@@ -62,6 +62,46 @@ export const deepActiveElement = (): Element | null => {
   return element;
 };
 
+/**
+ * Is a media player the thing that currently has focus?
+ *
+ * The arrow keys and space are a media player's keys: seek, volume, play/pause.
+ * That is not a YouTube convention — it is what the browser's own
+ * `<video controls>` does with them when the player has focus. Vimium-WebKit
+ * binds all five by default and listens in the capture phase, so without this
+ * the page never sees them at all: on a YouTube watch page, which focuses
+ * `#movie_player` on load, installing the userscript silently costs the user
+ * seek, volume and play/pause.
+ *
+ * Focus is the discriminator rather than the URL, so there is no site list to
+ * maintain and the keys go straight back to scrolling the moment the user
+ * clicks anything else on the page — exactly as they do without us.
+ *
+ * Cost is one `querySelector` over the focused element's subtree, and only for
+ * the five keys in question. A focused widget is small; a page with no player
+ * pays nothing, because the check never runs unless a media key was pressed.
+ */
+export const mediaPlayerHasFocus = (): boolean => {
+  const active = deepActiveElement();
+  if (!(active instanceof HTMLElement)) return false;
+  // `<body>` is the *absence* of focus, not a player, even on a page that
+  // happens to contain a video somewhere below it.
+  if (active === document.body || active === document.documentElement) {
+    return false;
+  }
+  if (active instanceof HTMLMediaElement) return true;
+  // Player shells, not the media element itself, are the norm: YouTube focuses
+  // `#movie_player`, a `tabindex="-1"` div wrapping the `<video>`, and routes
+  // its own shortcuts from there.
+  return containsMedia(active);
+};
+
+const containsMedia = (element: Element): boolean => {
+  if (element.querySelector("video, audio") !== null) return true;
+  const shadow = element.shadowRoot;
+  return shadow !== null && shadow.querySelector("video, audio") !== null;
+};
+
 /** Text-entry targets `gi` should consider, in document order. */
 export const focusableInputs = (root: ParentNode = document): HTMLElement[] => {
   const out: HTMLElement[] = [];

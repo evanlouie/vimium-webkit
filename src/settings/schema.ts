@@ -151,6 +151,16 @@ export const settingsSchema = z.object({
 
   // --- Behaviour ---
   grabBackFocus: field(z.boolean(), false),
+  /**
+   * Leave the arrow keys and space to a focused video or audio player.
+   *
+   * On by default. Those five keys seek, change the volume and toggle playback
+   * on every player there is — including the browser's own `<video controls>` —
+   * and we bind all five, in the capture phase, so without this a watch page
+   * loses them the moment Vimium-WebKit is installed. Turn it off to scroll
+   * with them everywhere, player or no player.
+   */
+  passMediaKeys: field(z.boolean(), true),
   /** Per-origin CSS zoom. Not real browser zoom; see §4.2. Off by default. */
   enableCssZoom: field(z.boolean(), false),
   /**

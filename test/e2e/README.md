@@ -220,6 +220,7 @@ which is why they are opt-in and why every spec that uses them says so.
 | `strict-csp.html`          | Served with `default-src 'self'; style-src 'self'` — verification item **V1**                                                      |
 | `spa.html`                 | `history.pushState` plus wholesale DOM replacement                                                                                 |
 | `scrollables.html`         | Nested scroll containers and one that reports `scrollHeight > clientHeight` and does not scroll                                    |
+| `media.html`               | A focusable player shell wrapping a `<video>`, as every watch page has                                                             |
 | `long-text.html`           | Matches split across element boundaries, for the find engine                                                                       |
 | `link-dense.html`          | 2400 links, for the hint-generation budget                                                                                         |
 

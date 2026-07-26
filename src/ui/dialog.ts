@@ -327,6 +327,11 @@ export class DialogController {
       ],
       ["grabBackFocus", "Take focus back from pages that steal it on load"],
       [
+        "passMediaKeys",
+        "Leave the arrow keys and space to a focused video or audio player",
+        "Turn off to scroll with them everywhere, even while a player has focus.",
+      ],
+      [
         "enableCssZoom",
         "Enable CSS zoom",
         "Not real browser zoom: it does not affect the URL bar and breaks position:fixed on some sites.",

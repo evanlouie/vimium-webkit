@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Media player</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+    /*
+     * The shape every video site actually has: a focusable *shell* around the
+     * media element, not the media element itself. YouTube focuses
+     * `#movie_player` (a `tabindex="-1"` div) on load and routes its keyboard
+     * shortcuts from a document-level listener.
+     */
+    #player {
+      width: 480px;
+      height: 240px;
+      background: #111;
+      outline: 2px solid #39f;
+    }
+    #player video {
+      width: 100%;
+      height: 100%;
+    }
+    .handle {
+      padding: 4px 8px;
+      background: #eef;
+      width: 480px;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>Media player</h1>
+    <p class="note">
+      A focusable player shell wrapping a <code>&lt;video&gt;</code>, plus a
+      focusable element with no media in it. Keys the page receives are recorded
+      on <code>window.__mediaKeys</code>.
+    </p>
+
+    <div id="player" tabindex="-1">
+      <!--
+        No `src`: nothing here needs the video to decode, and an autoplaying
+        asset would make the spec depend on codec support per engine.
+      -->
+      <video id="clip" muted playsinline></video>
+    </div>
+
+    <div class="handle" id="plain" tabindex="0">not a player</div>
+
+    <div class="tall"></div>
+    <p id="bottom-marker">bottom of the document</p>
+
+    <script>
+    // Recorded at the *document*, which is where a video site listens: if
+    // Vimium-WebKit suppressed the key on `window` in the capture phase, this
+    // never runs.
+    globalThis.__mediaKeys = [];
+    document.addEventListener("keydown", (event) => {
+      globalThis.__mediaKeys.push(event.key);
+      // Players consume these rather than letting them scroll the page, which
+      // is precisely why they have to arrive.
+      event.preventDefault();
+    });
+
+    // As a watch page does on load.
+    document.getElementById("player").focus({ preventScroll: true });
+    </script>
+  </body>
+</html>

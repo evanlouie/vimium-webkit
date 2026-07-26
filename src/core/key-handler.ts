@@ -26,6 +26,13 @@ export interface KeyHandlerCallbacks {
   mappings(): CompiledMappings;
   exclusion(): EffectiveRule;
   ignoreKeyboardLayout(): boolean;
+  /**
+   * Should the keys in `MEDIA_KEYS` be left to the page right now?
+   *
+   * Injected rather than computed here because answering it means asking what
+   * has focus, and this module is deliberately DOM-free.
+   */
+  mediaKeysBelongToPage(): boolean;
   /** Echoed into the HUD so a half-typed `g` is visible. `null` clears it. */
   showPending(keys: string | null): void;
   run(
@@ -35,6 +42,21 @@ export interface KeyHandlerCallbacks {
     event: KeyboardEvent,
   ): void;
 }
+
+/**
+ * The keys a focused media player owns.
+ *
+ * Exactly the set the browser's native `<video controls>` consumes when it has
+ * focus. Deliberately *not* `j`/`k`/`l`, which YouTube also binds: a Vim user
+ * pressing `j` on a video page means "scroll", and always has.
+ */
+export const MEDIA_KEYS: ReadonlySet<string> = new Set([
+  "<up>",
+  "<down>",
+  "<left>",
+  "<right>",
+  "<space>",
+]);
 
 export class NormalMode extends Mode {
   readonly #callbacks: KeyHandlerCallbacks;
@@ -143,6 +165,15 @@ export class NormalMode extends Mode {
     // Pass keys only apply to a fresh sequence: once the user has committed to
     // `g`, the follow-up key belongs to us even if it is in the pass set.
     if (atRoot && isPassKey(this.#callbacks.exclusion(), notation)) {
+      return CONTINUE_BUBBLING;
+    }
+
+    // The same rule for the keys a focused media player owns. The cheap set
+    // lookup goes first because the callback behind it walks the DOM.
+    if (
+      atRoot && MEDIA_KEYS.has(notation) &&
+      this.#callbacks.mediaKeysBelongToPage()
+    ) {
       return CONTINUE_BUBBLING;
     }
 

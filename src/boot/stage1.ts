@@ -53,7 +53,7 @@ import { createHints } from "~/features/hints/index.ts";
 import { createFind } from "~/features/find/index.ts";
 import { createVisual } from "~/features/visual/index.ts";
 import { createMarks } from "~/features/marks.ts";
-import { createInsert } from "~/features/insert.ts";
+import { createInsert, mediaPlayerHasFocus } from "~/features/insert.ts";
 import { createOmnibar } from "~/features/omnibar/index.ts";
 import { createFrameLink } from "~/frames/index.ts";
 
@@ -240,6 +240,8 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
     mappings: () => mappings,
     exclusion: () => exclusion,
     ignoreKeyboardLayout: () => settings.ignoreKeyboardLayout,
+    mediaKeysBelongToPage: () =>
+      settings.passMediaKeys && mediaPlayerHasFocus(),
     showPending: (keys) => hud.setIndicator(keys),
     run: (name, options, count, event) => {
       // Woken lazily rather than eagerly: subframes must not be forced through

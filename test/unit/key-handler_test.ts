@@ -23,7 +23,10 @@ interface Harness {
   readonly stack: HandlerStack;
   readonly runs: Run[];
   readonly pending: (string | null)[];
-  press(key: string, init?: Partial<KeyboardEvent>): void;
+  /** Pretend the page's media player has focus. */
+  mediaFocus: boolean;
+  /** @returns whether the page still sees the keystroke. */
+  press(key: string, init?: Partial<KeyboardEvent>): boolean;
   dispose(): void;
 }
 
@@ -70,10 +73,13 @@ const harness = (
     rejectReservedShortcuts: false,
   });
 
+  const state = { mediaFocus: false };
+
   const mode = new NormalMode(host, {
     mappings: () => mappings,
     exclusion: () => exclusion,
     ignoreKeyboardLayout: () => false,
+    mediaKeysBelongToPage: () => state.mediaFocus,
     showPending: (keys) => pending.push(keys),
     run: (command, _options, count) => runs.push({ command, count }),
   });
@@ -83,9 +89,13 @@ const harness = (
     stack,
     runs,
     pending,
-    press: (key, init) => {
-      stack.bubbleEvent("keydown", keyEvent(key, init));
+    get mediaFocus(): boolean {
+      return state.mediaFocus;
     },
+    set mediaFocus(value: boolean) {
+      state.mediaFocus = value;
+    },
+    press: (key, init) => stack.bubbleEvent("keydown", keyEvent(key, init)),
     dispose: () => {
       exitAllModes("navigation");
     },
@@ -240,6 +250,68 @@ Deno.test("a pass key reaches the page only at the start of a sequence", () => {
     // pass key — but here nothing is committed, so `j` runs normally.
     vw.press("j");
     assertEquals(vw.runs, [{ command: "scrollDown", count: 1 }]);
+  } finally {
+    vw.dispose();
+  }
+});
+
+Deno.test("a focused media player keeps the arrow keys and space", () => {
+  // A YouTube watch page focuses its player shell on load, and the player owns
+  // exactly these five keys — seek, volume, play/pause. Suppressing them in the
+  // capture phase cost the user all three the moment the userscript was
+  // installed.
+  const vw = harness("map <down> scrollDown\nmap <space> scrollDown");
+  try {
+    vw.mediaFocus = true;
+
+    assert(vw.press("ArrowDown"), "the page must still see the arrow key");
+    assert(vw.press(" "), "the page must still see space");
+    assertEquals(vw.runs, []);
+
+    // Focus moves off the player — a click on a comment — and they are ours
+    // again.
+    vw.mediaFocus = false;
+    assertEquals(vw.press("ArrowDown"), false);
+    assertEquals(vw.runs, [{ command: "scrollDown", count: 1 }]);
+  } finally {
+    vw.dispose();
+  }
+});
+
+Deno.test("a media key is still ours mid-sequence and after a count", () => {
+  const vw = harness("map z<down> scrollToTop\nmap <down> scrollDown");
+  try {
+    vw.mediaFocus = true;
+
+    // Committed to `z`: the follow-up belongs to us, exactly as for pass keys.
+    vw.press("z");
+    assertEquals(vw.press("ArrowDown"), false);
+    assertEquals(vw.runs, [{ command: "scrollToTop", count: 1 }]);
+
+    // A count is a commitment too — `3<down>` must scroll three steps rather
+    // than seeking the video and stranding the count in the HUD.
+    vw.press("3");
+    assertEquals(vw.press("ArrowDown"), false);
+    assertEquals(vw.runs.at(-1), { command: "scrollDown", count: 3 });
+  } finally {
+    vw.dispose();
+  }
+});
+
+Deno.test("a focused media player does not get every other key", () => {
+  // YouTube binds `j`/`k`/`l` as well, but a Vim user pressing `j` on a video
+  // page means "scroll", and always has.
+  const vw = harness("map j scrollDown\nmap gg scrollToTop");
+  try {
+    vw.mediaFocus = true;
+
+    assertEquals(vw.press("j"), false);
+    vw.press("g");
+    vw.press("g");
+    assertEquals(vw.runs, [
+      { command: "scrollDown", count: 1 },
+      { command: "scrollToTop", count: 1 },
+    ]);
   } finally {
     vw.dispose();
   }

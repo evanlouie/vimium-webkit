@@ -172,6 +172,19 @@ are preventable on macOS but
 [possibly not on iOS](https://bugs.webkit.org/show_bug.cgi?id=191768); they are
 allowed and flagged.
 
+### A focused video player keeps its own keys
+
+The defaults bind `<up>`, `<down>`, `<left>`, `<right>` and `<space>` — and
+those are also the five keys every media player uses for seek, volume and
+play/pause, including the browser's own `<video controls>`. While a `<video>` or
+`<audio>` element (or the focusable shell around one, which is what a site like
+YouTube actually focuses) holds the focus, those five go to the page instead of
+scrolling. Everything else stays ours: `j`/`k` scroll a watch page even though
+YouTube binds them too.
+
+Move the focus anywhere else — click a comment, press `Escape` — and they scroll
+again. Set `passMediaKeys` to `false` to always scroll with them.
+
 ---
 
 ## Configuration
@@ -224,6 +237,7 @@ configuration and no config file.
 | `hideHud`                      | `false`                | Suppress the corner HUD entirely.                                              |
 | `followPageColorScheme`        | `true`                 | Match the overlay to the page's theme rather than your system appearance.      |
 | `grabBackFocus`                | `false`                | Blur a field the page autofocused on load — unless you have already typed.     |
+| `passMediaKeys`                | `true`                 | Leave the arrow keys and space to a focused `<video>`/`<audio>` player.        |
 | `enableCssZoom`                | `false`                | Enable `zi`/`zo`. CSS zoom, not browser zoom; breaks `position: fixed` sites.  |
 | `enableHistoryIndex`           | **`false`**            | Build a local frecency index for the omnibar. See [Privacy](./PRIVACY.md).     |
 | `historyIndexDenylist`         | empty                  | URL globs never recorded in that index.                                        |
