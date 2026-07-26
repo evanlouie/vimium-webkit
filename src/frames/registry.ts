@@ -8,9 +8,12 @@
  *
  * Two jobs:
  *
- * 1. Prove that a `HELLO` came from a window that is actually in our frames
- *    tree. `event.source === window.frames[i]` compares window *identities* and
- *    works cross-origin, which is the only cheap identity check we get.
+ * 1. Prove that a `JOIN` came from the same window the coordinator challenged.
+ *    `event.source === window.frames[i]` compares window *identities* and works
+ *    cross-origin, which is the only cheap identity check we get — but it only
+ *    ever proves "a window on this page", never "our code", because a
+ *    page-controlled `srcdoc` iframe is genuinely in the tree. The one-shot
+ *    token in `#challenges` is what turns identity into a binding.
  * 2. Keep `frameId -> MessagePort` and reap frames that have gone away.
  *
  * Reaping is harder than it looks: posting to a `MessagePort` whose other end
@@ -189,12 +192,21 @@ export class FrameRegistry {
     return this.#records.size;
   }
 
-  /** Is `source` a window in our frames tree? The `HELLO` admission check. */
+  /**
+   * Is `source` a window in our frames tree?
+   *
+   * Note what this deliberately does **not** do any more: it does not answer
+   * `true` for the root. The coordinator's own window was previously
+   * short-circuited to "known", which meant a page could `window.postMessage`
+   * itself a `HELLO` and be admitted as a frame — with the session nonce and
+   * the user's settings delivered straight back to it. The coordinator's own
+   * frame joins over the loopback channel and never goes near this check.
+   */
   isKnownWindow(source: unknown): source is Window {
     if (this.#root === null || source === null || source === undefined) {
       return false;
     }
-    if (source === this.#root) return true;
+    if (source === this.#root) return false;
     for (const candidate of collectFrameWindows(this.#root)) {
       if (candidate === source) return true;
     }

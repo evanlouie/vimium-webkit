@@ -64,6 +64,15 @@ export const settingsSchema = z.object({
   /** One `keyword: url %s Description` per line, Vimium-compatible. */
   searchEngines: z.string(),
   newTabUrl: z.string(),
+  /**
+   * Ask the configured search engine for completions as the user types.
+   *
+   * Opt-in for the same reason `enableHistoryIndex` is: every keystroke in the
+   * omnibar leaves the device, with the user's cookies attached, to a third
+   * party they did not choose in that moment. "Off unless a manager cannot do
+   * it" is not a privacy control — it is the absence of one.
+   */
+  enableSearchSuggestions: z.boolean(),
 
   // --- UI ---
   hideHud: z.boolean(),
@@ -118,6 +127,7 @@ export const defaultSettings = (): Settings => ({
     "mdn: https://developer.mozilla.org/en-US/search?q=%s MDN",
   ].join("\n"),
   newTabUrl: "about:blank",
+  enableSearchSuggestions: false,
 
   hideHud: false,
   followPageColorScheme: true,

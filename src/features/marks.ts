@@ -14,7 +14,7 @@
 
 import type { AppContext, MarksApi } from "~/core/context.ts";
 import type { Marks } from "~/settings/schema.ts";
-import { openTab } from "~/platform/tabs.ts";
+import { navigate, openTab } from "~/platform/tabs.ts";
 
 /** Marks are keyed by URL without the fragment, matching upstream. */
 export const markKeyForUrl = (href: string): string => {
@@ -113,8 +113,21 @@ class MarksFeature implements MarksApi {
             "(a userscript cannot focus an existing tab)",
         );
       },
-      () => {
-        location.assign(target.href);
+      (error) => {
+        // The scheme allowlist used to *cause* the unsafe path: `openTab`
+        // refused a `javascript:` or `data:` mark, the refusal was read as "the
+        // manager could not do it", and the fallback then handed the very same
+        // URL to `location.assign` — which is the sink the allowlist exists to
+        // guard. Marks live in manager storage, which the manager's own UI can
+        // edit, so a poisoned one is a realistic source.
+        if (error.kind === "unsafe-url") {
+          this.#app.hud.error(
+            `Global mark "${letter}" points somewhere unsafe; refusing to open it`,
+          );
+          return;
+        }
+        const result = navigate(target.href);
+        if (result.isErr()) this.#app.hud.error(result.error.message);
       },
     );
   }

@@ -70,20 +70,30 @@ export class Vimium {
   }
 
   /**
-   * Wake Stage 0 and wait for Stage 1.
+   * Wake Stage 0 in this frame and wait for Stage 1.
    *
-   * Stage 0 exposes exactly one public way to be woken from outside: the
-   * `vimium-webkit:wake` message a top frame posts to its subframes. Dispatching
-   * it directly avoids waiting out the 1200 ms idle timer and avoids the
-   * alternative — pressing a key and hoping the buffer replays — which would
-   * make every spec's first keystroke ambiguous.
+   * Stage 0 honours a wake only from an ancestor, so a synthetic event has to
+   * name one. In the top frame `parent` is the window itself, which is exactly
+   * the shape a real self-wake has. Subframes cannot be woken this way —
+   * Firefox refuses a cross-origin `WindowProxy` as a `MessageEvent` source —
+   * so `bootAllFrames` posts them a real message from the top frame instead.
    */
   async boot(frame: Frame = this.page.mainFrame()): Promise<void> {
     await frame.evaluate(() => {
-      globalThis.dispatchEvent(
-        new MessageEvent("message", { data: "vimium-webkit:wake" }),
+      // `globalThis` *is* the window here; the cast is only because the Deno
+      // type for it does not carry the `Window` interface.
+      const view = globalThis as unknown as Window;
+      view.dispatchEvent(
+        new MessageEvent("message", {
+          data: { magic: "vimium-webkit/frames", v: 1, kind: "WAKE" },
+          source: view,
+        }),
       );
     });
+    await this.waitForOverlay(frame);
+  }
+
+  private async waitForOverlay(frame: Frame): Promise<void> {
     await frame.locator("vimium-webkit-overlay").first().waitFor({
       state: "attached",
       timeout: BOOT_TIMEOUT_MS,
@@ -91,19 +101,58 @@ export class Vimium {
     await this.page.waitForTimeout(BOOT_SETTLE_MS);
   }
 
-  /** Bring every frame in the page up, outermost first. */
+  /**
+   * Bring every frame in the page up.
+   *
+   * The top frame wakes itself; the rest are woken exactly as a cross-frame
+   * hint round wakes them, by the top frame posting into the frames tree. That
+   * is the only path that works across origins and across processes, and it has
+   * the side benefit of exercising the production wake rather than a fake.
+   *
+   * A frame whose overlay never appears is *not* a failure: a manager that
+   * declines `about:blank`, a sandboxed frame, and a cross-origin frame that
+   * was never injected into are all supported configurations. What must not
+   * happen is the whole page hanging or throwing, which the specs assert
+   * separately.
+   */
   async bootAllFrames(): Promise<void> {
-    await inOrder(
-      this.page.frames().map((frame) => async (): Promise<void> => {
+    await this.boot();
+
+    await this.page.mainFrame().evaluate(() => {
+      const wake = { magic: "vimium-webkit/frames", v: 1, kind: "WAKE" };
+      const visit = (view: Window, depth: number): void => {
+        if (depth > 16) return;
+        let count = 0;
         try {
-          await this.boot(frame);
+          count = view.frames.length;
         } catch {
-          // A frame we cannot reach (a manager that declines `about:blank`, a
-          // cross-origin frame that is still loading) must not fail the run:
-          // graceful degradation is the behaviour under test.
+          return;
         }
-      }),
+        for (let index = 0; index < count; index++) {
+          const child = view.frames[index];
+          if (child === undefined) continue;
+          try {
+            child.postMessage(wake, "*");
+          } catch {
+            // Nothing useful to do; the spec asserts on the outcome.
+          }
+          visit(child, depth + 1);
+        }
+      };
+      visit(globalThis as unknown as Window, 0);
+    });
+
+    const subframes = this.page.frames().filter(
+      (frame) => frame !== this.page.mainFrame(),
     );
+    await Promise.all(subframes.map(async (frame): Promise<void> => {
+      try {
+        await this.waitForOverlay(frame);
+      } catch {
+        // See the note above: an unreachable frame is a configuration, not a
+        // failure.
+      }
+    }));
   }
 
   // -- input ----------------------------------------------------------------

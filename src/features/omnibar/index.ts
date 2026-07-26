@@ -23,7 +23,11 @@ import type {
 import { navigate, openTab } from "~/platform/tabs.ts";
 import type { SessionState } from "~/settings/schema.ts";
 import { type Completion, completionsFor, liveTabs } from "./completers.ts";
-import { parseSearchEngines, type SearchEngine } from "./engines.ts";
+import {
+  classifyQuery,
+  parseSearchEngines,
+  type SearchEngine,
+} from "./engines.ts";
 import {
   createHistoryIndex,
   type HistoryIndexApi,
@@ -235,7 +239,17 @@ export const createOmnibar = (app: AppContext): OmnibarLiteApi => {
   // Suggestions
   // -------------------------------------------------------------------------
 
+  /**
+   * Ask the engine for completions, if the user has said we may.
+   *
+   * Two gates before anything leaves the device, and the second is the one that
+   * was missing: a query is only sent when it is actually a *search*. Suggestion
+   * requests used to fire for every non-command session, so a typed URL — an
+   * internal hostname, a staging box, a one-time link pasted from an email —
+   * went to the search engine on its way to being navigated to.
+   */
   const requestSuggestions = (current: Session, query: string): void => {
+    if (!app.settings().enableSearchSuggestions) return;
     if (!suggester.isAvailable()) return;
 
     const settings = app.settings();
@@ -246,6 +260,11 @@ export const createOmnibar = (app: AppContext): OmnibarLiteApi => {
     const split = parsed.length === 0 ? null : findKeyword(parsed, query);
     const template = split?.engine.url ?? settings.searchUrl;
     const text = split?.rest ?? query;
+
+    // A keyword prefix is an explicit "search this engine for the rest", so it
+    // settles the question by itself; without one, classification decides.
+    if (split === null && classifyQuery(text) !== "search") return;
+
     current.suggestionEngine = split?.engine.description ?? "Suggested";
 
     // Keyed on the *whole* input, not on the text sent to the engine, so that

@@ -22,7 +22,21 @@
  *   handlers and then never fires them.
  */
 
-/** Guards against a manager injecting us twice into the same realm. */
+/**
+ * Guards against a manager injecting us twice into the same realm.
+ *
+ * `Symbol.for` is unavoidable here: the two injections do not share a module
+ * scope, so the key has to be derivable from a constant, which means the page
+ * can derive it too. What the page must *not* get is the instance — a live
+ * `Stage0` hands out `dispose()` (permanently disable the userscript for this
+ * page, defeating the exclusion UI), `adopt()` (redirect every keystroke we see
+ * to a page-supplied function) and `drainBuffer()` (read buffered keys). So the
+ * property is a bare sentinel, and non-writable so the page cannot swap it for
+ * something that lies.
+ *
+ * Presence remains detectable. That is not worth defending: the overlay host is
+ * an element in the page's own DOM.
+ */
 const GUARD = Symbol.for("vimium-webkit.stage0");
 
 /**
@@ -34,8 +48,24 @@ const GUARD = Symbol.for("vimium-webkit.stage0");
  */
 const MAX_BUFFERED_KEYS = 16;
 
-/** Message a top frame sends to wake a subframe that is still at Stage 0. */
-export const WAKE_MESSAGE = "vimium-webkit:wake";
+/** Matches `collectFrameWindows`'s ceiling in `frames/registry.ts`. */
+const MAX_WAKE_DEPTH = 16;
+
+/**
+ * Message a top frame sends to wake a subframe that is still at Stage 0.
+ *
+ * Structured rather than a bare string, and checked against `event.source`
+ * before it is honoured. The bare public string could be posted by any page to
+ * itself and to every frame it could reach, which forced the whole of Stage 1 —
+ * storage hydration, Zod, a shadow root, the frame handshake — to run in every
+ * frame on demand, and removed an attacker's need to wait out the idle timer
+ * before starting on the frame protocol.
+ */
+export const WAKE_MESSAGE = {
+  magic: "vimium-webkit/frames",
+  v: 1,
+  kind: "WAKE",
+} as const;
 
 /**
  * Is this realm one we can actually serve?
@@ -105,8 +135,38 @@ export interface Stage0Options {
 }
 
 interface GuardedGlobal {
-  [GUARD]?: Stage0;
+  [GUARD]?: true;
 }
+
+/**
+ * Is this a wake we should honour?
+ *
+ * Only an ancestor may wake us. An ancestor can already create and destroy this
+ * frame, so it gains nothing by being able to wake it — whereas the page's own
+ * script, a sibling frame, or an opener could previously force Stage 1 in every
+ * frame on the page just by posting a known string.
+ */
+const isWakeMessage = (event: MessageEvent): boolean => {
+  const data: unknown = event.data;
+  if (typeof data !== "object" || data === null) return false;
+  const message = data as { magic?: unknown; v?: unknown; kind?: unknown };
+  if (
+    message.magic !== WAKE_MESSAGE.magic || message.v !== WAKE_MESSAGE.v ||
+    message.kind !== WAKE_MESSAGE.kind
+  ) {
+    return false;
+  }
+  try {
+    const scope = globalThis as { parent?: unknown; top?: unknown };
+    const source: unknown = event.source;
+    if (source === null || source === undefined) return false;
+    return source === scope.parent || source === scope.top;
+  } catch {
+    // A realm that throws on a plain read of `parent`. Refuse rather than
+    // guess: the cost of not waking is a frame that boots on its own keystroke.
+    return false;
+  }
+};
 
 const isEditableTarget = (target: EventTarget | null): boolean => {
   if (!(target instanceof Element)) return false;
@@ -155,7 +215,7 @@ class Stage0Impl implements Stage0 {
   };
 
   readonly #onMessage = (event: MessageEvent): void => {
-    if (event.data === WAKE_MESSAGE) this.#activate("wake");
+    if (isWakeMessage(event)) this.#activate("wake");
   };
 
   readonly #onPageHide = (event: PageTransitionEvent): void => {
@@ -244,27 +304,68 @@ class Stage0Impl implements Stage0 {
  *
  * `null` means either that this realm already has an instance, or that it is
  * one we cannot serve at all (see `isLiveRealm`).
- *
- * The guard is a `Symbol.for` on the global rather than a property name: it
- * survives bundling, cannot collide with page state, and is stable across our
- * own versions if a user ends up with two copies installed.
  */
 export const bootStage0 = (options: Stage0Options): Stage0 | null => {
   if (!isLiveRealm()) return null;
   const scope = globalThis as unknown as GuardedGlobal;
-  if (scope[GUARD] !== undefined) return null;
+  if (scope[GUARD] === true) return null;
   const stage0 = new Stage0Impl(options);
-  scope[GUARD] = stage0;
+  try {
+    Object.defineProperty(globalThis, GUARD, {
+      value: true,
+      writable: false,
+      enumerable: false,
+      // Configurable, so a test realm can unwind it. A page deleting it gains
+      // nothing: it cannot make the manager inject a second copy.
+      configurable: true,
+    });
+  } catch {
+    // A realm that refuses the definition. The guard is a nicety; running
+    // without it risks a duplicate install, which is strictly better than
+    // throwing at `document-start`.
+  }
   return stage0;
 };
 
-/** Wake every subframe. Used before a cross-frame hint round. */
+/**
+ * Wake every subframe, at every depth.
+ *
+ * Recursive because a hint round needs *all* frames, not just the direct
+ * children: a nested frame that stays at Stage 0 contributes no hints and is
+ * simply missing from the round, silently. `frames.length` and
+ * `frames[i].postMessage` are both readable across origins, so the walk works
+ * on a page whose every frame is a different origin.
+ *
+ * Depth-capped for the same reason `collectFrameWindows` is: ad-heavy pages
+ * nest absurdly, and this runs on the keystroke path.
+ */
 export const wakeSubframes = (): void => {
-  for (let index = 0; index < globalThis.frames.length; index++) {
+  const visit = (view: Window, depth: number): void => {
+    if (depth > MAX_WAKE_DEPTH) return;
+    let count = 0;
     try {
-      globalThis.frames[index]?.postMessage(WAKE_MESSAGE, "*");
+      count = view.frames.length;
     } catch {
-      // A cross-origin frame may refuse; there is nothing useful to do.
+      return;
     }
-  }
+    for (let index = 0; index < count; index++) {
+      let child: Window | undefined;
+      try {
+        child = view.frames[index];
+      } catch {
+        continue;
+      }
+      if (child === undefined) continue;
+      try {
+        child.postMessage(WAKE_MESSAGE, "*");
+      } catch {
+        // A cross-origin frame may refuse; there is nothing useful to do.
+      }
+      visit(child, depth + 1);
+    }
+  };
+
+  // `globalThis` is the window at runtime; the ambient Deno type for it simply
+  // does not carry the `Window` interface.
+  visit(globalThis as unknown as Window, 0);
 };

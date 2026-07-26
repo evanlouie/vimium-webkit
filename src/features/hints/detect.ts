@@ -563,9 +563,18 @@ export const linkTextFor = (
     }
     const type = element.type.toLowerCase();
     if (type === "file") return { text: "Choose File", show: false };
-    // Never surface the contents of a password field in the overlay.
-    if (type === "password") return fallback();
-    const text = element.value || element.placeholder;
+    // `element.value` is deliberately never read.
+    //
+    // Only `type="password"` used to be excluded, so every other input
+    // contributed its *contents* as the hint's label — and that label is
+    // carried verbatim across frame boundaries in the wire descriptor. Payment
+    // iframes (Stripe Elements, Braintree, Adyen) render card numbers in
+    // `type="text"` with an `aria-label` and no `<label>`, which is exactly
+    // this branch. TOTP codes and email addresses are the same shape.
+    //
+    // `placeholder` is authored by the page rather than typed by the user, so
+    // it is safe and, for filter matching, usually the better label anyway.
+    const text = element.placeholder;
     return text.length > 0 ? { text, show: false } : fallback();
   }
 

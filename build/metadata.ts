@@ -6,6 +6,8 @@
  * what `platform/gm.ts` actually probes for.
  */
 
+import { SUGGEST_HOSTS } from "~/features/omnibar/suggest.ts";
+
 export interface MetadataInput {
   readonly version: string;
   readonly repository: string;
@@ -67,9 +69,16 @@ export const buildMetadata = (input: MetadataInput): string => {
     // the GM API there (§5.3).
     ["inject-into", "content"],
     ...GRANTS.map((grant): readonly [string, string] => ["grant", grant]),
-    // Needed for Omnibar-lite's search suggestions. quoid does not implement
-    // `@connect` at all, which degrades to "no suggestions" rather than an error.
-    ["connect", "*"],
+    // Exactly the suggestion endpoints, derived from the table in `suggest.ts`
+    // so the grant cannot outlive the code. `@connect *` granted network access
+    // to every host on the web for a feature that talks to five, and a
+    // userscript's grants are the only thing standing between it and the user's
+    // cookies on arbitrary origins. quoid does not implement `@connect` at all,
+    // which degrades to "no suggestions" rather than an error.
+    ...SUGGEST_HOSTS.map((host): readonly [string, string] => [
+      "connect",
+      host,
+    ]),
     ["downloadURL", input.downloadUrl],
     ["updateURL", input.updateUrl],
   ];

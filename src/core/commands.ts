@@ -553,7 +553,12 @@ export const buildCommands = (): readonly CommandDef[] => [
 
   // --- Tabs --------------------------------------------------------------
   tierB("createTab", "tabs", "Open a new tab", ({ app }) => {
-    void openTab(app.gm, app.settings().newTabUrl, { active: true }).mapErr(
+    // `internal`: `newTabUrl` is the user's own setting, not page content, and
+    // `about:blank` — its default — is outside the page-content allowlist.
+    void openTab(app.gm, app.settings().newTabUrl, {
+      active: true,
+      trust: "internal",
+    }).mapErr(
       (error) => app.hud.error(error.message),
     );
   }),
@@ -603,7 +608,12 @@ export const buildCommands = (): readonly CommandDef[] => [
     "navigation",
     "View this page's source",
     ({ app }) => {
-      void openTab(app.gm, `view-source:${location.href}`, { active: true })
+      // `internal`: we built this URL from `location.href`, and `view-source:`
+      // is deliberately outside the set a page-supplied URL may use.
+      void openTab(app.gm, `view-source:${location.href}`, {
+        active: true,
+        trust: "internal",
+      })
         .mapErr(
           () =>
             app.hud.error(

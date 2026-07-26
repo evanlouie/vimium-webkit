@@ -180,6 +180,20 @@ const openInNewTab = (
   );
 };
 
+/**
+ * Where an activation came from.
+ *
+ * `"remote"` means another frame asked for it, so there is no transient
+ * activation to spend and no user gesture in *this* document.
+ */
+export type ActivationOrigin = "local" | "remote";
+
+/** Modes that write the clipboard, and therefore need a real user gesture. */
+const COPY_MODES: ReadonlySet<HintModeKind> = new Set<HintModeKind>([
+  "copy-link-url",
+  "copy-link-text",
+]);
+
 const copy = (app: AppContext, text: string, label: string): void => {
   // Called synchronously from the keydown task. Do not introduce an `await`
   // above this line.
@@ -197,17 +211,29 @@ const copy = (app: AppContext, text: string, label: string): void => {
 /**
  * Act on a hint that belongs to *this* frame.
  *
- * Exported so the cross-frame layer can drive it on behalf of another frame.
- * Note that a remotely-driven copy runs outside any keydown task and will
- * therefore usually be denied — an unavoidable consequence of activation being
- * per-task, not per-page.
+ * Exported so the cross-frame layer can drive it on behalf of another frame,
+ * which is why `origin` exists: a remote activation is an action requested by
+ * another document, and two of the modes here are capabilities that a page must
+ * not be able to spend on the user's behalf.
  */
 export const activateLocalHint = (
   app: AppContext,
   hint: LocalHint,
   kind: HintModeKind,
+  origin: ActivationOrigin = "local",
 ): void => {
   const element = hint.element;
+
+  // Defence in depth behind the coordinator's round check. The reasoning that
+  // used to stand here — that a remote copy "runs outside any keydown task and
+  // will therefore usually be denied" — is wrong: `writeClipboard` catches the
+  // rejection from `navigator.clipboard` and falls back to `GM_setClipboard`,
+  // which needs no activation at all. A silent clipboard write with attacker-
+  // chosen contents is a well-worn phishing primitive.
+  if (origin === "remote" && COPY_MODES.has(kind)) {
+    app.hud.error("Ignored a clipboard request from another frame.");
+    return;
+  }
 
   switch (kind) {
     case "activate":

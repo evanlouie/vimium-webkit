@@ -12,6 +12,7 @@ import {
   buildSearchUrl,
   classifyQuery,
   enginesMatchingPrefix,
+  isSafeTemplate,
   parseSearchEngines,
   resolveQuery,
   splitKeyword,
@@ -186,6 +187,61 @@ Deno.test("classifyQuery does not mistake a bare word or a version for a URL", (
   assertEquals(classifyQuery("wikipedia"), "search");
   assertEquals(classifyQuery("1.2.3"), "search");
   assertEquals(classifyQuery("file.txt"), "search");
+});
+
+Deno.test("classifyQuery never searches for something carrying credentials", () => {
+  // The direction that matters: a URL with embedded userinfo used to fall
+  // through to "search", which transmits the password to the search engine.
+  // There is no undoing that.
+  assertEquals(classifyQuery("user:pass@example.com"), "url");
+  assertEquals(classifyQuery("user:pass@example.com/path"), "url");
+  assertEquals(classifyQuery("admin@10.0.0.5:8443"), "url");
+  // An `@` *after* the first slash is part of a path, not userinfo.
+  assertEquals(classifyQuery("why/does@this"), "search");
+});
+
+Deno.test("classifyQuery recognises IPv6 literals rather than searching for them", () => {
+  assertEquals(classifyQuery("[::1]"), "url");
+  assertEquals(classifyQuery("[::1]:8080"), "url");
+  assertEquals(classifyQuery("[fe80::1]/status"), "url");
+});
+
+Deno.test("classifyQuery range-checks IPv4 octets", () => {
+  assertEquals(classifyQuery("192.168.1.1"), "url");
+  assertEquals(classifyQuery("999.999.999.999"), "search");
+});
+
+Deno.test("classifyQuery accepts a trailing-dot FQDN", () => {
+  assertEquals(classifyQuery("example.com."), "url");
+});
+
+Deno.test("parseSearchEngines refuses a template that is not http(s)", () => {
+  // `javascript:alert(%s)` parses perfectly well as an engine line, and every
+  // search through that keyword would then be an eval in the current origin.
+  // Rejecting it here means the user is told on the line they can fix.
+  const parsed = parseSearchEngines(
+    [
+      "bad: javascript:alert(%s) Evil",
+      "rel: /search?q=%s Relative",
+      "data: data:text/html,%s Data",
+      "ok: https://example.com/?q=%s Fine",
+    ].join("\n"),
+  );
+
+  assertEquals(parsed.engines.map((engine) => engine.keyword), ["ok"]);
+  assertEquals(parsed.diagnostics.length, 3);
+  for (const diagnostic of parsed.diagnostics) {
+    assertEquals(diagnostic.message, "the URL must be http:// or https://");
+  }
+});
+
+Deno.test("isSafeTemplate accepts only http and https", () => {
+  assertEquals(isSafeTemplate("https://example.com/?q=%s"), true);
+  assertEquals(isSafeTemplate("http://example.com/?q=%s"), true);
+  assertEquals(isSafeTemplate("HTTPS://example.com/?q=%s"), true);
+  assertEquals(isSafeTemplate("javascript:alert(%s)"), false);
+  assertEquals(isSafeTemplate("/search?q=%s"), false);
+  assertEquals(isSafeTemplate("example.com/?q=%s"), false);
 });
 
 Deno.test("toNavigableUrl adds https and never guesses http", () => {

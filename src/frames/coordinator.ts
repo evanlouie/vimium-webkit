@@ -35,10 +35,10 @@ import {
   ENVELOPE,
   FRAME_TO_TOP_KINDS,
   type FrameMessage,
-  type FrameMessageKind,
   parseInbound,
   REQUEST_DEADLINE_MS,
   sortDescriptors,
+  WINDOW_TO_TOP_KINDS,
 } from "./protocol.ts";
 import {
   type FrameChannel,
@@ -46,22 +46,50 @@ import {
   messagePortChannel,
 } from "./registry.ts";
 
-const HELLO_ONLY: ReadonlySet<FrameMessageKind> = new Set<FrameMessageKind>([
-  "HELLO",
-]);
+/**
+ * How long an issued admission token stays valid.
+ *
+ * Long enough to survive a busy main thread and a cross-origin frame throttled
+ * to 30 fps; short enough that a token captured out of a page-world message
+ * event is worthless by the time anyone looks at it.
+ */
+const CHALLENGE_TTL_MS = 10_000;
+
+/** Outstanding challenges, capped so a `HELLO` flood cannot grow the map. */
+const MAX_PENDING_CHALLENGES = 64;
+
+/**
+ * How long a hint round stays open for an `ACTIVATE_HINT`.
+ *
+ * Filter mode with `waitForEnterForFilteredHints` can legitimately keep a
+ * session open while the user reads the page, so this is generous. It is a
+ * bound on a capability, not a UX timeout.
+ */
+const ROUND_TTL_MS = 120_000;
 
 export interface CoordinatorOptions {
-  /** The window whose frames tree admits `HELLO`s. `null` disables admission (tests). */
+  /** The window whose frames tree admits joins. `null` disables admission (tests). */
   readonly root: Window | null;
   /** Resolved from the *top frame's* URL; see `effectiveExclusion` below. */
   readonly resolveExclusion?: () => EffectiveExclusion;
-  /** Current settings, snapshotted into `WELCOME` and `SETTINGS`. */
-  readonly currentSettings?: () => unknown;
 }
 
 interface PendingCollect {
   readonly frameId: FrameId;
   readonly resolve: (descriptors: readonly RemoteHintDescriptor[]) => void;
+}
+
+/** A token issued to one window, redeemable once. */
+interface Challenge {
+  readonly source: Window;
+  readonly issuedAt: number;
+}
+
+/** The hint round currently authorised to drive other frames. */
+interface ActiveRound {
+  readonly originFrameId: FrameId;
+  readonly mode: HintMode;
+  readonly startedAt: number;
 }
 
 export class FrameCoordinator {
@@ -70,11 +98,14 @@ export class FrameCoordinator {
   readonly #nonce = createNonce();
   readonly #nextRequestId = createRequestIdFactory("top");
   readonly #pendingCollect = new Map<string, PendingCollect>();
+  readonly #challenges = new Map<string, Challenge>();
 
   #focused: FrameId | null = null;
+  #round: ActiveRound | null = null;
   #rosterScheduled = false;
   #disposed = false;
   #detach: (() => void) | null = null;
+  #self: Window | null = null;
 
   constructor(options: CoordinatorOptions) {
     this.#options = options;
@@ -94,13 +125,14 @@ export class FrameCoordinator {
   }
 
   /**
-   * Start accepting `HELLO`s.
+   * Start accepting handshakes.
    *
    * Registration is accepted at any time and forever: WebKit's `document-start`
    * is unreliable, iframes are inserted after load, and a bfcache restore
    * re-runs the handshake. There is no "boot window" to close.
    */
   attach(target: Window): void {
+    this.#self = target;
     const onMessage = (event: MessageEvent): void =>
       this.#onWindowMessage(event);
     target.addEventListener("message", onMessage);
@@ -109,18 +141,16 @@ export class FrameCoordinator {
 
   /** Register the coordinator's own frame over an in-process channel. */
   admitLocal(channel: FrameChannel): FrameId {
-    return this.#admit(channel, null);
+    return this.#admit(channel, null, null);
   }
 
-  /** Re-publish settings and exclusion to every frame, e.g. after `AppContext.refresh()`. */
+  /** Re-publish the exclusion decision to every frame, e.g. after a settings change. */
   pushSettings(): void {
     const exclusion = this.#exclusion();
-    const settings = this.#options.currentSettings?.();
     this.#registry.broadcast(() => ({
       ...ENVELOPE,
       kind: "SETTINGS",
       nonce: this.#nonce,
-      settings,
       exclusion,
     }));
   }
@@ -129,6 +159,8 @@ export class FrameCoordinator {
     this.#disposed = true;
     this.#detach?.();
     this.#detach = null;
+    this.#challenges.clear();
+    this.#round = null;
     for (const pending of this.#pendingCollect.values()) pending.resolve([]);
     this.#pendingCollect.clear();
     this.#registry.dispose();
@@ -138,27 +170,50 @@ export class FrameCoordinator {
   // Admission
   // -------------------------------------------------------------------------
 
+  /**
+   * The `window`-level half of the handshake.
+   *
+   * `HELLO` earns a challenge; `JOIN` redeems one. Splitting it in two is what
+   * lets the port be transferred to a known `targetOrigin` and what binds the
+   * port to the window that announced itself — neither of which a single
+   * `HELLO`-with-port could do.
+   */
   #onWindowMessage(event: MessageEvent): void {
     if (this.#disposed) return;
 
-    // Ordering matters: parse before touching `event.source`, so a page
-    // spamming `postMessage` costs us one property read and a string compare.
+    // Ordering matters: `parseInbound` rejects on four raw property reads
+    // before it validates anything, so a page spamming `postMessage` costs us
+    // almost nothing.
     const message = parseInbound(event.data, {
       expectedNonce: null,
-      allowedKinds: HELLO_ONLY,
+      allowedKinds: WINDOW_TO_TOP_KINDS,
     });
     if (message === null) return;
 
-    // Window-identity check. `event.source === window.frames[i]` works
-    // cross-origin, and it is the only thing standing between us and a page
-    // that hands out ports on behalf of frames it does not own.
+    // Window identity does not prove the sender is our code — a page-controlled
+    // `srcdoc` frame is genuinely in the tree — but it does prove the sender is
+    // a frame on this page, and it rules out the coordinator's own window,
+    // which is what made a page able to admit itself.
     if (!this.#registry.isKnownWindow(event.source)) return;
+    const source = event.source;
+
+    if (message.kind === "HELLO") {
+      this.#challenge(source, event.origin);
+      return;
+    }
+    if (message.kind !== "JOIN") return;
+
+    const challenge = this.#challenges.get(message.token);
+    // One-shot, whether or not it turns out to be redeemable.
+    this.#challenges.delete(message.token);
+    if (challenge === undefined || challenge.source !== source) return;
+    if (Date.now() - challenge.issuedAt > CHALLENGE_TTL_MS) return;
 
     const port = event.ports[0];
     if (port === undefined) return;
 
     const channel = messagePortChannel(port);
-    const frameId = this.#admit(channel, event.source);
+    const frameId = this.#admit(channel, source, message.helloId);
 
     port.addEventListener("message", (portEvent: MessageEvent) => {
       this.#receive(frameId, portEvent.data);
@@ -169,15 +224,57 @@ export class FrameCoordinator {
     port.start();
   }
 
-  #admit(channel: FrameChannel, source: Window | null): FrameId {
+  /**
+   * Issue a one-shot token to exactly one window.
+   *
+   * `targetOrigin` is the announcing frame's own origin, taken from the event
+   * rather than guessed, so the token is not readable by any other document —
+   * and in particular not by the top page, which is what an unrestricted
+   * `"*"` would have allowed on a same-origin child.
+   */
+  #challenge(source: Window, origin: string): void {
+    this.#expireChallenges();
+    if (this.#challenges.size >= MAX_PENDING_CHALLENGES) return;
+
+    const token = createNonce();
+    this.#challenges.set(token, { source, issuedAt: Date.now() });
+    try {
+      source.postMessage(
+        { ...ENVELOPE, kind: "CHALLENGE", token },
+        // `"null"` is what an opaque origin (`srcdoc`, sandboxed, `data:`)
+        // reports, and it is not a valid `targetOrigin`. Those frames are
+        // reachable only through `"*"`, and they are also the ones whose
+        // origin we would not be authenticating anyway.
+        origin === "null" || origin === "" ? "*" : origin,
+      );
+    } catch {
+      // A frame detached between the `HELLO` and now. The token expires.
+    }
+  }
+
+  #expireChallenges(): void {
+    const now = Date.now();
+    for (const [token, challenge] of this.#challenges) {
+      if (now - challenge.issuedAt > CHALLENGE_TTL_MS) {
+        this.#challenges.delete(token);
+      }
+    }
+  }
+
+  #admit(
+    channel: FrameChannel,
+    source: Window | null,
+    helloId: string | null,
+  ): FrameId {
     const record = this.#registry.register(channel, source);
     this.#registry.post(record.frameId, {
       ...ENVELOPE,
       kind: "WELCOME",
       nonce: this.#nonce,
       frameId: record.frameId,
+      // The loopback endpoint has no attempt to echo; it is not racing anyone.
+      helloId: helloId ?? "",
       frames: this.#registry.ids(),
-      settings: this.#options.currentSettings?.(),
       exclusion: this.#exclusion(),
     });
     if (this.#focused === null) this.#focused = record.frameId;
@@ -195,17 +292,25 @@ export class FrameCoordinator {
 
   #receive(frameId: FrameId, data: unknown): void {
     if (this.#disposed) return;
+    // Before the parse, not after: a frame that was reaped mid-flight must not
+    // be able to talk its way back in without a fresh handshake, and it must
+    // not be able to make us validate a descriptor array on the way to being
+    // rejected.
+    if (!this.#registry.has(frameId)) return;
+
     const message = parseInbound(data, {
       expectedNonce: this.#nonce,
       allowedKinds: FRAME_TO_TOP_KINDS,
     });
     if (message === null) return;
-    // A frame that was reaped mid-flight must not be able to talk its way back
-    // in without a fresh `HELLO`.
-    if (!this.#registry.has(frameId)) return;
 
     switch (message.kind) {
       case "REQUEST_HINTS":
+        this.#round = {
+          originFrameId: frameId,
+          mode: message.mode,
+          startedAt: Date.now(),
+        };
         void this.#runHintRound(frameId, message.requestId, message.mode);
         return;
 
@@ -214,6 +319,14 @@ export class FrameCoordinator {
         return;
 
       case "ACTIVATE_HINT":
+        // The single most consequential relay in the protocol: it ends in a
+        // programmatic click, hover, focus or clipboard write inside a document
+        // of a different origin. `#resolveCollect` already enforces "a frame may
+        // only speak for itself" for descriptors; this is the same discipline
+        // for the action. Only the frame that started the live round may drive
+        // it, and only once.
+        if (!this.#ownsRound(frameId, message.mode)) return;
+        this.#round = null;
         this.#registry.post(message.targetFrameId, {
           ...ENVELOPE,
           kind: "ACTIVATE_HINT",
@@ -225,6 +338,9 @@ export class FrameCoordinator {
         return;
 
       case "KEYSTROKE":
+        // Keystrokes only mean anything inside a round, and only the frame the
+        // user is typing into has any business broadcasting them.
+        if (this.#round?.originFrameId !== frameId) return;
         this.relayKey(frameId, message.notation);
         return;
 
@@ -247,14 +363,26 @@ export class FrameCoordinator {
         return;
 
       case "GOODBYE":
+        if (this.#round?.originFrameId === frameId) this.#round = null;
         this.#registry.remove(frameId);
         return;
 
       default:
-        // `HELLO` never arrives over a port, and `FRAME_TO_TOP_KINDS` has
+        // `HELLO`/`JOIN` never arrive over a port, and `FRAME_TO_TOP_KINDS` has
         // already rejected every top-to-frame kind.
         return;
     }
+  }
+
+  /** Is `frameId` the frame that started the live round, in the same mode? */
+  #ownsRound(frameId: FrameId, mode: HintMode): boolean {
+    const round = this.#round;
+    if (round === null) return false;
+    if (Date.now() - round.startedAt > ROUND_TTL_MS) {
+      this.#round = null;
+      return false;
+    }
+    return round.originFrameId === frameId && round.mode === mode;
   }
 
   // -------------------------------------------------------------------------
@@ -372,7 +500,13 @@ export class FrameCoordinator {
     );
   }
 
-  /** Tell one frame to act on one of its own hints. */
+  /**
+   * Tell one frame to act on one of its own hints.
+   *
+   * The top frame's own path, so there is no round to authorise against — the
+   * caller *is* the coordinator. Frames reach this through `ACTIVATE_HINT`,
+   * which is checked in `#receive`.
+   */
   activateHint(
     targetFrameId: FrameId,
     localIndex: number,

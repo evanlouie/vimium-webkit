@@ -1,28 +1,80 @@
 import { assertEquals } from "@std/assert";
-import { ExclusionSet, isPassKey, patternToRegExp } from "~/core/exclusions.ts";
+import {
+  compilePattern,
+  ExclusionSet,
+  isPassKey,
+  patternToRegExp,
+} from "~/core/exclusions.ts";
 
-Deno.test("patternToRegExp: `*` is the only wildcard and both ends are anchored", () => {
-  const pattern = patternToRegExp("https://example.com/*");
-  assertEquals(pattern?.test("https://example.com/a/b"), true);
-  assertEquals(pattern?.test("https://example.com/"), true);
+Deno.test("compilePattern: `*` is the only wildcard and both ends are anchored", () => {
+  const matches = compilePattern("https://example.com/*");
+  assertEquals(matches?.("https://example.com/a/b"), true);
+  assertEquals(matches?.("https://example.com/"), true);
   // Anchoring matters: without it this would match an attacker-chosen host.
+  assertEquals(matches?.("https://evil.example.com.co/"), false);
+  assertEquals(matches?.("http://example.com/"), false);
+});
+
+Deno.test("compilePattern: interior wildcards match in order", () => {
+  const matches = compilePattern("https://*.example.com/*/edit");
+  assertEquals(matches?.("https://a.example.com/doc/edit"), true);
+  assertEquals(matches?.("https://a.example.com/edit/doc"), false);
+  assertEquals(matches?.("https://a.example.com/x/y/edit"), true);
+});
+
+Deno.test("compilePattern: a pattern with no wildcard is an exact match", () => {
+  const matches = compilePattern("https://example.com/only");
+  assertEquals(matches?.("https://example.com/only"), true);
+  assertEquals(matches?.("https://example.com/only/more"), false);
+});
+
+Deno.test("compilePattern: a wildcard glob cannot be made to backtrack", () => {
+  // The shape that used to compile to `^a.*a.*a.*…$` and be fed a
+  // page-controlled URL. Matched greedily this is linear; as a regex it is
+  // polynomial in the number of wildcards.
+  const matches = compilePattern(`https://${"a*".repeat(24)}end`);
+  const hostile = `https://${"a".repeat(3000)}`;
+
+  const started = performance.now();
+  assertEquals(matches?.(hostile), false);
+  const elapsed = performance.now() - started;
+
+  // Two orders of magnitude of slack; the point is "not seconds".
+  assertEquals(
+    elapsed < 200,
+    true,
+    `glob match took ${elapsed.toFixed(1)}ms`,
+  );
+});
+
+Deno.test("compilePattern: regex-delimited patterns are honoured", () => {
+  const matches = compilePattern("/https://(mail|inbox)\\.google\\.com/.*/");
+  assertEquals(matches?.("https://mail.google.com/u/0"), true);
+  assertEquals(matches?.("https://drive.google.com/u/0"), false);
+});
+
+Deno.test("compilePattern: regex metacharacters in a glob are literal", () => {
+  const matches = compilePattern("https://example.com/a+b");
+  assertEquals(matches?.("https://example.com/a+b"), true);
+  assertEquals(matches?.("https://example.com/aaab"), false);
+});
+
+Deno.test("compilePattern: a malformed pattern is dropped, not thrown", () => {
+  assertEquals(compilePattern("/[unclosed/"), null);
+  assertEquals(compilePattern("   "), null);
+  assertEquals(compilePattern(`/${"a".repeat(2000)}/`), null);
+});
+
+Deno.test("compilePattern: an absurdly long URL is refused rather than scanned", () => {
+  const matches = compilePattern("/.*/");
+  assertEquals(matches?.("https://example.com/"), true);
+  assertEquals(matches?.("x".repeat(5000)), false);
+});
+
+Deno.test("patternToRegExp still describes what a glob means", () => {
+  const pattern = patternToRegExp("https://example.com/*");
+  assertEquals(pattern?.test("https://example.com/a"), true);
   assertEquals(pattern?.test("https://evil.example.com.co/"), false);
-  assertEquals(pattern?.test("http://example.com/"), false);
-});
-
-Deno.test("patternToRegExp: regex-delimited patterns are honoured", () => {
-  const pattern = patternToRegExp("/https://(mail|inbox)\\.google\\.com/.*/");
-  assertEquals(pattern?.test("https://mail.google.com/u/0"), true);
-  assertEquals(pattern?.test("https://drive.google.com/u/0"), false);
-});
-
-Deno.test("patternToRegExp: regex metacharacters in a glob are literal", () => {
-  const pattern = patternToRegExp("https://example.com/a+b");
-  assertEquals(pattern?.test("https://example.com/a+b"), true);
-  assertEquals(pattern?.test("https://example.com/aaab"), false);
-});
-
-Deno.test("patternToRegExp: a malformed pattern is dropped, not thrown", () => {
   assertEquals(patternToRegExp("/[unclosed/"), null);
   assertEquals(patternToRegExp("   "), null);
 });

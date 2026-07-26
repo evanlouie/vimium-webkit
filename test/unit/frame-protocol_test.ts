@@ -79,13 +79,13 @@ const descriptor = (
 
 const hello = (): unknown => ({ ...ENVELOPE, kind: "HELLO" });
 
-const welcome = (nonce: string): unknown => ({
+const welcome = (nonce: string, helloId = ""): unknown => ({
   ...ENVELOPE,
   kind: "WELCOME",
   nonce,
   frameId: "f0000",
+  helloId,
   frames: ["f0000"],
-  settings: { anything: true },
   exclusion: { enabled: true, passKeys: "" },
 });
 
@@ -208,7 +208,7 @@ Deno.test("parseFrameMessage bounds hostile payloads", () => {
   assertEquals(
     parseFrameMessage(
       message(
-        Array.from({ length: 20_001 }, (_, i) => descriptor("f0001", i)),
+        Array.from({ length: 5_001 }, (_, i) => descriptor("f0001", i)),
       ),
     ),
     null,
@@ -221,13 +221,14 @@ Deno.test("parseFrameMessage accepts a message of every kind", () => {
   const nonce = createNonce();
   const samples: readonly unknown[] = [
     hello(),
+    { ...ENVELOPE, kind: "CHALLENGE", token: "t0" },
+    { ...ENVELOPE, kind: "JOIN", token: "t0", helloId: "h0" },
     welcome(nonce),
     { ...ENVELOPE, kind: "ROSTER", nonce, frames: ["f0000", "f0001"] },
     {
       ...ENVELOPE,
       kind: "SETTINGS",
       nonce,
-      settings: {},
       exclusion: DEFAULT_EXCLUSION,
     },
     {
@@ -383,8 +384,9 @@ Deno.test("parseInbound drops a wrong or absent nonce", () => {
 });
 
 Deno.test("parseInbound lets the handshake through without a nonce", () => {
-  // HELLO and WELCOME necessarily precede nonce knowledge; their trust comes
-  // from the transport (frames-tree check, exclusive port transfer).
+  // The handshake kinds necessarily precede nonce knowledge; their trust comes
+  // from the transport instead — a token bound to one window, a port
+  // transferred to one origin, and a `helloId` bound to one attempt.
   assert(
     parseInbound(hello(), {
       expectedNonce: null,
@@ -651,6 +653,16 @@ Deno.test("keystrokes reach every frame but the one they happened in", async () 
   const other = attachFrame(coordinator, owns(0));
   await flush();
 
+  // A keystroke only means anything inside a round, so start one.
+  coordinator.receive(origin.frameId, {
+    ...ENVELOPE,
+    kind: "REQUEST_HINTS",
+    nonce: origin.nonce,
+    requestId: "r:keys",
+    mode: "activate",
+  });
+  await flush();
+
   coordinator.receive(origin.frameId, {
     ...ENVELOPE,
     kind: "KEYSTROKE",
@@ -666,6 +678,97 @@ Deno.test("keystrokes reach every frame but the one they happened in", async () 
   assert(relayed !== undefined && relayed.kind === "KEYSTROKE");
   assertEquals(relayed.originFrameId, origin.frameId);
   assertEquals(relayed.notation, "s");
+  coordinator.dispose();
+});
+
+Deno.test("a frame that did not start the round cannot drive it", async () => {
+  // The exact escalation this closes: `ACTIVATE_HINT` ends in a programmatic
+  // click, hover, focus or clipboard write inside a document of a *different
+  // origin*, and it used to be relayed to whatever frame the sender named, with
+  // no check that the sender had started a round or that a round existed.
+  const coordinator = new FrameCoordinator({ root: null });
+  const origin = attachFrame(coordinator, owns(1));
+  const bystander = attachFrame(coordinator, owns(1));
+  const victim = attachFrame(coordinator, owns(1));
+  await flush();
+
+  const activate = (from: FakeFrame, mode: HintMode): void => {
+    coordinator.receive(from.frameId, {
+      ...ENVELOPE,
+      kind: "ACTIVATE_HINT",
+      nonce: from.nonce,
+      targetFrameId: victim.frameId,
+      localIndex: 0,
+      mode,
+    });
+  };
+
+  // No round at all.
+  activate(bystander, "activate");
+  await flush();
+  assertEquals(inboxOf(victim, "ACTIVATE_HINT").length, 0, "no live round");
+
+  coordinator.receive(origin.frameId, {
+    ...ENVELOPE,
+    kind: "REQUEST_HINTS",
+    nonce: origin.nonce,
+    requestId: "r:round",
+    mode: "activate",
+  });
+  await flush();
+
+  activate(bystander, "activate");
+  await flush();
+  assertEquals(
+    inboxOf(victim, "ACTIVATE_HINT").length,
+    0,
+    "a frame that is not the origin",
+  );
+
+  // A mode the round was not opened in is a different capability: `activate`
+  // clicks, `copy-link-url` writes the clipboard.
+  activate(origin, "copy-link-url");
+  await flush();
+  assertEquals(inboxOf(victim, "ACTIVATE_HINT").length, 0, "a different mode");
+
+  activate(origin, "activate");
+  await flush();
+  assertEquals(inboxOf(victim, "ACTIVATE_HINT").length, 1, "the origin may");
+
+  // One activation ends the round; a second is a fresh capability request.
+  activate(origin, "activate");
+  await flush();
+  assertEquals(inboxOf(victim, "ACTIVATE_HINT").length, 1, "and only once");
+
+  coordinator.dispose();
+});
+
+Deno.test("a keystroke from a frame that is not the round's origin is dropped", async () => {
+  const coordinator = new FrameCoordinator({ root: null });
+  const origin = attachFrame(coordinator, owns(0));
+  const bystander = attachFrame(coordinator, owns(0));
+  const other = attachFrame(coordinator, owns(0));
+  await flush();
+
+  coordinator.receive(origin.frameId, {
+    ...ENVELOPE,
+    kind: "REQUEST_HINTS",
+    nonce: origin.nonce,
+    requestId: "r:round",
+    mode: "activate",
+  });
+  await flush();
+
+  coordinator.receive(bystander.frameId, {
+    ...ENVELOPE,
+    kind: "KEYSTROKE",
+    nonce: bystander.nonce,
+    originFrameId: bystander.frameId,
+    notation: "s",
+  });
+  await flush();
+
+  assertEquals(inboxOf(other, "KEYSTROKE").length, 0);
   coordinator.dispose();
 });
 

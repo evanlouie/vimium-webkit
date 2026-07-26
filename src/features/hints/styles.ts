@@ -100,13 +100,44 @@ export const HINT_CSS = `
 `;
 
 /**
+ * Longest user stylesheet we will install.
+ *
+ * Marker styling needs a handful of declarations. A cap this generous never
+ * inconveniences a real user and keeps a pathological value from being pushed
+ * through `replaceSync` on every session.
+ */
+const MAX_USER_CSS_LENGTH = 8 * 1024;
+
+/**
+ * Constructs that would let user CSS reach outside the overlay.
+ *
+ * `@import` and `url(` both make network requests, which turns a stylesheet
+ * into an exfiltration channel: an attribute selector plus a background image
+ * reports which hints exist to a third-party host. Neither is needed to style a
+ * marker, so refusing them costs nothing real.
+ */
+const FORBIDDEN_CSS = /@import\b|url\s*\(|@charset\b/iu;
+
+/**
+ * Is this user CSS we are willing to install?
+ *
+ * Exported so the settings dialog can refuse it at the point the user can fix
+ * it, rather than silently dropping it later.
+ */
+export const isSafeUserCss = (css: string): boolean =>
+  css.length <= MAX_USER_CSS_LENGTH && !FORBIDDEN_CSS.test(css);
+
+/**
  * The stylesheet for a session, with `userDefinedLinkHintCss` appended.
  *
  * Appended rather than merged so that user rules win on equal specificity, and
  * scoped by being inside our shadow root so a bad user rule can only break our
- * own overlay, never the page.
+ * own overlay, never the page. "Only our own overlay" is not nothing, though:
+ * CSS that repositions or relabels a marker can make a hint point at an element
+ * the user did not choose, which is why `isSafeUserCss` exists.
  */
 export const hintCss = (userDefinedLinkHintCss: string): string => {
   const user = userDefinedLinkHintCss.trim();
-  return user.length === 0 ? HINT_CSS : `${HINT_CSS}\n/* user */\n${user}\n`;
+  if (user.length === 0 || !isSafeUserCss(user)) return HINT_CSS;
+  return `${HINT_CSS}\n/* user */\n${user}\n`;
 };

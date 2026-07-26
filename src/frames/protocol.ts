@@ -13,20 +13,34 @@
  * "probably fine" path. Keep this module free of DOM access so it stays
  * unit-testable under `deno test`.
  *
- * ## Security posture — accept and document, do not gold-plate
+ * ## Security posture
  *
- * A malicious page can post messages that look like our protocol. The
- * mitigations are:
+ * A malicious page can post messages that look like our protocol, and — this is
+ * the part that is easy to get wrong — a page-controlled `srcdoc` or
+ * same-origin iframe is *legitimately* in the frames tree. Window identity
+ * proves "a window on this page", never "our code". The layers are therefore:
  *
- * 1. `event.source` is validated against the real frames tree (registry.ts),
- * 2. every payload is Zod-validated here and dropped on failure, and
- * 3. a per-session nonce is distributed top-down in `WELCOME` and echoed on
- *    every subsequent message.
+ * 1. **Challenge-response admission.** A `HELLO` is only an announcement; it
+ *    carries nothing and grants nothing. The coordinator answers it with a
+ *    one-shot token posted *to that window alone*, and admits the frame only
+ *    when the token comes back with a port attached. That is what binds the
+ *    port to the window, and it is why the coordinator's own window can never
+ *    admit itself.
+ * 2. **Targeted transfer.** The challenge tells the child the coordinator's
+ *    origin, so the port is transferred with a real `targetOrigin` instead of
+ *    `"*"`. The port is the capability; handing it to `"*"` was handing it to
+ *    whoever answered first.
+ * 3. **Authorize, then validate.** `parseInbound` checks the envelope, the
+ *    direction and the nonce by direct property read before any Zod parse, so
+ *    an unauthorized sender cannot make us validate megabytes of payload.
+ * 4. **Nothing with a side effect crosses the wire.** No settings: every frame
+ *    reads its own storage. What travels is the exclusion decision, which is
+ *    two fields and genuinely has to come from the top frame's URL.
  *
- * None of this is airtight in page world, where the page shares our realm; in
- * content world the page cannot read the nonce. The worst realistic case is
- * spoofed hint descriptors pointing at page-controlled elements — which the
- * page could click itself anyway. **Severity: low. Do not over-engineer this.**
+ * None of this is airtight in page world, where the page shares our realm and
+ * can read the token out of the message event. In content world it cannot. The
+ * posture is to make the content-world case sound and to be honest about the
+ * other one — not to pretend a nonce helps where the attacker can read it.
  */
 
 import * as z from "zod/mini";
@@ -65,11 +79,17 @@ const envelopeShape = () => ({
 /**
  * Ceilings, not tuning knobs. They exist so that a hostile or broken frame
  * cannot make us allocate without limit before we have decided to trust it.
+ *
+ * `MAX_LINK_TEXT` and `MAX_DESCRIPTORS` were four and two orders of magnitude
+ * above anything real — 20 000 × 1024 is a 20 MB `safeParse` — so they are
+ * sized against what the feature actually uses: markers render 40 characters,
+ * filter matching wants a little more, and a frame contributing five thousand
+ * hints is already past the point where hints are usable.
  */
 const MAX_ID_LENGTH = 64;
-const MAX_LINK_TEXT = 1024;
+const MAX_LINK_TEXT = 256;
 const MAX_LOCAL_INDEX = 100_000;
-const MAX_DESCRIPTORS = 20_000;
+const MAX_DESCRIPTORS = 5_000;
 const MAX_NOTATION_LENGTH = 64;
 
 const idSchema = z.string().check(z.maxLength(MAX_ID_LENGTH));
@@ -196,15 +216,44 @@ export const DEFAULT_EXCLUSION: EffectiveExclusion = {
 // ---------------------------------------------------------------------------
 
 /**
- * Child → top, over `window.top.postMessage` with `port2` transferred.
+ * Child → top, over `window.top.postMessage`. An announcement, nothing more.
  *
- * The only message that travels over `window.postMessage`, and the only one
- * without a nonce — the child cannot know the nonce until it is welcomed. That
- * asymmetry is the documented soft spot in the threat model above.
+ * It carries no secret, grants nothing, and transfers no port — so it costs
+ * nothing if a page forges one. The coordinator answers with a `CHALLENGE`
+ * addressed to the announcing window; the port only moves in `JOIN`.
  */
 const helloSchema = z.object({
   ...envelopeShape(),
   kind: z.literal("HELLO"),
+});
+
+/**
+ * Top → child, over `window.postMessage`, addressed to one window.
+ *
+ * The token is one-shot and bound to the window it was posted to. It is *not*
+ * the session nonce: it authorises exactly one `JOIN` and is then consumed, so
+ * capturing it buys an attacker one registration they could have obtained by
+ * announcing themselves anyway.
+ */
+const challengeSchema = z.object({
+  ...envelopeShape(),
+  kind: z.literal("CHALLENGE"),
+  token: idSchema,
+});
+
+/**
+ * Child → top, over `window.postMessage` with `port2` transferred.
+ *
+ * Sent with the coordinator's real origin as `targetOrigin`, which the
+ * `CHALLENGE` is what told us. `helloId` is the child's own per-attempt id,
+ * echoed back in `WELCOME` so a stale or forged welcome from a racing responder
+ * is dropped rather than silently re-keying the frame.
+ */
+const joinSchema = z.object({
+  ...envelopeShape(),
+  kind: z.literal("JOIN"),
+  token: idSchema,
+  helloId: idSchema,
 });
 
 /** Top → child, over the port. Carries everything a frame needs to boot. */
@@ -213,13 +262,9 @@ const welcomeSchema = z.object({
   kind: z.literal("WELCOME"),
   nonce: idSchema,
   frameId: idSchema,
+  /** Echoes the `JOIN` that earned it; anything else is a race or a spoof. */
+  helloId: idSchema,
   frames: z.readonly(z.array(idSchema)),
-  /**
-   * Deliberately unvalidated here: validating against `settingsSchema` would
-   * make a version-skewed frame drop the whole `WELCOME` and never boot. The
-   * consumer re-validates (`onSettingsPushed`).
-   */
-  settings: z.unknown(),
   exclusion: effectiveExclusionSchema,
 });
 
@@ -231,12 +276,20 @@ const rosterSchema = z.object({
   frames: z.readonly(z.array(idSchema)),
 });
 
-/** Top → child, after `AppContext.refresh()` in the top frame. */
+/**
+ * Top → child, after a settings change in the top frame.
+ *
+ * Carries the exclusion decision and nothing else. Settings used to ride along
+ * here, which made the protocol a channel for pushing a CSS string, a search
+ * template and a key-mapping source into every frame on the page — and made
+ * `WELCOME` an exfiltration route for the user's exclusion patterns, mappings
+ * and engine list. Every frame reads its own storage; this message is a
+ * *prompt* to do that, not a source of truth.
+ */
 const settingsPushSchema = z.object({
   ...envelopeShape(),
   kind: z.literal("SETTINGS"),
   nonce: idSchema,
-  settings: z.unknown(),
   exclusion: effectiveExclusionSchema,
 });
 
@@ -372,6 +425,8 @@ const goodbyeSchema = z.object({
 
 export const frameMessageSchema = z.discriminatedUnion("kind", [
   helloSchema,
+  challengeSchema,
+  joinSchema,
   welcomeSchema,
   rosterSchema,
   settingsPushSchema,
@@ -403,6 +458,7 @@ export type MessageOf<K extends FrameMessageKind> = Extract<
 export const FRAME_TO_TOP_KINDS: ReadonlySet<FrameMessageKind> = new Set(
   [
     "HELLO",
+    "JOIN",
     "REQUEST_HINTS",
     "HINTS",
     "ACTIVATE_HINT",
@@ -412,6 +468,21 @@ export const FRAME_TO_TOP_KINDS: ReadonlySet<FrameMessageKind> = new Set(
     "EXCLUSION_REQUEST",
     "GOODBYE",
   ] satisfies readonly FrameMessageKind[],
+);
+
+/**
+ * The two kinds that travel over `window.postMessage` rather than a port.
+ *
+ * Everything else is port-only, so a `window`-level listener that sees one is
+ * looking at page traffic and should drop it without further thought.
+ */
+export const WINDOW_TO_TOP_KINDS: ReadonlySet<FrameMessageKind> = new Set(
+  ["HELLO", "JOIN"] satisfies readonly FrameMessageKind[],
+);
+
+/** Top → child over `window.postMessage`; the only one. */
+export const TOP_TO_WINDOW_KINDS: ReadonlySet<FrameMessageKind> = new Set(
+  ["CHALLENGE"] satisfies readonly FrameMessageKind[],
 );
 
 /** Messages the coordinator may send to a frame. */
@@ -455,15 +526,56 @@ export const parseFrameMessage = (data: unknown): FrameMessage | null => {
 };
 
 /**
- * The two handshake messages, which by definition precede nonce knowledge.
+ * The handshake kinds, which by definition precede nonce knowledge.
  *
- * Their trust comes from the transport instead: `HELLO` is admitted only after
- * its `event.source` is found in the frames tree, and `WELCOME` can only arrive
- * on a port whose other end was transferred to `window.top` alone.
+ * Their trust comes from the transport instead: `HELLO` grants nothing at all,
+ * `CHALLENGE` is only honoured from a strict ancestor, `JOIN` must quote a
+ * token the coordinator issued to that exact window, and `WELCOME` must quote
+ * the `helloId` of the attempt still in flight.
  */
 const NONCELESS_KINDS: ReadonlySet<FrameMessageKind> = new Set(
-  ["HELLO", "WELCOME"] satisfies readonly FrameMessageKind[],
+  [
+    "HELLO",
+    "CHALLENGE",
+    "JOIN",
+    "WELCOME",
+  ] satisfies readonly FrameMessageKind[],
 );
+
+export interface InboundOptions {
+  readonly expectedNonce: string | null;
+  readonly allowedKinds: ReadonlySet<FrameMessageKind>;
+}
+
+/**
+ * Decide whether a payload is worth validating, by direct property read.
+ *
+ * This runs *before* `frameMessageSchema.safeParse`, and that ordering is the
+ * point: a descriptor array is bounded but still large, and validating one for
+ * a sender we were always going to reject hands an attacker our main thread for
+ * free. Reads four properties and compares four values.
+ */
+export const preauthorize = (
+  data: unknown,
+  options: InboundOptions,
+): boolean => {
+  if (typeof data !== "object" || data === null) return false;
+  const raw = data as Record<string, unknown>;
+  if (raw["magic"] !== PROTOCOL_MAGIC || raw["v"] !== PROTOCOL_VERSION) {
+    return false;
+  }
+
+  const kind = raw["kind"];
+  if (typeof kind !== "string") return false;
+  const known = kind as FrameMessageKind;
+  if (!options.allowedKinds.has(known)) return false;
+  if (NONCELESS_KINDS.has(known)) return true;
+
+  // Not constant-time. It does not need to be: the attacker is same-page and
+  // can already observe our timing far more directly than through this compare.
+  return options.expectedNonce !== null &&
+    raw["nonce"] === options.expectedNonce;
+};
 
 /**
  * Parse and check both the direction and the session nonce.
@@ -474,18 +586,15 @@ const NONCELESS_KINDS: ReadonlySet<FrameMessageKind> = new Set(
  */
 export const parseInbound = (
   data: unknown,
-  options: {
-    readonly expectedNonce: string | null;
-    readonly allowedKinds: ReadonlySet<FrameMessageKind>;
-  },
+  options: InboundOptions,
 ): FrameMessage | null => {
+  if (!preauthorize(data, options)) return null;
   const message = parseFrameMessage(data);
   if (message === null) return null;
+  // Re-checked against the *parsed* message: `preauthorize` trusts a raw
+  // property read, and the two must not be able to disagree.
   if (!options.allowedKinds.has(message.kind)) return null;
   if (NONCELESS_KINDS.has(message.kind)) return message;
-  if (options.expectedNonce === null) return null;
-  // Not constant-time. It does not need to be: the attacker is same-page and
-  // can already observe our timing far more directly than through this compare.
   return "nonce" in message && message.nonce === options.expectedNonce
     ? message
     : null;
@@ -496,6 +605,8 @@ export const parseInbound = (
  *
  * 128 bits from the CSPRNG. `crypto.getRandomValues` is available in every
  * target (Safari 11+) and in Deno, so there is no fallback path to get wrong.
+ * Also used for the one-shot admission tokens and for per-attempt `helloId`s,
+ * where the same properties are wanted for the same reason.
  */
 export const createNonce = (): string => {
   const bytes = new Uint8Array(16);

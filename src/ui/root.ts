@@ -82,6 +82,8 @@ class ShadowUiRoot implements UiRoot {
   readonly #host: HTMLElement;
   readonly #layers = new Map<UiLayerName, HTMLElement>();
   readonly #sheets: CSSStyleSheet[] = [];
+  /** Sheets that are replaced in place rather than appended. */
+  readonly #keyed = new Map<string, CSSStyleSheet>();
   readonly #onViewportChange: (() => void) | null;
   readonly #followPageColorScheme: () => boolean;
   readonly #schemeQuery: MediaQueryList | null;
@@ -188,6 +190,28 @@ class ShadowUiRoot implements UiRoot {
   }
 
   /**
+   * Install or replace a named stylesheet.
+   *
+   * `addStyle` appends, which is right for the fixed sheets installed once at
+   * boot and wrong for anything derived from a setting: a value that alternates
+   * between two strings grew `adoptedStyleSheets` without bound, one entry per
+   * change, each one still in effect.
+   */
+  setStyle(key: string, css: string): void {
+    const existing = this.#keyed.get(key);
+    if (existing !== undefined && this.#caps.adoptedStyleSheets) {
+      try {
+        existing.replaceSync(css);
+        return;
+      } catch {
+        // Fall through and reinstall.
+      }
+    }
+    const sheet = this.#installStyle(css);
+    if (sheet !== null) this.#keyed.set(key, sheet);
+  }
+
+  /**
    * Recompute the overlay's colour scheme and publish it to the stylesheets.
    *
    * Call after anything that could change the answer: a settings change, or a
@@ -223,14 +247,14 @@ class ShadowUiRoot implements UiRoot {
     return target instanceof Node && this.shadow.contains(target);
   }
 
-  #installStyle(css: string): void {
+  #installStyle(css: string): CSSStyleSheet | null {
     if (this.#caps.adoptedStyleSheets) {
       try {
         const sheet = new CSSStyleSheet();
         sheet.replaceSync(css);
         this.#sheets.push(sheet);
         this.shadow.adoptedStyleSheets = this.#sheets;
-        return;
+        return sheet;
       } catch {
         // Fall through to the element path below.
       }
@@ -246,6 +270,7 @@ class ShadowUiRoot implements UiRoot {
       return element;
     })();
     this.#fallbackStyle.textContent += `\n${css}`;
+    return null;
   }
 
   /**

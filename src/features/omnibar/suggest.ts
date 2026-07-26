@@ -2,18 +2,21 @@
  * Search suggestions over `GM_xmlHttpRequest` (IMPLEMENTATION_PLAN.md §6.7).
  *
  * This is the one place in the omnibar that talks to the network, and it is
- * strictly opt-out-by-absence: the request needs `@connect`, which quoid
- * (Userscripts) does not implement at all. A `kind: "unavailable"` result
- * therefore means "this feature is off on this manager" — we latch it, stop
- * asking, and say nothing. Nagging the user about a capability their manager
- * will never grow is noise, not information.
+ * gated on `enableSearchSuggestions`, which is **off by default**. The gate has
+ * to be a setting rather than a capability: `GM.xmlHttpRequest` exists on quoid
+ * (Userscripts) too, so "off wherever the manager cannot do it" would have left
+ * the feature silently on everywhere it mattered. A `kind: "unavailable"`
+ * result still latches the feature off for the session — a manager that will
+ * never grow the capability is not worth nagging the user about — but that is a
+ * fallback, not the control.
  *
  * The timings are the plan's: 100 ms debounce, 2.5 s abort, 2 h cache.
  *
  * Privacy note: what leaves the device here is the text the user has typed,
  * sent to the search engine they configured — the same request the engine's own
- * search box would make. The frecency index in `history.ts` is never consulted
- * and never transmitted.
+ * search box would make, and with the same cookies. The caller is responsible
+ * for only offering *searches*: a typed URL must never reach this module. The
+ * frecency index in `history.ts` is never consulted and never transmitted.
  */
 
 import type { GmSurface } from "~/platform/gm.ts";
@@ -34,6 +37,10 @@ export const SUGGEST_LIMIT = 5;
  * URL: an unknown engine gets no suggestions, which is a missing feature, while
  * a guessed endpoint gets the user's keystrokes sent to an arbitrary path on a
  * third-party host, which is a bug with consequences.
+ *
+ * `SUGGEST_HOSTS` below is what the `@connect` metadata grants. The two must
+ * agree: a host here and not there produces a silent refusal, and a host there
+ * and not here is network access we do not use.
  */
 const SUGGEST_ENDPOINTS: ReadonlyArray<readonly [string, string]> = [
   [
@@ -51,6 +58,16 @@ const SUGGEST_ENDPOINTS: ReadonlyArray<readonly [string, string]> = [
     "https://en.wikipedia.org/w/api.php?action=opensearch&format=json&limit=8&search=%s",
   ],
 ];
+
+/**
+ * Every host `SUGGEST_ENDPOINTS` can reach, for the `@connect` metadata.
+ *
+ * Derived from the table rather than written out again, so the grant cannot
+ * drift away from the code that uses it.
+ */
+export const SUGGEST_HOSTS: readonly string[] = [
+  ...new Set(SUGGEST_ENDPOINTS.map((entry) => new URL(entry[1]).hostname)),
+].sort();
 
 export const suggestEndpointFor = (searchUrl: string): string | null => {
   let host: string;

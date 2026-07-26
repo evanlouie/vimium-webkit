@@ -61,6 +61,15 @@ export interface LocalHintsApi extends HintsApi {
 /** Vimium's number, and for the same reason: a hung frame must not deadlock us. */
 const COLLECT_DEADLINE_MS = 3000;
 
+/**
+ * How long a hint round keeps authorising a remote activation.
+ *
+ * Matches the coordinator's own round TTL: filter mode with
+ * `waitForEnterForFilteredHints` can legitimately stay open while the user
+ * reads the page, so this bounds a capability rather than a UX interaction.
+ */
+const ROUND_TTL_MS = 120_000;
+
 const descriptorsFor = (
   frameId: string,
   hints: readonly LocalHint[],
@@ -98,14 +107,27 @@ export const createHints = (app: AppContext): LocalHintsApi => {
   let installedCss: string | null = null;
   /** Kept so a remote `activateHint` can find the element again. */
   let lastLocal: readonly LocalHint[] = [];
+  /**
+   * When the round that produced `lastLocal` stops authorising activation.
+   *
+   * `activateLocal` used to index straight into `lastLocal` with no session
+   * check, and `lastLocal` is populated by *any* detection pass — including one
+   * triggered by a `COLLECT_HINTS` for a round the user never started. Bounding
+   * it by time rather than by "is a mode live" is deliberate: the origin frame
+   * tears its own mode down before it dispatches, so requiring a live session
+   * here would refuse the legitimate activation it is meant to protect.
+   */
+  let roundOpenUntil = 0;
   let warnedUnreachable = false;
 
   const ensureStyles = (): void => {
     const css = hintCss(app.settings().userDefinedLinkHintCss);
     if (css === installedCss) return;
     // CSSOM only. A `<style>` element here would be subject to the page's
-    // `style-src` and silently blocked on any CSP-hardened site.
-    app.ui.addStyle(css);
+    // `style-src` and silently blocked on any CSP-hardened site. Keyed rather
+    // than appended: the user CSS can change, and every past version would
+    // otherwise stay adopted alongside the current one.
+    app.ui.setStyle("hints", css);
     installedCss = css;
   };
 
@@ -268,13 +290,21 @@ export const createHints = (app: AppContext): LocalHintsApi => {
     ): Promise<readonly RemoteHintDescriptor[]> => {
       const controller = new AbortController();
       const hints = await detect(kind, controller.signal);
+      roundOpenUntil = Date.now() + ROUND_TTL_MS;
       return descriptorsFor(app.frames.frameId, hints);
     },
 
     activateLocal: (localIndex: number, kind: HintModeKind): void => {
+      if (Date.now() > roundOpenUntil) {
+        lastLocal = [];
+        return;
+      }
       const hint = lastLocal[localIndex];
       if (hint === undefined) return;
-      activateLocalHint(app, hint, kind);
+      // One activation per round, so a single authorised request cannot be
+      // replayed into a click on every element this frame ever hinted.
+      roundOpenUntil = 0;
+      activateLocalHint(app, hint, kind, "remote");
     },
 
     beginRemoteSession: (remote: RemoteHintSession): void => {

@@ -316,6 +316,11 @@ export class DialogController {
         "Recorded on this device only, and readable in your userscript manager's storage viewer.",
       ],
       [
+        "enableSearchSuggestions",
+        "Ask the search engine for omnibar completions",
+        "Sends what you type in the omnibar to your search engine, with your cookies, as you type it.",
+      ],
+      [
         "shadowNativeFind",
         "Shadow the browser's own Find shortcut",
         "May not be preventable on iOS (WebKit bug 191768).",

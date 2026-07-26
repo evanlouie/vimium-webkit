@@ -25,7 +25,21 @@ export interface InvariantInput {
   readonly metadataBlock: string;
 }
 
-export const STAGE0_BUDGET_BYTES = 5 * 1024;
+/**
+ * Stage 0's code cost, **minified**.
+ *
+ * Measured minified because the budget is about parse and execute work in
+ * twenty frames, and an unminified measurement charges the file for its own
+ * documentation — which is a budget that punishes exactly the wrong thing. The
+ * shipped bundle is not minified, but nothing in it is charged per-frame
+ * separately either: the whole 380 KB IIFE is what an engine sees at
+ * `document-start`, and that is the `bundle-budget` line's problem, not this
+ * one's.
+ *
+ * 3 KB against a measured 2.2 KB: enough headroom for a real change, not enough
+ * to absorb a rewrite unnoticed.
+ */
+export const STAGE0_BUDGET_BYTES = 3 * 1024;
 /** Headroom under Greasy Fork's 2 MB unminified ceiling. */
 export const BUNDLE_BUDGET_BYTES = 1_500 * 1024;
 

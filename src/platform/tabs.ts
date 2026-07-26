@@ -25,17 +25,39 @@ const tabError = (
 ): TabError => ({ kind, message, nativeAlternative });
 
 /**
- * Schemes we are willing to navigate to.
+ * Where a URL came from, which decides how much we trust it.
  *
- * `javascript:` and `data:` are excluded because hint targets and clipboard
- * contents are attacker-influenced, and `GM_openInTab` will happily execute
- * either. `view-source:` is allowed because `gs` needs it; managers may still
- * refuse, which surfaces as a normal failure.
+ * `"page"` covers everything derived from the document or from the user's
+ * clipboard: hint `href`s, `rel=next` targets, stored marks, omnibar input.
+ * `"internal"` is a URL this script constructed — `gs`'s `view-source:`, the
+ * configured `newTabUrl`.
+ *
+ * The distinction matters because `GM_openInTab` is not subject to the
+ * browser's block on navigating from `http:` to `file:`. Without it, a page
+ * could offer `<a href="file:///Users/x/.ssh/id_rsa">` and have `F` open it.
  */
-const ALLOWED_SCHEMES: ReadonlySet<string> = new Set([
+export type UrlTrust = "page" | "internal";
+
+/**
+ * Schemes we are willing to navigate to, by provenance.
+ *
+ * `javascript:` and `data:` appear in neither: `GM_openInTab` will happily
+ * execute either, and both are trivially reachable from page content.
+ */
+const PAGE_SCHEMES: ReadonlySet<string> = new Set([
   "http:",
   "https:",
   "ftp:",
+]);
+
+/**
+ * The wider set, for URLs we built ourselves.
+ *
+ * `view-source:` is here because `gs` needs it; managers may still refuse,
+ * which surfaces as a normal failure.
+ */
+const INTERNAL_SCHEMES: ReadonlySet<string> = new Set([
+  ...PAGE_SCHEMES,
   "file:",
   "about:",
   "view-source:",
@@ -43,10 +65,14 @@ const ALLOWED_SCHEMES: ReadonlySet<string> = new Set([
   "safari-web-extension:",
 ]);
 
-export const isNavigableUrl = (url: string): boolean => {
+export const isNavigableUrl = (
+  url: string,
+  trust: UrlTrust = "page",
+): boolean => {
   try {
     const parsed = new URL(url, document.baseURI);
-    return ALLOWED_SCHEMES.has(parsed.protocol);
+    const allowed = trust === "internal" ? INTERNAL_SCHEMES : PAGE_SCHEMES;
+    return allowed.has(parsed.protocol);
   } catch {
     return false;
   }
@@ -57,6 +83,8 @@ export interface OpenTabOptions {
   readonly active?: boolean;
   /** Place the new tab immediately after this one. */
   readonly insert?: boolean;
+  /** Defaults to `"page"`; only pass `"internal"` for a URL we constructed. */
+  readonly trust?: UrlTrust;
 }
 
 export interface OpenTabOutcome {
@@ -79,7 +107,7 @@ export const openTab = (
   url: string,
   options: OpenTabOptions = {},
 ): ResultAsync<OpenTabOutcome, TabError> => {
-  if (!isNavigableUrl(url)) {
+  if (!isNavigableUrl(url, options.trust ?? "page")) {
     return liftResult(
       err(tabError("unsafe-url", `refusing to open ${url.slice(0, 60)}`)),
     );
@@ -147,8 +175,9 @@ export const closeCurrentTab = (surface: GmSurface): Result<void, TabError> => {
 export const navigate = (
   url: string,
   replace = false,
+  trust: UrlTrust = "page",
 ): Result<void, TabError> => {
-  if (!isNavigableUrl(url)) {
+  if (!isNavigableUrl(url, trust)) {
     return err(
       tabError("unsafe-url", `refusing to navigate to ${url.slice(0, 60)}`),
     );

@@ -1,5 +1,10 @@
 import { assert, assertEquals, assertFalse } from "@std/assert";
-import { bootStage0, isLiveRealm, isTopFrame } from "~/boot/stage0.ts";
+import {
+  bootStage0,
+  isLiveRealm,
+  isTopFrame,
+  WAKE_MESSAGE,
+} from "~/boot/stage0.ts";
 import {
   type GlobalScope,
   poisonGlobals,
@@ -8,7 +13,7 @@ import {
 
 const GUARD = Symbol.for("vimium-webkit.stage0");
 
-const GLOBALS = ["navigator", "document", "self", "top"] as const;
+const GLOBALS = ["navigator", "document", "self", "top", "parent"] as const;
 
 type Realm = "live-top" | "absent" | "hostile";
 
@@ -29,12 +34,14 @@ const withRealm = (realm: Realm): GlobalScope => {
       document: {},
       self: globalThis,
       top: globalThis,
+      parent: globalThis,
     }
     : {
       navigator: undefined,
       document: undefined,
       self: undefined,
       top: undefined,
+      parent: undefined,
     };
 
   // The double-injection guard is realm state too: leaving it behind would
@@ -98,7 +105,8 @@ Deno.test("stage0 does not activate if its realm dies after boot", () => {
   try {
     globalThis.dispatchEvent(
       new MessageEvent("message", {
-        data: "vimium-webkit:wake",
+        data: WAKE_MESSAGE,
+        source: globalThis as unknown as MessageEventSource,
       }),
     );
     assertEquals(activations, 0);
@@ -106,5 +114,60 @@ Deno.test("stage0 does not activate if its realm dies after boot", () => {
     stage0.dispose();
     dead.restore();
     live.restore();
+  }
+});
+
+Deno.test("only an ancestor can wake stage0", () => {
+  const realm = withRealm("live-top");
+  let activations = 0;
+  const stage0 = bootStage0({ onActivate: () => activations++ });
+  assert(stage0 !== null);
+
+  const post = (init: MessageEventInit): void => {
+    globalThis.dispatchEvent(new MessageEvent("message", init));
+  };
+
+  try {
+    // The shape a page used to be able to forge: the wake was a public string
+    // with no source check, so any script could force the whole of Stage 1 into
+    // every frame it could reach.
+    post({ data: "vimium-webkit:wake" });
+    post({ data: WAKE_MESSAGE });
+    post({ data: WAKE_MESSAGE, source: new MessageChannel().port1 });
+    assertEquals(activations, 0);
+
+    post({
+      data: WAKE_MESSAGE,
+      source: globalThis as unknown as MessageEventSource,
+    });
+    assertEquals(activations, 1);
+  } finally {
+    stage0.dispose();
+    realm.restore();
+  }
+});
+
+Deno.test("stage0 publishes a sentinel, never its instance", () => {
+  const realm = withRealm("live-top");
+  const stage0 = bootStage0({ onActivate: () => {} });
+  assert(stage0 !== null);
+
+  try {
+    // A live `Stage0` on the global would hand any page `dispose()`,
+    // `adopt(handler)` and `drainBuffer()` — permanent disablement, keystroke
+    // interception, and a read of everything typed before we booted.
+    const published: unknown = (globalThis as Record<symbol, unknown>)[GUARD];
+    assertEquals(published, true);
+
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, GUARD);
+    assert(descriptor !== undefined);
+    assertFalse(descriptor.writable);
+    assertFalse(descriptor.enumerable);
+
+    // Still a guard: a second install into the same realm is refused.
+    assertEquals(bootStage0({ onActivate: () => {} }), null);
+  } finally {
+    stage0.dispose();
+    realm.restore();
   }
 });

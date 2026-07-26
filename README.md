@@ -190,19 +190,30 @@ the two APIs that would make it one do not exist for a userscript:
 | ------------------ | -------------------------------------------------------------- |
 | Commands (`:`)     | ✅ Full parity, including greyed-out Tier C entries            |
 | Search engines     | ✅ Vimium-compatible `keyword: url %s Description` config      |
-| Search suggestions | ⚠️ Needs `@connect`; silently unavailable on quoid             |
+| Search suggestions | ⚠️ **Opt-in, off by default** — see below                      |
 | Local history      | ⚠️ **Opt-in, off by default** — see below                      |
 | Browser history    | ❌ No `chrome.history`                                         |
 | Bookmarks          | ❌ No `chrome.bookmarks`                                       |
 | Open tabs          | ⚠️ Only tabs _we_ opened, labelled "Recent" rather than "Tabs" |
 
 > [!WARNING]
-> **Privacy.** The local history index is a real privacy surface: it records the
-> pages you visit into userscript-manager storage, which the manager's own UI
-> can read. It is **off by default**, honours a per-origin denylist, skips
-> private browsing where detectable, is capped with LRU eviction, can be wiped
-> with `:clear-history`, and never leaves your device. Turn it on deliberately
-> or not at all.
+> **Privacy.** Two things in the omnibar are off by default, and both stay off
+> until you say otherwise.
+>
+> **Search suggestions** send what you type to your configured search engine as
+> you type it, with your cookies, over `GM_xmlhttpRequest`. That is the same
+> request the engine's own search box makes, but you did not open the engine's
+> search box — so it is a decision, not a default. Only queries classified as
+> searches are sent; a URL you type is navigated to, never searched for. The
+> script can reach exactly five hosts (`@connect` names them individually), and
+> nothing is sent at all unless **Ask the search engine for omnibar
+> completions** is enabled in Settings.
+>
+> **The local history index** records the pages you visit into
+> userscript-manager storage, which the manager's own UI can read. It honours a
+> per-origin denylist, skips private browsing where detectable, is capped with
+> LRU eviction, can be wiped with `:clear-history`, and never leaves your
+> device.
 
 ---
 

@@ -24,7 +24,6 @@ import {
   sessionGroup,
   type Settings,
   settingsGroup,
-  settingsSchema,
 } from "~/settings/schema.ts";
 
 import { HandlerStack } from "~/core/handler-stack.ts";
@@ -160,17 +159,13 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       handleRemoteKey: (notation) => hints().handleRemoteKey(notation),
       beginRemoteSession: (remote) => hints().beginRemoteSession(remote),
     },
-    currentSettings: () => settings,
-    onSettingsPushed: (pushed, pushedExclusion) => {
-      // Re-validated rather than trusted: it arrived over `postMessage`, and a
-      // page can post anything that looks like our protocol (§6.5).
-      const parsed = settingsSchema.safeParse(pushed);
-      if (parsed.success) {
-        settings = parsed.data;
-        mappings = compile(settings, caps);
-        normalMode.recompiled();
-        ui.syncColorScheme();
-      }
+    onTopFrameUpdate: (pushedExclusion) => {
+      // Settings are never accepted over the wire. They used to be, which made
+      // the protocol a route for a CSS string, a search template and a mapping
+      // source into every frame on the page — and made the handshake an
+      // exfiltration channel for the user's exclusion patterns. This is a
+      // prompt to re-read our own storage, not a source of truth.
+      void reloadSettings();
 
       // The top frame resolves exclusions from its own URL, so a subframe only
       // learns the verdict when it is welcomed. Until this ran, a subframe that
@@ -186,6 +181,23 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
     },
     onTakeFocus: () => hud.show("Frame focused"),
   });
+
+  /**
+   * Re-read settings from *our own* storage and recompile everything derived.
+   *
+   * Split out of `refresh()` because the two callers differ in exactly one
+   * respect: `refresh()` also re-resolves the exclusion, which for a subframe
+   * means a round trip to the top frame. When the top frame has just told us
+   * the exclusion, asking it again would be a redundant hop on the settings
+   * path.
+   */
+  const reloadSettings = async (): Promise<void> => {
+    await groups.settings.hydrate();
+    settings = groups.settings.current();
+    mappings = compile(settings, caps);
+    normalMode.recompiled();
+    ui.syncColorScheme();
+  };
 
   const commands = createCommandRegistry();
 
@@ -262,11 +274,7 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
     },
     frames,
     refresh: async () => {
-      await groups.settings.hydrate();
-      settings = groups.settings.current();
-      mappings = compile(settings, caps);
-      normalMode.recompiled();
-      ui.syncColorScheme();
+      await reloadSettings();
       exclusion = await resolveExclusion();
       applyExclusion();
     },

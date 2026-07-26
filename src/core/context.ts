@@ -39,6 +39,13 @@ export interface UiRoot {
   /** Append CSS via CSSOM; falls back to `<style>` below Safari 16.4. */
   addStyle(css: string): void;
   /**
+   * Install or replace a stylesheet under a key.
+   *
+   * For anything derived from a live setting. `addStyle` appends, so a value
+   * that changes leaves every previous version adopted and in effect.
+   */
+  setStyle(key: string, css: string): void;
+  /**
    * Recompute the overlay's colour scheme.
    *
    * Exposed because `followPageColorScheme` is a live setting and the page's

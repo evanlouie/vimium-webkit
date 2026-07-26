@@ -93,6 +93,20 @@ export const parseSearchEngines = (source: string): ParsedSearchEngines => {
       continue;
     }
 
+    if (!isSafeTemplate(url)) {
+      // A `javascript:` template parses perfectly well as an engine line, and
+      // then every search through that keyword is an eval of attacker- or
+      // typo-supplied text in the current origin. The check belongs here rather
+      // than at `buildSearchUrl`, so the user is told at the point where they
+      // can fix it.
+      diagnostics.push({
+        line,
+        text,
+        message: "the URL must be http:// or https://",
+      });
+      continue;
+    }
+
     const engine: SearchEngine = {
       keyword,
       url,
@@ -114,6 +128,20 @@ export const parseSearchEngines = (source: string): ParsedSearchEngines => {
   }
 
   return { engines, diagnostics };
+};
+
+/**
+ * Is this a template we are willing to open?
+ *
+ * Scheme-checked against the *literal* template rather than the built URL: the
+ * query is percent-encoded into it, so if the scheme is safe before
+ * substitution it is safe after.
+ */
+export const isSafeTemplate = (template: string): boolean => {
+  const scheme = /^([a-z][a-z0-9+.-]*):/iu.exec(template.trim());
+  if (scheme === null) return false;
+  const protocol = (scheme[1] ?? "").toLowerCase();
+  return protocol === "http" || protocol === "https";
 };
 
 /**
@@ -211,7 +239,22 @@ const NON_TLD_EXTENSIONS: ReadonlySet<string> = new Set([
 ]);
 
 /** One or more labels, then a plausible TLD, then an optional port and path. */
-const HOST_LIKE = /^([^\s/?#@]+)\.([a-z]{2,63})(?::\d+)?(?:[/?#][\s\S]*)?$/iu;
+const HOST_LIKE =
+  /^([^\s/?#@]+)\.([a-z]{2,63})\.?(?::\d+)?(?:[/?#][\s\S]*)?$/iu;
+
+/** `[::1]`, `[::1]:8080`, `[fe80::1%25en0]/path`. */
+const IPV6_LIKE = /^\[[0-9a-f:.]+(?:%25[^\]]+)?\](?::\d+)?(?:[/?#][\s\S]*)?$/iu;
+
+const IPV4_LIKE =
+  /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?::\d+)?(?:[/?#][\s\S]*)?$/u;
+
+const isIpv4 = (trimmed: string): boolean => {
+  const match = IPV4_LIKE.exec(trimmed);
+  if (match === null) return false;
+  // `\d{1,3}` on its own accepts `999.999.999.999`, which is not an address
+  // and should be searched for rather than navigated to.
+  return match.slice(1, 5).every((octet) => Number(octet) <= 255);
+};
 
 /**
  * Decide whether the user typed a destination or a question.
@@ -233,10 +276,17 @@ export const classifyQuery = (query: string): QueryKind => {
     // for the payload.
     return "url";
   }
+
+  // An `@` before the first `/` is userinfo. Searching for it would transmit
+  // the password to the search engine, which is the one outcome here that
+  // cannot be undone.
+  const firstSlash = trimmed.indexOf("/");
+  const at = trimmed.indexOf("@");
+  if (at !== -1 && (firstSlash === -1 || at < firstSlash)) return "url";
+
+  if (IPV6_LIKE.test(trimmed)) return "url";
   if (/^localhost(?::\d+)?(?:[/?#][\s\S]*)?$/iu.test(trimmed)) return "url";
-  if (/^\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?(?:[/?#][\s\S]*)?$/u.test(trimmed)) {
-    return "url";
-  }
+  if (isIpv4(trimmed)) return "url";
 
   const match = HOST_LIKE.exec(trimmed);
   if (match === null) return "search";

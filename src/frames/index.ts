@@ -43,6 +43,7 @@ import type {
 import { withDeadline } from "~/platform/scheduler.ts";
 import { FrameCoordinator } from "./coordinator.ts";
 import {
+  createNonce,
   createRequestIdFactory,
   DEFAULT_EXCLUSION,
   type EffectiveExclusion,
@@ -51,6 +52,7 @@ import {
   parseInbound,
   REQUEST_DEADLINE_MS,
   TOP_TO_FRAME_KINDS,
+  TOP_TO_WINDOW_KINDS,
 } from "./protocol.ts";
 import { loopbackChannel } from "./registry.ts";
 
@@ -129,20 +131,16 @@ export interface FrameLinkOptions {
   readonly resolveExclusion?: () => EffectiveExclusion;
   /** Bound by stage1 so the coordinator can ask *this* frame for its hints. */
   readonly localHints?: LocalHintsBridge;
-  /** Snapshotted into `WELCOME` and `SETTINGS`. Top frame only. */
-  readonly currentSettings?: () => unknown;
   /**
-   * Settings *and* the effective exclusion handed down by the top frame.
+   * The top frame's exclusion verdict landed.
    *
-   * Both arrive together in `WELCOME` and `SETTINGS`, and both matter: a
-   * subframe that boots before it is welcomed has been running fully enabled
-   * on a page the user excluded, and the exclusion is the only thing that can
-   * tell it so (FRM-04). Re-validate the settings before use.
+   * Fires on `WELCOME` and on every `SETTINGS`. Settings themselves are
+   * deliberately **not** carried: pushing them made the protocol a route for a
+   * CSS string, a search template and a key-mapping source into every frame,
+   * and made `WELCOME` an exfiltration channel for the user's exclusion
+   * patterns. Treat this as a prompt to re-read local storage.
    */
-  readonly onSettingsPushed?: (
-    settings: unknown,
-    exclusion: EffectiveExclusion,
-  ) => void;
+  readonly onTopFrameUpdate?: (exclusion: EffectiveExclusion) => void;
   /** Flash a frame indicator; `gf` has just handed this frame focus. */
   readonly onTakeFocus?: () => void;
   /** Injection seam. Defaults to the ambient `window`. */
@@ -151,7 +149,7 @@ export interface FrameLinkOptions {
 
 /** `FrameLinkApi` plus the top-frame-only republish hook. */
 export interface FrameLink extends FrameLinkApi {
-  /** Re-publish settings and exclusion to every frame. No-op below the top. */
+  /** Re-publish the exclusion decision to every frame. No-op below the top. */
   pushSettings(): void;
 }
 
@@ -161,10 +159,7 @@ export interface FrameLink extends FrameLinkApi {
 
 interface EndpointOptions {
   readonly localHints?: LocalHintsBridge;
-  readonly onSettingsPushed?: (
-    settings: unknown,
-    exclusion: EffectiveExclusion,
-  ) => void;
+  readonly onTopFrameUpdate?: (exclusion: EffectiveExclusion) => void;
   readonly onTakeFocus?: () => void;
   readonly window?: Window;
 }
@@ -192,6 +187,14 @@ class FrameEndpoint {
   #roster: readonly FrameId[] = [];
   #exclusion: EffectiveExclusion = DEFAULT_EXCLUSION;
   #welcomed = false;
+  /**
+   * The `helloId` of the handshake attempt currently in flight.
+   *
+   * `WELCOME` has to quote it. Without that, whoever answered *last* owned the
+   * frame: `WELCOME` re-keyed `#nonce`, `#frameId` and the exclusion every time
+   * it arrived, so a racing responder did not even need to win the race.
+   */
+  #pendingHelloId: string | null = null;
   #resolveReady: (welcomed: boolean) => void = () => {};
   #onWelcome: (() => void) | null = null;
   #disposed = false;
@@ -215,6 +218,19 @@ class FrameEndpoint {
     this.#send = send;
   }
 
+  /**
+   * Arm the next handshake attempt.
+   *
+   * Each attempt gets a fresh id, and only a `WELCOME` quoting the *current*
+   * one is accepted. Re-arming also unlatches `#welcomed`, because a
+   * deliberately rebuilt transport (a retry, or a bfcache restore) is the one
+   * case where being welcomed again is legitimate.
+   */
+  expectWelcome(helloId: string): void {
+    this.#pendingHelloId = helloId;
+    this.#welcomed = false;
+  }
+
   /** Called once, the first time `WELCOME` lands. Cancels handshake retries. */
   onWelcome(callback: () => void): void {
     this.#onWelcome = callback;
@@ -231,16 +247,26 @@ class FrameEndpoint {
     if (message === null) return;
 
     switch (message.kind) {
-      case "WELCOME":
+      case "WELCOME": {
+        // A `WELCOME` we did not ask for, or one for a superseded attempt, is
+        // either a race or a spoof. Either way it must not re-key us.
+        if (
+          this.#pendingHelloId !== null &&
+          message.helloId !== this.#pendingHelloId
+        ) {
+          return;
+        }
+        if (this.#welcomed) return;
+        this.#welcomed = true;
         this.#frameId = message.frameId;
         this.#nonce = message.nonce;
         this.#roster = message.frames;
         this.#exclusion = message.exclusion;
-        this.#welcomed = true;
         this.#resolveReady(true);
         this.#onWelcome?.();
-        this.#options.onSettingsPushed?.(message.settings, message.exclusion);
+        this.#options.onTopFrameUpdate?.(message.exclusion);
         return;
+      }
 
       case "ROSTER":
         this.#roster = message.frames;
@@ -248,7 +274,7 @@ class FrameEndpoint {
 
       case "SETTINGS":
         this.#exclusion = message.exclusion;
-        this.#options.onSettingsPushed?.(message.settings, message.exclusion);
+        this.#options.onTopFrameUpdate?.(message.exclusion);
         return;
 
       case "COLLECT_HINTS":
@@ -527,7 +553,7 @@ export const createFrameLink = (options: FrameLinkOptions): FrameLink => {
 
   const endpoint = new FrameEndpoint({
     localHints: options.localHints,
-    onSettingsPushed: options.onSettingsPushed,
+    onTopFrameUpdate: options.onTopFrameUpdate,
     onTakeFocus: options.onTakeFocus,
     window: view ?? undefined,
   });
@@ -541,7 +567,6 @@ export const createFrameLink = (options: FrameLinkOptions): FrameLink => {
     coordinator = new FrameCoordinator({
       root: view,
       resolveExclusion: options.resolveExclusion,
-      currentSettings: options.currentSettings,
     });
     coordinator.attach(view);
 
@@ -595,13 +620,27 @@ export const createFrameLink = (options: FrameLinkOptions): FrameLink => {
 };
 
 /**
- * Child-side handshake: create a `MessageChannel`, transfer `port2` to the top
- * frame inside a `HELLO`, and speak the rest of the protocol over `port1`.
+ * Child-side handshake.
+ *
+ * Three messages rather than one, and the extra round trip buys two things a
+ * single `HELLO`-with-port could not:
+ *
+ * 1. `HELLO` announces and grants nothing, so forging one is pointless. The
+ *    coordinator replies with a `CHALLENGE` addressed to *this window*, and
+ *    that reply is what tells us the coordinator's real origin.
+ * 2. `JOIN` therefore transfers `port2` with a genuine `targetOrigin` instead
+ *    of `"*"`. The port is the capability — whoever holds it can push an
+ *    exclusion, drive `ACTIVATE_HINT` into this document, and take its focus —
+ *    and handing a capability to `"*"` is handing it to whoever answers first.
  *
  * `MessagePort` transfer over a cross-origin `postMessage` works, and it is
  * what makes per-keystroke relaying affordable: without it every keystroke
  * would have to be re-broadcast through `window.postMessage` and filtered by
  * every frame on the page.
+ *
+ * Retries exist because `document-start` is unreliable on WebKit: a child can
+ * announce itself before the top frame has installed its listener, and the
+ * message is then simply gone.
  */
 const connectToTop = (view: Window, endpoint: FrameEndpoint): () => void => {
   const timers: number[] = [];
@@ -614,7 +653,20 @@ const connectToTop = (view: Window, endpoint: FrameEndpoint): () => void => {
   // hand a port to.
   if (top === null || top === view) return () => {};
 
-  const attempt = (): void => {
+  /** Announce. Cheap, idempotent, and safe to repeat. */
+  const announce = (): void => {
+    if (closed) return;
+    try {
+      // `"*"` is correct here and only here: we do not know the top frame's
+      // origin yet — finding it out is what the reply is for — and the payload
+      // is a bare "I exist", which every frame on the page can already tell.
+      top.postMessage({ ...ENVELOPE, kind: "HELLO" }, "*");
+    } catch {
+      // A detached or otherwise hostile `top` proxy. Retries may still succeed.
+    }
+  };
+
+  const join = (token: string, origin: string): void => {
     if (closed) return;
     const channel = new MessageChannel();
     port?.close();
@@ -635,39 +687,60 @@ const connectToTop = (view: Window, endpoint: FrameEndpoint): () => void => {
       }
     });
 
+    const helloId = createNonce();
+    endpoint.expectWelcome(helloId);
+
     try {
-      // `"*"` because we cannot know the top frame's origin — that is the whole
-      // reason this channel exists. Safe: `HELLO` carries no secret. The nonce
-      // travels the other way, over the port, and only to whoever we handed
-      // `port2` to.
-      top.postMessage({ ...ENVELOPE, kind: "HELLO" }, "*", [channel.port2]);
+      top.postMessage(
+        { ...ENVELOPE, kind: "JOIN", token, helloId },
+        // The origin the challenge came from, so the port cannot be delivered
+        // to a document that merely happens to be at `window.top` now. An
+        // opaque origin reports `"null"`, which is not a valid `targetOrigin`.
+        origin === "null" || origin === "" ? "*" : origin,
+        [channel.port2],
+      );
     } catch {
-      // A detached or otherwise hostile `top` proxy. Retries below may still
-      // succeed if the frame is re-attached.
+      // Same as above: a later retry may find a live `top`.
     }
   };
+
+  const onWindowMessage = (event: MessageEvent): void => {
+    // Only an ancestor gets to challenge us. A sibling or the page's own
+    // script posting a `CHALLENGE` to this window would otherwise be able to
+    // trigger a port transfer addressed at its own origin.
+    if (event.source !== top) return;
+    const message = parseInbound(event.data, {
+      expectedNonce: null,
+      allowedKinds: TOP_TO_WINDOW_KINDS,
+    });
+    if (message === null || message.kind !== "CHALLENGE") return;
+    join(message.token, event.origin);
+  };
+
+  view.addEventListener("message", onWindowMessage);
 
   endpoint.onWelcome(() => {
     for (const timer of timers) clearTimeout(timer);
     timers.length = 0;
   });
 
-  attempt();
+  announce();
   for (const delay of HANDSHAKE_RETRY_MS) {
-    timers.push(setTimeout(attempt, delay));
+    timers.push(setTimeout(announce, delay));
   }
 
   const onPageShow = (event: PageTransitionEvent): void => {
     // A bfcache restore brings back a document whose ports the coordinator has
     // already reaped. Re-registering is cheap and the registry re-keys us to
     // the same frame id, since our window identity has not changed.
-    if (event.persisted) attempt();
+    if (event.persisted) announce();
   };
   view.addEventListener("pageshow", onPageShow);
 
   return () => {
     closed = true;
     for (const timer of timers) clearTimeout(timer);
+    view.removeEventListener("message", onWindowMessage);
     view.removeEventListener("pageshow", onPageShow);
     port?.close();
     port = null;

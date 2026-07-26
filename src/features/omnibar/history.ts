@@ -98,12 +98,37 @@ export const mergeVisit = (
 };
 
 /**
+ * Query-string keys that are worth keeping.
+ *
+ * The query used to be kept whole, on the reasoning that `?id=` is often the
+ * only distinguishing part of a URL. True, and also true of
+ * `?token=`, `?access_token=`, `?sig=`, the one-time links in password-reset
+ * emails, and every session identifier a badly-built site puts in the URL bar.
+ * A local index that persists those is a worse privacy surface than one that
+ * occasionally collapses two pages into one row.
+ *
+ * So the default is to drop the query entirely, and keep only the handful of
+ * keys that genuinely identify a *page* rather than a *session*.
+ */
+const PRESERVED_QUERY_KEYS: ReadonlySet<string> = new Set([
+  "id",
+  "p",
+  "page",
+  "q",
+  "query",
+  "search",
+  "v",
+]);
+
+/** Longest value we will keep for a preserved key; a token is never this short. */
+const MAX_QUERY_VALUE_LENGTH = 64;
+
+/**
  * Canonical form for indexing.
  *
  * The fragment is dropped (it is client-side state, not a page) along with any
- * embedded credentials, which have no business being persisted anywhere.
- * The query string is *kept*: `?id=` URLs are often the only distinguishing
- * part, and dropping it would collapse every page of a site into one row.
+ * embedded credentials, which have no business being persisted anywhere, and
+ * all but a short allowlist of query keys — see `PRESERVED_QUERY_KEYS`.
  */
 export const canonicaliseUrl = (raw: string): string | null => {
   let parsed: URL;
@@ -119,6 +144,15 @@ export const canonicaliseUrl = (raw: string): string | null => {
   parsed.hash = "";
   parsed.username = "";
   parsed.password = "";
+
+  const kept = new URLSearchParams();
+  for (const [key, value] of parsed.searchParams) {
+    if (!PRESERVED_QUERY_KEYS.has(key.toLowerCase())) continue;
+    if (value.length > MAX_QUERY_VALUE_LENGTH) continue;
+    kept.append(key, value);
+  }
+  parsed.search = kept.toString();
+
   return parsed.href;
 };
 

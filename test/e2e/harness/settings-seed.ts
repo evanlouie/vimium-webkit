@@ -46,6 +46,7 @@ const BASE: Settings = {
   searchUrl: "https://www.google.com/search?q=%s",
   searchEngines: "g: https://www.google.com/search?q=%s Google",
   newTabUrl: "about:blank",
+  enableSearchSuggestions: false,
 
   hideHud: false,
   followPageColorScheme: true,
