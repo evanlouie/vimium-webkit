@@ -16,6 +16,7 @@ import { ensureDir } from "@std/fs";
 import { fromFileUrl, resolve } from "@std/path";
 import { BANNER_NOTICE, buildMetadata } from "./metadata.ts";
 import { checkInvariants, formatViolations } from "./invariants.ts";
+import { defaultSettings } from "~/settings/schema.ts";
 
 const ROOT = resolve(fromFileUrl(import.meta.url), "../..");
 const DIST = `${ROOT}/dist`;
@@ -163,6 +164,18 @@ const main = async (): Promise<void> => {
       output,
     );
     await Deno.writeTextFile(`${DIST}/vimium-webkit.meta.js`, metadata);
+
+    // The shipped defaults, as data.
+    //
+    // The e2e harness needs them, and it runs under Playwright's own module
+    // loader, which resolves neither the `~/` alias nor `npm:zod/mini`. A
+    // hand-copied literal was the alternative, and the one that used to live
+    // there had already drifted to a single search engine against the five
+    // here — so the harness seeded settings that no user has.
+    await Deno.writeTextFile(
+      `${DIST}/default-settings.json`,
+      `${JSON.stringify(defaultSettings(), null, 2)}\n`,
+    );
 
     const report = await sizeReport();
     await Deno.writeTextFile(

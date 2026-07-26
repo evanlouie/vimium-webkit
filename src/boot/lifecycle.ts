@@ -25,6 +25,14 @@ export interface LifecycleOptions {
   onRestore?(): void;
   /** The page is going away for real (not into the bfcache). */
   onLeave?(): void;
+  /**
+   * The page is going away *or* being backgrounded.
+   *
+   * Distinct from `onLeave`: this fires for the bfcache case too, and it is
+   * where anything buffered has to be committed. It runs synchronously inside
+   * the event, so it must not await before starting its work.
+   */
+  onPersist?(): void;
   /** The tab became visible again; a good moment to re-read shared storage. */
   onVisible?(): void;
 }
@@ -60,6 +68,7 @@ export class Lifecycle {
 
   readonly #onPageHide = (event: PageTransitionEvent): void => {
     this.#stopPolling();
+    this.#options.onPersist?.();
     if (!event.persisted) this.#options.onLeave?.();
   };
 
@@ -70,6 +79,9 @@ export class Lifecycle {
       this.#options.onVisible?.();
     } else {
       this.#stopPolling();
+      // The last moment we are reliably given on mobile WebKit: a tab that is
+      // backgrounded may never see `pagehide` at all.
+      this.#options.onPersist?.();
     }
   };
 

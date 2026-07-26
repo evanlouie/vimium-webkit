@@ -66,12 +66,20 @@ const SCROLLABLE_OVERFLOW: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Is `element` actually scrollable along `axis`?
+ * Can `element` absorb a scroll of this sign along `axis`?
  *
- * The computed-style and size checks are necessary but not sufficient:
- * `scrollHeight`/`clientHeight` lie often enough (sub-pixel layout, sticky
- * children, `content-visibility`) that upstream confirms empirically by
- * nudging ±1px and observing. We do the same, and restore the offset.
+ * Deliberately read-only. Upstream confirms scrollability by nudging the offset
+ * ±1px and observing, and that probe is wrong in both directions here: under
+ * `scroll-behavior: smooth` the write is *animated*, so reading back in the
+ * same task returns the old value and every nested smooth scroller is judged
+ * unscrollable — which is why `j` inside one scrolled the document by ~10px
+ * instead of the container by 60. It also fires a `scroll` event on the page
+ * for every candidate on the walk, on every keystroke.
+ *
+ * Computed `overflow` plus the size comparison answers "is this a scroll
+ * container", and the remaining-room check answers "has it any left in this
+ * direction" — which is what makes the walk continue past an exhausted inner
+ * container to the outer one.
  */
 export const isScrollable = (
   element: Element,
@@ -85,14 +93,12 @@ export const isScrollable = (
 
   const scrollSize = element[props.scrollSize];
   const clientSize = element[props.clientSize];
-  if (scrollSize <= clientSize) return false;
+  // Sub-pixel layout routinely leaves a fraction of a pixel of "overflow" on
+  // an element with nothing to scroll.
+  if (scrollSize - clientSize <= 1) return false;
 
-  const before = readOffset(element, axis);
-  const probe = amountSign < 0 ? -1 : 1;
-  writeOffset(element, axis, before + probe);
-  const moved = readOffset(element, axis) !== before;
-  writeOffset(element, axis, before);
-  return moved;
+  const offset = readOffset(element, axis);
+  return amountSign < 0 ? offset > 0 : offset < scrollSize - clientSize - 1;
 };
 
 /**
@@ -127,9 +133,19 @@ export const findScrollableAncestor = (
 interface Animation {
   readonly axis: ScrollAxis;
   readonly element: Element;
-  readonly code: string | null;
-  readonly generation: number;
+  /** The physical key holding this animation open, for key-repeat detection. */
+  code: string | null;
+  generation: number;
   amount: number;
+  /**
+   * Distance already covered when the current leg started.
+   *
+   * Key repeat extends a running animation and resets `elapsed`, which sets
+   * `progress` back to zero. Without a rebase the next frame's target is zero
+   * *total* distance and the scroll jumps backwards by everything applied so
+   * far — measured at −367px on the first repeat frame.
+   */
+  origin: number;
   duration: number;
   elapsed: number;
   applied: number;
@@ -147,6 +163,7 @@ export interface ScrollerOptions {
 
 class Scroller implements ScrollerApi {
   readonly #options: ScrollerOptions;
+  readonly #onWindowBlur: () => void;
 
   #calibration = 1;
   /** Bumped on every non-repeat keydown; identifies "this press". */
@@ -158,7 +175,19 @@ class Scroller implements ScrollerApi {
     this.#options = options;
     // A dropped `keyup` (window loses focus mid-repeat) would otherwise leave
     // an animation running forever.
-    globalThis.addEventListener("blur", () => this.#releaseAll(), true);
+    //
+    // Bubble phase, not capture: `blur` does not bubble, so a capturing
+    // `window` listener ran for *every element blur on the page* — thousands of
+    // times on a form-heavy site — to answer a question only the window's own
+    // blur can answer.
+    this.#onWindowBlur = () => this.#releaseAll();
+    globalThis.addEventListener("blur", this.#onWindowBlur);
+  }
+
+  dispose(): void {
+    globalThis.removeEventListener("blur", this.#onWindowBlur);
+    for (const axis of [...this.#animations.keys()]) this.#cancel(axis);
+    this.#heldCodes.clear();
   }
 
   /** Call from the global keydown listener, before command dispatch. */
@@ -182,23 +211,56 @@ class Scroller implements ScrollerApi {
     event: KeyboardEvent | null,
   ): void {
     if (amount === 0) return;
-    const element = this.#target(axis, amount);
 
-    if (!this.#options.smooth()) {
+    // Checked *before* resolving a target. `#target()` walks the ancestor chain
+    // reading computed styles at every step, and on the key-repeat path its
+    // result is thrown away — pure waste at ~30 Hz.
+    const existing = this.#animations.get(axis);
+    if (existing && existing.generation === this.#generation) {
+      this.#merge(existing, amount);
+      return;
+    }
+
+    this.#scrollElementBy(this.#target(axis, amount), axis, amount, event);
+  }
+
+  /**
+   * Fold more distance into a running animation.
+   *
+   * Rebasing onto `applied` is what makes it *more* distance rather than a
+   * restart: resetting `elapsed` alone puts `progress` back to zero, and the
+   * next frame then aims at zero total distance and jumps backwards by
+   * everything covered so far.
+   */
+  #merge(animation: Animation, amount: number): void {
+    animation.origin = animation.applied;
+    animation.amount += amount;
+    animation.duration = durationFor(
+      Math.abs(animation.amount - animation.applied),
+    );
+    animation.elapsed = 0;
+  }
+
+  #scrollElementBy(
+    element: Element,
+    axis: ScrollAxis,
+    amount: number,
+    event: KeyboardEvent | null,
+  ): void {
+    if (!this.#animated()) {
       this.#applyInstant(element, axis, amount);
       return;
     }
 
     const existing = this.#animations.get(axis);
-    // During key repeat the running animator simply keeps going: starting a
-    // fresh one per repeat is what makes naive implementations accelerate
-    // uncontrollably.
-    if (existing && existing.generation === this.#generation) {
-      existing.amount += amount;
-      existing.duration = durationFor(
-        Math.abs(existing.amount - existing.applied),
-      );
-      existing.elapsed = 0;
+    if (existing !== undefined && existing.element === element) {
+      // A second press while the first is still gliding. Accumulating rather
+      // than cancelling is what makes three taps scroll three steps whatever
+      // their timing; cancelling discarded whatever the first press had not yet
+      // applied.
+      existing.code = event?.code ?? existing.code;
+      existing.generation = this.#generation;
+      this.#merge(existing, amount);
       return;
     }
 
@@ -206,18 +268,41 @@ class Scroller implements ScrollerApi {
     this.#start(element, axis, amount, event?.code ?? null);
   }
 
+  /**
+   * Should this scroll be animated at all?
+   *
+   * `prefers-reduced-motion` is a user telling the platform that animation
+   * makes the web unusable for them; a userscript that animates anyway is
+   * overriding an accessibility setting with a preference.
+   */
+  #animated(): boolean {
+    if (!this.#options.smooth()) return false;
+    if (typeof matchMedia !== "function") return true;
+    return !matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
   scrollByViewport(
     axis: ScrollAxis,
     fraction: number,
     event: KeyboardEvent | null,
   ): void {
+    // One walk, not two: `scrollBy` would resolve the same target again.
     const element = this.#target(axis, fraction);
     const props = AXIS_PROPERTIES[axis];
     const size =
       element === (document.scrollingElement ?? document.documentElement)
         ? globalThis[props.viewport]
         : element[props.clientSize];
-    this.scrollBy(axis, Math.round(size * fraction), event);
+
+    const amount = Math.round(size * fraction);
+    if (amount === 0) return;
+
+    const existing = this.#animations.get(axis);
+    if (existing && existing.generation === this.#generation) {
+      this.#merge(existing, amount);
+      return;
+    }
+    this.#scrollElementBy(element, axis, amount, event);
   }
 
   scrollTo(axis: ScrollAxis, position: "start" | "end" | number): void {
@@ -278,6 +363,7 @@ class Scroller implements ScrollerApi {
       code,
       generation: this.#generation,
       amount,
+      origin: 0,
       duration: durationFor(Math.abs(amount)),
       elapsed: 0,
       applied: 0,
@@ -293,8 +379,16 @@ class Scroller implements ScrollerApi {
       animation.elapsed += delta;
       animation.frames++;
 
-      const progress = Math.min(1, animation.elapsed / animation.duration);
-      const target = animation.amount * progress * this.#calibration;
+      // Calibration scales the *rate*, not the distance. Multiplying the
+      // target distance by it meant a calibration that had drifted to its 1.6
+      // ceiling — which it reaches within a few taps — silently made every
+      // scroll 60% further than `scrollStepSize` says.
+      const progress = Math.min(
+        1,
+        (animation.elapsed * this.#calibration) / animation.duration,
+      );
+      const target = animation.origin +
+        (animation.amount - animation.origin) * progress;
       const frameDelta = Math.trunc(target - animation.applied);
 
       if (frameDelta !== 0) {
@@ -303,7 +397,13 @@ class Scroller implements ScrollerApi {
         const moved = readOffset(element, axis) - before;
         animation.applied += moved;
         if (moved === 0) {
-          // Hit the end of the scroll range; nothing further to do.
+          // The element refused the scroll: either it is at the end of its
+          // range, or it lied about being scrollable. Hand the remainder to the
+          // document rather than stopping silently.
+          const root = document.scrollingElement ?? document.documentElement;
+          if (root !== element && animation.applied === 0) {
+            writeOffset(root, axis, readOffset(root, axis) + frameDelta);
+          }
           this.#finish(axis, animation);
           return;
         }
@@ -320,9 +420,11 @@ class Scroller implements ScrollerApi {
       if (progress >= 1 && stillHeld) {
         // Key repeat: extend the animation rather than restarting it, so a held
         // key produces a continuous glide instead of a staircase.
+        animation.origin = animation.applied;
         animation.amount += Math.sign(animation.amount) *
           Math.abs(this.#options.stepSize());
-        animation.duration += durationFor(Math.abs(this.#options.stepSize()));
+        animation.duration = durationFor(Math.abs(this.#options.stepSize()));
+        animation.elapsed = 0;
       }
 
       animation.handle = requestAnimationFrame(step);

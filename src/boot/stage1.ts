@@ -71,6 +71,21 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
   const caps: Capabilities = probeCapabilities(gm);
 
   const store = new ValueStore(selectValueBackend(gm, STORAGE_PREFIX));
+
+  // Registered *before* hydration. It used to be attached forty lines later,
+  // which is why the read failures below were invisible: every one of them was
+  // reported into an empty listener set and then papered over with defaults.
+  const startupIssues: string[] = [];
+  let reportIssue: (message: string) => void = (message) => {
+    startupIssues.push(message);
+  };
+  store.onIssue((issue) => {
+    reportIssue(
+      `Stored ${issue.group} could not be read (${issue.kind}); using defaults. ` +
+        "Open Settings to review.",
+    );
+  });
+
   const groups: StorageGroups = {
     settings: store.group(settingsGroup),
     marks: store.group(marksGroup),
@@ -79,13 +94,15 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
     session: store.group(sessionGroup),
   };
 
-  // Hydrate before anything reads settings. `hydrate()` never rejects: a
-  // corrupt group falls back to defaults and reports through `store.onIssue`.
-  await Promise.all([
-    groups.settings.hydrate(),
-    groups.marks.hydrate(),
-    groups.session.hydrate(),
-  ]);
+  // Every group, not a subset. `update()` is read-modify-write against
+  // `current() = #cached ?? defaults()`, so a group that was never hydrated has
+  // no `#cached` — and the first write to it silently replaces the user's
+  // entire persisted value with the defaults plus one change. The frecency
+  // index and find history lost everything on every page load.
+  //
+  // Driven off the store's own registry rather than a hand-written list, so
+  // this class of bug is structurally impossible rather than caught by review.
+  await store.hydrateAll();
 
   let settings: Settings = groups.settings.current();
   let mappings = compile(settings, caps);
@@ -108,12 +125,9 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
     console.error(`[vimium-webkit] ${message}`, cause);
   });
 
-  store.onIssue((issue) => {
-    hud.error(
-      `Stored ${issue.group} could not be read (${issue.kind}); using defaults. ` +
-        "Open Settings to review.",
-    );
-  });
+  // The HUD exists now, so issues can be shown rather than collected.
+  reportIssue = (message) => hud.error(message);
+  for (const message of startupIssues.splice(0)) hud.error(message);
 
   const isTop = isTopFrame();
   const exclusions = () => new ExclusionSet(settings.exclusionRules);
@@ -360,6 +374,9 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       void app().refresh();
     },
     onLeave: () => teardownCommandObservers(),
+    // Marks debounce 100 ms, settings 250 ms and the history index 2 s; a
+    // navigation inside any of those windows used to discard the write.
+    onPersist: () => void store.flushAll(),
     onVisible: () => {
       // The portable substitute for `GM_addValueChangeListener`, which quoid
       // and Stay do not implement: re-read shared storage when the tab is

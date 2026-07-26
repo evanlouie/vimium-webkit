@@ -13,7 +13,7 @@
 
 import { ResultAsync } from "neverthrow";
 import { liftResult, type ValueBackend } from "./gm.ts";
-import { err, ok } from "neverthrow";
+import { err, ok, type Result } from "neverthrow";
 
 export const STORAGE_PREFIX = "vimium-webkit:";
 
@@ -89,6 +89,7 @@ export type IssueListener = (issue: StorageIssue) => void;
 export class ValueStore {
   readonly #backend: ValueBackend;
   readonly #issueListeners = new Set<IssueListener>();
+  readonly #groups: ValueGroup<unknown>[] = [];
 
   constructor(backend: ValueBackend) {
     this.#backend = backend;
@@ -100,6 +101,11 @@ export class ValueStore {
 
   get supportsWatch(): boolean {
     return this.#backend.watch !== null;
+  }
+
+  /** Every group created from this store, in creation order. */
+  get groups(): readonly ValueGroup<unknown>[] {
+    return this.#groups;
   }
 
   onIssue(listener: IssueListener): () => void {
@@ -118,7 +124,24 @@ export class ValueStore {
   }
 
   group<T>(spec: GroupSpec<T>): ValueGroup<T> {
-    return new ValueGroup<T>(this, this.#backend, spec);
+    const created = new ValueGroup<T>(this, this.#backend, spec);
+    this.#groups.push(created as ValueGroup<unknown>);
+    return created;
+  }
+
+  /** Hydrate every registered group. The only correct way to boot. */
+  hydrateAll(): Promise<unknown[]> {
+    return Promise.all(this.#groups.map((group) => group.hydrate()));
+  }
+
+  /**
+   * Flush every group's pending write.
+   *
+   * Wired to `pagehide` and `visibilitychange`, where the alternative is losing
+   * whatever is still inside a debounce window.
+   */
+  flushAll(): Promise<unknown[]> {
+    return Promise.all(this.#groups.map((group) => group.flush()));
   }
 }
 
@@ -134,6 +157,17 @@ export class ValueGroup<T> {
   #pendingWrite: T | undefined;
   #writeTimer: number | null = null;
   #unwatch: (() => void) | null = null;
+
+  /**
+   * The outcome every debounced `write()` since the last flush is waiting on.
+   *
+   * One promise shared by all of them, because a superseded write must *settle*
+   * — adopting its successor's outcome — rather than being dropped.
+   * `clearTimeout` used to orphan the previous `resolve` outright, so an
+   * `await update()` that lost a race never returned at all.
+   */
+  #settlement: Promise<Result<void, StorageIssue>> | null = null;
+  #settle: ((result: Result<void, StorageIssue>) => void) | null = null;
 
   constructor(store: ValueStore, backend: ValueBackend, spec: GroupSpec<T>) {
     this.#store = store;
@@ -164,10 +198,18 @@ export class ValueGroup<T> {
    * store's issue listeners and the defaults are returned in its place.
    */
   hydrate(): Promise<T> {
-    this.#hydration ??= this.#doHydrate().finally(() => {
+    this.#hydration ??= this.#hydrateOnce().finally(() => {
       this.#hydration = null;
     });
     return this.#hydration;
+  }
+
+  async #hydrateOnce(): Promise<T> {
+    // A debounced write still sitting in its timer holds the newest value.
+    // Reading around it and adopting what is on disk would resurrect exactly
+    // the value the pending write is about to replace.
+    if (this.#pendingWrite !== undefined) await this.flush();
+    return this.#doHydrate();
   }
 
   async #doHydrate(): Promise<T> {
@@ -198,8 +240,8 @@ export class ValueGroup<T> {
     let data = envelope.data;
     if (envelope.schemaVersion < this.#spec.schemaVersion) {
       const migrated = this.#runMigrations(data, envelope.schemaVersion);
-      if (migrated === undefined) return this.#spec.defaults();
-      data = migrated;
+      if (!migrated.ok) return this.#spec.defaults();
+      data = migrated.data;
     } else if (envelope.schemaVersion > this.#spec.schemaVersion) {
       // Written by a newer build in another tab. Do not attempt to downgrade;
       // use defaults for this session and leave the stored value untouched.
@@ -223,7 +265,18 @@ export class ValueGroup<T> {
     return result.data;
   }
 
-  #runMigrations(data: unknown, from: number): unknown | undefined {
+  /**
+   * Run every migration step newer than `from`, in order.
+   *
+   * The result is a tagged union rather than `unknown | undefined`, which is
+   * just `unknown`: the failure sentinel was unrepresentable in the type, so
+   * nothing stopped a migration that legitimately produced `undefined` from
+   * being read as a failure.
+   */
+  #runMigrations(
+    data: unknown,
+    from: number,
+  ): { readonly ok: true; readonly data: unknown } | { readonly ok: false } {
     let current = data;
     const steps = (this.#spec.migrations ?? [])
       .filter((step) => step.to > from)
@@ -237,10 +290,10 @@ export class ValueGroup<T> {
           `migration to v${step.to} (${step.describe}) failed`,
           cause,
         );
-        return undefined;
+        return { ok: false };
       }
     }
-    return current;
+    return { ok: true, data: current };
   }
 
   #adopt(value: T): T {
@@ -255,7 +308,14 @@ export class ValueGroup<T> {
     return value;
   }
 
-  /** Replace the value. Resolves once the write reaches the backend. */
+  /**
+   * Replace the value. Resolves once the write actually reaches the backend.
+   *
+   * The debounced path used to resolve `Ok` when the *timer* fired, `void`-ing
+   * the flush that followed — so `ResultAsync<void, StorageIssue>` could never
+   * be `Err` in production, and error handling built on it was provably
+   * unreachable. Every group here debounces, so that was every group.
+   */
   write(value: T): ResultAsync<void, StorageIssue> {
     this.#cached = value;
     const debounce = this.#spec.writeDebounceMs ?? 0;
@@ -263,25 +323,74 @@ export class ValueGroup<T> {
 
     this.#pendingWrite = value;
     if (this.#writeTimer !== null) clearTimeout(this.#writeTimer);
-    return ResultAsync.fromSafePromise(
-      new Promise<void>((resolve) => {
-        this.#writeTimer = setTimeout(() => {
-          this.#writeTimer = null;
-          const pending = this.#pendingWrite;
-          this.#pendingWrite = undefined;
-          if (pending !== undefined) void this.#flushValue(pending);
-          resolve();
-        }, debounce);
-      }),
-    ).andThen(() => ok(undefined));
+
+    // Shared: everyone waiting on this debounce window gets the outcome of the
+    // flush that closes it, whether or not their own value is the one written.
+    this.#settlement ??= new Promise<Result<void, StorageIssue>>((resolve) => {
+      this.#settle = resolve;
+    });
+    const settlement = this.#settlement;
+
+    this.#writeTimer = setTimeout(() => {
+      this.#writeTimer = null;
+      void this.flush();
+    }, debounce);
+
+    return ResultAsync.fromSafePromise(settlement).andThen((result) => result);
+  }
+
+  /**
+   * Write any pending value now.
+   *
+   * Wired to `pagehide` and `visibilitychange`: marks debounce 100 ms, settings
+   * 250 ms and the history index 2 s, so without this every one of them is lost
+   * on a navigation that happens inside its own window.
+   */
+  flush(): ResultAsync<void, StorageIssue> {
+    if (this.#writeTimer !== null) {
+      clearTimeout(this.#writeTimer);
+      this.#writeTimer = null;
+    }
+
+    const pending = this.#pendingWrite;
+    const settle = this.#settle;
+    this.#pendingWrite = undefined;
+    this.#settlement = null;
+    this.#settle = null;
+
+    if (pending === undefined) {
+      settle?.(ok(undefined));
+      return liftResult(ok(undefined));
+    }
+
+    const flushed = this.#flushValue(pending);
+    if (settle !== null) {
+      void flushed.match(
+        () => settle(ok(undefined)),
+        (issue) => settle(err(issue)),
+      );
+    }
+    return flushed;
   }
 
   #flushValue(value: T): ResultAsync<void, StorageIssue> {
+    // Validated on the way out as well as on the way in, so a bad value is
+    // caught where it was produced rather than on the next load — where it
+    // would reset the group and take every other field with it.
+    const validated = this.#spec.schema.safeParse(value);
+    if (!validated.success) {
+      return liftResult(err(this.#issue(
+        "invalid",
+        "refusing to persist a value that fails its own schema",
+        validated.error,
+      )));
+    }
+
     let encoded: string;
     try {
       const envelope: Envelope = {
         schemaVersion: this.#spec.schemaVersion,
-        data: value,
+        data: validated.data,
       };
       encoded = JSON.stringify(envelope);
     } catch (cause) {

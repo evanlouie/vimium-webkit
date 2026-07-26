@@ -14,6 +14,7 @@
 
 import type { AppContext, MarksApi } from "~/core/context.ts";
 import type { Marks } from "~/settings/schema.ts";
+import { pruneMarks } from "~/settings/schema.ts";
 import { navigate, openTab } from "~/platform/tabs.ts";
 
 /** Marks are keyed by URL without the fragment, matching upstream. */
@@ -133,7 +134,12 @@ class MarksFeature implements MarksApi {
   }
 
   #update(mutate: (marks: Marks) => Marks): Promise<void> {
-    return this.#app.groups.marks.update(mutate).match(
+    // Pruned on every write rather than on a timer: local marks are keyed by
+    // URL and nothing else ever removes one, so the table only ever grew — and
+    // the whole of it is rewritten on each mark.
+    return this.#app.groups.marks.update((marks) =>
+      pruneMarks(mutate(marks), Date.now())
+    ).match(
       () => undefined,
       (issue) => {
         this.#app.hud.error(`Could not save mark: ${issue.message}`);

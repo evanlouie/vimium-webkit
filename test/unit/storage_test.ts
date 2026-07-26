@@ -1,6 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import * as z from "zod/mini";
-import { okAsync } from "neverthrow";
+import { errAsync, okAsync } from "neverthrow";
 import type { ValueBackend } from "~/platform/gm.ts";
 import {
   type Migration,
@@ -233,4 +233,154 @@ Deno.test("a backend without a watch primitive reports it honestly", () => {
   // quoid and Stay have no change-listener primitive at all; `lifecycle.ts`
   // substitutes a re-read on `visibilitychange`, and it needs to know.
   assertEquals(new ValueStore(fakeBackend(false).backend).supportsWatch, false);
+});
+
+// ---------------------------------------------------------------------------
+// Debounced writes
+//
+// Every group in `settings/schema.ts` sets `writeDebounceMs > 0`, so this is
+// the path production actually takes — and it had no coverage at all.
+// ---------------------------------------------------------------------------
+
+const debouncedSpec = (debounceMs: number) => ({
+  ...spec(),
+  writeDebounceMs: debounceMs,
+});
+
+/** A backend whose `set` can be made to fail, and which records every write. */
+const failableBackend = (): {
+  readonly backend: ValueBackend;
+  readonly writes: string[];
+  fail: boolean;
+} => {
+  const base = fakeBackend(false);
+  const writes: string[] = [];
+  const state = { fail: false };
+  return {
+    writes,
+    get fail(): boolean {
+      return state.fail;
+    },
+    set fail(value: boolean) {
+      state.fail = value;
+    },
+    backend: {
+      ...base.backend,
+      set: (key, value) => {
+        if (state.fail) {
+          return errAsync({
+            kind: "failed" as const,
+            api: "setValue",
+            message: "disk full",
+          });
+        }
+        writes.push(value);
+        return base.backend.set(key, value);
+      },
+    },
+  };
+};
+
+Deno.test("a debounced write resolves from the flush, not the timer", async () => {
+  const fake = failableBackend();
+  const group = new ValueStore(fake.backend).group(debouncedSpec(5));
+  fake.fail = true;
+
+  const result = await group.write({ count: 1, label: "a" });
+
+  // The regression: the promise used to resolve `Ok` when the *timer* fired
+  // while `void`-ing the flush, so `ResultAsync<void, StorageIssue>` could
+  // never be `Err` in production and every error branch built on it was
+  // unreachable.
+  assert(result.isErr(), "a failing backend must surface as Err");
+  assertEquals(result.error.kind, "backend");
+});
+
+Deno.test("a superseded write settles rather than hanging", async () => {
+  const fake = failableBackend();
+  const group = new ValueStore(fake.backend).group(debouncedSpec(5));
+
+  // The first write's timer is cleared by the second. Its promise used to be
+  // orphaned by that `clearTimeout`, so `await update()` never returned.
+  const first = group.write({ count: 1, label: "a" });
+  const second = group.write({ count: 2, label: "b" });
+
+  const [a, b] = await Promise.all([first, second]);
+  assert(a.isOk());
+  assert(b.isOk());
+  // Coalesced: one write reaches the backend, carrying the newest value.
+  assertEquals(fake.writes.length, 1);
+  assertEquals(JSON.parse(fake.writes[0] ?? "{}").data, {
+    count: 2,
+    label: "b",
+  });
+});
+
+Deno.test("flush() commits a pending write immediately", async () => {
+  const fake = failableBackend();
+  const group = new ValueStore(fake.backend).group(debouncedSpec(10_000));
+
+  const pending = group.write({ count: 5, label: "e" });
+  assertEquals(fake.writes.length, 0);
+
+  await group.flush();
+  assertEquals(fake.writes.length, 1);
+  assert((await pending).isOk(), "the pending write adopts the flush outcome");
+});
+
+Deno.test("flushAll commits every group", async () => {
+  const fake = failableBackend();
+  const store = new ValueStore(fake.backend);
+  const one = store.group({ ...debouncedSpec(10_000), name: "one" });
+  const two = store.group({ ...debouncedSpec(10_000), name: "two" });
+
+  void one.write({ count: 1, label: "a" });
+  void two.write({ count: 2, label: "b" });
+  await store.flushAll();
+
+  assertEquals(fake.writes.length, 2);
+});
+
+Deno.test("hydrate does not resurrect a value a pending write is replacing", async () => {
+  const fake = failableBackend();
+  const store = new ValueStore(fake.backend);
+  const group = store.group(debouncedSpec(10_000));
+
+  const stored = group.write({ count: 1, label: "stored" });
+  await group.flush();
+  assert((await stored).isOk());
+
+  // Written but still inside its debounce window when a refresh comes in.
+  void group.write({ count: 2, label: "newer" });
+  assertEquals(await group.hydrate(), { count: 2, label: "newer" });
+});
+
+Deno.test("a value that fails its own schema is never persisted", async () => {
+  const fake = failableBackend();
+  const group = new ValueStore(fake.backend).group(spec());
+
+  // Caught here rather than on the next load, where it would reset the whole
+  // group and take every other field down with it.
+  const result = await group.write(
+    { count: "not a number", label: "x" } as unknown as Shape,
+  );
+  assert(result.isErr());
+  assertEquals(result.error.kind, "invalid");
+  assertEquals(fake.writes.length, 0);
+});
+
+Deno.test("hydrateAll covers every registered group", async () => {
+  const fake = fakeBackend(false);
+  const store = new ValueStore(fake.backend);
+  const one = store.group({ ...spec(), name: "one" });
+  const two = store.group({ ...spec(), name: "two" });
+
+  assertEquals(store.groups.length, 2);
+  await store.hydrateAll();
+
+  // The bug this makes impossible: three of five groups were hydrated by a
+  // hand-written list, and `update()` on an unhydrated group replaces the
+  // user's whole persisted value with the defaults plus one change.
+  assertEquals(one.peek(), defaults());
+  assertEquals(two.peek(), defaults());
 });

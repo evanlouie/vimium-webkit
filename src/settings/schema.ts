@@ -1,11 +1,25 @@
 /**
  * Persisted configuration: schema, defaults, and migrations.
  *
- * Everything here is validated on every read (`platform/storage.ts`). Adding a
- * field is safe; changing or removing one requires a migration and a bump of
- * the corresponding `*_SCHEMA_VERSION`. The migration list is built in from
- * v0.1 deliberately — upstream Vimium's `migratePre2_0`/`migratePre2_4` history
- * is the cautionary tale.
+ * Everything here is validated on every read *and* on every write
+ * (`platform/storage.ts`), so a bad value is caught where it was produced
+ * rather than on the next load, where it would take the whole group down with
+ * it.
+ *
+ * Two rules make that survivable across versions:
+ *
+ * 1. **Every settings field carries its own fallback.** `z.catch(schema, x)`
+ *    turns a bad or missing field into `x` instead of failing the object. This
+ *    is what makes adding a field genuinely safe: a payload written by an older
+ *    build is missing the new key, and the new key alone is defaulted.
+ * 2. **The defaults *are* the schema.** `defaultSettings()` is what an empty
+ *    object decodes to, so there is no second list of default values that can
+ *    drift away from the first.
+ *
+ * Changing or removing a field still requires a migration and a bump of the
+ * corresponding `*_SCHEMA_VERSION`. The migration list is built in from v0.1
+ * deliberately — upstream Vimium's `migratePre2_0`/`migratePre2_4` history is
+ * the cautionary tale.
  */
 
 import * as z from "zod/mini";
@@ -31,39 +45,95 @@ export type ExclusionRule = z.infer<typeof exclusionRuleSchema>;
 // Settings
 // ---------------------------------------------------------------------------
 
+/**
+ * A field that degrades to `fallback` instead of taking the group with it.
+ *
+ * Named rather than inlined so the intent reads at every use: one bad field
+ * costs the user that field. `#decode` returns the defaults for the *whole*
+ * group on a validation failure, which without this would mean a single
+ * hand-edited character in the manager's storage viewer erasing every setting.
+ */
+const field = <T>(schema: z.ZodMiniType<T>, fallback: T): z.ZodMiniType<T> =>
+  z.catch(schema, fallback);
+
+/** Characters usable for hint labels must be distinct, or two hints collide. */
+const distinctCharacters = (value: string): boolean =>
+  new Set(value).size === value.length;
+
+/** A search template without `%s` silently discards whatever the user typed. */
+const hasQueryPlaceholder = (value: string): boolean => value.includes("%s");
+
 export const settingsSchema = z.object({
   // --- Scrolling ---
-  scrollStepSize: z.number().check(z.minimum(1), z.maximum(10_000)),
-  smoothScroll: z.boolean(),
+  scrollStepSize: field(
+    z.number().check(z.minimum(1), z.maximum(10_000)),
+    60,
+  ),
+  smoothScroll: field(z.boolean(), true),
 
   // --- Link hints ---
-  linkHintCharacters: z.string().check(z.minLength(2)),
-  linkHintNumbers: z.string().check(z.minLength(2)),
-  filterLinkHints: z.boolean(),
-  waitForEnterForFilteredHints: z.boolean(),
+  linkHintCharacters: field(
+    z.string().check(
+      z.minLength(2),
+      z.refine(distinctCharacters, {
+        message: "hint characters must all be different",
+      }),
+    ),
+    "sadfjklewcmpgh",
+  ),
+  linkHintNumbers: field(
+    z.string().check(
+      z.minLength(2),
+      z.refine(distinctCharacters, {
+        message: "hint number characters must all be different",
+      }),
+    ),
+    "0123456789",
+  ),
+  filterLinkHints: field(z.boolean(), false),
+  waitForEnterForFilteredHints: field(z.boolean(), true),
   /** Extra CSS applied inside our shadow root; never injected into the page. */
-  userDefinedLinkHintCss: z.string(),
+  userDefinedLinkHintCss: field(z.string(), ""),
 
   // --- Find ---
-  regexFindMode: z.boolean(),
-  ignoreKeyboardLayout: z.boolean(),
+  regexFindMode: field(z.boolean(), false),
+  ignoreKeyboardLayout: field(z.boolean(), false),
   /**
    * Shadow the browser's own ⌘F/Ctrl+F. Off by default: preventable on macOS
    * Safari, but possibly not on iOS (WebKit bug 191768), and stealing the
    * native binding when we cannot reliably deliver a replacement is worse than
    * not offering it.
    */
-  shadowNativeFind: z.boolean(),
+  shadowNativeFind: field(z.boolean(), false),
 
   // --- Navigation heuristics ---
-  previousPatterns: z.string(),
-  nextPatterns: z.string(),
+  previousPatterns: field(
+    z.string(),
+    "prev,previous,back,older,<,‹,←,«,≪,<<",
+  ),
+  nextPatterns: field(z.string(), "next,more,newer,>,›,→,»,≫,>>"),
 
   // --- Search ---
-  searchUrl: z.string(),
+  searchUrl: field(
+    z.string().check(
+      z.refine(hasQueryPlaceholder, {
+        message: "the search URL must contain %s",
+      }),
+    ),
+    "https://www.google.com/search?q=%s",
+  ),
   /** One `keyword: url %s Description` per line, Vimium-compatible. */
-  searchEngines: z.string(),
-  newTabUrl: z.string(),
+  searchEngines: field(
+    z.string(),
+    [
+      "w: https://www.wikipedia.org/w/index.php?title=Special:Search&search=%s Wikipedia",
+      "g: https://www.google.com/search?q=%s Google",
+      "d: https://duckduckgo.com/?q=%s DuckDuckGo",
+      "gh: https://github.com/search?q=%s GitHub",
+      "mdn: https://developer.mozilla.org/en-US/search?q=%s MDN",
+    ].join("\n"),
+  ),
+  newTabUrl: field(z.string(), "about:blank"),
   /**
    * Ask the configured search engine for completions as the user types.
    *
@@ -72,75 +142,47 @@ export const settingsSchema = z.object({
    * party they did not choose in that moment. "Off unless a manager cannot do
    * it" is not a privacy control — it is the absence of one.
    */
-  enableSearchSuggestions: z.boolean(),
+  enableSearchSuggestions: field(z.boolean(), false),
 
   // --- UI ---
-  hideHud: z.boolean(),
+  hideHud: field(z.boolean(), false),
   /** Blend the overlay with the page's own colour scheme where detectable. */
-  followPageColorScheme: z.boolean(),
+  followPageColorScheme: field(z.boolean(), true),
 
   // --- Behaviour ---
-  grabBackFocus: z.boolean(),
+  grabBackFocus: field(z.boolean(), false),
   /** Per-origin CSS zoom. Not real browser zoom; see §4.2. Off by default. */
-  enableCssZoom: z.boolean(),
+  enableCssZoom: field(z.boolean(), false),
   /**
    * Record visited pages locally to power Omnibar-lite. Opt-in, and it must
    * stay that way: a userscript building a browsing-history index is a real
    * privacy surface and GM storage is readable from the manager's own UI.
    */
-  enableHistoryIndex: z.boolean(),
-  historyIndexDenylist: z.array(z.string()),
-  historyIndexLimit: z.number().check(z.minimum(0), z.maximum(50_000)),
+  enableHistoryIndex: field(z.boolean(), false),
+  historyIndexDenylist: field(z.array(z.string()), []),
+  historyIndexLimit: field(
+    z.number().check(z.minimum(0), z.maximum(50_000)),
+    5000,
+  ),
 
   // --- Rules ---
-  exclusionRules: z.array(exclusionRuleSchema),
+  exclusionRules: field(z.array(exclusionRuleSchema), []),
   /** Raw `map`/`unmap`/`unmapAll`/`mapkey` source, parsed by `core/mappings.ts`. */
-  keyMappings: z.string(),
+  keyMappings: field(z.string(), ""),
 });
 
 export type Settings = z.infer<typeof settingsSchema>;
 
-/** Mirrors upstream Vimium's defaults wherever a difference would be gratuitous. */
-export const defaultSettings = (): Settings => ({
-  scrollStepSize: 60,
-  smoothScroll: true,
-
-  linkHintCharacters: "sadfjklewcmpgh",
-  linkHintNumbers: "0123456789",
-  filterLinkHints: false,
-  waitForEnterForFilteredHints: true,
-  userDefinedLinkHintCss: "",
-
-  regexFindMode: false,
-  ignoreKeyboardLayout: false,
-  shadowNativeFind: false,
-
-  previousPatterns: "prev,previous,back,older,<,‹,←,«,≪,<<",
-  nextPatterns: "next,more,newer,>,›,→,»,≫,>>",
-
-  searchUrl: "https://www.google.com/search?q=%s",
-  searchEngines: [
-    "w: https://www.wikipedia.org/w/index.php?title=Special:Search&search=%s Wikipedia",
-    "g: https://www.google.com/search?q=%s Google",
-    "d: https://duckduckgo.com/?q=%s DuckDuckGo",
-    "gh: https://github.com/search?q=%s GitHub",
-    "mdn: https://developer.mozilla.org/en-US/search?q=%s MDN",
-  ].join("\n"),
-  newTabUrl: "about:blank",
-  enableSearchSuggestions: false,
-
-  hideHud: false,
-  followPageColorScheme: true,
-
-  grabBackFocus: false,
-  enableCssZoom: false,
-  enableHistoryIndex: false,
-  historyIndexDenylist: [],
-  historyIndexLimit: 5000,
-
-  exclusionRules: [],
-  keyMappings: "",
-});
+/**
+ * The settings a fresh install starts from.
+ *
+ * Derived rather than declared: every field's fallback *is* its default, so
+ * decoding an empty object yields exactly the shipped configuration. A second
+ * hand-written literal would be a second source of truth, and the one in the
+ * e2e harness had already drifted to a single search engine against the five
+ * here.
+ */
+export const defaultSettings = (): Settings => settingsSchema.parse({});
 
 export const SETTINGS_SCHEMA_VERSION = 1;
 
@@ -180,6 +222,56 @@ export const marksSchema = z.object({
 export type Marks = z.infer<typeof marksSchema>;
 export type LocalMark = z.infer<typeof localMarkSchema>;
 export type GlobalMark = z.infer<typeof globalMarkSchema>;
+
+/**
+ * How many distinct URLs may hold local marks.
+ *
+ * Local marks are keyed by URL and nothing ever removed one, so a user who
+ * pressed `ma` on a thousand pages had a thousand entries — rewritten in full
+ * on every subsequent mark. `savedAt` was written on every mark and read by
+ * nothing; it is what `pruneMarks` sorts on.
+ */
+export const LOCAL_MARK_URL_LIMIT = 200;
+
+/** Local marks older than this are dropped. Global marks are never expired. */
+export const LOCAL_MARK_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+/**
+ * Bound the local-mark table: expire, then keep the most recent URLs.
+ *
+ * Pure, so the eviction policy is inspectable rather than implied by whatever
+ * the write path happens to do.
+ */
+export const pruneMarks = (marks: Marks, now: number): Marks => {
+  const entries: Array<[string, Record<string, LocalMark>]> = [];
+
+  for (const [url, letters] of Object.entries(marks.local)) {
+    const live: Record<string, LocalMark> = {};
+    let newest = 0;
+    for (const [letter, mark] of Object.entries(letters)) {
+      if (now - mark.savedAt > LOCAL_MARK_TTL_MS) continue;
+      live[letter] = mark;
+      newest = Math.max(newest, mark.savedAt);
+    }
+    if (newest > 0) entries.push([url, live]);
+  }
+
+  entries.sort((a, b) => newestSavedAt(b[1]) - newestSavedAt(a[1]));
+
+  const local: Record<string, Record<string, LocalMark>> = {};
+  for (const [url, letters] of entries.slice(0, LOCAL_MARK_URL_LIMIT)) {
+    local[url] = letters;
+  }
+  return { local, global: marks.global };
+};
+
+const newestSavedAt = (letters: Record<string, LocalMark>): number => {
+  let newest = 0;
+  for (const mark of Object.values(letters)) {
+    newest = Math.max(newest, mark.savedAt);
+  }
+  return newest;
+};
 
 export const MARKS_SCHEMA_VERSION = 1;
 

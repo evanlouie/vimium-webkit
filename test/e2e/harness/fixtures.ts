@@ -17,7 +17,7 @@ import {
   type HarnessState,
   installPageHarness,
 } from "./page-harness.ts";
-import { seedWithSettings } from "./settings-seed.ts";
+import { effectiveSettings, seedWithSettings } from "./settings-seed.ts";
 import { hudText, visibleHintMarkers } from "./overlay.ts";
 
 export { expect };
@@ -54,11 +54,132 @@ const BOOT_TIMEOUT_MS = 15_000;
  */
 const BOOT_SETTLE_MS = 60;
 
+/**
+ * Which hint marker sits on the element labelled `needle`, in this frame.
+ *
+ * Runs inside the page. Deliberately positional: markers are painted at their
+ * element's top-left, so the nearest marker to a matched element is that
+ * element's. Matching the element itself prefers the *smallest* candidate,
+ * because an ancestor paragraph has the same `textContent` as the link inside
+ * it and only the link takes a hint.
+ */
+const hintLabelForText = (needle: string): string | null => {
+  const host = globalThis as unknown as {
+    __vimiumHarness?: { shadow: ShadowRoot | null };
+  };
+  const shadow = host.__vimiumHarness?.shadow ?? null;
+  if (shadow === null) return null;
+
+  const labelsOf = (element: Element): readonly string[] => {
+    const out = [(element.textContent ?? "").trim()];
+    const aria = element.getAttribute("aria-label");
+    if (aria !== null) out.push(aria.trim());
+    const title = element.getAttribute("title");
+    if (title !== null) out.push(title.trim());
+    if (element instanceof HTMLImageElement) out.push(element.alt.trim());
+    if (element instanceof HTMLAreaElement) out.push(element.alt.trim());
+    if (element instanceof HTMLInputElement) {
+      out.push(element.placeholder.trim());
+      for (const label of element.labels ?? []) {
+        out.push((label.textContent ?? "").trim().replace(/:$/, ""));
+      }
+    }
+    return out;
+  };
+
+  const candidates: Element[] = [];
+  const walk = (root: ParentNode): void => {
+    for (const element of root.querySelectorAll("*")) {
+      if (labelsOf(element).includes(needle)) candidates.push(element);
+      const inner = element.shadowRoot;
+      if (inner) walk(inner);
+    }
+  };
+  walk(document);
+  if (candidates.length === 0) return null;
+
+  const rectOf = (element: Element): DOMRect => {
+    // An `<area>` lives in a detached `<map>` and has no layout box of its own,
+    // so its own rect is 0×0 at the origin — which would match whichever marker
+    // happens to be nearest the top-left corner. Derive it from the image the
+    // same way detection does.
+    if (element instanceof HTMLAreaElement) {
+      const map = element.closest("map");
+      const name = map?.getAttribute("name") ?? "";
+      const image = name === ""
+        ? null
+        : document.querySelector<HTMLImageElement>(
+          `img[usemap="#${CSS.escape(name)}"]`,
+        );
+      if (image === null) return element.getBoundingClientRect();
+
+      const base = image.getBoundingClientRect();
+      const coords = element.coords.split(",").map((part) =>
+        Number.parseInt(part.trim(), 10)
+      );
+      const shape = element.shape.toLowerCase();
+      let left = coords[0] ?? 0;
+      let top = coords[1] ?? 0;
+      if (shape === "circle" || shape === "circ") {
+        // The inscribed square, matching how detection derives an area's rect:
+        // a circle's hint sits on the largest axis-aligned box inside it.
+        const inset = (coords[2] ?? 0) / Math.SQRT2;
+        left = (coords[0] ?? 0) - inset;
+        top = (coords[1] ?? 0) - inset;
+      }
+      return new DOMRect(base.left + left, base.top + top, 1, 1);
+    }
+    return element.getBoundingClientRect();
+  };
+
+  const area = (element: Element): number => {
+    const rect = rectOf(element);
+    return rect.width * rect.height;
+  };
+  const target = candidates.reduce((best, element) =>
+    area(element) < area(best) ? element : best
+  );
+  const rect = rectOf(target);
+
+  // An element with no layout box is not rendered — `content-visibility: hidden`,
+  // `display: none`, a closed shadow root's contents — so it has no hint, and
+  // its rect at the origin would otherwise match whichever marker happens to be
+  // nearest the top-left corner.
+  if (rect.width === 0 && rect.height === 0) return null;
+
+  // A marker is painted at exactly `max(2, rect.left/top)`, rounded, so the
+  // match is a coincidence test rather than a proximity one: anything further
+  // than a pixel or two away is a *different* element's marker.
+  const expectedLeft = Math.max(2, rect.left);
+  const expectedTop = Math.max(2, rect.top);
+
+  let bestLabel: string | null = null;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const marker of shadow.querySelectorAll(".vw-hint")) {
+    if (marker.classList.contains("vw-hint--hidden")) continue;
+    const box = marker.getBoundingClientRect();
+    const distance = Math.hypot(
+      box.left - expectedLeft,
+      box.top - expectedTop,
+    );
+    if (distance >= bestDistance) continue;
+    bestDistance = distance;
+    bestLabel = (marker.textContent ?? "").trim();
+  }
+
+  return bestDistance <= 3 && bestLabel !== null && bestLabel.length > 0
+    ? bestLabel
+    : null;
+};
+
 export class Vimium {
   readonly page: Page;
+  /** Whether hints are matched by link text rather than by hint string. */
+  readonly filterMode: boolean;
 
-  constructor(page: Page) {
+  constructor(page: Page, filterMode: boolean) {
     this.page = page;
+    this.filterMode = filterMode;
   }
 
   // -- lifecycle ------------------------------------------------------------
@@ -222,14 +343,76 @@ export class Vimium {
   }
 
   /**
-   * Filter-mode activation: type the link text, then confirm.
+   * Activate the hint on the element whose label is `linkText`.
    *
-   * If the confirmation timer fired first the `Enter` lands in normal mode,
-   * where it is unbound — so this is safe either way.
+   * Mode-aware, because the two hint pipelines are activated in genuinely
+   * different ways and the *default* one is alphabet mode. The harness used to
+   * force `filterLinkHints: true` on every spec, which is why the default
+   * pipeline had no integration coverage at all (TST-04) — and why a
+   * cross-frame defect that only manifests there survived a green suite.
+   *
+   * - **Filter mode**: type the link text, then confirm. If the confirmation
+   *   timer fired first the `Enter` lands in normal mode, where it is unbound,
+   *   so this is safe either way.
+   * - **Alphabet mode**: find the marker drawn on that element and type its
+   *   label. The lookup is positional — a marker is painted at its element's
+   *   top-left — which keeps the harness out of the hint-string algorithm the
+   *   unit tests already cover.
    */
   async activateHint(linkText: string): Promise<void> {
-    await this.type(linkText);
-    await this.page.keyboard.press("Enter");
+    if (this.filterMode) {
+      await this.type(linkText);
+      await this.page.keyboard.press("Enter");
+      return;
+    }
+
+    const label = await this.hintLabelFor(linkText);
+    if (label === null) {
+      throw new Error(`no hint marker is drawn on "${linkText}"`);
+    }
+    await this.type(label);
+  }
+
+  /**
+   * The hint string currently drawn on the element labelled `linkText`.
+   *
+   * Searches every frame, because in a cross-frame round each frame draws the
+   * markers for its own elements while the strings are assigned globally.
+   */
+  async hintLabelFor(linkText: string): Promise<string | null> {
+    // Every frame at once: the frames are independent and a sequential walk
+    // would pay a round trip per frame on a page that has twenty.
+    const labels = await Promise.all(
+      this.page.frames().map((frame) =>
+        frame.evaluate(hintLabelForText, linkText).catch(
+          (): string | null => null,
+        )
+      ),
+    );
+    return labels.find((label) => label !== null) ?? null;
+  }
+
+  /**
+   * Assert that nothing on the page carries a hint for `linkText`, then dismiss.
+   *
+   * Mode-aware for the same reason `activateHint` is. In filter mode the
+   * observable signal is the HUD saying so; in alphabet mode it is the absence
+   * of a marker on the element.
+   */
+  async expectNoHint(linkText: string): Promise<void> {
+    if (this.filterMode) {
+      await this.type(linkText);
+      await this.waitForHud("No matches");
+    } else {
+      const label = await this.hintLabelFor(linkText);
+      if (label !== null) {
+        throw new Error(
+          `expected no hint on "${linkText}", but marker "${label}" is drawn on it`,
+        );
+      }
+    }
+    await this.press("Escape");
+    await this.waitForHintsGone();
   }
 
   // -- observation ----------------------------------------------------------
@@ -349,6 +532,8 @@ export const test = base.extend<HarnessOptions & HarnessFixtures>({
       seed: seedWithSettings(settingsPatch),
     });
     await page.addInitScript({ content: readBundle() });
-    await use(new Vimium(page));
+    await use(
+      new Vimium(page, effectiveSettings(settingsPatch).filterLinkHints),
+    );
   },
 });

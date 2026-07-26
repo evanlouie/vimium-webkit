@@ -6,20 +6,12 @@
  * overlay drew. The one exception is waiting for markers to exist, which is
  * just the harness's readiness signal.
  *
- * These specs run in filter mode (see `harness/settings-seed.ts`): typing a
- * link's own text and pressing Enter is both what a user does and independent
- * of the hint-string algorithm, which has its own unit tests.
+ * They run against the *shipped* settings, so the pipeline under test is the
+ * default one: alphabet hints. `activateHint` and `expectNoHint` know which
+ * mode they are in and drive the overlay accordingly.
  */
 
-import { expect, test, type Vimium } from "./harness/fixtures.ts";
-
-/** Type a query that should match no hint, then dismiss the session. */
-const expectUnhinted = async (vw: Vimium, linkText: string): Promise<void> => {
-  await vw.type(linkText);
-  await vw.waitForHud("No matches");
-  await vw.press("Escape");
-  await vw.waitForHintsGone();
-};
+import { expect, test } from "./harness/fixtures.ts";
 
 /**
  * Image maps.
@@ -84,7 +76,7 @@ test.describe("shadow DOM", () => {
     // There is no API for walking into a closed root, and patching
     // `attachShadow` needs a reliable `document-start` WebKit does not give a
     // userscript. The contract is that we say so, not that we get in.
-    await expectUnhinted(vw, "Closed shadow link");
+    await vw.expectNoHint("Closed shadow link");
     expect(page.url()).toBe(before);
   });
 });
@@ -103,7 +95,7 @@ test.describe("content-visibility", () => {
     const before = page.url();
     await vw.startHints();
 
-    await expectUnhinted(vw, "Hidden subtree link");
+    await vw.expectNoHint("Hidden subtree link");
     expect(page.url()).toBe(before);
   });
 
@@ -122,7 +114,7 @@ test.describe("occlusion", () => {
     const before = page.url();
     await vw.startHints();
 
-    await expectUnhinted(vw, "Occluded link");
+    await vw.expectNoHint("Occluded link");
     expect(page.url()).toBe(before);
   });
 

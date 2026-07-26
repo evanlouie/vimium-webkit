@@ -1,14 +1,21 @@
 /**
  * Scroll commands against `scrollables.html`.
  *
- * These specs run with `smoothScroll: false` (see `harness/settings-seed.ts`):
- * the animator's calibration loop measures real frame throughput, so an
- * assertion on an exact offset mid-animation would be a flake generator. What
- * is under test here is *which element absorbs the scroll*, which is
- * `findScrollableAncestor`'s job and is independent of the animation.
+ * Under `smoothScroll: false`, opted into explicitly below: the animator
+ * calibrates against real frame throughput, so an assertion on an exact offset
+ * mid-animation would be a flake generator. What is under test here is *which
+ * element absorbs the scroll*, which is `findScrollableAncestor`'s job and is
+ * independent of the animation.
+ *
+ * The shipped default is `smoothScroll: true`, and it has its own coverage in
+ * `smooth-scroll.spec.ts` — the harness used to force this setting on every
+ * spec, which left the default scroll path with no integration coverage at all.
  */
 
 import { expect, test, type Vimium } from "./harness/fixtures.ts";
+import { DETERMINISTIC } from "./harness/settings-seed.ts";
+
+test.use({ settingsPatch: DETERMINISTIC });
 
 /** Focus without scrolling, so the focus itself does not move the viewport. */
 const focus = (vw: Vimium, id: string): Promise<void> =>
