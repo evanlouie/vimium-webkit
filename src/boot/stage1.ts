@@ -34,7 +34,6 @@ import {
   commandNames,
   createCommandRegistry,
   DEFAULT_MAPPINGS,
-  passNextKeyRequest,
   teardownCommandObservers,
 } from "~/core/commands.ts";
 import { NormalMode } from "~/core/key-handler.ts";
@@ -247,10 +246,6 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       // Stage 1 unless a cross-frame feature actually needs them.
       if (name.startsWith("LinkHints.")) wakeSubframes();
       commands.run(name, { count, options, event, app: app() });
-      if (passNextKeyRequest.count > 0) {
-        normalMode.passNextKey(passNextKeyRequest.count);
-        passNextKeyRequest.count = 0;
-      }
     },
   });
 
@@ -292,6 +287,7 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       exclusion = await resolveExclusion();
       applyExclusion();
     },
+    passNextKey: (count) => normalMode.passNextKey(count),
     showHelp: () => dialogs.showHelp(),
     showSettings: () => dialogs.showSettings(),
   };
@@ -327,7 +323,9 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
   // since autofocused its search box (OSU-02).
   if (exclusion.enabled) insert().seedFromFocus();
 
-  if (settings.grabBackFocus && isTop) insert().grabBackFocus();
+  if (settings.grabBackFocus && isTop) {
+    insert().grabBackFocus(stage0.hasTypedIntoEditable());
+  }
   if (isTop) omnibar().noteVisit();
 
   // Hand the keyboard over and replay whatever the user typed while we booted.
@@ -363,6 +361,14 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
   };
   const detach = [forward("click"), forward("focus"), forward("blur")];
 
+  // A press whose release we will never see — Cmd-Tab away mid-keystroke is the
+  // everyday case — leaves normal mode expecting a `keyup` that never comes,
+  // and the *next* release of that physical key is then swallowed from a page
+  // that was entitled to it.
+  const forgetSuppressed = (): void => normalMode.forgetSuppressed();
+  globalThis.addEventListener("blur", forgetSuppressed);
+  detach.push(() => globalThis.removeEventListener("blur", forgetSuppressed));
+
   const lifecycle = watchLifecycle({
     onUrlChange: () => {
       exitAllModes("navigation");
@@ -376,7 +382,10 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
     onLeave: () => teardownCommandObservers(),
     // Marks debounce 100 ms, settings 250 ms and the history index 2 s; a
     // navigation inside any of those windows used to discard the write.
-    onPersist: () => void store.flushAll(),
+    onPersist: () => {
+      void store.flushAll();
+      normalMode.forgetSuppressed();
+    },
     onVisible: () => {
       // The portable substitute for `GM_addValueChangeListener`, which quoid
       // and Stay do not implement: re-read shared storage when the tab is
@@ -405,8 +414,12 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
  * Compile the default mappings, then the user's on top.
  *
  * Concatenating rather than replacing means `unmap j` works against the
- * defaults, which is what every Vimium user's configuration assumes.
+ * defaults, which is what every Vimium user's configuration assumes — at the
+ * cost of a line-number offset, which `lineOffset` corrects so that a
+ * diagnostic the user sees next to their own text names their own line.
  */
+const DEFAULT_MAPPING_LINES = `${DEFAULT_MAPPINGS}\n`.split("\n").length - 1;
+
 const compile = (settings: Settings, caps: Capabilities): CompiledMappings => {
   const source = `${DEFAULT_MAPPINGS}\n${settings.keyMappings}`;
   return compileMappings(source, {
@@ -414,5 +427,6 @@ const compile = (settings: Settings, caps: Capabilities): CompiledMappings => {
     // Only reject outright on the engine where the binding genuinely cannot
     // fire; elsewhere the same configuration is legitimate.
     rejectReservedShortcuts: caps.webkitLike,
+    lineOffset: DEFAULT_MAPPING_LINES,
   });
 };

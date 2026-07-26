@@ -131,13 +131,21 @@ export class HandlerStack {
     name: K,
     event: HandlerEventMap[K],
   ): boolean {
-    // Iterate over a snapshot: handlers routinely push and pop modes.
-    let index = this.#stack.length - 1;
+    // A real snapshot, which the comment here used to claim and the code did
+    // not do. Handlers routinely push and pop modes, and indexing into the live
+    // array while it is being spliced skips frames: a handler that removed
+    // itself shifted every entry below it up by one, so the next iteration
+    // stepped over one of them. Reproduced as the sequence `C,C,B`.
+    let frames = [...this.#stack];
+    let index = frames.length - 1;
 
     while (index >= 0) {
-      const entry = this.#stack[index];
+      const entry = frames[index];
       index--;
       if (entry === undefined) continue;
+      // The snapshot is stable; the stack is not. An entry removed since the
+      // snapshot was taken must not still see the event.
+      if (!this.has(entry.id)) continue;
 
       const fn = entry.handler[name];
       if (typeof fn !== "function") continue;
@@ -172,7 +180,10 @@ export class HandlerStack {
           suppressPropagation(event);
           return false;
         case RESTART_BUBBLING:
-          index = this.#stack.length - 1;
+          // Re-snapshot: the whole point of a restart is that the handler just
+          // pushed something that has to see this event.
+          frames = [...this.#stack];
+          index = frames.length - 1;
           continue;
       }
     }

@@ -328,6 +328,16 @@ export interface AppContext {
 
   /** Re-read settings, recompile the key trie, re-evaluate exclusions. */
   refresh(): Promise<void>;
+  /**
+   * Hand the next `count` keystrokes straight to the page.
+   *
+   * On the context rather than in a module-level cell: the cell was drained
+   * only inside `NormalMode`'s own dispatch callback, so running `passNextKey`
+   * from the command palette — which calls the registry directly — armed
+   * nothing, left the count set, and then armed a pass-through as a side effect
+   * of whatever normal-mode command the user ran next.
+   */
+  passNextKey(count: number): void;
   /** Open the help dialog. */
   showHelp(): void;
   /** Open the settings overlay. */

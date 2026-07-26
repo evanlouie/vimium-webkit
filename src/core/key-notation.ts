@@ -154,8 +154,18 @@ export const keyChar = (
   if (ignoreKeyboardLayout && event.code) {
     const code = event.code;
     if (code.startsWith("Key")) return code.slice(3).toLowerCase();
-    if (code.startsWith("Digit")) return code.slice(5);
-    if (code.startsWith("Numpad")) return code.slice(6).toLowerCase();
+    // Shifted digits are the exception: the *character* is what the binding
+    // names, and folding `Shift+4` back to `"4"` both killed four shipped
+    // bindings (`$`, `#`, `*`, `^`) and fed them to the count prefix. Physical
+    // positions are what this option is for, and a shifted digit's position is
+    // already unambiguous from the character.
+    if (code.startsWith("Digit") && !event.shiftKey) return code.slice(5);
+    if (code.startsWith("Numpad")) {
+      const suffix = code.slice(6);
+      // `NumpadDivide` etc. are named keys, not characters; lowercasing them
+      // produced `"divide"`, which no notation can express.
+      return /^\d$/.test(suffix) ? suffix : normaliseAppKitKey(event.key);
+    }
   }
 
   const key = normaliseAppKitKey(event.key);
@@ -318,13 +328,20 @@ const renderKey = (
   key: Omit<ParsedKey, "notation">,
 ): string => {
   const named = isNamedChar(key.char);
+  const upper = key.char.toUpperCase();
+  // Folding shift into the character only works where the character *has* an
+  // uppercase form. On a digit or a punctuation mark `toUpperCase()` is the
+  // identity, so `<c-s-1>` silently canonicalised to `<c-1>` — dead, and
+  // colliding with any real `<c-1>` binding. Keep the modifier explicit there.
+  const foldable = !named && key.shift && upper !== key.char;
+
   const modifiers: ModifierLetter[] = [];
   if (key.ctrl) modifiers.push("c");
   if (key.alt) modifiers.push("a");
   if (key.meta) modifiers.push("m");
-  if (key.shift && named) modifiers.push("s");
+  if (key.shift && !foldable) modifiers.push("s");
 
-  const char = !named && key.shift ? key.char.toUpperCase() : key.char;
+  const char = foldable ? upper : key.char;
   if (modifiers.length === 0 && !named) return char;
   return `<${[...modifiers, char].join("-")}>`;
 };
@@ -430,8 +447,32 @@ const RESERVED_BY_NOTATION: ReadonlyMap<string, string> = new Map(
   SAFARI_RESERVED.map((entry) => [entry.notation, entry.reason]),
 );
 
+/**
+ * Why this combination never reaches the page on Safari, or `null`.
+ *
+ * Matched case-sensitively on the canonical notation. Lowercasing the lookup
+ * would answer `<m-T>` (Reopen Last Closed Tab) with the reason recorded for
+ * `<m-t>` (New Tab) — the right verdict for the wrong reason, and the wrong
+ * verdict for any shifted combination whose unshifted twin happens to be
+ * reserved.
+ */
 export const reservedReason = (notation: string): string | null =>
-  RESERVED_BY_NOTATION.get(notation.toLowerCase()) ?? null;
+  RESERVED_BY_NOTATION.get(notation) ?? null;
+
+/**
+ * Is this notation an explicit shift on a character that shift *changes*?
+ *
+ * `<c-s-1>` is such a case: a real `Ctrl+Shift+1` reports `event.key === "!"`
+ * on a US layout, so the binding can never fire however it is canonicalised.
+ * The layout dependence is the reason this is a warning rather than an error —
+ * on some layouts the shifted digit really is the digit.
+ */
+export const shiftedNonLetter = (notation: string): boolean => {
+  const match = /^<(?:[cam]-)*s-(.)>$/u.exec(notation);
+  const char = match?.[1];
+  if (char === undefined) return false;
+  return char.toUpperCase() === char.toLowerCase();
+};
 
 /**
  * Combinations Safari *does* deliver on macOS but which

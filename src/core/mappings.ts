@@ -13,6 +13,7 @@ import {
   normaliseKeySequence,
   parseKeySequence,
   reservedReason,
+  shiftedNonLetter,
 } from "./key-notation.ts";
 
 export interface KeyBinding {
@@ -22,6 +23,8 @@ export interface KeyBinding {
   readonly options: Readonly<Record<string, string | boolean>>;
   /** The source line, for error attribution and the help dialog. */
   readonly source: string;
+  /** Raw line number in the compiled source; see `ParseOptions.lineOffset`. */
+  readonly line: number;
 }
 
 export interface TrieNode {
@@ -32,6 +35,7 @@ export interface TrieNode {
 export type DiagnosticSeverity = "error" | "warning";
 
 export interface MappingDiagnostic {
+  /** Line number *within the source the user is looking at*. See `lineOffset`. */
   readonly line: number;
   readonly severity: DiagnosticSeverity;
   readonly message: string;
@@ -57,9 +61,31 @@ export interface ParseOptions {
    * so it downgrades to a warning and the binding is kept.
    */
   readonly rejectReservedShortcuts: boolean;
+  /**
+   * Subtracted from reported line numbers.
+   *
+   * The shipped defaults are compiled as a prefix of the user's own source, so
+   * raw line numbers count from the top of the combined text. The only place a
+   * user ever sees one is the settings dialog, next to *their* text — where an
+   * error on their line 1 was reported as "line 105". Diagnostics attributed to
+   * the defaults are dropped rather than renumbered into negatives: the user
+   * cannot act on them, and the build has its own test that the defaults
+   * compile cleanly.
+   */
+  readonly lineOffset?: number;
 }
 
 const newNode = (): TrieNode => ({ children: new Map(), binding: null });
+
+/**
+ * Identity for the binding table.
+ *
+ * `keys.join("")` is not injective: `["<", "c", "-", "a", ">"]` and `["<c-a>"]`
+ * both flatten to `"<c-a>"`, so one binding silently replaced the other and
+ * `unmap` removed whichever happened to survive. A separator that cannot appear
+ * in a canonical notation fixes it.
+ */
+const bindingKey = (keys: readonly string[]): string => keys.join("\u0000");
 
 // ---------------------------------------------------------------------------
 // Tokenising
@@ -84,23 +110,33 @@ export const readLogicalLines = (source: string): readonly LogicalLine[] => {
   const raw = source.split(/\r?\n/);
 
   let buffer = "";
+  let continuing = false;
   let startLine = 0;
 
   for (let index = 0; index < raw.length; index++) {
     const line = raw[index] ?? "";
-    const stripped = stripComment(line);
+    const isComment = isCommentLine(line);
 
-    if (stripped.endsWith("\\")) {
-      if (buffer === "") startLine = index + 1;
-      buffer += `${stripped.slice(0, -1)} `;
+    // A comment inside a continuation is a comment, not a terminator. Treating
+    // it as one split `map j \` / `# why` / `scrollDown` into two bogus lines
+    // and reported two confusing errors for a construct that reads as valid.
+    if (isComment && continuing) continue;
+
+    const stripped = isComment ? "" : line;
+
+    if (stripped.trimEnd().endsWith("\\")) {
+      if (!continuing) startLine = index + 1;
+      continuing = true;
+      buffer += `${stripped.trimEnd().slice(0, -1)} `;
       continue;
     }
 
     const text = `${buffer}${stripped}`.trim();
     if (text.length > 0) {
-      out.push({ number: buffer === "" ? index + 1 : startLine, text });
+      out.push({ number: continuing ? startLine : index + 1, text });
     }
     buffer = "";
+    continuing = false;
   }
 
   if (buffer.trim().length > 0) {
@@ -109,9 +145,9 @@ export const readLogicalLines = (source: string): readonly LogicalLine[] => {
   return out;
 };
 
-const stripComment = (line: string): string => {
+const isCommentLine = (line: string): boolean => {
   const trimmed = line.trimStart();
-  return trimmed.startsWith("#") || trimmed.startsWith('"') ? "" : line;
+  return trimmed.startsWith("#") || trimmed.startsWith('"');
 };
 
 const splitTokens = (text: string): readonly string[] =>
@@ -139,14 +175,18 @@ export const compileMappings = (
   const diagnostics: MappingDiagnostic[] = [];
   const bindings = new Map<string, KeyBinding>();
   const keyRemap = new Map<string, string>();
+  const offset = options.lineOffset ?? 0;
 
   const report = (
     line: LogicalLine,
     severity: DiagnosticSeverity,
     message: string,
   ): void => {
+    const relative = line.number - offset;
+    // Attributed to the shipped defaults, which the user cannot edit.
+    if (relative < 1) return;
     diagnostics.push({
-      line: line.number,
+      line: relative,
       severity,
       message,
       text: line.text,
@@ -161,7 +201,7 @@ export const compileMappings = (
     switch (directive) {
       case "map": {
         const binding = parseMapLine(tokens, line, options, report);
-        if (binding) bindings.set(binding.keys.join(""), binding);
+        if (binding) bindings.set(bindingKey(binding.keys), binding);
         break;
       }
 
@@ -173,7 +213,7 @@ export const compileMappings = (
         }
         const keys = tryNormalise(sequence, line, report);
         if (keys) {
-          if (!bindings.delete(keys.join(""))) {
+          if (!bindings.delete(bindingKey(keys))) {
             report(line, "warning", `nothing was mapped to ${sequence}`);
           }
         }
@@ -201,6 +241,17 @@ export const compileMappings = (
         const source0 = fromKeys[0];
         const target0 = toKeys[0];
         if (source0 !== undefined && target0 !== undefined) {
+          if (isCountDigit(target0)) {
+            // `1`–`9` at the start of a sequence are the count prefix, so a
+            // remap onto one turns the source key into a count digit rather
+            // than into a binding — silently, and with no way to notice.
+            report(
+              line,
+              "warning",
+              `${target0} is a count digit, so ${source0} will start a count ` +
+                "rather than run a command",
+            );
+          }
           keyRemap.set(source0, target0);
         }
         break;
@@ -215,7 +266,43 @@ export const compileMappings = (
   const ordered = [...bindings.values()];
   for (const binding of ordered) insert(trie, binding);
 
+  reportShadowedPrefixes(ordered, diagnostics, offset);
+
   return { trie, bindings: ordered, keyRemap, diagnostics };
+};
+
+/**
+ * Warn where one binding is a strict prefix of another.
+ *
+ * `map g A` plus `map gg B` is not an error — the dispatcher waits for the next
+ * key and resolves it — but it does mean `g` on its own no longer fires until
+ * the user presses something that dead-ends. That is surprising enough to be
+ * worth saying out loud, and it was previously silent in both directions.
+ */
+const reportShadowedPrefixes = (
+  bindings: readonly KeyBinding[],
+  diagnostics: MappingDiagnostic[],
+  offset: number,
+): void => {
+  const byKey = new Map(bindings.map((b) => [bindingKey(b.keys), b]));
+
+  for (const binding of bindings) {
+    if (binding.keys.length < 2) continue;
+    for (let length = 1; length < binding.keys.length; length++) {
+      const prefix = byKey.get(bindingKey(binding.keys.slice(0, length)));
+      if (prefix === undefined) continue;
+      const line = binding.line - offset;
+      if (line < 1) continue;
+      diagnostics.push({
+        line,
+        severity: "warning",
+        message:
+          `${prefix.keys.join("")} is also bound, so it only runs once a key ` +
+          `that is not part of ${binding.keys.join("")} follows it`,
+        text: binding.source,
+      });
+    }
+  }
 };
 
 type Reporter = (
@@ -265,6 +352,14 @@ const parseMapLine = (
   }
 
   for (const key of keys) {
+    if (shiftedNonLetter(key)) {
+      report(
+        line,
+        "warning",
+        `${key} names a shifted character that shift changes on most layouts ` +
+          "(Shift+1 arrives as !), so this binding is unlikely to ever fire",
+      );
+    }
     const reason = reservedReason(key);
     if (reason === null) continue;
     if (options.rejectReservedShortcuts) {
@@ -289,8 +384,13 @@ const parseMapLine = (
     command,
     options: Object.fromEntries(entries),
     source: line.text,
+    line: line.number,
   };
 };
+
+/** `1`–`9`: the count prefix claims these before the trie is consulted. */
+const isCountDigit = (key: string): boolean =>
+  key.length === 1 && key >= "1" && key <= "9";
 
 const insert = (trie: TrieNode, binding: KeyBinding): void => {
   let node = trie;

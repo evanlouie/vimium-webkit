@@ -113,6 +113,15 @@ export type ActivationReason = "keydown" | "wake" | "idle";
 export interface Stage0 {
   /** Keys pressed before Stage 1 was ready, oldest first. */
   drainBuffer(): readonly KeyboardEvent[];
+  /**
+   * Has the user typed into an editable element since we booted?
+   *
+   * Stage 0 sees every keystroke and deliberately declines to wake for the ones
+   * aimed at a text field, so it is the only thing that knows. `grabBackFocus`
+   * needs the answer: Stage 1 activates up to 1200 ms after load, by which time
+   * the user may be well into typing.
+   */
+  hasTypedIntoEditable(): boolean;
   /** Hand keyboard events to Stage 1 from here on. */
   adopt(handler: Stage0KeyHandler): void;
   /** Re-register listeners; called after a bfcache restore. */
@@ -197,10 +206,12 @@ class Stage0Impl implements Stage0 {
 
   #handler: Stage0KeyHandler | null = null;
   #activated = false;
+  #typedIntoEditable = false;
   #idleTimer: number | null = null;
   #disposed = false;
 
   readonly #onKeydown = (event: KeyboardEvent): void => {
+    if (isEditableTarget(event.target)) this.#typedIntoEditable = true;
     if (this.#handler !== null) {
       this.#handler(event);
       return;
@@ -282,6 +293,10 @@ class Stage0Impl implements Stage0 {
 
   drainBuffer(): readonly KeyboardEvent[] {
     return this.#buffer.splice(0);
+  }
+
+  hasTypedIntoEditable(): boolean {
+    return this.#typedIntoEditable;
   }
 
   adopt(handler: Stage0KeyHandler): void {

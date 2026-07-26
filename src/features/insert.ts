@@ -219,8 +219,14 @@ class InsertModeImpl extends Mode {
    * `grabBackFocus`: some pages steal focus into a search box on load, which
    * silently swallows the user's first keystrokes. Blur it once, and only once,
    * and only if the user has not typed yet.
+   *
+   * The typing guard is load-bearing rather than decorative: in the top frame
+   * Stage 1 boots up to 1200 ms after load, and Stage 0 deliberately does *not*
+   * wake for keystrokes aimed at an editable — so without it the field is
+   * yanked out from under a user who is already a second into their query.
    */
-  grabBackFocus(): void {
+  grabBackFocus(hasTyped: boolean): void {
+    if (hasTyped) return;
     const active = deepActiveElement();
     if (isEditable(active)) {
       active.blur();
@@ -251,8 +257,14 @@ export interface InsertFeature extends InsertApi {
   ensureEntered(): void;
   /** Adopt an element the page focused before Stage 1 existed. */
   seedFromFocus(): void;
-  /** Blur a field the page auto-focused on load (`grabBackFocus`). */
-  grabBackFocus(): void;
+  /**
+   * Blur a field the page auto-focused on load (`grabBackFocus`).
+   *
+   * `hasTyped` is the caller's answer to "has the user already started using
+   * that field?" — taking the focus back from someone mid-sentence is worse
+   * than leaving it where the page put it.
+   */
+  grabBackFocus(hasTyped: boolean): void;
 }
 
 export const createInsert = (
@@ -268,6 +280,6 @@ export const createInsert = (
     focusInput: (count) => mode.focusInput(count),
     ensureEntered: () => void mode.enter(),
     seedFromFocus: () => mode.seedFromFocus(),
-    grabBackFocus: () => mode.grabBackFocus(),
+    grabBackFocus: (hasTyped) => mode.grabBackFocus(hasTyped),
   };
 };

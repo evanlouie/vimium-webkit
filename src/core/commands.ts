@@ -17,11 +17,8 @@ import type {
   CommandRegistry,
   HintMode,
 } from "./context.ts";
-import {
-  CONTINUE_BUBBLING,
-  type Handler,
-  SUPPRESS_EVENT,
-} from "./handler-stack.ts";
+import { type Handler, SUPPRESS_EVENT } from "./handler-stack.ts";
+import { Mode } from "./mode.ts";
 import { isComposing, isModifierKey, keyNotation } from "./key-notation.ts";
 import { closeCurrentTab, navigate, openTab } from "~/platform/tabs.ts";
 import { writeClipboard } from "~/platform/clipboard.ts";
@@ -34,28 +31,65 @@ import { readClipboard } from "~/platform/clipboard.ts";
 /**
  * Read exactly one more keystroke, then hand it to `callback`.
  *
- * Used by `m` and `` ` ``. A full `Mode` would be heavier than the interaction
- * warrants — there is nothing to indicate and nothing to exit from.
+ * Used by `m` and `` ` ``. A `Mode` rather than a bare handler, despite the
+ * interaction being one key: a raw handler was invisible to `exitAllModes`, so
+ * a soft navigation between `m` and the letter left it armed across the
+ * navigation; it clobbered whatever indicator a live mode owned instead of
+ * participating in the indicator stack; and a throwing callback took the
+ * keystroke with it.
  */
+class CaptureKeyMode extends Mode {
+  readonly #app: AppContext;
+  readonly #callback: (notation: string) => void;
+
+  constructor(
+    app: AppContext,
+    prompt: string,
+    callback: (notation: string) => void,
+  ) {
+    super(app.modeHost, {
+      name: "capture-next-key",
+      indicator: prompt,
+      exitOnEscape: true,
+      // Owns the keyboard outright: a stray `j` between `m` and the letter must
+      // not scroll the page.
+      suppressAllKeyboardEvents: true,
+      singleton: "capture-next-key",
+    });
+    this.#app = app;
+    this.#callback = callback;
+  }
+
+  protected override handlers(): Omit<Handler, "name"> {
+    return {
+      keydown: (event) => {
+        if (isComposing(event) || isModifierKey(event)) return SUPPRESS_EVENT;
+        const notation = keyNotation(
+          event,
+          this.#app.settings().ignoreKeyboardLayout,
+        );
+        if (notation === null) return SUPPRESS_EVENT;
+
+        this.exit("explicit");
+        try {
+          this.#callback(notation);
+        } catch (cause) {
+          this.#app.hud.error(
+            cause instanceof Error ? cause.message : String(cause),
+          );
+        }
+        return SUPPRESS_EVENT;
+      },
+    };
+  }
+}
+
 const captureNextKey = (
   app: AppContext,
   prompt: string,
   callback: (notation: string) => void,
 ): void => {
-  app.hud.setIndicator(prompt);
-  const handler: Handler = {
-    name: "capture-next-key",
-    keydown: (event) => {
-      if (isComposing(event) || isModifierKey(event)) return CONTINUE_BUBBLING;
-      const notation = keyNotation(event, app.settings().ignoreKeyboardLayout);
-      if (notation === null) return CONTINUE_BUBBLING;
-      app.handlerStack.remove(id);
-      app.hud.setIndicator(null);
-      if (notation !== "<esc>" && event.key !== "Escape") callback(notation);
-      return SUPPRESS_EVENT;
-    },
-  };
-  const id = app.handlerStack.push(handler);
+  new CaptureKeyMode(app, prompt, callback).enter();
 };
 
 const copyToClipboard = (
@@ -131,8 +165,14 @@ export const findRelLink = (
   const relSelector = rel === "prev"
     ? 'a[rel~="prev"], a[rel~="previous"], link[rel~="prev"]'
     : 'a[rel~="next"], link[rel~="next"]';
-  const tagged = document.querySelector(relSelector);
-  if (tagged instanceof HTMLAnchorElement) return tagged;
+  // `querySelectorAll`, not `querySelector`. `<link rel="next">` lives in
+  // `<head>` and therefore wins tree order, so on the normal configuration for
+  // paginated content — both a machine-readable `<link>` and a visible `<a>` —
+  // the first match was the `<link>`, the `instanceof` check failed, and the
+  // unambiguous anchor sitting right there was abandoned for a text heuristic.
+  for (const tagged of document.querySelectorAll(relSelector)) {
+    if (tagged instanceof HTMLAnchorElement) return tagged;
+  }
 
   const normalised = patterns.map((pattern) => pattern.trim().toLowerCase())
     .filter((pattern) => pattern.length > 0);
@@ -159,17 +199,20 @@ export const findRelLink = (
 export const goUpUrl = (href: string, levels: number): string | null => {
   try {
     const url = new URL(href);
-    if (url.hash.length > 0) {
-      url.hash = "";
-      if (levels <= 1) return url.href;
-    }
-    if (url.search.length > 0) {
-      url.search = "";
-      if (levels <= 1) return url.href;
-    }
+    // Stripping the fragment or the query is *free*: it is not a level. With
+    // the early return keyed on `levels <= 1`, `2gu` on a URL with a fragment
+    // removed the fragment and two path segments — three steps for a count of
+    // two.
+    const hadDecoration = url.hash.length > 0 || url.search.length > 0;
+    url.hash = "";
+    url.search = "";
+    if (hadDecoration && levels <= 1) return url.href;
+
     const segments = url.pathname.split("/").filter((part) => part.length > 0);
     if (segments.length === 0) return null;
-    segments.splice(Math.max(0, segments.length - levels));
+    const drop = hadDecoration ? levels - 1 : levels;
+    if (drop <= 0) return url.href;
+    segments.splice(Math.max(0, segments.length - drop));
     url.pathname = `/${segments.join("/")}${segments.length > 0 ? "/" : ""}`;
     return url.href;
   } catch {
@@ -377,20 +420,12 @@ export const buildCommands = (): readonly CommandDef[] => [
 
   // --- Navigation (Tier A) -----------------------------------------------
   tierA("reload", "navigation", "Reload the page", () => location.reload()),
-  tierA(
+  tierC(
     "reloadHard",
     "navigation",
     "Reload, bypassing the cache",
-    ({ app }) => {
-      // A userscript cannot request a cache-bypassing reload, so we approximate
-      // with a cache-busting parameter and say so.
-      const url = new URL(location.href);
-      url.searchParams.set("__vw_cachebust", String(Date.now()));
-      app.hud.show(
-        "Hard reload is approximated with a cache-busting parameter",
-      );
-      location.replace(url.href);
-    },
+    "a userscript cannot ask the browser to bypass its cache",
+    "⇧⌘R",
   ),
   tierA("goBack", "navigation", "Go back in history", ({ count }) => {
     history.go(-count);
@@ -788,18 +823,11 @@ export const buildCommands = (): readonly CommandDef[] => [
       app.hud.show(
         `Passing the next ${count === 1 ? "key" : `${count} keys`} to the page`,
       );
-      passNextKeyRequest.count = count;
+      app.passNextKey(count);
     },
     { repeatable: true, advanced: true },
   ),
 ];
-
-/**
- * `passNextKey` has to reach `NormalMode`, which owns the key pipeline, but the
- * command signature deliberately does not expose it. A tiny shared cell is
- * simpler than threading a callback through every command.
- */
-export const passNextKeyRequest = { count: 0 };
 
 // ---------------------------------------------------------------------------
 // Registry

@@ -53,6 +53,11 @@ export class NormalMode extends Mode {
    * A page listening for `keyup` must not see a phantom release for a press it
    * never saw. Keyed on `code` rather than `key` because modifier state can
    * change between press and release.
+   *
+   * `forgetSuppressed()` must be called whenever we stop being able to observe
+   * releases — a window blur during Cmd-Tab is the everyday case. A stale entry
+   * means the *next* release of that physical key is swallowed, and by then the
+   * user may be typing into a text field that was entitled to it.
    */
   readonly #suppressedCodes = new Set<string>();
 
@@ -60,6 +65,17 @@ export class NormalMode extends Mode {
     super(host, { name: "normal" });
     this.#callbacks = callbacks;
     this.#reset();
+  }
+
+  /**
+   * Forget which presses we swallowed.
+   *
+   * Wired to `blur` and `visibilitychange` by the boot layer rather than here:
+   * this module is deliberately DOM-free, which is what makes the whole key
+   * pipeline unit-testable.
+   */
+  forgetSuppressed(): void {
+    this.#suppressedCodes.clear();
   }
 
   /** Consume the next keystroke as a literal, passing it to the page. */
@@ -148,13 +164,18 @@ export class NormalMode extends Mode {
   /**
    * `0` is only a count digit once a count is under way; otherwise it is a
    * bindable key in its own right (upstream binds it to `scrollToLeft`).
+   *
+   * `1`–`9` yield to an explicit binding for the same reason. They used to be
+   * intercepted unconditionally, so `map 1 scrollDown` compiled cleanly,
+   * produced no diagnostic, and could never fire — while also eating the
+   * keystroke and pinning `1` in the HUD until the user pressed Escape.
    */
   #isCountKey(notation: string): boolean {
     if (notation.length !== 1) return false;
     if (this.#keyState.length !== 1) return false;
-    return this.#countPrefix > 0
-      ? notation >= "0" && notation <= "9"
-      : notation >= "1" && notation <= "9";
+    if (this.#countPrefix > 0) return notation >= "0" && notation <= "9";
+    if (notation < "1" || notation > "9") return false;
+    return !this.#callbacks.mappings().trie.children.has(notation);
   }
 
   #advance(notation: string, event: KeyboardEvent): HandlerResult {
@@ -173,6 +194,14 @@ export class NormalMode extends Mode {
       return wasPartial ? this.#suppress(event) : CONTINUE_BUBBLING;
     }
 
+    // The deepest candidate is the most specific continuation, because
+    // `keyState` is ordered shallowest-first. If it can still be extended, this
+    // sequence is not finished: firing the shorter binding here is what made
+    // `map gg` unreachable behind `map g`, and — at depth ≥ 3 — made a
+    // mid-sequence key run a shallower binding instead of continuing.
+    const deepest = candidates[candidates.length - 1];
+    const stillOpen = deepest !== undefined && deepest.children.size > 0;
+
     // Later candidates come from deeper `keyState` entries, so the last binding
     // found is the most specific match.
     let terminal: TrieNode | null = null;
@@ -180,7 +209,7 @@ export class NormalMode extends Mode {
       if (candidate.binding !== null) terminal = candidate;
     }
 
-    if (terminal?.binding) {
+    if (!stillOpen && terminal?.binding) {
       const { command, options } = terminal.binding;
       const count = this.#countPrefix === 0 ? 1 : this.#countPrefix;
       this.#reset();
