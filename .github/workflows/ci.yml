@@ -2,14 +2,20 @@ name: CI
 
 on:
   push:
+    # `branches` matches branches *only*. Without a `tags` filter a tag push
+    # does not start this workflow at all, which made the `release` job below
+    # unreachable: its `refs/tags/v` guard could never be true.
     branches: ["**"]
+    tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
-# A force-push should cancel the run it superseded; nothing here is a
-# deployment, so there is no reason to finish the old one.
+# A force-push should cancel the run it superseded. A tag run is exempt: it
+# publishes, and cancelling it midway can leave a release with one of its two
+# assets attached.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   DENO_VERSION: v2.x
@@ -109,10 +115,30 @@ jobs:
       - uses: denoland/setup-deno@v2
         with:
           deno-version: ${{ env.DENO_VERSION }}
+
+      # Build invariant 5 ties `@version` to `deno.json`, but nothing tied
+      # `deno.json` to the tag. Tagging v0.2.0 while `deno.json` still said
+      # 0.1.0 would publish a script whose `@version` is 0.1.0 — and a manager
+      # that fetches `@updateURL` and reads back the version it already has
+      # does not warn, it just never updates. Every existing install would be
+      # stranded silently. Fail before building rather than after publishing.
+      - name: Check the tag matches deno.json
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          declared="$(deno eval \
+            'console.log(JSON.parse(Deno.readTextFileSync("deno.json")).version)')"
+          if [ "$TAG" != "v$declared" ]; then
+            echo "::error::tag $TAG does not match deno.json version $declared"
+            exit 1
+          fi
+
       - run: deno task build
+
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/vimium-webkit.user.js
             dist/vimium-webkit.meta.js
           fail_on_unmatched_files: true
+          generate_release_notes: true

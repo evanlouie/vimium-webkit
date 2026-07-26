@@ -312,6 +312,24 @@ project could quietly stop working on WebKit:
    replace a global with an accessor that _throws_, and neither a `typeof` guard
    nor `?.` survives that — both perform the read.
 
+### Releasing
+
+Releases are cut by CI, from a tag. The install link above resolves to
+`/releases/latest/download/`, so until a tag exists it 404s.
+
+1. Bump `version` in `deno.json` and commit it.
+2. Tag it `v<version>` and push the tag.
+
+Pushing the tag runs the full pipeline — static checks, unit tests, build
+invariants, and Playwright against all three engines — and only then attaches
+`vimium-webkit.user.js` and `vimium-webkit.meta.js` to a GitHub release.
+
+The tag must match `deno.json`; CI refuses the release otherwise. The mismatch
+is worth failing over because it is invisible when it happens: managers decide
+whether to update by fetching `@updateURL` and comparing `@version` to the one
+they already have. A release tagged `v0.2.0` carrying `@version 0.1.0` reports
+no newer version, so every existing install silently stays where it is.
+
 ### Architecture
 
 ```
