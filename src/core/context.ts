@@ -39,6 +39,13 @@ export interface UiRoot {
   /** Append CSS via CSSOM; falls back to `<style>` below Safari 16.4. */
   addStyle(css: string): void;
   /**
+   * Recompute the overlay's colour scheme.
+   *
+   * Exposed because `followPageColorScheme` is a live setting and the page's
+   * own theme can change under a soft navigation.
+   */
+  syncColorScheme(): void;
+  /**
    * Does this event target belong to our overlay?
    *
    * Necessary because the root is `closed`: an event that originates inside it
@@ -60,8 +67,6 @@ export interface ViewportRect {
   readonly height: number;
   readonly scale: number;
 }
-
-export type HudTone = "info" | "error";
 
 export interface HudPromptOptions {
   readonly label: string;
@@ -106,6 +111,15 @@ export interface ScrollerApi {
   restore(x: number, y: number): void;
   /** Called when a suppressed keyup arrives, to stop key-repeat animation. */
   noteKeyup(event: KeyboardEvent): void;
+  /**
+   * Called for every keydown before the handler stack sees it, so key-repeat
+   * can be distinguished from a fresh press.
+   *
+   * Part of the interface because `stage1.ts` calls it on the hot key path;
+   * omitting it here made the contract narrower than the one thing that
+   * implements it (MNT-15).
+   */
+  noteKeydown(event: KeyboardEvent): void;
 }
 
 export type HintMode =
@@ -152,6 +166,14 @@ export type OmnibarSource = "url" | "command" | "search" | "bookmark";
 export interface OmnibarApi {
   open(source: OmnibarSource, initialQuery?: string): void;
   close(): void;
+  /**
+   * Wipe the local history index.
+   *
+   * On the user-facing surface rather than the wiring surface because it is a
+   * user-facing verb: the README documents it as the only way to purge the
+   * index, which makes it a privacy control, not plumbing.
+   */
+  clearHistory(): Promise<void>;
 }
 
 export interface InsertApi {

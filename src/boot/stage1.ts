@@ -18,7 +18,6 @@ import {
 import { detectGmSurface, selectValueBackend } from "~/platform/gm.ts";
 import { STORAGE_PREFIX, ValueStore } from "~/platform/storage.ts";
 import {
-  defaultSettings,
   findHistoryGroup,
   historyGroup,
   marksGroup,
@@ -94,7 +93,10 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
   let exclusion: EffectiveRule = FULLY_ENABLED;
 
   const handlerStack = new HandlerStack();
-  const ui = createUiRoot({ caps });
+  const ui = createUiRoot({
+    caps,
+    followPageColorScheme: () => settings.followPageColorScheme,
+  });
   const hud = createHud({ root: ui, hidden: () => settings.hideHud });
 
   const modeHost: ModeHost = {
@@ -156,16 +158,31 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       collectLocal: (mode) => hints().collectLocal(mode),
       activateLocal: (index, mode) => hints().activateLocal(index, mode),
       handleRemoteKey: (notation) => hints().handleRemoteKey(notation),
+      beginRemoteSession: (remote) => hints().beginRemoteSession(remote),
     },
     currentSettings: () => settings,
-    onSettingsPushed: (pushed) => {
+    onSettingsPushed: (pushed, pushedExclusion) => {
       // Re-validated rather than trusted: it arrived over `postMessage`, and a
       // page can post anything that looks like our protocol (§6.5).
       const parsed = settingsSchema.safeParse(pushed);
-      if (!parsed.success) return;
-      settings = parsed.data;
-      mappings = compile(settings, caps);
-      normalMode.recompiled();
+      if (parsed.success) {
+        settings = parsed.data;
+        mappings = compile(settings, caps);
+        normalMode.recompiled();
+        ui.syncColorScheme();
+      }
+
+      // The top frame resolves exclusions from its own URL, so a subframe only
+      // learns the verdict when it is welcomed. Until this ran, a subframe that
+      // booted ahead of its welcome stayed fully enabled on an excluded page
+      // for the life of the document (FRM-04).
+      if (!isTop) {
+        exclusion = {
+          enabled: pushedExclusion.enabled,
+          passKeys: pushedExclusion.passKeys,
+        };
+        applyExclusion();
+      }
     },
     onTakeFocus: () => hud.show("Frame focused"),
   });
@@ -182,6 +199,7 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       settings = next;
       mappings = compile(settings, caps);
       normalMode.recompiled();
+      ui.syncColorScheme();
       await groups.settings.write(next);
       frames.pushSettings();
     },
@@ -248,6 +266,7 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       settings = groups.settings.current();
       mappings = compile(settings, caps);
       normalMode.recompiled();
+      ui.syncColorScheme();
       exclusion = await resolveExclusion();
       applyExclusion();
     },
@@ -267,7 +286,11 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
   const applyExclusion = (): void => {
     if (exclusion.enabled) {
       normalMode.enter();
-      insert();
+      // `ensureEntered`, not just construction: the feature object is memoised,
+      // so after `exitAllModes` on a soft navigation the memoised value is an
+      // *exited* mode and constructing it again is exactly what memoisation
+      // prevents (CORE-01).
+      insert().ensureEntered();
     } else {
       exitAllModes("navigation");
       hud.setIndicator(null);
@@ -276,6 +299,11 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
 
   exclusion = await resolveExclusion();
   applyExclusion();
+
+  // Before any listener is attached: insert mode otherwise only learns about
+  // focus from live events, and by the time Stage 1 runs the page has long
+  // since autofocused its search box (OSU-02).
+  if (exclusion.enabled) insert().seedFromFocus();
 
   if (settings.grabBackFocus && isTop) insert().grabBackFocus();
   if (isTop) omnibar().noteVisit();
@@ -363,6 +391,3 @@ const compile = (settings: Settings, caps: Capabilities): CompiledMappings => {
     rejectReservedShortcuts: caps.webkitLike,
   });
 };
-
-/** Exported for tests: the settings a fresh install starts from. */
-export const initialSettings = defaultSettings;

@@ -198,6 +198,24 @@ class InsertModeImpl extends Mode {
   }
 
   /**
+   * Adopt whatever already has focus.
+   *
+   * Insert mode otherwise only ever learns about focus from live `focus`
+   * events, and Stage 1 boots long after the page has autofocused its search
+   * box. On DuckDuckGo, on most login pages, and on anything with
+   * `<input autofocus>`, that meant the user's first keystrokes were read as
+   * commands (OSU-02).
+   */
+  seedFromFocus(): void {
+    const active = deepActiveElement();
+    if (this.#app.hud.ownsFocus(active)) return;
+    if (isEditable(active)) {
+      this.#element = active;
+      this.#app.hud.setIndicator("Insert mode");
+    }
+  }
+
+  /**
    * `grabBackFocus`: some pages steal focus into a search box on load, which
    * silently swallows the user's first keystrokes. Blur it once, and only once,
    * and only if the user has not typed yet.
@@ -222,6 +240,17 @@ export type { InsertModeImpl };
  * from `InsertApi.isActive()`'s "is the user typing into something".
  */
 export interface InsertFeature extends InsertApi {
+  /**
+   * Make sure the underlying stack frame is live.
+   *
+   * The feature object is memoised in `stage1.ts`, so after a soft navigation
+   * exits every mode the memoised value is an *exited* mode. Constructing it
+   * again is not an option — that is the memoisation — so re-entry has to be
+   * reachable from outside (CORE-01).
+   */
+  ensureEntered(): void;
+  /** Adopt an element the page focused before Stage 1 existed. */
+  seedFromFocus(): void;
   /** Blur a field the page auto-focused on load (`grabBackFocus`). */
   grabBackFocus(): void;
 }
@@ -237,6 +266,8 @@ export const createInsert = (
     exit: () => mode.exitInsert(),
     isActive: () => mode.isInserting(),
     focusInput: (count) => mode.focusInput(count),
+    ensureEntered: () => void mode.enter(),
+    seedFromFocus: () => mode.seedFromFocus(),
     grabBackFocus: () => mode.grabBackFocus(),
   };
 };

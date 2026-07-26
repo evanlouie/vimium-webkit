@@ -76,8 +76,22 @@ export class Mode {
     return {};
   }
 
+  /**
+   * Enter, or re-enter after an exit.
+   *
+   * Modes are explicitly **re-usable**: the feature singletons in `stage1.ts`
+   * are memoised objects, and every one of them is exited and re-entered across
+   * a soft navigation or an exclusion change. Latching `#exited` on the first
+   * `exit()` therefore made `isActive` lie, made a second `exit()` return early
+   * and leave the handler on the stack forever, and made `onExit()` fire its
+   * handler at registration time (CORE-02, PRF-15).
+   *
+   * Calling `enter()` on a live mode is a no-op, so it doubles as "make sure
+   * this is entered".
+   */
   enter(): this {
     if (this.#handlerId !== null) return this;
+    this.#exited = false;
 
     const singleton = this.#options.singleton;
     if (singleton !== undefined) {

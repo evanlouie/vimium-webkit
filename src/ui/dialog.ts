@@ -299,6 +299,11 @@ export class DialogController {
         "Use physical key positions (ignore the keyboard layout)",
       ],
       ["hideHud", "Hide the HUD"],
+      [
+        "followPageColorScheme",
+        "Match the page's colour scheme",
+        "When off, the overlay follows your system appearance instead.",
+      ],
       ["grabBackFocus", "Take focus back from pages that steal it on load"],
       [
         "enableCssZoom",
@@ -428,7 +433,7 @@ const clampNumber = (
 };
 
 /** `pattern [passKeys]` per line; blank lines and `#` comments ignored. */
-export const parseExclusionText = (
+const parseExclusionText = (
   text: string,
 ): ReadonlyArray<{ pattern: string; passKeys: string }> => {
   const out: Array<{ pattern: string; passKeys: string }> = [];

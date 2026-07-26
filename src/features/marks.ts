@@ -130,11 +130,3 @@ class MarksFeature implements MarksApi {
 }
 
 export const createMarks = (app: AppContext): MarksApi => new MarksFeature(app);
-
-/**
- * A one-shot mode that reads the next keystroke as a mark letter.
- *
- * Implemented by the command layer rather than as a `Mode` subclass because it
- * is a single key and does not need the exit machinery.
- */
-export type MarkAction = "set" | "jump";

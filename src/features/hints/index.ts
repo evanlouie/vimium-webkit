@@ -16,6 +16,7 @@ import type {
   HintsApi,
   RemoteHintDescriptor,
 } from "~/core/context.ts";
+import type { RemoteHintSession } from "~/frames/index.ts";
 import { AbortedError, withDeadline } from "~/platform/scheduler.ts";
 import { detectHints, type LocalHint } from "./detect.ts";
 import {
@@ -46,6 +47,15 @@ export interface LocalHintsApi extends HintsApi {
   activateLocal(localIndex: number, mode: HintModeKind): void;
   /** A keystroke that happened in another frame during a live session. */
   handleRemoteKey(notation: string): void;
+  /**
+   * Join a round another frame started, so this frame draws its own markers.
+   *
+   * Without this, a cross-frame round put markers only on the origin frame's
+   * links: everything below the hook was already in place, and the hook itself
+   * had no implementation and no call site, which made cross-frame hints dead
+   * in the default (alphabet) mode (FRM-01).
+   */
+  beginRemoteSession(remote: RemoteHintSession): void;
 }
 
 /** Vimium's number, and for the same reason: a hung frame must not deadlock us. */
@@ -265,6 +275,40 @@ export const createHints = (app: AppContext): LocalHintsApi => {
       const hint = lastLocal[localIndex];
       if (hint === undefined) return;
       activateLocalHint(app, hint, kind);
+    },
+
+    beginRemoteSession: (remote: RemoteHintSession): void => {
+      ensureStyles();
+      teardown();
+
+      // `lastLocal` is this frame's answer to the `COLLECT_HINTS` that opened
+      // the round, and the descriptors arrive with our own entries stripped, so
+      // `merge` reassembles exactly the ordering the origin frame derived.
+      const entries = merge(lastLocal, remote.descriptors);
+      if (entries.length === 0) return;
+
+      const current: Session = {
+        kind: remote.mode,
+        controller: new AbortController(),
+        buffer: null,
+        mode: null,
+      };
+      session = current;
+
+      const mode = new HintMode({
+        app,
+        kind: remote.mode,
+        entries,
+        // Keys reach us over the relay; echoing them back would loop.
+        crossFrame: false,
+        role: "participant",
+      });
+      current.mode = mode;
+      mode.enter();
+      mode.start();
+      mode.onExit(() => {
+        if (session === current) session = null;
+      });
     },
 
     handleRemoteKey: (notation: string): void => {

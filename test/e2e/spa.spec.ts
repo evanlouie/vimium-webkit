@@ -91,4 +91,57 @@ test.describe("SPA navigation", () => {
     await expect.poll(async () => (await vw.scrollOffsets()).y)
       .toBeGreaterThan(0);
   });
+
+  /**
+   * The gap this closes: `applyExclusion()` calls `exitAllModes` and then
+   * re-enters normal mode, but insert mode is a *memoised* feature object, so
+   * re-reading it returned the instance that had just been exited. Every
+   * keystroke after a soft navigation was then read as a command, and typing
+   * into a search box scrolled the page instead (CORE-01).
+   */
+  test("typing into an input still reaches the page after a pushState navigation", async ({ vw, page }) => {
+    await vw.open("/spa.html");
+
+    await page.locator("#go-detail").click();
+    await expect(page.locator("#status")).toHaveText(/^detail:/);
+    // Past the post-click URL sample and its `refresh()`.
+    await page.waitForTimeout(URL_SETTLE_MS);
+
+    await page.locator("#typing").click();
+    await vw.type("jkgg");
+
+    await expect(page.locator("#typing")).toHaveValue("jkgg");
+    // `gg` would have jumped to the top and `j` scrolled down; neither is a
+    // thing that should happen while the user is typing.
+    expect((await vw.scrollOffsets()).y).toBe(0);
+  });
+});
+
+test.describe("pre-existing focus", () => {
+  /**
+   * Stage 1 boots on a timer, long after the page autofocused its search box.
+   * Seeding insert mode from `deepActiveElement()` is the only way it can know
+   * (OSU-02).
+   */
+  test("an autofocused field is typed into, not commanded at", async ({ vw, page }) => {
+    await vw.open("/autofocus.html");
+
+    await expect(page.locator("#search")).toBeFocused();
+    await vw.type("jjf");
+
+    await expect(page.locator("#search")).toHaveValue("jjf");
+    expect(await vw.hintsVisible()).toBe(false);
+    expect((await vw.scrollOffsets()).y).toBe(0);
+  });
+
+  test("Escape leaves the seeded insert mode", async ({ vw, page }) => {
+    await vw.open("/autofocus.html");
+
+    await expect(page.locator("#search")).toBeFocused();
+    await vw.press("Escape");
+
+    await vw.press("j");
+    await expect.poll(async () => (await vw.scrollOffsets()).y)
+      .toBeGreaterThan(0);
+  });
 });

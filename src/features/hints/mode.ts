@@ -292,6 +292,18 @@ export interface HintModeConfig {
   readonly entries: readonly HintEntry[];
   /** Broadcast keystrokes so sibling frames stay in lockstep. */
   readonly crossFrame: boolean;
+  /**
+   * Whether this frame started the round.
+   *
+   * A cross-frame round runs the *same* mode in every frame so that each one
+   * draws its own markers with the hint strings everybody agreed on. Only the
+   * origin acts on the result: every frame reaches the same conclusion from the
+   * same keystrokes, so if participants activated too, a hint would be followed
+   * once per frame on the page.
+   *
+   * Defaults to `"origin"`, which is the single-frame case.
+   */
+  readonly role?: "origin" | "participant";
 }
 
 const INDICATORS: Readonly<Record<HintModeKind, string>> = {
@@ -324,6 +336,7 @@ export class HintMode extends Mode {
   readonly #kind: HintModeKind;
   readonly #entries: readonly HintEntry[];
   readonly #crossFrame: boolean;
+  readonly #isOrigin: boolean;
   readonly #markers: MarkerLayer;
 
   /** Indices into `#entries` that this frame owns, in order. */
@@ -358,6 +371,7 @@ export class HintMode extends Mode {
     this.#kind = config.kind;
     this.#entries = config.entries;
     this.#crossFrame = config.crossFrame;
+    this.#isOrigin = config.role !== "participant";
     this.#filtering = settings.filterLinkHints;
     this.#alphabet = normaliseHintCharacters(
       settings.linkHintCharacters,
@@ -526,7 +540,9 @@ export class HintMode extends Mode {
     if (!this.#filtering) {
       const matches = matchByPrefix(this.#hints, this.#typed);
       if (matches.length === 0) {
-        this.#app.hud.show("No matching hint", 800);
+        // Only the origin frame speaks: one HUD message per page, not one per
+        // frame that happens to be running the same round.
+        if (this.#isOrigin) this.#app.hud.show("No matching hint", 800);
         this.exit("explicit");
         return;
       }
@@ -544,7 +560,9 @@ export class HintMode extends Mode {
     this.#render();
 
     if (this.#outcome.candidates.length === 0) {
-      this.#app.hud.show(`No matches for "${this.#queryText()}"`);
+      if (this.#isOrigin) {
+        this.#app.hud.show(`No matches for "${this.#queryText()}"`);
+      }
       return;
     }
     this.#showQuery();
@@ -570,6 +588,7 @@ export class HintMode extends Mode {
   }
 
   #showQuery(): void {
+    if (!this.#isOrigin) return;
     const query = this.#queryText();
     if (query.length > 0) this.#app.hud.show(query);
   }
@@ -648,6 +667,11 @@ export class HintMode extends Mode {
     // Tear the overlay down first: activation may move focus, and a marker
     // still in the tree would be visible for a frame after navigation starts.
     this.exit("explicit");
+
+    // A participant frame renders and follows along, but the origin is the one
+    // that dispatches — either locally or as an `ACTIVATE_HINT` addressed to
+    // whichever frame owns the entry, which may well be this one.
+    if (!this.#isOrigin) return;
 
     if (entry.hint !== null) {
       activateLocalHint(this.#app, entry.hint, this.#kind);

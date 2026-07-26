@@ -12,8 +12,6 @@ export interface IdleDeadline {
   timeRemaining(): number;
 }
 
-export type IdleHandle = { readonly cancel: () => void };
-
 /** Slice length for chunked work. Chosen to stay inside one 60 Hz frame. */
 export const CHUNK_BUDGET_MS = 8;
 
@@ -25,41 +23,10 @@ interface NativeIdleWindow {
     callback: (deadline: IdleDeadline) => void,
     options?: { timeout?: number },
   ) => number;
-  cancelIdleCallback?: (handle: number) => void;
 }
 
 export const hasNativeIdleCallback = (): boolean =>
   typeof (globalThis as NativeIdleWindow).requestIdleCallback === "function";
-
-/**
- * `requestIdleCallback` with a `setTimeout`-based fallback.
- *
- * The fallback deliberately reports a fixed, small `timeRemaining()` rather
- * than pretending to know about frame boundaries: over-reporting is what turns
- * a chunked pass into a jank spike.
- */
-export const requestIdle = (
-  callback: (deadline: IdleDeadline) => void,
-  timeoutMs = 200,
-): IdleHandle => {
-  const scope = globalThis as NativeIdleWindow;
-  const native = scope.requestIdleCallback;
-  if (typeof native === "function") {
-    const id = native.call(globalThis, callback, { timeout: timeoutMs });
-    return {
-      cancel: () => scope.cancelIdleCallback?.call(globalThis, id),
-    };
-  }
-
-  const start = now();
-  const id = setTimeout(() => {
-    callback({
-      didTimeout: false,
-      timeRemaining: () => Math.max(0, CHUNK_BUDGET_MS - (now() - start)),
-    });
-  }, 1);
-  return { cancel: () => clearTimeout(id) };
-};
 
 export interface ChunkedRunOptions {
   /** Time budget per slice. */

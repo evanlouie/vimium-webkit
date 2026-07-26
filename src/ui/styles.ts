@@ -42,6 +42,39 @@ export const BASE_CSS = `
   }
 }
 
+/*
+ * The resolved scheme, decided in JS (\`ui/root.ts\`).
+ *
+ * \`followPageColorScheme\` means "match the page", and no media query can
+ * express that — a light overlay on a dark page is the thing the setting
+ * exists to prevent. \`:host([data-scheme])\` outranks the bare \`:host\` rules
+ * above on specificity, so it wins over the user-agent preference whichever
+ * order the sheets are adopted in.
+ */
+:host([data-scheme="light"]) {
+  --vw-fg: #1b1b1b;
+  --vw-bg: #f5f5f4;
+  --vw-bg-raised: #ffffff;
+  --vw-border: rgba(0, 0, 0, 0.22);
+  --vw-shadow: 0 6px 24px rgba(0, 0, 0, 0.24);
+  --vw-accent: #1a5fb4;
+  --vw-accent-fg: #ffffff;
+  --vw-muted: #6a6a6a;
+  --vw-danger: #b3261e;
+}
+
+:host([data-scheme="dark"]) {
+  --vw-fg: #ececec;
+  --vw-bg: #23232a;
+  --vw-bg-raised: #2e2e37;
+  --vw-border: rgba(255, 255, 255, 0.18);
+  --vw-shadow: 0 6px 24px rgba(0, 0, 0, 0.55);
+  --vw-accent: #7aa2f7;
+  --vw-accent-fg: #16161e;
+  --vw-muted: #9a9aa5;
+  --vw-danger: #f28b82;
+}
+
 .vw-layer {
   position: fixed;
   inset: 0;

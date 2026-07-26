@@ -21,6 +21,12 @@
     </p>
     <p class="note">status: <span id="status"></span></p>
 
+    <!--
+      Outside `#content`, so it survives the router replacing its subtree. Used
+      to check that insert mode is still live after a soft navigation.
+    -->
+    <p><input id="typing" type="text" aria-label="typing target" /></p>
+
     <div id="content"></div>
     <div class="tall"></div>
 

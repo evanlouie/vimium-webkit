@@ -116,10 +116,9 @@ export interface LocalHintsBridge {
   /**
    * Start a marker session for a round another frame initiated.
    *
-   * Optional because `LocalHintsApi` does not expose it yet. Until it does, a
-   * non-origin frame renders no markers of its own and `handleRemoteKey` is a
-   * no-op there — cross-frame hints degrade to "the origin frame's hints".
-   * Everything below the hook is already in place.
+   * Optional only because `createFrameLink` is used without a hints subsystem
+   * in tests and in frames that never build one; `stage1.ts` always provides
+   * it.
    */
   beginRemoteSession?(session: RemoteHintSession): void;
 }
@@ -132,8 +131,18 @@ export interface FrameLinkOptions {
   readonly localHints?: LocalHintsBridge;
   /** Snapshotted into `WELCOME` and `SETTINGS`. Top frame only. */
   readonly currentSettings?: () => unknown;
-  /** Settings handed down by the top frame. Re-validate before use. */
-  readonly onSettingsPushed?: (settings: unknown) => void;
+  /**
+   * Settings *and* the effective exclusion handed down by the top frame.
+   *
+   * Both arrive together in `WELCOME` and `SETTINGS`, and both matter: a
+   * subframe that boots before it is welcomed has been running fully enabled
+   * on a page the user excluded, and the exclusion is the only thing that can
+   * tell it so (FRM-04). Re-validate the settings before use.
+   */
+  readonly onSettingsPushed?: (
+    settings: unknown,
+    exclusion: EffectiveExclusion,
+  ) => void;
   /** Flash a frame indicator; `gf` has just handed this frame focus. */
   readonly onTakeFocus?: () => void;
   /** Injection seam. Defaults to the ambient `window`. */
@@ -152,7 +161,10 @@ export interface FrameLink extends FrameLinkApi {
 
 interface EndpointOptions {
   readonly localHints?: LocalHintsBridge;
-  readonly onSettingsPushed?: (settings: unknown) => void;
+  readonly onSettingsPushed?: (
+    settings: unknown,
+    exclusion: EffectiveExclusion,
+  ) => void;
   readonly onTakeFocus?: () => void;
   readonly window?: Window;
 }
@@ -227,7 +239,7 @@ class FrameEndpoint {
         this.#welcomed = true;
         this.#resolveReady(true);
         this.#onWelcome?.();
-        this.#options.onSettingsPushed?.(message.settings);
+        this.#options.onSettingsPushed?.(message.settings, message.exclusion);
         return;
 
       case "ROSTER":
@@ -236,7 +248,7 @@ class FrameEndpoint {
 
       case "SETTINGS":
         this.#exclusion = message.exclusion;
-        this.#options.onSettingsPushed?.(message.settings);
+        this.#options.onSettingsPushed?.(message.settings, message.exclusion);
         return;
 
       case "COLLECT_HINTS":

@@ -137,7 +137,6 @@ class Stage0Impl implements Stage0 {
 
   #handler: Stage0KeyHandler | null = null;
   #activated = false;
-  #armed = false;
   #idleTimer: number | null = null;
   #disposed = false;
 
@@ -192,10 +191,15 @@ class Stage0Impl implements Stage0 {
    * Capture phase on `globalThis`, so we see keys before the page's own
    * handlers regardless of who registered first — and re-attached on `pageshow`
    * because a bfcache restore can leave us detached.
+   *
+   * No `#armed` latch: the constructor sets it, nothing ever cleared it, and
+   * every later call therefore returned immediately, which made the documented
+   * bfcache re-arm path a permanent no-op (FRM-09). A latch is not needed
+   * anyway — `addEventListener` with the same type, callback and capture flag
+   * is specified to be a no-op, so re-arming cannot double-register.
    */
   rearm(): void {
-    if (this.#disposed || this.#armed) return;
-    this.#armed = true;
+    if (this.#disposed) return;
     globalThis.addEventListener("keydown", this.#onKeydown, true);
     globalThis.addEventListener("keyup", this.#onKeyup, true);
     globalThis.addEventListener("message", this.#onMessage);
@@ -226,7 +230,6 @@ class Stage0Impl implements Stage0 {
 
   dispose(): void {
     this.#disposed = true;
-    this.#armed = false;
     if (this.#idleTimer !== null) clearTimeout(this.#idleTimer);
     globalThis.removeEventListener("keydown", this.#onKeydown, true);
     globalThis.removeEventListener("keyup", this.#onKeyup, true);

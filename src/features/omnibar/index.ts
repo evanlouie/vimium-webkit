@@ -103,9 +103,8 @@ export { OmnibarView } from "./ui.ts";
  * The omnibar surface, plus the hooks the bootstrap and the command registry
  * need.
  *
- * `noteVisit` and `clearHistoryIndex` are here rather than on `OmnibarApi`
- * because they are wiring, not user-facing verbs: the former is called once per
- * page load, the latter backs the `:clear-history` command.
+ * `noteVisit` is here rather than on `OmnibarApi` because it is wiring, not a
+ * user-facing verb: it is called once per page load.
  */
 export interface OmnibarLiteApi extends OmnibarApi {
   /**
@@ -114,8 +113,6 @@ export interface OmnibarLiteApi extends OmnibarApi {
    * inside, and with `enableHistoryIndex` off this is a no-op.
    */
   noteVisit(): void;
-  /** Backs `:clear-history`. Wipes the persisted index. */
-  clearHistoryIndex(): Promise<void>;
   /** `null` when recording is on; otherwise why it is off. For HUD messages. */
   historyRecordingBlockedBy(): RecordingBlock | null;
 }
@@ -481,7 +478,7 @@ export const createOmnibar = (app: AppContext): OmnibarLiteApi => {
       heartbeat();
     },
 
-    clearHistoryIndex: (): Promise<void> => history.clear(),
+    clearHistory: (): Promise<void> => history.clear(),
 
     historyRecordingBlockedBy: (): RecordingBlock | null => history.blockedBy(),
   };

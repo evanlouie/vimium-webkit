@@ -21,6 +21,7 @@
 import type { Capabilities } from "~/platform/capabilities.ts";
 import type { UiLayerName, UiRoot, ViewportRect } from "~/core/context.ts";
 import { rafCoalesce } from "~/platform/scheduler.ts";
+import { type ColorScheme, detectPageScheme } from "./color-scheme.ts";
 import { BASE_CSS } from "./styles.ts";
 
 /**
@@ -62,6 +63,13 @@ const INTERACTIVE_LAYERS: ReadonlySet<UiLayerName> = new Set([
 
 export interface UiRootOptions {
   readonly caps: Capabilities;
+  /**
+   * Whether to match the page's colour scheme rather than the user agent's.
+   *
+   * A callback rather than a value: the setting is live, and re-reading it is
+   * cheaper than tearing the overlay down and rebuilding it.
+   */
+  readonly followPageColorScheme?: () => boolean;
   /** Injection seam for tests. */
   readonly document?: Document;
 }
@@ -75,6 +83,9 @@ class ShadowUiRoot implements UiRoot {
   readonly #layers = new Map<UiLayerName, HTMLElement>();
   readonly #sheets: CSSStyleSheet[] = [];
   readonly #onViewportChange: (() => void) | null;
+  readonly #followPageColorScheme: () => boolean;
+  readonly #schemeQuery: MediaQueryList | null;
+  readonly #onSchemeChange: (() => void) | null;
 
   #fallbackStyle: HTMLStyleElement | null = null;
   #destroyed = false;
@@ -82,6 +93,8 @@ class ShadowUiRoot implements UiRoot {
   constructor(options: UiRootOptions) {
     this.#doc = options.document ?? document;
     this.#caps = options.caps;
+    this.#followPageColorScheme = options.followPageColorScheme ??
+      (() => false);
 
     this.#host = this.#doc.createElement("vimium-webkit-overlay");
     for (const [property, value] of HOST_STYLE) {
@@ -106,6 +119,20 @@ class ShadowUiRoot implements UiRoot {
     }
 
     this.#attach();
+
+    // Resolved in JS rather than by a media query, because "follow the page"
+    // is not a question about the user agent. Tracked live so that flipping the
+    // OS appearance re-themes an open overlay.
+    this.#schemeQuery = typeof matchMedia === "function"
+      ? matchMedia("(prefers-color-scheme: dark)")
+      : null;
+    if (this.#schemeQuery === null) {
+      this.#onSchemeChange = null;
+    } else {
+      this.#onSchemeChange = () => this.syncColorScheme();
+      this.#schemeQuery.addEventListener("change", this.#onSchemeChange);
+    }
+    this.syncColorScheme();
 
     // The visual viewport moves independently of the layout viewport under
     // iOS's dynamic toolbar and during pinch-zoom; anything positioned `fixed`
@@ -158,6 +185,26 @@ class ShadowUiRoot implements UiRoot {
 
   addStyle(css: string): void {
     this.#installStyle(css);
+  }
+
+  /**
+   * Recompute the overlay's colour scheme and publish it to the stylesheets.
+   *
+   * Call after anything that could change the answer: a settings change, or a
+   * navigation that swapped the page's theme.
+   */
+  syncColorScheme(): void {
+    this.#host.dataset["scheme"] = this.#resolveScheme();
+  }
+
+  #resolveScheme(): ColorScheme {
+    if (this.#followPageColorScheme()) {
+      const page = detectPageScheme(this.#doc);
+      // `null` means the page has no detectable opinion, which is not a reason
+      // to ignore the user agent's.
+      if (page !== null) return page;
+    }
+    return this.#schemeQuery?.matches === true ? "dark" : "light";
   }
 
   /**
@@ -244,6 +291,9 @@ class ShadowUiRoot implements UiRoot {
     if (visual && this.#onViewportChange) {
       visual.removeEventListener("resize", this.#onViewportChange);
       visual.removeEventListener("scroll", this.#onViewportChange);
+    }
+    if (this.#schemeQuery && this.#onSchemeChange) {
+      this.#schemeQuery.removeEventListener("change", this.#onSchemeChange);
     }
     this.#host.remove();
     this.#layers.clear();

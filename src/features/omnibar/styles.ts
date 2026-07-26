@@ -173,39 +173,44 @@ export const OMNIBAR_CSS = `
   color: rgba(0, 0, 0, 0.42);
 }
 
-@media (prefers-color-scheme: dark) {
-  .vw-omnibar__panel {
-    background: #1f1f21;
-    color: #f2f2f7;
-    border-color: rgba(255, 255, 255, 0.14);
-  }
+/*
+ * Dark palette.
+ *
+ * Keyed off the host attribute rather than a media query so it tracks the
+ * scheme \`ui/root.ts\` resolved — which is the *page's* scheme when
+ * \`followPageColorScheme\` is on, and the user agent's otherwise.
+ */
+:host([data-scheme="dark"]) .vw-omnibar__panel {
+  background: #1f1f21;
+  color: #f2f2f7;
+  border-color: rgba(255, 255, 255, 0.14);
+}
 
-  .vw-omnibar__field,
-  .vw-omnibar__footer {
-    border-color: rgba(255, 255, 255, 0.12);
-  }
+:host([data-scheme="dark"]) .vw-omnibar__field,
+:host([data-scheme="dark"]) .vw-omnibar__footer {
+  border-color: rgba(255, 255, 255, 0.12);
+}
 
-  .vw-omnibar__input::placeholder {
-    color: rgba(255, 255, 255, 0.35);
-  }
+:host([data-scheme="dark"]) .vw-omnibar__input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
 
-  .vw-omnibar__badge {
-    color: rgba(255, 255, 255, 0.45);
-  }
+:host([data-scheme="dark"]) .vw-omnibar__badge {
+  color: rgba(255, 255, 255, 0.45);
+}
 
-  .vw-omnibar__detail,
-  .vw-omnibar__empty,
-  .vw-omnibar__footer {
-    color: rgba(255, 255, 255, 0.5);
-  }
+:host([data-scheme="dark"]) .vw-omnibar__detail,
+:host([data-scheme="dark"]) .vw-omnibar__empty,
+:host([data-scheme="dark"]) .vw-omnibar__footer {
+  color: rgba(255, 255, 255, 0.5);
+}
 
-  .vw-omnibar__native {
-    border-color: rgba(255, 255, 255, 0.25);
-    color: rgba(255, 255, 255, 0.65);
-  }
+:host([data-scheme="dark"]) .vw-omnibar__native {
+  border-color: rgba(255, 255, 255, 0.25);
+  color: rgba(255, 255, 255, 0.65);
+}
 
-  .vw-omnibar__row--selected {
-    background: rgba(255, 197, 66, 0.22);
-  }
+:host([data-scheme="dark"]) .vw-omnibar__row--selected {
+  background: rgba(255, 197, 66, 0.22);
 }
 `;

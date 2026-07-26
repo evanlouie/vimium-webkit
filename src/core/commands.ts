@@ -730,6 +730,24 @@ export const buildCommands = (): readonly CommandDef[] => [
     "there is no bookmarks API for a userscript",
     "⌥⌘B",
   ),
+  tierB(
+    "clear-history",
+    "misc",
+    "Erase the local history index",
+    ({ app }) => {
+      void app.omnibar.clearHistory().then(
+        () => app.hud.show("Local history index erased"),
+        (cause: unknown) => {
+          app.hud.error(
+            `Could not erase the history index: ${
+              cause instanceof Error ? cause.message : String(cause)
+            }`,
+          );
+        },
+      );
+    },
+    { topFrameOnly: true },
+  ),
 
   // --- Frames ------------------------------------------------------------
   tierB("nextFrame", "navigation", "Focus the next frame", ({ app }) => {

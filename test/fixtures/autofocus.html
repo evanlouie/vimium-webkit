@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Autofocused field</title>
+    <link rel="stylesheet" href="assets/base.css" />
+  </head>
+  <body>
+    <h1>Autofocused field</h1>
+    <p class="note">
+      What DuckDuckGo, most login pages, and anything with
+      <code>&lt;input autofocus&gt;</code> do: focus a text field before any
+      userscript has run. Stage 1 boots long afterwards and only ever learns
+      about focus from live <code>focus</code> events, so without seeding from
+      the pre-existing focus the user's first keystrokes are read as commands.
+    </p>
+
+    <p><input id="search" type="text" autofocus aria-label="search" /></p>
+
+    <p><a href="#target">a link, so hint mode has something to find</a></p>
+
+    <div class="tall"></div>
+    <p id="target">bottom</p>
+  </body>
+</html>

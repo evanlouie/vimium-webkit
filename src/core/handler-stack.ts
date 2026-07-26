@@ -203,21 +203,3 @@ export class HandlerStack {
     this.#generation++;
   }
 }
-
-/** Wrap a side-effecting function so it always continues bubbling. */
-export const alwaysContinue = <A extends readonly unknown[]>(
-  fn: (...args: A) => unknown,
-): (...args: A) => HandlerResult =>
-(...args: A) => {
-  fn(...args);
-  return CONTINUE_BUBBLING;
-};
-
-/** Wrap a side-effecting function so it always suppresses the event. */
-export const alwaysSuppress = <A extends readonly unknown[]>(
-  fn: (...args: A) => unknown,
-): (...args: A) => HandlerResult =>
-(...args: A) => {
-  fn(...args);
-  return SUPPRESS_EVENT;
-};
