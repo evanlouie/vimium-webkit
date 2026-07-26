@@ -177,3 +177,33 @@ Deno.test("wordQuery applies smartcase", () => {
   assert(wordQuery("find").ignoreCase);
   assert(!wordQuery("Find").ignoreCase);
 });
+
+Deno.test("a catastrophically backtracking pattern is refused", () => {
+  // `(a+)+$` against a long line backtracks exponentially, and find mode owns
+  // the keyboard — so the tab is gone with no way to abort. The pattern is
+  // re-run on every keystroke, which turns one typed character into a freeze.
+  //
+  // Refused empirically rather than syntactically: every syntactic rule either
+  // rejects patterns users legitimately want or misses ones that hang.
+  for (const source of ["(a+)+$", "(a*)*b", "(\\d+)+$", "(a|a)*$"]) {
+    const query = parseFindQuery(source, { regexFindMode: true });
+    assert(
+      query.error !== null,
+      `${source} compiled without complaint`,
+    );
+    assertEquals(toRegExp(query), null);
+  }
+});
+
+Deno.test("ordinary quantifiers are still allowed", () => {
+  for (const source of ["a+", "\\d{2,4}", "(?:foo|bar)+", "[a-z]*x"]) {
+    const query = parseFindQuery(source, { regexFindMode: true });
+    assertEquals(query.error, null, `${source} was refused`);
+    assert(toRegExp(query) !== null);
+  }
+});
+
+Deno.test("an absurdly long pattern is refused", () => {
+  const query = parseFindQuery("a".repeat(600), { regexFindMode: true });
+  assert(query.error !== null);
+});

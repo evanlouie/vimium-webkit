@@ -205,3 +205,38 @@ test.describe("Escape", () => {
     expect(await vw.hintsVisible()).toBe(false);
   });
 });
+
+/**
+ * The occlusion probe, in both directions it used to be wrong in.
+ *
+ * A hit inside the element's *own* open shadow root is the element; a hit on
+ * an ancestor while the element paints nothing is not.
+ */
+test.describe("occlusion probe", () => {
+  test("a clickable custom element gets a hint", async ({ vw, page }) => {
+    await vw.open("/overlays.html");
+    await vw.startHints();
+
+    await vw.activateHint("Shadow component button");
+    await expect(page).toHaveURL(/#shadow-component-target$/);
+  });
+
+  for (
+    const [label, description] of [
+      ["Clipped link", "clip-path: inset(100%)"],
+      ["Collapsed link", "height: 0; overflow: hidden"],
+      ["Untouchable link", "pointer-events: none"],
+    ] as const
+  ) {
+    test(`no phantom hint on ${description}`, async ({ vw, page }) => {
+      await vw.open("/overlays.html");
+      const before = page.url();
+      await vw.startHints();
+
+      // A phantom hint here is not cosmetic: activating it dispatches a real
+      // click on content the user cannot see or reach.
+      await vw.expectNoHint(label);
+      expect(page.url()).toBe(before);
+    });
+  }
+});

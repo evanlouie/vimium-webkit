@@ -252,14 +252,96 @@ export const parseFindQuery = (
   };
 };
 
-/** `null` when `source`/`flags` compile, else the engine's own message. */
+/**
+ * Nested quantifiers, the shape that backtracks catastrophically.
+ *
+ * `(a+)+`, `(a*)*` and friends: a group that is itself quantified and whose
+ * body is quantified. A user regex in `regexFindMode` is re-run against the
+ * whole page on *every* keystroke, and once `exec` is inside such a pattern
+ * nothing in JavaScript can interrupt it — find mode owns the keyboard, so the
+ * tab is simply gone.
+ *
+ * A cheap syntactic pre-filter, not a decision procedure; `probeBacktracking`
+ * below is what catches the shapes this misses.
+ */
+const NESTED_QUANTIFIER = /\((?![?]:)[^)]*[+*][^)]*\)\s*[+*{]/u;
+
+/** Longest user pattern we will compile. */
+const MAX_PATTERN_LENGTH = 512;
+
+/**
+ * Inputs that make a backtracking pattern show itself.
+ *
+ * Short on purpose, and each one ends in a character that forces the match to
+ * *fail*: catastrophic backtracking only happens on a failing match. Twenty
+ * characters is where a pathological pattern costs tens of milliseconds —
+ * measurable — while a safe one costs hundredths, and where the probe itself
+ * cannot become the hang it is looking for.
+ */
+const PROBE_LENGTH = 20;
+
+const PROBE_INPUTS: readonly string[] = [
+  `${"a".repeat(PROBE_LENGTH)}!`,
+  `${"0".repeat(PROBE_LENGTH)}!`,
+  `${"ab".repeat(PROBE_LENGTH / 2)}!`,
+  `${" ".repeat(PROBE_LENGTH)}!`,
+  `${"a0 ".repeat(PROBE_LENGTH / 4)}!`,
+];
+
+/**
+ * Milliseconds the whole probe may take before the pattern is refused.
+ *
+ * Measured separation at `PROBE_LENGTH`: safe patterns 0.02–0.05 ms,
+ * pathological ones 14–150 ms. Eight is two orders of magnitude above the
+ * former, so a GC pause cannot turn a safe pattern into a refused one.
+ */
+const PROBE_BUDGET_MS = 8;
+
+/**
+ * Does this pattern backtrack badly enough to be dangerous?
+ *
+ * Empirical rather than analytical, because the analytical question is not
+ * decidable from the source and every syntactic rule either refuses patterns
+ * users legitimately want (`(?:foo|bar)+`) or misses ones that hang
+ * (`(ab|a)*c`). Running it is the only test that tells the truth.
+ */
+const probeBacktracking = (regex: RegExp): boolean => {
+  const started = typeof performance !== "undefined"
+    ? performance.now()
+    : Date.now();
+  for (const input of PROBE_INPUTS) {
+    try {
+      regex.lastIndex = 0;
+      regex.test(input);
+    } catch {
+      return false;
+    }
+    const elapsed =
+      (typeof performance !== "undefined" ? performance.now() : Date.now()) -
+      started;
+    if (elapsed > PROBE_BUDGET_MS) return true;
+  }
+  return false;
+};
+
+/** `null` when `source`/`flags` compile *and* are safe to run repeatedly. */
 const compileError = (source: string, flags: string): string | null => {
+  if (source.length > MAX_PATTERN_LENGTH) {
+    return `pattern is longer than ${MAX_PATTERN_LENGTH} characters`;
+  }
+
+  let regex: RegExp;
   try {
-    new RegExp(source, flags);
-    return null;
+    regex = new RegExp(source, flags);
   } catch (cause) {
     return cause instanceof Error ? cause.message : String(cause);
   }
+
+  if (NESTED_QUANTIFIER.test(source) || probeBacktracking(regex)) {
+    return "this pattern backtracks badly enough to hang the page; " +
+      "try a simpler one";
+  }
+  return null;
 };
 
 /**

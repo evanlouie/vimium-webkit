@@ -58,6 +58,17 @@ export interface MatchSpan {
 export const DEFAULT_MATCH_LIMIT = 500;
 
 /**
+ * Time budget for one `collectSpans` pass.
+ *
+ * A user-supplied regex in `regexFindMode` is re-run on every keystroke against
+ * the whole page, and a catastrophically-backtracking pattern (`(a+)+$` against
+ * a long line) freezes the tab with no way out — find mode owns the keyboard.
+ * Bailing out early yields the matches found so far, which is exactly what an
+ * incremental find wants anyway.
+ */
+const MATCH_BUDGET_MS = 50;
+
+/**
  * Every non-empty match of `pattern` in `haystack`, up to `limit`.
  *
  * The regex is cloned rather than used directly: `lastIndex` is mutable state
@@ -76,6 +87,7 @@ export const collectSpans = (
     : `${pattern.flags}g`;
   const regex = new RegExp(pattern.source, flags);
   const spans: MatchSpan[] = [];
+  const deadline = now() + MATCH_BUDGET_MS;
 
   for (;;) {
     const match = regex.exec(haystack);
@@ -93,10 +105,17 @@ export const collectSpans = (
 
     spans.push({ start: match.index, end: match.index + text.length });
     if (spans.length >= limit) break;
+    // Checked between matches, which bounds the *loop*. A single `exec` that
+    // backtracks catastrophically cannot be interrupted from JavaScript at all;
+    // `query.ts` refuses the patterns that do it before they get here.
+    if (now() > deadline) break;
   }
 
   return spans;
 };
+
+const now = (): number =>
+  typeof performance !== "undefined" ? performance.now() : Date.now();
 
 // ---------------------------------------------------------------------------
 // Pure: offset → chunk

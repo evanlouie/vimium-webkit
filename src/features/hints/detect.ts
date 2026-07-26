@@ -653,12 +653,41 @@ const shadowHostChain = (element: Element): readonly Element[] => {
 };
 
 /**
+ * Does `ancestor` contain `node`, crossing open shadow boundaries?
+ *
+ * `Node.contains` stops at a shadow root, so a hit on a *descendant inside the
+ * element's own open shadow root* looked like an unrelated element painted on
+ * top — and every clickable custom element lost its hint entirely.
+ */
+const containsDeep = (ancestor: Element, node: Element): boolean => {
+  let current: Node | null = node;
+  for (;;) {
+    if (current === null) return false;
+    if (ancestor.contains(current)) return true;
+    const root = current.getRootNode();
+    if (!(root instanceof ShadowRoot)) return false;
+    current = root.host;
+  }
+};
+
+/**
  * Is `element` the thing the user would hit at this point?
  *
  * `document.elementsFromPoint` rather than `elementFromPoint`: the singular
  * form returns the retargeted shadow *host*, so a hint inside any web component
  * would look permanently occluded. Walking the returned front-to-back list lets
  * us accept the host, an ancestor, or a descendant.
+ *
+ * The two directions are *not* symmetric, and treating them as such is what
+ * made this wrong both ways:
+ *
+ * - A hit on something inside our own subtree — including inside our own open
+ *   shadow root — is us. Accept it.
+ * - A hit on an *ancestor* is only us if nothing else is painted in between.
+ *   Accepting any ancestor meant `pointer-events: none` overlays,
+ *   `clip-path`-hidden content and `height: 0; overflow: hidden` boxes earned
+ *   hints — and real synthetic clicks — because their containing block was
+ *   returned by the hit test.
  */
 const hitsAtPoint = (
   element: Element,
@@ -669,9 +698,13 @@ const hitsAtPoint = (
 ): boolean => {
   for (const candidate of document.elementsFromPoint(x, y)) {
     if (candidate === overlayHost) continue;
-    // The first unrelated element in hit-test order is painted on top of us.
-    return candidate === element || candidate.contains(element) ||
-      element.contains(candidate) || hosts.includes(candidate);
+    if (candidate === element) return true;
+    if (containsDeep(element, candidate)) return true;
+    if (hosts.includes(candidate)) return true;
+    // An ancestor: the point is inside our box but the topmost thing painted
+    // there is something above us in the tree, which means we are not painting
+    // at this point at all.
+    return false;
   }
   return false;
 };

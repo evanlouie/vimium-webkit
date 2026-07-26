@@ -20,6 +20,7 @@ import { isEscape, Mode, type ModeHost } from "./mode.ts";
 import { isComposing, isModifierKey, keyNotation } from "./key-notation.ts";
 import type { CompiledMappings, TrieNode } from "./mappings.ts";
 import { type EffectiveRule, isPassKey } from "./exclusions.ts";
+import { appendCountDigit, isCountDigit } from "./count.ts";
 
 export interface KeyHandlerCallbacks {
   mappings(): CompiledMappings;
@@ -34,9 +35,6 @@ export interface KeyHandlerCallbacks {
     event: KeyboardEvent,
   ): void;
 }
-
-/** Cap on the count prefix, so `999999999G` cannot be used to hang a tab. */
-const MAX_COUNT = 9999;
 
 export class NormalMode extends Mode {
   readonly #callbacks: KeyHandlerCallbacks;
@@ -149,10 +147,7 @@ export class NormalMode extends Mode {
     }
 
     if (this.#isCountKey(notation)) {
-      this.#countPrefix = Math.min(
-        MAX_COUNT,
-        this.#countPrefix * 10 + Number(notation),
-      );
+      this.#countPrefix = appendCountDigit(this.#countPrefix, notation);
       this.#pendingKeys.push(notation);
       this.#callbacks.showPending(this.#pendingKeys.join(""));
       return this.#suppress(event);
@@ -171,10 +166,9 @@ export class NormalMode extends Mode {
    * keystroke and pinning `1` in the HUD until the user pressed Escape.
    */
   #isCountKey(notation: string): boolean {
-    if (notation.length !== 1) return false;
     if (this.#keyState.length !== 1) return false;
-    if (this.#countPrefix > 0) return notation >= "0" && notation <= "9";
-    if (notation < "1" || notation > "9") return false;
+    if (!isCountDigit(notation, this.#countPrefix > 0)) return false;
+    if (this.#countPrefix > 0) return true;
     return !this.#callbacks.mappings().trie.children.has(notation);
   }
 

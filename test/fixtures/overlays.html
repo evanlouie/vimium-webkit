@@ -46,6 +46,21 @@
     #footer a {
       color: #fc9;
     }
+    /*
+     * Three ways a link can be inside a box that the hit test returns while
+     * the link itself paints nothing. Accepting *any* ancestor hit gave all
+     * three a hint, and a hint that activates dispatches a real click.
+     */
+    #clipped {
+      clip-path: inset(100%);
+    }
+    #collapsed {
+      height: 0;
+      overflow: hidden;
+    }
+    #untouchable {
+      pointer-events: none;
+    }
     </style>
   </head>
   <body>
@@ -70,6 +85,27 @@
         Also present: a <code>position: sticky</code> footer that occludes the
         bottom of the viewport once the page is scrolled.
       </p>
+
+      <!--
+        A clickable custom element with an open shadow root. The hit test
+        returns the element *inside* the shadow root, which `Node.contains`
+        does not recognise as a descendant — so the host lost its hint
+        entirely, which is every clickable web component on the web.
+      -->
+      <p>
+        <shadow-button id="shadow-host"></shadow-button>
+      </p>
+
+      <div id="clipped">
+        <a id="clipped-link" href="#clipped-target">Clipped link</a>
+      </div>
+      <div id="collapsed">
+        <a id="collapsed-link" href="#collapsed-target">Collapsed link</a>
+      </div>
+      <div id="untouchable">
+        <a id="untouchable-link" href="#untouchable-target">Untouchable link</a>
+      </div>
+
       <div class="tall"></div>
     </div>
     <div id="footer">

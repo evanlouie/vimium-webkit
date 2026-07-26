@@ -19,6 +19,7 @@ import type { AppContext } from "~/core/context.ts";
 import type { Handler, HandlerResult } from "~/core/handler-stack.ts";
 import { SUPPRESS_EVENT } from "~/core/handler-stack.ts";
 import { isComposing, keyNotation } from "~/core/key-notation.ts";
+import { appendCountDigit, isCountDigit } from "~/core/count.ts";
 import { type ExitReason, Mode } from "~/core/mode.ts";
 import { writeClipboard } from "~/platform/clipboard.ts";
 import {
@@ -69,7 +70,7 @@ export class VisualMode extends Mode {
   readonly #lineWise: boolean;
   readonly #switchTo: (kind: VisualKind) => void;
 
-  #count = "";
+  #count = 0;
   #pendingG = false;
 
   constructor(config: VisualModeConfig, kind: VisualKind = "visual") {
@@ -177,9 +178,11 @@ export class VisualMode extends Mode {
       // should still perform that motion rather than being swallowed.
     }
 
-    if (/^[1-9]$/.test(notation) || (notation === "0" && this.#count !== "")) {
+    if (isCountDigit(notation, this.#count > 0)) {
       // Vim's rule: `0` is a motion, except while a count is being typed.
-      this.#count += notation;
+      // Capped, because visual mode suppresses every keyboard event — so an
+      // uncapped `999999999j` was a freeze that Escape could not abort.
+      this.#count = appendCountDigit(this.#count, notation);
       return;
     }
 
@@ -202,32 +205,32 @@ export class VisualMode extends Mode {
         this.#swapEnds();
         return;
       case "c":
-        this.#count = "";
+        this.#count = 0;
         this.#switchTo("caret");
         return;
       case "v":
-        this.#count = "";
+        this.#count = 0;
         this.#switchTo("visual");
         return;
       case "V":
-        this.#count = "";
+        this.#count = 0;
         this.#switchTo("visual-line");
         return;
       case "p":
       case "P":
-        this.#count = "";
+        this.#count = 0;
         this.#app.hud.show(PASTE_EXPLANATION, 4000);
         return;
       default:
-        this.#count = "";
+        this.#count = 0;
         return;
     }
   }
 
   #takeCount(): number {
-    const parsed = Number.parseInt(this.#count, 10);
-    this.#count = "";
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+    const count = this.#count;
+    this.#count = 0;
+    return count > 0 ? count : 1;
   }
 
   // -- motions ---------------------------------------------------------------
@@ -273,7 +276,7 @@ export class VisualMode extends Mode {
   }
 
   #swapEnds(): void {
-    this.#count = "";
+    this.#count = 0;
     const selection = globalThis.getSelection();
     if (selection === null) return;
     reverseSelection(selection);
@@ -291,7 +294,7 @@ export class VisualMode extends Mode {
    * `navigator.clipboard.writeText` rejects.
    */
   #yank(): void {
-    this.#count = "";
+    this.#count = 0;
     const selection = globalThis.getSelection();
     const text = selection === null ? "" : selectionText(selection);
 
