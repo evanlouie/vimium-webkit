@@ -32,6 +32,8 @@ Ported designs:
 | `content_scripts/mode_visual.js`      | `src/features/visual/`                          |
 | `content_scripts/marks.js`            | `src/features/marks.ts`                         |
 | `content_scripts/mode_insert.js`      | `src/features/insert.ts`                        |
+| `content_scripts/vimium_frontend.js`  | `src/frames/index.ts`, `protocol.ts`            |
+| `background_scripts/main.js`          | `src/frames/coordinator.ts`, `registry.ts`      |
 | `background_scripts/completion.js`    | `src/features/omnibar/scoring.ts`, `engines.ts` |
 
 > [!NOTE]

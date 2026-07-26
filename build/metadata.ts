@@ -106,6 +106,36 @@ export const BANNER_NOTICE = `/*
  *   Copyright (c) 2010 Phil Crosby, Ilya Sukhar. Released under the MIT
  *   licence. Individual source files name the upstream file they derive from.
  *
- * See THIRD-PARTY-NOTICES.md in the repository for full licence texts.
+ * This file also *contains* the following MIT-licensed libraries, bundled
+ * verbatim. Their copyright notices travel with the code, which is the
+ * condition under which the MIT licence permits distribution at all — and
+ * without them this artefact could not be published to Greasy Fork or anywhere
+ * else.
+ *
+ *   Zod (https://github.com/colinhacks/zod)
+ *     Copyright (c) 2020 Colin McDonnell
+ *
+ *   neverthrow (https://github.com/supermacro/neverthrow)
+ *     Copyright (c) 2019 Giorgio Delgado
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ *
+ * See THIRD-PARTY-NOTICES.md in the repository for the full texts.
  */
 `;

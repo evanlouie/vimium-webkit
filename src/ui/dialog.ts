@@ -22,6 +22,34 @@ import type { CompiledMappings } from "~/core/mappings.ts";
 import { defaultSettings, type Settings } from "~/settings/schema.ts";
 import { DEFAULT_MAPPINGS } from "~/core/commands.ts";
 import type { ShadowUiRoot } from "./root.ts";
+import type { ValueBackendKind } from "~/platform/gm.ts";
+
+/**
+ * Where the settings shown in this dialog will actually be kept.
+ *
+ * Said out loud, and said *truthfully*, because it changes what the user should
+ * expect: the copy here used to claim settings are never in `localStorage`,
+ * while `gm.ts` falls back to exactly that on a manager with no value store —
+ * and `capabilities.ts` warns about it in the same session. Two parts of the UI
+ * disagreeing about where the user's data lives is worse than either message.
+ */
+const storageExplanation = (backend: ValueBackendKind): string => {
+  const preamble = "There is no options page for a userscript, so settings " +
+    "live here. ";
+  switch (backend) {
+    case "gm-sync":
+    case "gm-async":
+      return `${preamble}They are stored with your userscript manager, which ` +
+        "is durable and survives Safari's seven-day storage purge.";
+    case "localstorage-fallback":
+      return `${preamble}Your userscript manager offers no storage, so they ` +
+        "are kept in localStorage — which Safari erases after seven days " +
+        "without a visit to this site.";
+    case "memory":
+      return `${preamble}No storage is available at all, so they last only ` +
+        "until this page is closed.";
+  }
+};
 
 const LAYER: UiLayerName = "dialog";
 
@@ -240,14 +268,7 @@ export class DialogController {
     dialog.setAttribute("aria-label", "Vimium-WebKit settings");
     dialog.appendChild(el(doc, "h1", undefined, "Settings"));
     dialog.appendChild(
-      el(
-        doc,
-        "p",
-        undefined,
-        "There is no options page for a userscript, so settings live here. " +
-          "They are stored with your userscript manager, not in localStorage — " +
-          "Safari erases localStorage after seven idle days.",
-      ),
+      el(doc, "p", undefined, storageExplanation(app.store.backendKind)),
     );
 
     dialog.appendChild(el(doc, "h2", undefined, "Key mappings"));

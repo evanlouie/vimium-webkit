@@ -12,10 +12,16 @@ deno task serve:fixtures        # just the fixture server, for poking by hand
 deno task check:e2e             # type-check the config and the specs
 ```
 
-Current status: **156 passing** across the three projects, of which **21 are
-`test.fail()`** — seven specs per engine that encode intended behaviour the
-product does not yet have. See
-[Open defects](#open-defects-found-by-this-suite).
+Current status: **204 passing** across the three projects, and no `test.fail()`
+annotations. There is no list of known-broken behaviour here: a spec either
+asserts what the product does or it is deleted.
+
+The default configuration is the **shipped** `defaultSettings()`, read from the
+build output rather than copied. Specs that need determinism opt into
+`DETERMINISTIC` (instant scrolling, filter-mode hints) explicitly, one describe
+block at a time, and say so. Forcing those two settings on every spec is how the
+default hint pipeline and the default scroll path ended up with no coverage at
+all while the suite was green.
 
 The suite is Deno-hosted — the fixture server, the bundle build, and the harness
 all use `Deno.*` — and Playwright's runner is invoked from inside that Deno
@@ -91,66 +97,22 @@ three engines.
 
 ---
 
-## Open defects found by this suite
+## What this suite is allowed to assert
 
-Three product bugs, all reproducible on **all three engines**. Every one is
-marked `test.fail()` with the analysis inline, so fixing it turns the run red
-until the annotation is removed. None of them is a test-harness artefact.
+Every spec asserts on a **side effect** — the page navigated, an element took
+focus, the document scrolled, nothing happened at all — rather than on what the
+overlay drew. Waiting for markers to exist is the readiness signal, not the
+assertion.
 
-### 1. `FindPromptMode` does not own the keyboard — `src/features/find/mode.ts`
+The two harness helpers that read the overlay do so to _discover_ which label
+sits on which element, never to check that it is there:
 
-Find mode is unusable. `FindPromptMode` sets neither `suppressAllKeyboardEvents`
-nor a `keydown` handler, on the stated assumption that "the HUD input has focus
-and the prompt's own callbacks do the work". Stage 0 listens for `keydown` on
-`globalThis` in the **capture** phase, so it sees every keystroke before the HUD
-input's own capture-phase listener can `stopPropagation()`. The event reaches
-`NormalMode` and runs commands: typing `hemisphere` executes `h` (scrollLeft),
-`m` (create mark), `i` (insert mode) and `s` (`Vomnibar.activateSearch`), and
-the omnibar taking focus blurs the prompt, which cancels it.
+- `vw.activateHint(linkText)` types the link text in filter mode, and in
+  alphabet mode finds the marker painted on that element and types its label.
+- `vw.expectNoHint(linkText)` is the negative form, and is mode-aware for the
+  same reason.
 
-`InsertMode` does not cover this — it deliberately ignores our own inputs via
-`hud.ownsFocus()`, so that focusing the HUD is not mistaken for the page asking
-for insert mode.
-
-`OmnibarMode` already has the right shape: `#passIfOurs()` returns
-`PASS_EVENT_TO_PAGE` when `ownsFocus(event.target)` and `SUPPRESS_EVENT`
-otherwise. `FindPromptMode` needs the same `handlers()` override.
-
-Four specs in `find.spec.ts`.
-
-### 2. Image-map areas are dropped by the occlusion pass — `src/features/hints/detect.ts`
-
-`imageMapHints()` produces a hint per `<area>`, positioned inside the image's
-rect. `isHintVisible()` then throws all of them away: it hit-tests with
-`document.elementsFromPoint()`, which returns the `<img>`, and an `<area>` lives
-in a detached `<map>` — so it neither contains the image nor is contained by it,
-and `hitsAtPoint()` is `false` at all five sample points. Upstream Vimium does
-not have this problem because it never runs the "is this on top?" test against
-an image-map area.
-
-The better fix is for `LocalHint` to carry the element the hit test should
-_accept_ (the `<img>`, for an `area` hint) rather than skipping occlusion for
-`kind === "area"`: an area under a fixed overlay genuinely is unreachable and
-should still be dropped.
-
-Two specs in `hints.spec.ts`.
-
-### 3. The overlay host's `style` attribute is blocked by CSP — `src/ui/root.ts`
-
-`ShadowUiRoot`'s constructor does `host.setAttribute("style", HOST_STYLE)`. A
-`style` **attribute** is governed by `style-src-attr`, which falls back to
-`style-src`; under `style-src 'self'` the declarations are discarded and a
-violation is reported. CSP does not police CSSOM, so setting the same properties
-through `host.style.*` makes the overlay CSP-clean.
-
-This does **not** invalidate V1 — the adopted stylesheet applies, and the
-sibling specs prove the dialog and the hint markers are correctly styled under
-the policy, because every layer inside the shadow root is `position: fixed` in
-its own right. What is lost on a strict-CSP site is `all: initial`, the
-`z-index: 2147483647`, and the visual-viewport transform: the page-CSS-bleed and
-stacking defences, on exactly the sites that need them most.
-
-One spec in `csp.spec.ts`.
+Both go through the `attachShadow` capture described below.
 
 ---
 
@@ -211,27 +173,33 @@ proxy outside the root.
 ### Waking the extension
 
 Stage 0 stays asleep until a key arrives or 1200 ms elapse in the top frame.
-Specs use `vw.boot()`, which dispatches the same `vimium-webkit:wake` message a
-top frame posts to its subframes, then waits for `<vimium-webkit-overlay>` to
-appear in the light DOM.
+Specs use `vw.boot()`, which dispatches the structured wake message a top frame
+posts to its subframes, then waits for `<vimium-webkit-overlay>` to appear in
+the light DOM. Stage 0 honours a wake only from an ancestor, so `bootAllFrames`
+wakes subframes the way production does — the top frame posts into the frames
+tree — rather than synthesising an event inside each one. Firefox refuses a
+cross-origin `WindowProxy` as a `MessageEvent` source, which is what that
+synthetic path used to rely on.
 
 ### Determinism
 
-`harness/settings-seed.ts` seeds settings that differ from the shipped defaults
-in exactly two ways, both to remove non-determinism rather than to test
-something different:
+The baseline is the shipped `defaultSettings()`, read from
+`dist/default-settings.json` — emitted by the same build that produces the
+bundle, so it cannot drift from the code under test. It cannot be _imported_:
+this module runs under Playwright's own loader, which resolves neither the `~/`
+alias nor `npm:zod/mini`.
+
+`DETERMINISTIC` in `harness/settings-seed.ts` is an opt-in patch, applied per
+describe block by the specs that need it:
 
 - `smoothScroll: false`, because the scroll animator calibrates against measured
   frame throughput and an assertion on an exact offset mid-animation is a flake
-  generator. (`durationFor` has unit tests.)
-- `filterLinkHints: true`, so a spec activates a hint by typing the link's own
-  text rather than by predicting a hint string. Hint strings are an
-  implementation detail with their own unit tests; link text is the user-facing
-  contract.
+  generator. The default (animated) path has its own coverage in
+  `smooth-scroll.spec.ts`, which asserts on where the scroll _settles_.
+- `filterLinkHints: true`, so a spec matches a hint by the link's own text.
 
-The seed is typed as `Settings` via a type-only import, so adding a field to
-`settings/schema.ts` breaks `deno check` here rather than silently producing a
-seed that fails validation and falls back to defaults.
+Whatever a spec proves under those, it proves about a configuration no user has,
+which is why they are opt-in and why every spec that uses them says so.
 
 ---
 
@@ -239,27 +207,31 @@ seed that fails validation and falls back to defaults.
 
 `test/fixtures/`, mirroring upstream Vimium's `test_harnesses/`:
 
-| File                       | Exercises                                                                                       |
-| -------------------------- | ----------------------------------------------------------------------------------------------- |
-| `nested-frames.html`       | Two levels of same-origin iframes; globally-ordered hint assignment                             |
-| `cross-origin-frames.html` | A frame on a second port (a different origin); `MessageChannel` handshake                       |
-| `srcdoc-frames.html`       | `srcdoc` and `about:blank` frames; graceful degradation                                         |
-| `image-maps.html`          | `<img usemap>` with `rect` and `circle` `<area>`s                                               |
-| `shadow-dom.html`          | Open root, closed root, and slotted light-DOM content                                           |
-| `content-visibility.html`  | `content-visibility: auto` (rendered and skipped) and `hidden` subtrees                         |
-| `overlays.html`            | A fixed bar occluding a link, a sticky footer, an input, and a button                           |
-| `strict-csp.html`          | Served with `default-src 'self'; style-src 'self'` — verification item **V1**                   |
-| `spa.html`                 | `history.pushState` plus wholesale DOM replacement                                              |
-| `scrollables.html`         | Nested scroll containers and one that reports `scrollHeight > clientHeight` and does not scroll |
-| `long-text.html`           | Matches split across element boundaries, for the find engine                                    |
-| `link-dense.html`          | 2400 links, for the hint-generation budget                                                      |
+| File                       | Exercises                                                                                                                          |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `nested-frames.html`       | Two levels of same-origin iframes; globally-ordered hint assignment                                                                |
+| `cross-origin-frames.html` | A frame on a second port (a different origin); `MessageChannel` handshake                                                          |
+| `srcdoc-frames.html`       | `srcdoc` and `about:blank` frames; graceful degradation                                                                            |
+| `image-maps.html`          | `<img usemap>` with `rect` and `circle` `<area>`s                                                                                  |
+| `shadow-dom.html`          | Open root, closed root, and slotted light-DOM content                                                                              |
+| `content-visibility.html`  | `content-visibility: auto` (rendered and skipped) and `hidden` subtrees                                                            |
+| `overlays.html`            | A fixed bar occluding a link, a sticky footer, a clickable custom element, and three ways to be invisible while still having a box |
+| `autofocus.html`           | An `<input autofocus>`, as DuckDuckGo and most login pages have                                                                    |
+| `strict-csp.html`          | Served with `default-src 'self'; style-src 'self'` — verification item **V1**                                                      |
+| `spa.html`                 | `history.pushState` plus wholesale DOM replacement                                                                                 |
+| `scrollables.html`         | Nested scroll containers and one that reports `scrollHeight > clientHeight` and does not scroll                                    |
+| `long-text.html`           | Matches split across element boundaries, for the find engine                                                                       |
+| `link-dense.html`          | 2400 links, for the hint-generation budget                                                                                         |
 
 The server (`harness/server.ts`) binds two ports so cross-origin frames have a
 second origin, substitutes `%SECONDARY_ORIGIN%` into `.html` responses so the
 port number lives in one place, and adds the CSP response header for
-`strict-csp.html`. A `<meta http-equiv>` would not do: the policy has to be in
-force before the first byte of the document is parsed, which is when a
-`document-start` script installs its overlay.
+`strict-csp.html`. Both ports come from the ephemeral range per run
+(`harness/ports.ts`) and `/__ready` answers with a token `globalSetup` checks:
+with fixed ports and `reuseExistingServer`, any process listening on 8787 was
+silently adopted and the whole suite ran against it. A `<meta http-equiv>` would
+not do: the policy has to be in force before the first byte of the document is
+parsed, which is when a `document-start` script installs its overlay.
 
 ---
 

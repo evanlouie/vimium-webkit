@@ -25,7 +25,15 @@ worked around, is in [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md).
    - **Chrome / Edge / Firefox** —
      [Violentmonkey](https://violentmonkey.github.io) or
      [Tampermonkey](https://www.tampermonkey.net).
-2. Install `dist/vimium-webkit.user.js`.
+2. Install the userscript:
+   [`vimium-webkit.user.js`](https://github.com/vimium-webkit/vimium-webkit/releases/latest/download/vimium-webkit.user.js)
+   from the latest release. Your manager will offer to install it and will check
+   that URL for updates afterwards.
+
+   Building it yourself gives a byte-for-byte identical file: `deno task build`
+   writes `dist/vimium-webkit.user.js`. `dist/` is not committed, deliberately —
+   a build output in version control is a second source of truth that goes stale
+   the first time someone forgets to rebuild.
 3. Press `?` on any page for the full key reference.
 
 > [!NOTE]
@@ -52,11 +60,18 @@ Commands are classified into three tiers, and **all three are bound**. Pressing
 `J` does not silently do nothing — it tells you why tab switching is impossible
 and shows you the native Safari shortcut instead.
 
-| Tier  | Count | Behaviour                                                                    |
-| ----- | ----- | ---------------------------------------------------------------------------- |
-| **A** | 38    | Full parity. Pure DOM; works identically on every browser and every manager. |
-| **B** | 22    | Works, with a documented caveat, or depends on a `GM_*` capability.          |
-| **C** | 17    | Not implementable. Greyed out in `?`; pressing the key explains why.         |
+| Tier | Count | Behaviour |
+
+| Tier  | Count | Meaning                                                               |
+| ----- | ----- | --------------------------------------------------------------------- |
+| **A** | 37    | Full parity. No `GM_*` capability needed; identical on every manager. |
+| **B** | 22    | Works, with a documented caveat, or depends on a `GM_*` capability.   |
+| **C** | 18    | Not implementable. Greyed out in `?`; pressing the key explains why.  |
+
+> [!NOTE]
+> Tier A means "needs no manager capability", not "pure DOM". Marks are Tier A
+> and are persisted through the manager's value store, because losing a mark on
+> a manager without one is a degraded feature rather than an absent one.
 
 ### Tier A — full parity
 
@@ -122,9 +137,9 @@ a cache-busting query parameter and says so in the HUD.
 | `<a-m>`        | `toggleMuteTab`                                  | Mutes `<audio>`/`<video>` elements only; WebAudio keeps playing                                |
 | `zi` `zo` `z0` | `zoomIn` `zoomOut` `zoomReset`                   | CSS zoom, not browser zoom. Off by default; breaks `position: fixed` on some sites             |
 | `gs`           | `toggleViewSource`                               | Some managers refuse to open `view-source:`                                                    |
-| `o` `O`        | `Vomnibar.activate`, `…InNewTab`                 | See [Omnibar-lite](#omnibar-lite)                                                              |
+| `o` `O`        | `Vomnibar.activate`, `…InNewTab`                 | Both open the omnibar in this tab: a userscript cannot pre-focus a new tab's address bar       |
 | `:`            | `Vomnibar.activateCommands`                      | Full parity — the command palette needs no browser API                                         |
-| `s`            | `Vomnibar.activateSearch`                        | Search suggestions need `@connect`, which quoid does not implement                             |
+| `s`            | `Vomnibar.activateSearch`                        | Suggestions are opt-in and need `@connect`, which quoid does not implement                     |
 | `gf` `gF`      | `nextFrame`, `mainFrame`                         | Cannot see frames the script failed to inject into (CSP-sandboxed, older `about:blank`)        |
 
 ### Tier C — not implementable
@@ -176,10 +191,48 @@ mapkey a b          " remap a physical key
 unmapAll            " start from nothing
 ```
 
-Settings are stored with your userscript manager, **never in `localStorage`** —
-Safari's Intelligent Tracking Prevention erases all script-writable storage
-after seven days without interaction with a site, which would silently destroy
-your mappings and marks.
+Settings are stored with your userscript manager wherever it offers a value
+store, which is durable. On a manager that offers none the script falls back to
+`localStorage` and tells you so, in the settings dialog and in a one-time
+warning — because Safari's Intelligent Tracking Prevention erases all
+script-writable storage after seven days without interaction with a site, which
+would silently destroy your mappings and marks.
+
+### Every setting
+
+All of these are editable in the settings overlay. There is no hidden
+configuration and no config file.
+
+| Setting                        | Default                | What it does                                                                   |
+| ------------------------------ | ---------------------- | ------------------------------------------------------------------------------ |
+| `scrollStepSize`               | `60`                   | Pixels one `j`/`k` moves. 1–10000.                                             |
+| `smoothScroll`                 | `true`                 | Animate scrolling. Ignored when `prefers-reduced-motion` is set.               |
+| `linkHintCharacters`           | `sadfjklewcmpgh`       | Alphabet for hint labels. Characters must be distinct.                         |
+| `linkHintNumbers`              | `0123456789`           | Digits used to select among filtered hints.                                    |
+| `filterLinkHints`              | `false`                | Match hints by link text instead of by hint string.                            |
+| `waitForEnterForFilteredHints` | `true`                 | In filter mode, require Enter rather than activating on a pause.               |
+| `userDefinedLinkHintCss`       | empty                  | Extra CSS for hint markers, inside our shadow root. No `@import` or `url()`.   |
+| `regexFindMode`                | `false`                | Treat a bare find query as a regular expression.                               |
+| `ignoreKeyboardLayout`         | `false`                | Bind physical key positions, so Dvorak and Cyrillic drive QWERTY bindings.     |
+| `shadowNativeFind`             | `false`                | Shadow the browser's own ⌘F. Off because it may be unpreventable on iOS.       |
+| `previousPatterns`             | `prev,previous,back,…` | Link text `[` looks for.                                                       |
+| `nextPatterns`                 | `next,more,newer,…`    | Link text `]` looks for.                                                       |
+| `searchUrl`                    | Google                 | Default search template. Must contain `%s`.                                    |
+| `searchEngines`                | 5 engines              | One `keyword: url-with-%s Description` per line. Templates must be `http(s)`.  |
+| `newTabUrl`                    | `about:blank`          | What `t` opens.                                                                |
+| `enableSearchSuggestions`      | **`false`**            | Send omnibar searches to your engine as you type. See [Privacy](./PRIVACY.md). |
+| `hideHud`                      | `false`                | Suppress the corner HUD entirely.                                              |
+| `followPageColorScheme`        | `true`                 | Match the overlay to the page's theme rather than your system appearance.      |
+| `grabBackFocus`                | `false`                | Blur a field the page autofocused on load — unless you have already typed.     |
+| `enableCssZoom`                | `false`                | Enable `zi`/`zo`. CSS zoom, not browser zoom; breaks `position: fixed` sites.  |
+| `enableHistoryIndex`           | **`false`**            | Build a local frecency index for the omnibar. See [Privacy](./PRIVACY.md).     |
+| `historyIndexDenylist`         | empty                  | URL globs never recorded in that index.                                        |
+| `historyIndexLimit`            | `5000`                 | Entries kept before LRU eviction. `0` disables recording.                      |
+| `exclusionRules`               | empty                  | URL glob → pass-key set. An empty pass-key set disables us on matching pages.  |
+| `keyMappings`                  | empty                  | Your `map`/`unmap`/`unmapAll`/`mapkey` lines, applied over the defaults.       |
+
+A value the script cannot make sense of falls back to its own default — that one
+setting, not the whole configuration.
 
 ### Omnibar-lite
 

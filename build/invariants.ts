@@ -43,6 +43,20 @@ export const STAGE0_BUDGET_BYTES = 3 * 1024;
 /** Headroom under Greasy Fork's 2 MB unminified ceiling. */
 export const BUNDLE_BUDGET_BYTES = 1_500 * 1024;
 
+/**
+ * Copyright lines that must appear in the shipped artefact.
+ *
+ * The MIT licence permits redistribution *on condition* that the notice travels
+ * with the code. These strings are what `build/metadata.ts` emits; if a
+ * dependency is added or removed, this list is where the obligation is
+ * recorded.
+ */
+const BUNDLED_COPYRIGHT_HOLDERS: readonly string[] = [
+  "Copyright (c) 2020 Colin McDonnell",
+  "Copyright (c) 2019 Giorgio Delgado",
+  "Copyright (c) 2010 Phil Crosby, Ilya Sukhar",
+];
+
 /** Files exempt from the "all GM access goes through the shim" rule. */
 const GM_SHIM_FILES: ReadonlySet<string> = new Set([
   "src/platform/gm.ts",
@@ -252,6 +266,24 @@ export const checkInvariants = async (
         message: `use addEventListener: ${hit.text}`,
       });
     }
+
+    // 9. No HTML sinks. Three separate modules call this discipline out in
+    //    prose as load-bearing — link text, page titles and search suggestions
+    //    are all page-supplied and all end up inside our own overlay — and
+    //    nothing enforced it. `textContent` on the parts is the only way in.
+    for (
+      const hit of scan(
+        contents,
+        /\.(inner|outer)HTML\b|insertAdjacentHTML\s*\(|createContextualFragment\s*\(|\bsrcdoc\s*=/g,
+      )
+    ) {
+      violations.push({
+        rule: "no-html-sinks",
+        file: rel,
+        line: hit.line,
+        message: `build nodes and set textContent instead: ${hit.text}`,
+      });
+    }
   }
 
   // 3. Stage 0 runs in every frame of every page; growth here is the classic
@@ -299,6 +331,22 @@ export const checkInvariants = async (
       rule: "metadata-first",
       file: "dist/vimium-webkit.user.js",
       message: "the metadata block must be the very first thing in the file",
+    });
+  }
+
+  // 10. Every bundled MIT dependency's copyright notice ships with it.
+  //
+  //     Scanned in the *bundle*, not the source: the licence obligation is on
+  //     the artefact, and every other rule here inspects source only. Roughly
+  //     105 KB of third-party code shipped with no notice at all, which is
+  //     distribution-blocking for Greasy Fork and a licence violation
+  //     regardless of where it is distributed.
+  for (const holder of BUNDLED_COPYRIGHT_HOLDERS) {
+    if (input.bundle.includes(holder)) continue;
+    violations.push({
+      rule: "third-party-notices",
+      file: "dist/vimium-webkit.user.js",
+      message: `the bundle carries no copyright notice for ${holder}`,
     });
   }
 
