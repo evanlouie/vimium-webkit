@@ -8,7 +8,7 @@ about it is welcome.
 ## Reporting a vulnerability
 
 Open a
-[private security advisory](https://github.com/vimium-webkit/vimium-webkit/security/advisories/new)
+[private security advisory](https://github.com/evanlouie/vimium-webkit/security/advisories/new)
 on GitHub. Please do not open a public issue for anything you believe is
 exploitable.
 

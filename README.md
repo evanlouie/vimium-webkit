@@ -26,7 +26,7 @@ worked around, is in [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md).
      [Violentmonkey](https://violentmonkey.github.io) or
      [Tampermonkey](https://www.tampermonkey.net).
 2. Install the userscript:
-   [`vimium-webkit.user.js`](https://github.com/vimium-webkit/vimium-webkit/releases/latest/download/vimium-webkit.user.js)
+   [`vimium-webkit.user.js`](https://github.com/evanlouie/vimium-webkit/releases/latest/download/vimium-webkit.user.js)
    from the latest release. Your manager will offer to install it and will check
    that URL for updates afterwards.
 

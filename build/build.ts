@@ -20,7 +20,7 @@ import { defaultSettings } from "~/settings/schema.ts";
 
 const ROOT = resolve(fromFileUrl(import.meta.url), "../..");
 const DIST = `${ROOT}/dist`;
-const REPOSITORY = "https://github.com/vimium-webkit/vimium-webkit";
+const REPOSITORY = "https://github.com/evanlouie/vimium-webkit";
 
 /**
  * Bridge the loader's vendored esbuild types onto the pinned esbuild release.
