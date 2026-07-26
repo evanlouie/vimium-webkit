@@ -4,8 +4,15 @@
 > [Vimium](https://github.com/philc/vimium), distributed as a single userscript
 > for Violentmonkey, Tampermonkey, and the Safari-native userscript managers.
 
-**Status:** Planning · **Target:** `vimium-webkit.user.js` · **Reference
+**Status:** Implemented · **Target:** `vimium-webkit.user.js` · **Reference
 upstream:** Vimium 2.4.2 (MIT)
+
+> [!NOTE]
+> This document is the design rationale, and remains the source of truth for
+> _why_ things are the way they are. For what is built, how to run it, and the
+> published Tier A/B/C table, see [`README.md`](./README.md).
+> [§12](#12-empirical-verification-checklist) records which of the load-bearing
+> assumptions have since been verified empirically.
 
 ---
 
@@ -1256,22 +1263,50 @@ visibly declined.
 
 ## 12. Empirical verification checklist
 
-Every item below is **load-bearing and unverified**. Resolve in Phase 0.
+Every item below was **load-bearing and unverified** when this plan was written.
+The **Status** column records what the Playwright suite (`test/e2e/`) has since
+established on WebKit, Chromium, and Firefox.
 
-| ID      | Question                                                                                                                                                | Blocks                                                                       |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| **V1**  | Does WebKit apply page `style-src` to a constructed `CSSStyleSheet` adopted into a content-script shadow root? Test on GitHub and Google                | [§6.3](#63-ui-layer--closed-shadow-root-cssom-styling) — the entire UI layer |
-| **V2**  | Is `document-start` genuinely reliable on Safari 18+ _through Tampermonkey_? The platform bug is reported fixed; the manager async hop may not be       | [§5.2](#52-boot-sequence)                                                    |
-| **V3**  | Does Tampermonkey Safari inject into `about:blank`/`srcdoc` iframes now? ([#602](https://github.com/Tampermonkey/tampermonkey/issues/602) is from 2018) | [§6.5](#65-cross-frame-coordination)                                         |
-| **V4**  | Is [WebKit bug 191768](https://bugs.webkit.org/show_bug.cgi?id=191768) (iOS `preventDefault` on key commands) fixed?                                    | [§7.3](#73-keyboard) — iOS viability                                         |
-| **V5**  | Do synthesized modifier-clicks ever open tabs in WebKit?                                                                                                | Confirms new-tab hints must use `GM_openInTab`                               |
-| **V6**  | Does `GM_openInTab({active:false})` actually background the tab on Safari, in each manager?                                                             | [§7.5](#75-opening-tabs)                                                     |
-| **V7**  | Does content-script injection reach the Safari PDF viewer or Reader mode?                                                                               | [§7.11](#711-pages-where-we-cannot-run)                                      |
-| **V8**  | Does an "Apple domain" injection blocklist exist? (We found no evidence)                                                                                | [§7.11](#711-pages-where-we-cannot-run)                                      |
-| **V9**  | Is the iOS 18 `unlimitedStorage` ~3 MB regression resolved?                                                                                             | Frecency index cap                                                           |
-| **V10** | Does `MessagePort` transfer over cross-origin `postMessage` work reliably in Safari content-script world?                                               | [§6.5](#65-cross-frame-coordination) — the whole frame protocol              |
-| **V11** | Measured Stage 0 cost per frame on a 20-frame page in Safari                                                                                            | The performance budget                                                       |
-| **V12** | Does quoid's `GM.getValue` latency at Stage 1 cause a perceptible key-buffering delay?                                                                  | [§5.2](#52-boot-sequence)                                                    |
+> [!IMPORTANT]
+> Playwright's WebKit build is **not Safari**. It has no ITP, no reserved
+> shortcut list, and no extension host, so it cannot answer V2, V4, V6, V7, V8,
+> or V9. Those still need real devices with a real manager installed.
+
+| ID      | Question                                                                                                                                                | Status                                                                                                                          | Blocks                                                                       |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| **V1**  | Does WebKit apply page `style-src` to a constructed `CSSStyleSheet` adopted into a content-script shadow root? Test on GitHub and Google                | 🟢 **No.** `test/e2e/csp.spec.ts` renders and styles the help dialog under a real `default-src 'self'; style-src 'self'` header | [§6.3](#63-ui-layer--closed-shadow-root-cssom-styling) — the entire UI layer |
+| **V2**  | Is `document-start` genuinely reliable on Safari 18+ _through Tampermonkey_? The platform bug is reported fixed; the manager async hop may not be       | ⚪️ Unanswerable in Playwright. Mitigated regardless: boot is staged, idempotent, and late-safe ([§5.2](#52-boot-sequence))      | [§5.2](#52-boot-sequence)                                                    |
+| **V3**  | Does Tampermonkey Safari inject into `about:blank`/`srcdoc` iframes now? ([#602](https://github.com/Tampermonkey/tampermonkey/issues/602) is from 2018) | ⚪️ Injection question open; the **degradation contract is pinned** — `srcdoc-frames.html` proves no hang and no exception       | [§6.5](#65-cross-frame-coordination)                                         |
+| **V4**  | Is [WebKit bug 191768](https://bugs.webkit.org/show_bug.cgi?id=191768) (iOS `preventDefault` on key commands) fixed?                                    | ⚪️ Needs a real iOS device. `shadowNativeFind` stays off by default until answered                                              | [§7.3](#73-keyboard) — iOS viability                                         |
+| **V5**  | Do synthesized modifier-clicks ever open tabs in WebKit?                                                                                                | ⚪️ Premise untested; the **consequence is enforced** — `hints.spec.ts` asserts new-tab hints route through `GM_openInTab`       | Confirms new-tab hints must use `GM_openInTab`                               |
+| **V6**  | Does `GM_openInTab({active:false})` actually background the tab on Safari, in each manager?                                                             | ⚪️ Needs each real manager                                                                                                      | [§7.5](#75-opening-tabs)                                                     |
+| **V7**  | Does content-script injection reach the Safari PDF viewer or Reader mode?                                                                               | ⚪️ Needs real Safari                                                                                                            | [§7.11](#711-pages-where-we-cannot-run)                                      |
+| **V8**  | Does an "Apple domain" injection blocklist exist? (We found no evidence)                                                                                | ⚪️ Needs real Safari                                                                                                            | [§7.11](#711-pages-where-we-cannot-run)                                      |
+| **V9**  | Is the iOS 18 `unlimitedStorage` ~3 MB regression resolved?                                                                                             | ⚪️ Needs a real iOS device. The frecency index is capped at 5 000 entries with LRU eviction meanwhile                           | Frecency index cap                                                           |
+| **V10** | Does `MessagePort` transfer over cross-origin `postMessage` work reliably in Safari content-script world?                                               | 🟢 **Yes.** `test/e2e/frames.spec.ts` completes the handshake and activates remote hints across origins on all three engines    | [§6.5](#65-cross-frame-coordination) — the whole frame protocol              |
+| **V11** | Measured Stage 0 cost per frame on a 20-frame page in Safari                                                                                            | 🟢 Stage 0 bundles to **3.7 KB** (5 KB budget, CI-enforced); `perf.spec.ts` shows subframes scheduling zero timers and zero rAF | The performance budget                                                       |
+| **V12** | Does quoid's `GM.getValue` latency at Stage 1 cause a perceptible key-buffering delay?                                                                  | ⚪️ Latency is stubbed at zero in the harness, but the promise-only path boots correctly (`csp.spec.ts`, capability-floor case)  | [§5.2](#52-boot-sequence)                                                    |
+
+### Defects the suite found, all since fixed
+
+1. **`FindPromptMode` did not claim the keyboard.** Stage 0 listens on
+   `globalThis` in the capture phase, so it saw keystrokes before the HUD
+   input's own listener could stop them — typing into the find field ran
+   commands.
+2. **Image-map `<area>` hints were discarded by the occlusion pass**, because
+   `elementsFromPoint` returns the `<img>` and an `<area>` lives in a detached
+   `<map>`. `LocalHint.hitTarget` now carries the element the hit test should
+   accept, so occlusion is still tested rather than skipped.
+3. **The overlay host was styled with a `style` attribute**, which
+   `style-src-attr` blocks — costing `all: initial`, the stacking context, and
+   the visual-viewport transform on exactly the strict-CSP sites that need them
+   most. Now written through `host.style.setProperty()`; CSP does not police
+   CSSOM.
+
+All three shared a root cause worth remembering: **a closed shadow root
+retargets `event.target` to the host**, so any "is this ours?" check made from a
+`window`-level listener must compare against the host, not the inner node.
+`UiRoot.owns()` is the single answer to that question.
 
 ---
 
