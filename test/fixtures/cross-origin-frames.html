@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cross-origin frames</title>
+    <link rel="stylesheet" href="assets/base.css" />
+  </head>
+  <body>
+    <h1>Cross-origin frames</h1>
+    <p class="note">
+      The frame below is served from a second port on the same host, which is a
+      different <em>origin</em>: `postMessage` and `MessageChannel` transfer
+      behave exactly as they do across hostnames. The
+      <code>%SECONDARY_ORIGIN%</code> token is substituted by the fixture
+      server so the port lives in one place.
+    </p>
+    <p><a id="top" href="#top-target">Cross origin top link</a></p>
+    <iframe
+      id="remote"
+      src="%SECONDARY_ORIGIN%/frames/remote.html"
+      width="640"
+      height="240"
+      title="cross-origin frame"
+    ></iframe>
+  </body>
+</html>

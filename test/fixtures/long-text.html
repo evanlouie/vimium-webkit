@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Long text</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+    .region {
+      margin: 0 0 640px;
+      max-width: 40em;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>Long text</h1>
+    <p class="note">
+      Four occurrences of the word under test, each split differently across
+      element boundaries. The find engine flattens text runs before matching, so
+      all four must be found.
+    </p>
+
+    <!-- 1: split across two sibling spans. -->
+    <p class="region" data-region="1">
+      The northern <span>hemi</span><span>sphere</span> tilts toward the sun in
+      July, which is why the solstice falls where it does.
+    </p>
+
+    <!-- 2: a single text node. -->
+    <p class="region" data-region="2">
+      In the southern hemisphere the same tilt produces the opposite season, and
+      the calendar has to be read backwards.
+    </p>
+
+    <!-- 3: split by inline markup. -->
+    <p class="region" data-region="3">
+      Cartographers drew the hemi<b>sphere</b> boundary at the equator long
+      before anyone could measure it accurately.
+    </p>
+
+    <!-- 4: different case, to exercise smartcase. -->
+    <p class="region" data-region="4">
+      Hemisphere is also the name of a rather good album, which is not relevant
+      but does make the fixture easier to read.
+    </p>
+
+    <p class="region" data-region="5">
+      This paragraph mentions neither of the words under test and exists only to
+      keep the document scrolling past the last match.
+    </p>
+  </body>
+</html>

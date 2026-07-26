@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>content-visibility</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+    section {
+      border: 1px solid #bbb;
+      padding: 12px;
+      margin: 0 0 12px;
+    }
+    /*
+     * In the viewport, so the engine renders it: the links inside must be
+     * hinted normally.
+     */
+    #cv-auto {
+      content-visibility: auto;
+      contain-intrinsic-size: auto 120px;
+    }
+    /*
+     * Never rendered. Descendants have no boxes at all, so
+     * `getClientRects()` is empty and no hint can be produced — which is the
+     * assertion, because `getBoundingClientRect()` on a skipped subtree is
+     * perfectly happy to report a plausible-looking rect.
+     */
+    #cv-hidden {
+      content-visibility: hidden;
+    }
+    /*
+     * Far below the fold with an intrinsic size, so the engine skips it. Its
+     * links are off-screen anyway; it is here so the detection pass has to
+     * walk a skipped subtree without tripping over stale layout.
+     */
+    #cv-offscreen {
+      content-visibility: auto;
+      contain-intrinsic-size: auto 800px;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>content-visibility</h1>
+
+    <section id="cv-auto">
+      <p><a href="#auto-target">Auto visible link</a></p>
+    </section>
+
+    <section id="cv-hidden">
+      <p><a href="#hidden-target">Hidden subtree link</a></p>
+    </section>
+
+    <p><a href="#plain-target">Plain sibling link</a></p>
+
+    <div class="tall"></div>
+
+    <section id="cv-offscreen">
+      <p><a href="#offscreen-target">Offscreen skipped link</a></p>
+    </section>
+  </body>
+</html>

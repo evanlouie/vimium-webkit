@@ -1,0 +1,57 @@
+/*
+ * Shared fixture styling.
+ *
+ * An external stylesheet, not a <style> element: `strict-csp.html` is served
+ * with `style-src 'self'`, and a fixture that trips the policy by itself would
+ * make `csp.spec.ts` meaningless.
+ */
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  padding: 24px;
+  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    sans-serif;
+  color: #1b1b1b;
+  background: #ffffff;
+}
+
+h1 {
+  font-size: 20px;
+  margin: 0 0 8px;
+}
+
+p {
+  margin: 0 0 12px;
+}
+
+a {
+  color: #1a5fb4;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+}
+
+.note {
+  color: #6a6a6a;
+  font-size: 14px;
+}
+
+.tall {
+  height: 2400px;
+}
+
+.gap {
+  height: 320px;
+}
+
+iframe {
+  border: 1px solid #c9c9c9;
+  display: block;
+  margin: 12px 0;
+}

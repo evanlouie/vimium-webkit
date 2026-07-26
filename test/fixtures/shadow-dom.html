@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Shadow DOM</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+    closed-widget {
+      display: block;
+      width: 260px;
+      height: 44px;
+      border: 1px dashed #b00;
+      margin: 12px 0;
+    }
+    #open-host {
+      display: block;
+      border: 1px dashed #06c;
+      padding: 8px;
+      margin: 12px 0;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>Shadow DOM</h1>
+    <p class="note">
+      An open root (walkable), a closed root (not walkable — the user gets a HUD
+      warning instead of a silent gap), and slotted light-DOM content that must
+      be hinted exactly once.
+    </p>
+
+    <div id="open-host">
+      <p><a id="slotted" href="#slotted-target">Slotted link</a></p>
+    </div>
+
+    <closed-widget id="closed-host"></closed-widget>
+
+    <p><a id="plain" href="#plain-target">Plain page link</a></p>
+    <div class="tall"></div>
+
+    <script src="assets/shadow-dom.js"></script>
+  </body>
+</html>

@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>srcdoc and about:blank frames</title>
+    <link rel="stylesheet" href="assets/base.css" />
+  </head>
+  <body>
+    <h1>srcdoc and about:blank frames</h1>
+    <p class="note">
+      Whether a manager injects into these at all is verification item V3 and
+      differs per manager. The contract this fixture pins down is weaker and
+      more important: whatever the answer, the top frame must not hang and must
+      not throw.
+    </p>
+    <p><a id="top" href="#top-target">Srcdoc host link</a></p>
+
+    <iframe
+      id="srcdoc"
+      title="srcdoc"
+      width="440"
+      height="120"
+      srcdoc="<!DOCTYPE html><html><body><a id='srcdoc-link' href='#srcdoc-target'>Srcdoc frame link</a></body></html>"
+    ></iframe>
+
+    <iframe id="blank" title="about:blank" width="440" height="120"></iframe>
+  </body>
+</html>

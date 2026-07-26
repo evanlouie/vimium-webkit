@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Image maps</title>
+    <link rel="stylesheet" href="assets/base.css" />
+  </head>
+  <body>
+    <h1>Image maps</h1>
+    <p class="note">
+      An <code>&lt;img usemap&gt;</code> yields hints for its
+      <code>&lt;area&gt;</code> elements and never for itself. Areas have no
+      layout box of their own, so their rects are derived from the image's.
+    </p>
+
+    <img
+      id="map-image"
+      src="assets/map.svg"
+      usemap="#nav"
+      width="300"
+      height="150"
+      alt="Two halves"
+    />
+    <map name="nav">
+      <area
+        shape="rect"
+        coords="0,0,150,150"
+        href="#area-left"
+        aria-label="Left area"
+      />
+      <area
+        shape="circle"
+        coords="225,75,60"
+        href="#area-right"
+        aria-label="Right area"
+      />
+    </map>
+
+    <p><a id="ordinary" href="#ordinary-target">Ordinary link</a></p>
+    <div class="tall"></div>
+  </body>
+</html>

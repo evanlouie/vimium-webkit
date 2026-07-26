@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SPA</title>
+    <link rel="stylesheet" href="assets/base.css" />
+  </head>
+  <body>
+    <h1>SPA</h1>
+    <p class="note">
+      Changes the URL with <code>history.pushState</code> and replaces its own
+      DOM. In the content world we cannot patch the page's
+      <code>History.prototype</code>, so the URL change is only observed by
+      polling and by the post-click sample.
+    </p>
+
+    <p>
+      <button id="go-detail" type="button">Go to detail</button>
+      <button id="go-home" type="button">Go home</button>
+      <button id="churn" type="button">Churn the DOM</button>
+    </p>
+    <p class="note">status: <span id="status"></span></p>
+
+    <div id="content"></div>
+    <div class="tall"></div>
+
+    <script src="assets/spa.js"></script>
+  </body>
+</html>

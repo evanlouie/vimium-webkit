@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Link dense</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+    #grid {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 4px;
+    }
+    .cell {
+      display: block;
+      padding: 4px 6px;
+      border: 1px solid #ddd;
+      font-size: 12px;
+      text-decoration: none;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>Link dense</h1>
+    <p class="note">
+      <span id="count">0</span> links. Most are below the fold, so most are
+      rejected by the rect crop before the (expensive) occlusion pass — which is
+      exactly the shape of a real link-dense page.
+    </p>
+    <p>
+      <a id="beacon" href="#beacon-target">Unmistakable beacon</a>
+    </p>
+    <div id="grid"></div>
+    <script src="assets/link-dense.js"></script>
+  </body>
+</html>

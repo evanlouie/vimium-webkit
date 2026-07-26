@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Sticky and fixed overlays</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+    body {
+      padding: 0;
+    }
+    /*
+     * An opaque fixed bar covering the top 220px of the viewport. Anything
+     * underneath it is unreachable by a real click and must not take a hint.
+     */
+    #bar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 220px;
+      background: #223;
+      color: #fff;
+      padding: 16px 24px;
+      box-sizing: border-box;
+      z-index: 10;
+    }
+    #bar a {
+      color: #9cf;
+    }
+    #beneath {
+      position: absolute;
+      top: 80px;
+      left: 24px;
+    }
+    #below-the-bar {
+      padding: 260px 24px 0;
+    }
+    /* Sticky, and opaque, so it occludes whatever scrolls under it. */
+    #footer {
+      position: sticky;
+      bottom: 0;
+      background: #332;
+      color: #fff;
+      padding: 12px 24px;
+    }
+    #footer a {
+      color: #fc9;
+    }
+    </style>
+  </head>
+  <body>
+    <header id="bar">
+      <p><a id="overlay-link" href="#overlay-target">Overlay bar link</a></p>
+    </header>
+
+    <!-- Sits at y=80, squarely under the fixed bar. -->
+    <p
+      id="beneath"><a id="occluded" href="#occluded-target">Occluded link</a></p>
+
+    <div id="below-the-bar">
+      <p><a id="clear" href="#clear-target">Clear link</a></p>
+      <p>
+        <input id="search-box" type="text" placeholder="Search box" />
+      </p>
+      <p>
+        <button id="counter" type="button">Increment counter</button>
+        <span class="note">clicks: <span id="click-count">0</span></span>
+      </p>
+      <p class="note">
+        Also present: a <code>position: sticky</code> footer that occludes the
+        bottom of the viewport once the page is scrolled.
+      </p>
+      <div class="tall"></div>
+    </div>
+    <div id="footer">
+      <a id="sticky-link" href="#sticky-target">Sticky footer link</a>
+    </div>
+    <script src="assets/overlays.js"></script>
+  </body>
+</html>

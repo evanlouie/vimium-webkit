@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Strict CSP</title>
+    <!--
+      Served with `default-src 'self'; style-src 'self'` as a response header
+      (see test/e2e/harness/server.ts). Nothing on this page may be inline:
+      the point is that any CSP violation reported while this fixture is loaded
+      came from the extension, not from the fixture.
+    -->
+    <link rel="stylesheet" href="assets/base.css" />
+  </head>
+  <body>
+    <h1>Strict CSP</h1>
+    <p class="note">
+      This document is served with
+      <code>Content-Security-Policy: default-src 'self'; style-src 'self'</code>
+      — no <code>'unsafe-inline'</code>. Verification item V1: a constructed
+      <code>CSSStyleSheet</code> adopted into a shadow root is not a
+      <code>style-src</code> fetch and must still apply.
+    </p>
+    <p><a id="csp-link" href="#csp-target">Strict CSP link</a></p>
+    <div class="gap"></div>
+    <p><a id="csp-link-two" href="#csp-target-two">Second CSP link</a></p>
+    <div class="tall"></div>
+  </body>
+</html>

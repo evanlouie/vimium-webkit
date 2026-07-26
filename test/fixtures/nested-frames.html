@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Nested frames</title>
+    <link rel="stylesheet" href="assets/base.css" />
+  </head>
+  <body>
+    <h1>Nested frames</h1>
+    <p class="note">
+      Same-origin, two levels deep. Hint strings must be assigned from a single
+      globally-ordered list, so a hint owned by the innermost frame is typed in
+      the outermost one.
+    </p>
+    <p><a id="top" href="#top-target">Top frame link</a></p>
+    <iframe
+      id="level1"
+      src="frames/level1.html"
+      width="640"
+      height="360"
+      title="level one"
+    ></iframe>
+  </body>
+</html>

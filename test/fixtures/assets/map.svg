@@ -1,0 +1,12 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="300"
+  height="150"
+  viewBox="0 0 300 150"
+>
+  <rect width="150" height="150" fill="#cfe3ff" />
+  <rect x="150" width="150" height="150" fill="#ffe1c4" />
+  <circle cx="225" cy="75" r="60" fill="#ffc98a" />
+  <text x="60" y="80" font-family="sans-serif" font-size="16">left</text>
+  <text x="205" y="80" font-family="sans-serif" font-size="16">right</text>
+</svg>

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Scroll containers</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+    .box {
+      width: 480px;
+      border: 1px solid #999;
+      margin: 12px 0;
+    }
+    #outer {
+      height: 200px;
+      overflow-y: auto;
+    }
+    #inner {
+      height: 120px;
+      overflow-y: scroll;
+      border: 1px solid #c33;
+      margin: 8px;
+    }
+    /*
+     * The fake scrollable. `scrollHeight` is far larger than `clientHeight`
+     * — every naive check says "scrollable" — but `overflow: hidden` means
+     * the user cannot scroll it, so a scroll command aimed here must fall
+     * through to the document.
+     */
+    #fake {
+      height: 160px;
+      overflow: hidden;
+    }
+    .filler {
+      height: 1600px;
+      background: repeating-linear-gradient(
+        #f4f4f4 0 40px,
+        #ebebeb 40px 80px
+      );
+    }
+    .handle {
+      padding: 4px 8px;
+      background: #eef;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>Scroll containers</h1>
+    <p class="note">
+      Nested <code>overflow: auto</code> / <code>scroll</code> containers, plus
+      one that reports <code>scrollHeight &gt; clientHeight</code> and does not
+      actually scroll.
+    </p>
+
+    <div class="box" id="outer">
+      <div class="handle" id="outer-focus" tabindex="0">outer handle</div>
+      <div class="box" id="inner">
+        <div class="handle" id="inner-focus" tabindex="0">inner handle</div>
+        <div class="filler"></div>
+      </div>
+      <div class="filler"></div>
+    </div>
+
+    <div class="box" id="fake">
+      <div class="handle" id="fake-focus" tabindex="0">fake handle</div>
+      <div class="filler"></div>
+    </div>
+
+    <div class="tall"></div>
+    <p id="bottom-marker">bottom of the document</p>
+  </body>
+</html>
