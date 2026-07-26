@@ -1,0 +1,201 @@
+/**
+ * Normal mode: the trie walk, the count prefix, and pass keys.
+ *
+ * Ported from upstream Vimium's `content_scripts/mode_key_handler.js` and
+ * `mode_normal.js` (MIT).
+ *
+ * The load-bearing detail is that `keyState` is a **list** of trie nodes rather
+ * than a single node. That is what lets `gg` resolve while `g` is also a live
+ * prefix, and what lets a fresh sequence start in the middle of an abandoned
+ * one (`g` then `j` scrolls down instead of doing nothing).
+ */
+
+import {
+  CONTINUE_BUBBLING,
+  type Handler,
+  type HandlerResult,
+  SUPPRESS_EVENT,
+} from "./handler-stack.ts";
+import { isEscape, Mode, type ModeHost } from "./mode.ts";
+import { isComposing, isModifierKey, keyNotation } from "./key-notation.ts";
+import type { CompiledMappings, TrieNode } from "./mappings.ts";
+import { type EffectiveRule, isPassKey } from "./exclusions.ts";
+
+export interface KeyHandlerCallbacks {
+  mappings(): CompiledMappings;
+  exclusion(): EffectiveRule;
+  ignoreKeyboardLayout(): boolean;
+  /** Echoed into the HUD so a half-typed `g` is visible. `null` clears it. */
+  showPending(keys: string | null): void;
+  run(
+    command: string,
+    options: Readonly<Record<string, string | boolean>>,
+    count: number,
+    event: KeyboardEvent,
+  ): void;
+}
+
+/** Cap on the count prefix, so `999999999G` cannot be used to hang a tab. */
+const MAX_COUNT = 9999;
+
+export class NormalMode extends Mode {
+  readonly #callbacks: KeyHandlerCallbacks;
+
+  /** Always non-empty; element 0 is the trie root. */
+  #keyState: TrieNode[] = [];
+  #countPrefix = 0;
+  #pendingKeys: string[] = [];
+  #passNextKeyCount = 0;
+
+  /**
+   * `event.code`s whose `keydown` we swallowed.
+   *
+   * A page listening for `keyup` must not see a phantom release for a press it
+   * never saw. Keyed on `code` rather than `key` because modifier state can
+   * change between press and release.
+   */
+  readonly #suppressedCodes = new Set<string>();
+
+  constructor(host: ModeHost, callbacks: KeyHandlerCallbacks) {
+    super(host, { name: "normal" });
+    this.#callbacks = callbacks;
+    this.#reset();
+  }
+
+  /** Consume the next keystroke as a literal, passing it to the page. */
+  passNextKey(count: number): void {
+    this.#passNextKeyCount = Math.max(1, count);
+  }
+
+  protected override handlers(): Omit<Handler, "name"> {
+    return {
+      keydown: (event) => this.#onKeydown(event),
+      keyup: (event) => this.#onKeyup(event),
+    };
+  }
+
+  #reset(): void {
+    this.#keyState = [this.#callbacks.mappings().trie];
+    this.#countPrefix = 0;
+    if (this.#pendingKeys.length > 0) {
+      this.#pendingKeys = [];
+      this.#callbacks.showPending(null);
+    }
+  }
+
+  /** Called when the mapping source changes, so the walk restarts cleanly. */
+  recompiled(): void {
+    this.#reset();
+  }
+
+  #suppress(event: KeyboardEvent): HandlerResult {
+    if (event.code) this.#suppressedCodes.add(event.code);
+    return SUPPRESS_EVENT;
+  }
+
+  #onKeyup(event: KeyboardEvent): HandlerResult {
+    if (event.code && this.#suppressedCodes.delete(event.code)) {
+      return SUPPRESS_EVENT;
+    }
+    return CONTINUE_BUBBLING;
+  }
+
+  #onKeydown(event: KeyboardEvent): HandlerResult {
+    // IME and dead-key composition. Missing this guard means we eat keystrokes
+    // mid-composition, which is the single most damaging failure mode for CJK
+    // users — and one they cannot work around.
+    if (isComposing(event) || isModifierKey(event)) return CONTINUE_BUBBLING;
+
+    const raw = keyNotation(event, this.#callbacks.ignoreKeyboardLayout());
+    if (raw === null) return CONTINUE_BUBBLING;
+
+    const mappings = this.#callbacks.mappings();
+    const notation = mappings.keyRemap.get(raw) ?? raw;
+
+    if (this.#passNextKeyCount > 0) {
+      this.#passNextKeyCount--;
+      this.#reset();
+      return CONTINUE_BUBBLING;
+    }
+
+    const atRoot = this.#keyState.length === 1 && this.#countPrefix === 0;
+
+    if (isEscape(event)) {
+      if (atRoot) return CONTINUE_BUBBLING;
+      this.#reset();
+      return this.#suppress(event);
+    }
+
+    // Pass keys only apply to a fresh sequence: once the user has committed to
+    // `g`, the follow-up key belongs to us even if it is in the pass set.
+    if (atRoot && isPassKey(this.#callbacks.exclusion(), notation)) {
+      return CONTINUE_BUBBLING;
+    }
+
+    if (this.#isCountKey(notation)) {
+      this.#countPrefix = Math.min(
+        MAX_COUNT,
+        this.#countPrefix * 10 + Number(notation),
+      );
+      this.#pendingKeys.push(notation);
+      this.#callbacks.showPending(this.#pendingKeys.join(""));
+      return this.#suppress(event);
+    }
+
+    return this.#advance(notation, event);
+  }
+
+  /**
+   * `0` is only a count digit once a count is under way; otherwise it is a
+   * bindable key in its own right (upstream binds it to `scrollToLeft`).
+   */
+  #isCountKey(notation: string): boolean {
+    if (notation.length !== 1) return false;
+    if (this.#keyState.length !== 1) return false;
+    return this.#countPrefix > 0
+      ? notation >= "0" && notation <= "9"
+      : notation >= "1" && notation <= "9";
+  }
+
+  #advance(notation: string, event: KeyboardEvent): HandlerResult {
+    const candidates: TrieNode[] = [];
+    for (const node of this.#keyState) {
+      const child = node.children.get(notation);
+      if (child) candidates.push(child);
+    }
+
+    if (candidates.length === 0) {
+      const wasPartial = this.#keyState.length > 1 || this.#countPrefix > 0;
+      this.#reset();
+      // A dead-ended sequence is still *ours*: the user typed `g` deliberately,
+      // so leaking the follow-up key to the page would be surprising. A key
+      // that never matched anything at all passes straight through.
+      return wasPartial ? this.#suppress(event) : CONTINUE_BUBBLING;
+    }
+
+    // Later candidates come from deeper `keyState` entries, so the last binding
+    // found is the most specific match.
+    let terminal: TrieNode | null = null;
+    for (const candidate of candidates) {
+      if (candidate.binding !== null) terminal = candidate;
+    }
+
+    if (terminal?.binding) {
+      const { command, options } = terminal.binding;
+      const count = this.#countPrefix === 0 ? 1 : this.#countPrefix;
+      this.#reset();
+      // Run *after* resetting so that a command which enters another mode sees
+      // a clean normal-mode state underneath it.
+      this.#callbacks.run(command, options, count, event);
+      return this.#suppress(event);
+    }
+
+    this.#keyState = [
+      this.#keyState[0] ?? this.#callbacks.mappings().trie,
+      ...candidates,
+    ];
+    this.#pendingKeys.push(notation);
+    this.#callbacks.showPending(this.#pendingKeys.join(""));
+    return this.#suppress(event);
+  }
+}
