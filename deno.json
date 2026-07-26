@@ -9,6 +9,7 @@
     "watch": "deno run -A build/build.ts --watch",
     "check": "deno check src/ build/ test/",
     "test": "deno test -A test/",
+    "coverage": "rm -rf .coverage && deno test -A --coverage=.coverage test/ && deno coverage .coverage --include='^file://.*/src/' --detailed",
     "lint": "deno lint",
     "fmt": "deno fmt",
     "fmt:check": "deno fmt --check",

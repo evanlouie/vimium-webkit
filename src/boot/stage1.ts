@@ -372,6 +372,9 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
   const lifecycle = watchLifecycle({
     onUrlChange: () => {
       exitAllModes("navigation");
+      // The observer is watching media elements that no longer exist, and a
+      // soft navigation is the point at which "muted" stops meaning anything.
+      teardownCommandObservers();
       void app().refresh();
       if (isTop) omnibar().noteVisit();
     },
@@ -402,8 +405,12 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       lifecycle.dispose();
       for (const off of detach) off();
       teardownCommandObservers();
+      // Anything still inside a debounce window would otherwise be discarded.
+      void store.flushAll();
       exitAllModes("navigation");
       frames.dispose();
+      scroller.dispose();
+      normalMode.forgetSuppressed();
       ui.destroy();
       handlerStack.reset();
     },

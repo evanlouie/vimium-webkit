@@ -458,7 +458,11 @@ export class PostFindMode extends Mode {
       singleton: "find",
     });
     this.#runtime = runtime;
-    this.onExit(() => this.#runtime.clearHighlight());
+    // `clear()`, not `clearHighlight()`. The highlighter's DOM goes either way,
+    // but `#runs` and `#matches` hold the whole page's text nodes and a `Range`
+    // per match — measured at 4,001 detached nodes and up to 500 live ranges
+    // pinned by one find session, surviving every soft navigation after it.
+    this.onExit(() => this.#runtime.clear());
   }
 
   protected override handlers(): Omit<Handler, "name"> {

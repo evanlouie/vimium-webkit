@@ -274,14 +274,20 @@ the two APIs that would make it one do not exist for a userscript:
 
 ```
 deno task check      # type-check src/, build/, test/
+deno task check:e2e  # type-check the Playwright config and specs
 deno task test       # unit tests
 deno task test:e2e   # Playwright, against WebKit + Chromium + Firefox
+deno task coverage   # line coverage over every file in src/, not just the loaded ones
 deno task lint
 deno task build      # dist/vimium-webkit.user.js + invariant checks
 deno task verify     # everything above
 ```
 
 `deno task test:e2e:install` fetches the browser binaries the first time.
+
+`deno task coverage` reports over **all** of `src/`. A test module imports every
+file so that an untested one appears in the denominator instead of vanishing
+from the report — the difference between the two framings was 59% and 38%.
 
 ### Build invariants
 
