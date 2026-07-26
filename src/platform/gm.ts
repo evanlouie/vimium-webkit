@@ -9,6 +9,7 @@
  */
 
 import { err, ok, Result, ResultAsync } from "neverthrow";
+import { probe } from "./ambient.ts";
 import type {
   GmNamespace,
   GmOpenInTabOptions,
@@ -147,40 +148,74 @@ export interface GmSurface {
   readonly windowClose: (() => void) | null;
 }
 
-export const detectGmSurface = (): GmSurface => {
-  const namespace: GmNamespace | null =
-    typeof GM !== "undefined" && GM !== null &&
-      typeof GM === "object"
-      ? GM
-      : null;
+/**
+ * Read one manager binding, tolerating both kinds of absence.
+ *
+ * `typeof` is what stops an *undeclared* identifier throwing `ReferenceError`.
+ * The `probe` is what stops a *declared but hostile* one — an accessor that
+ * throws — taking the rest of the surface with it. Both are needed, and in the
+ * page world both are reachable by the site: these are ordinary `window`
+ * properties there, so a page gets a vote on what we see.
+ *
+ * Per binding rather than around the whole surface, so one poisoned name costs
+ * one API instead of sending us to the no-storage fallback.
+ */
+const binding = <T>(read: () => T | undefined): T | null =>
+  probe(() => read() ?? null, null);
 
-  const info: unknown = typeof GM_info !== "undefined"
-    ? GM_info
-    : namespace?.info ?? null;
+export const detectGmSurface = (): GmSurface => {
+  const namespace = binding<GmNamespace>(() =>
+    typeof GM !== "undefined" && GM !== null && typeof GM === "object"
+      ? GM
+      : undefined
+  );
+
+  const info: unknown = probe(
+    () => typeof GM_info !== "undefined" ? GM_info : namespace?.info ?? null,
+    null,
+  );
 
   return {
     namespace,
     info,
-    getValueSync: typeof GM_getValue === "function" ? GM_getValue : null,
-    setValueSync: typeof GM_setValue === "function" ? GM_setValue : null,
-    deleteValueSync: typeof GM_deleteValue === "function"
-      ? GM_deleteValue
-      : null,
-    listValuesSync: typeof GM_listValues === "function" ? GM_listValues : null,
-    openInTabSync: typeof GM_openInTab === "function" ? GM_openInTab : null,
-    setClipboardSync: typeof GM_setClipboard === "function"
-      ? GM_setClipboard
-      : null,
-    xhrSync: typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : null,
-    addValueChangeListener: typeof GM_addValueChangeListener === "function"
-      ? GM_addValueChangeListener
-      : null,
-    registerMenuCommand: typeof GM_registerMenuCommand === "function"
-      ? GM_registerMenuCommand
-      : null,
-    addStyle: typeof GM_addStyle === "function" ? GM_addStyle : null,
-    hasUnsafeWindow: typeof unsafeWindow !== "undefined" &&
-      unsafeWindow !== undefined,
+    getValueSync: binding(() =>
+      typeof GM_getValue === "function" ? GM_getValue : undefined
+    ),
+    setValueSync: binding(() =>
+      typeof GM_setValue === "function" ? GM_setValue : undefined
+    ),
+    deleteValueSync: binding(() =>
+      typeof GM_deleteValue === "function" ? GM_deleteValue : undefined
+    ),
+    listValuesSync: binding(() =>
+      typeof GM_listValues === "function" ? GM_listValues : undefined
+    ),
+    openInTabSync: binding(() =>
+      typeof GM_openInTab === "function" ? GM_openInTab : undefined
+    ),
+    setClipboardSync: binding(() =>
+      typeof GM_setClipboard === "function" ? GM_setClipboard : undefined
+    ),
+    xhrSync: binding(() =>
+      typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : undefined
+    ),
+    addValueChangeListener: binding(() =>
+      typeof GM_addValueChangeListener === "function"
+        ? GM_addValueChangeListener
+        : undefined
+    ),
+    registerMenuCommand: binding(() =>
+      typeof GM_registerMenuCommand === "function"
+        ? GM_registerMenuCommand
+        : undefined
+    ),
+    addStyle: binding(() =>
+      typeof GM_addStyle === "function" ? GM_addStyle : undefined
+    ),
+    hasUnsafeWindow: probe(
+      () => typeof unsafeWindow !== "undefined" && unsafeWindow !== undefined,
+      false,
+    ),
     windowClose: probeWindowClose(),
   };
 };
@@ -191,14 +226,11 @@ export const detectGmSurface = (): GmSurface => {
  * do not). There is no way to distinguish "granted" from "will silently no-op"
  * ahead of time, so we only report whether the function is callable at all.
  */
-const probeWindowClose = (): (() => void) | null => {
-  try {
+const probeWindowClose = (): (() => void) | null =>
+  probe(() => {
     const fn: unknown = globalThis.close;
     return typeof fn === "function" ? () => globalThis.close() : null;
-  } catch {
-    return null;
-  }
-};
+  }, null);
 
 // ---------------------------------------------------------------------------
 // GM_info

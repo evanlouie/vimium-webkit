@@ -7,9 +7,19 @@
  *    behaviour may branch on it.
  * 2. **Every `false` has a defined behaviour**, and where that behaviour is
  *    user-visible it must produce a HUD message on first attempt.
+ * 3. **No probe may throw.** Reading a global is not safe in a userscript (see
+ *    `platform/ambient.ts`), and this module runs before anything else in
+ *    Stage 1 — an exception here costs the whole boot rather than one
+ *    capability.
  */
 
 import { detectGmSurface, type GmSurface, readManagerIdentity } from "./gm.ts";
+import {
+  clipboardReader,
+  clipboardWriter,
+  probe,
+  userAgent,
+} from "./ambient.ts";
 import { hasNativeIdleCallback } from "./scheduler.ts";
 
 export type ManagerName =
@@ -100,32 +110,33 @@ const detectWorld = (
   return "unknown";
 };
 
-const supportsAdoptedStyleSheets = (): boolean => {
-  try {
+/**
+ * Every probe below is wrapped in `probe`, which turns a throw into "absent".
+ *
+ * That is not defensive padding: a userscript does not own its globals, and
+ * this module runs first in Stage 1, so one hostile accessor would cost the
+ * whole boot rather than one capability. See `platform/ambient.ts`.
+ */
+const supportsAdoptedStyleSheets = (): boolean =>
+  probe(() => {
     if (typeof CSSStyleSheet !== "function") return false;
     const sheet = new CSSStyleSheet();
     sheet.replaceSync(":host{color:inherit}");
     // Writability of `adoptedStyleSheets` is the part that actually varies;
     // Safari 16.4 / Chrome 111 / Firefox 101 are the floors.
-    const probe = document.createElement("div").attachShadow({
+    const probeRoot = document.createElement("div").attachShadow({
       mode: "closed",
     });
-    probe.adoptedStyleSheets = [sheet];
-    return probe.adoptedStyleSheets.length === 1;
-  } catch {
-    return false;
-  }
-};
+    probeRoot.adoptedStyleSheets = [sheet];
+    return probeRoot.adoptedStyleSheets.length === 1;
+  }, false);
 
-const supportsSelectionModify = (): boolean => {
-  try {
+const supportsSelectionModify = (): boolean =>
+  probe(() => {
     const selection = globalThis.getSelection();
     return selection !== null &&
       typeof (selection as { modify?: unknown }).modify === "function";
-  } catch {
-    return false;
-  }
-};
+  }, false);
 
 /**
  * Are we on WebKit?
@@ -135,7 +146,7 @@ const supportsSelectionModify = (): boolean => {
  * feature-detectable proxy for "this engine reserves ⌘T", hence the sniff.
  */
 const detectWebKit = (): boolean => {
-  const ua = navigator.userAgent;
+  const ua = userAgent();
   const isAppleWebKit = ua.includes("AppleWebKit");
   const isBlink = ua.includes("Chrome/") || ua.includes("Chromium/") ||
     ua.includes("Edg/");
@@ -160,8 +171,6 @@ export const probeCapabilities = (
     ? "localstorage-fallback"
     : "memory";
 
-  const clipboard: Clipboard | undefined = navigator.clipboard;
-
   return {
     manager,
     managerVersion: identity.handlerVersion,
@@ -184,38 +193,56 @@ export const probeCapabilities = (
     windowClose: surface.windowClose !== null,
 
     adoptedStyleSheets: supportsAdoptedStyleSheets(),
-    constructableStyleSheets: typeof CSSStyleSheet === "function",
-    checkVisibility: typeof Element.prototype.checkVisibility === "function",
-    composedRanges: typeof (
-      Selection.prototype as { getComposedRanges?: unknown }
-    ).getComposedRanges === "function",
-    caretPositionFromPoint:
-      typeof (document as { caretPositionFromPoint?: unknown })
-        .caretPositionFromPoint === "function",
-    caretRangeFromPoint: typeof (document as { caretRangeFromPoint?: unknown })
-      .caretRangeFromPoint ===
-      "function",
+    constructableStyleSheets: probe(
+      () => typeof CSSStyleSheet === "function",
+      false,
+    ),
+    checkVisibility: probe(
+      () => typeof Element.prototype.checkVisibility === "function",
+      false,
+    ),
+    composedRanges: probe(
+      () =>
+        typeof (Selection.prototype as { getComposedRanges?: unknown })
+          .getComposedRanges === "function",
+      false,
+    ),
+    caretPositionFromPoint: probe(
+      () =>
+        typeof (document as { caretPositionFromPoint?: unknown })
+          .caretPositionFromPoint === "function",
+      false,
+    ),
+    caretRangeFromPoint: probe(
+      () =>
+        typeof (document as { caretRangeFromPoint?: unknown })
+          .caretRangeFromPoint === "function",
+      false,
+    ),
     selectionModify: supportsSelectionModify(),
-    clipboardWrite: typeof clipboard?.writeText === "function",
-    clipboardRead: typeof clipboard?.readText === "function",
-    idleCallback: hasNativeIdleCallback(),
-    visualViewport: typeof globalThis.visualViewport === "object" &&
-      globalThis.visualViewport !== null,
-    secureContext: globalThis.isSecureContext === true,
+    // The same accessors the clipboard module will actually call, so the
+    // capability and the feature cannot disagree about what exists.
+    clipboardWrite: clipboardWriter() !== null,
+    clipboardRead: clipboardReader() !== null,
+    idleCallback: probe(() => hasNativeIdleCallback(), false),
+    visualViewport: probe(
+      () =>
+        typeof globalThis.visualViewport === "object" &&
+        globalThis.visualViewport !== null,
+      false,
+    ),
+    secureContext: probe(() => globalThis.isSecureContext === true, false),
     webkitLike: detectWebKit(),
   };
 };
 
-const hasWorkingLocalStorage = (): boolean => {
-  try {
+const hasWorkingLocalStorage = (): boolean =>
+  probe(() => {
     const key = "__vimium_webkit_probe__";
     globalThis.localStorage.setItem(key, "1");
     globalThis.localStorage.removeItem(key);
     return true;
-  } catch {
-    return false;
-  }
-};
+  }, false);
 
 /**
  * Warnings the user needs to see once per session, in priority order.

@@ -61,7 +61,7 @@ import { createOmnibar } from "~/features/omnibar/index.ts";
 import { createFrameLink } from "~/frames/index.ts";
 
 import { watchLifecycle } from "./lifecycle.ts";
-import { type Stage0, wakeSubframes } from "./stage0.ts";
+import { isTopFrame, type Stage0, wakeSubframes } from "./stage0.ts";
 
 export interface Stage1 {
   readonly app: AppContext;
@@ -114,7 +114,7 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
     );
   });
 
-  const isTop = globalThis.top === globalThis.self;
+  const isTop = isTopFrame();
   const exclusions = () => new ExclusionSet(settings.exclusionRules);
 
   // Declared before `app` so features can close over it; assigned immediately

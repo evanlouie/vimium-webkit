@@ -37,6 +37,45 @@ const MAX_BUFFERED_KEYS = 16;
 /** Message a top frame sends to wake a subframe that is still at Stage 0. */
 export const WAKE_MESSAGE = "vimium-webkit:wake";
 
+/**
+ * Is this realm one we can actually serve?
+ *
+ * A userscript does not own its globals. A sandboxing manager can hand us a
+ * proxied `window`, an extension can replace `navigator` with an accessor, and
+ * either can make a plain read *throw* rather than return `undefined` — which
+ * is why this is a `try` and not a pair of `typeof` guards. Stage 0 runs at
+ * `document-start` in every frame, so an exception escaping here is an
+ * exception thrown into the page: the one failure mode this project rules out
+ * unconditionally (G3).
+ */
+export const isLiveRealm = (): boolean => {
+  try {
+    return typeof navigator !== "undefined" && typeof document !== "undefined";
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Are we the top frame?
+ *
+ * The obvious spelling, `top === self`, is a trap: in any realm that hides or
+ * has torn down those bindings it reads `undefined === undefined` and promotes
+ * every frame to "top", which is how a frame we cannot serve ends up scheduling
+ * the idle wake-up and dragging Stage 1 in behind it. Demanding a real object
+ * costs nothing and cannot be satisfied by absence.
+ */
+export const isTopFrame = (): boolean => {
+  if (!isLiveRealm()) return false;
+  try {
+    const scope = globalThis as { top?: unknown; self?: unknown };
+    const top = scope.top;
+    return typeof top === "object" && top !== null && top === scope.self;
+  } catch {
+    return false;
+  }
+};
+
 export type Stage0KeyHandler = (event: KeyboardEvent) => void;
 
 export type ActivationReason = "keydown" | "wake" | "idle";
@@ -139,7 +178,7 @@ class Stage0Impl implements Stage0 {
     // The top frame warms up on its own so the first keystroke feels instant;
     // subframes stay at Stage 0 until a key lands in them or the coordinator
     // wakes them for a hint round (§5.2: "do not build UI in Stage 0").
-    if (globalThis.top === globalThis.self) {
+    if (isTopFrame()) {
       this.#idleTimer = setTimeout(() => {
         this.#idleTimer = null;
         this.#activate("idle");
@@ -171,6 +210,9 @@ class Stage0Impl implements Stage0 {
       clearTimeout(this.#idleTimer);
       this.#idleTimer = null;
     }
+    // The realm may have gone away since we booted — a frame removed while a
+    // timer was pending. Nothing Stage 1 builds could be seen or used there.
+    if (!isLiveRealm()) return;
     this.#options.onActivate(reason);
   }
 
@@ -195,13 +237,17 @@ class Stage0Impl implements Stage0 {
 }
 
 /**
- * Install Stage 0, or return `null` if this realm already has it.
+ * Install Stage 0, or return `null` if there is nothing to install into.
+ *
+ * `null` means either that this realm already has an instance, or that it is
+ * one we cannot serve at all (see `isLiveRealm`).
  *
  * The guard is a `Symbol.for` on the global rather than a property name: it
  * survives bundling, cannot collide with page state, and is stable across our
  * own versions if a user ends up with two copies installed.
  */
 export const bootStage0 = (options: Stage0Options): Stage0 | null => {
+  if (!isLiveRealm()) return null;
   const scope = globalThis as unknown as GuardedGlobal;
   if (scope[GUARD] !== undefined) return null;
   const stage0 = new Stage0Impl(options);

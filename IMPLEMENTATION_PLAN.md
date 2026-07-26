@@ -1155,6 +1155,10 @@ Deno, matching upstream Vimium's choice and the project's conventions.
    lint rule, not convention.
 7. Every command in the registry has a tier annotation and, for Tier C, a
    user-facing explanation string.
+8. Every read of `navigator`/`unsafeWindow` goes through `platform/ambient.ts`,
+   which wraps it in a `try`. These globals belong to whoever got there first:
+   an accessor installed by the page, an extension, or a sandboxing manager can
+   throw on read, and both `typeof` and `?.` perform the read.
 
 ---
 

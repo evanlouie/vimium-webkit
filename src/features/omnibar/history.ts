@@ -25,6 +25,7 @@
  */
 
 import type { AppContext } from "~/core/context.ts";
+import { storageManager } from "~/platform/ambient.ts";
 import type { HistoryIndex, Visit } from "~/settings/schema.ts";
 
 // ---------------------------------------------------------------------------
@@ -160,9 +161,10 @@ export const detectPrivateBrowsing = async (): Promise<PrivacyProbe> => {
     return "storage-blocked";
   }
 
-  const storage: StorageManager | undefined = navigator.storage;
-  if (typeof storage?.estimate === "function") {
+  const storage = storageManager();
+  if (storage !== null) {
     try {
+      if (typeof storage.estimate !== "function") return "clear";
       const estimate = await storage.estimate();
       const quota = estimate.quota;
       if (

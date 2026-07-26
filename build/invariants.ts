@@ -40,6 +40,28 @@ const STYLE_ELEMENT_FILES: ReadonlySet<string> = new Set([
   "src/ui/root.ts",
 ]);
 
+/**
+ * Files allowed to name a global that someone else can replace.
+ *
+ * A page, an extension, or a sandboxing manager can swap `navigator` (or
+ * `unsafeWindow`) for an accessor, and an accessor can *throw* where a missing
+ * API would merely be `undefined` — which is how a Safari user lost the whole
+ * of Stage 1 to a `userAgent` getter. `typeof` and `?.` both perform the read,
+ * so neither helps; only a `try` does.
+ *
+ * Everywhere else goes through `platform/ambient.ts`. The exemptions:
+ * `ambient.ts` itself; `boot/stage0.ts`, which may not import anything (§5.2)
+ * and so carries its own `try`; `platform/gm.ts`, the manager chokepoint, which
+ * probes each binding individually; and `platform/gm-api.ts`, which only
+ * `declare`s these names for the type checker and emits nothing.
+ */
+const AMBIENT_GLOBAL_FILES: ReadonlySet<string> = new Set([
+  "src/platform/ambient.ts",
+  "src/boot/stage0.ts",
+  "src/platform/gm.ts",
+  "src/platform/gm-api.ts",
+]);
+
 const sourceFiles = async (root: string): Promise<string[]> => {
   const out: string[] = [];
   for await (
@@ -185,6 +207,21 @@ export const checkInvariants = async (
           file: rel,
           line: hit.line,
           message: `route this through platform/gm.ts: ${hit.text}`,
+        });
+      }
+    }
+
+    // 8. Globals a page or manager can replace are read through one guarded
+    //    accessor, never inline. See `AMBIENT_GLOBAL_FILES` for why.
+    if (!AMBIENT_GLOBAL_FILES.has(rel)) {
+      for (
+        const hit of scan(contents, /(?<![\w$.])(navigator|unsafeWindow)\b/g)
+      ) {
+        violations.push({
+          rule: "ambient-globals",
+          file: rel,
+          line: hit.line,
+          message: `read this through platform/ambient.ts: ${hit.text}`,
         });
       }
     }

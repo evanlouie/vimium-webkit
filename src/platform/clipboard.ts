@@ -11,6 +11,7 @@
  */
 
 import { err, ok, type Result } from "neverthrow";
+import { clipboardReader, clipboardWriter } from "./ambient.ts";
 import { type GmSurface, setClipboard } from "./gm.ts";
 import { withDeadline } from "./scheduler.ts";
 
@@ -115,10 +116,10 @@ export const writeClipboard = (
     return err(clipboardError("empty", "nothing to copy"));
   }
 
-  const asyncWrite = navigator.clipboard?.writeText;
-  if (typeof asyncWrite === "function") {
+  const asyncWrite = clipboardWriter();
+  if (asyncWrite !== null) {
     // Bound and invoked immediately — no `await` may intervene.
-    const promise = asyncWrite.call(navigator.clipboard, text);
+    const promise = asyncWrite(text);
     return ok({
       method: "async-clipboard",
       settled: promise
@@ -171,8 +172,8 @@ export const CLIPBOARD_READ_DEADLINE_MS = 250;
 export const readClipboard = async (): Promise<
   Result<string, ClipboardError>
 > => {
-  const read = navigator.clipboard?.readText;
-  if (typeof read !== "function") {
+  const read = clipboardReader();
+  if (read === null) {
     return err(
       clipboardError(
         "unavailable",
@@ -181,7 +182,7 @@ export const readClipboard = async (): Promise<
     );
   }
 
-  const attempt = read.call(navigator.clipboard)
+  const attempt = read()
     .then<Result<string, ClipboardError>>((text) => ok(text))
     .catch((cause: unknown) =>
       err(

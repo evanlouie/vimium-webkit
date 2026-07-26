@@ -237,6 +237,10 @@ project could quietly stop working on WebKit:
 6. Every `GM_*` / `GM.*` reference goes through `src/platform/gm.ts`.
 7. Every command carries a tier, and every Tier C command carries a user-facing
    explanation.
+8. Every read of `navigator` or `unsafeWindow` goes through
+   `src/platform/ambient.ts`. A page, an extension, or a sandboxing manager can
+   replace a global with an accessor that _throws_, and neither a `typeof` guard
+   nor `?.` survives that — both perform the read.
 
 ### Architecture
 
