@@ -8,53 +8,22 @@ import {
 } from "~/platform/ambient.ts";
 import { detectGmSurface, type GmSurface } from "~/platform/gm.ts";
 import { writeClipboard } from "~/platform/clipboard.ts";
+import {
+  type GlobalScope,
+  poisonGlobals,
+  withGlobals,
+} from "./support/globals.ts";
 
 const hostile = (): never => {
   throw new TypeError("undefined is not an object (evaluating 'x')");
 };
 
 /** Install accessors that throw on read, and undo it afterwards. */
-const poison = (...names: readonly string[]): { restore(): void } => {
-  const saved = names.map(
-    (name) =>
-      [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const,
-  );
-  for (const name of names) {
-    Object.defineProperty(globalThis, name, {
-      configurable: true,
-      get: hostile,
-    });
-  }
-  return {
-    restore: () => {
-      for (const [name, descriptor] of saved) {
-        if (descriptor === undefined) {
-          Reflect.deleteProperty(globalThis, name);
-        } else {
-          Object.defineProperty(globalThis, name, descriptor);
-        }
-      }
-    },
-  };
-};
+const poison = (...names: readonly string[]): GlobalScope =>
+  poisonGlobals(...names);
 
-const define = (name: string, value: unknown): { restore(): void } => {
-  const saved = Object.getOwnPropertyDescriptor(globalThis, name);
-  Object.defineProperty(globalThis, name, {
-    configurable: true,
-    writable: true,
-    value,
-  });
-  return {
-    restore: () => {
-      if (saved === undefined) {
-        Reflect.deleteProperty(globalThis, name);
-      } else {
-        Object.defineProperty(globalThis, name, saved);
-      }
-    },
-  };
-};
+const define = (name: string, value: unknown): GlobalScope =>
+  withGlobals({ [name]: value });
 
 Deno.test("probe answers with the fallback instead of throwing", () => {
   assertEquals(probe(() => "read", "fallback"), "read");

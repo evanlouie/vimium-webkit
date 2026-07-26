@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# A force-push should cancel the run it superseded; nothing here is a
+# deployment, so there is no reason to finish the old one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DENO_VERSION: v2.x
+
+jobs:
+  # The cheap gates, once. Splitting them out means a formatting slip does not
+  # cost three browser installs to discover.
+  static:
+    name: fmt / lint / check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+      - run: deno task fmt:check
+      - run: deno task lint
+      - run: deno task check
+      - run: deno task check:e2e
+
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+      - run: deno task test
+
+  build:
+    name: build + invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+      - run: deno task build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: userscript
+          path: dist/
+          if-no-files-found: error
+
+  # One job per engine. The suite's whole purpose is cross-engine behaviour, so
+  # a matrix that stops at the first failure would hide exactly what it exists
+  # to find.
+  e2e:
+    name: e2e (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    needs: [static, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [webkit, chromium, firefox]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+
+      # Playwright pins its browser revisions to the npm package version, so
+      # keying the cache on the lockfile is exact rather than approximate.
+      - name: Cache Playwright browsers
+        id: browser-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('deno.lock') }}
+
+      - name: Install browsers
+        run: >-
+          deno run -A --node-modules-dir=auto npm:@playwright/test install
+          --with-deps ${{ matrix.project }}
+
+      - run: deno task test:e2e --project=${{ matrix.project }}
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-results-${{ matrix.project }}
+          path: test-results/
+          if-no-files-found: ignore

@@ -8,23 +8,28 @@
 
 export const FIXTURE_HOST = "127.0.0.1";
 
-/** The origin the fixtures are served from. */
-export const PRIMARY_PORT = 8787;
-
 /**
- * A second port on the same host.
+ * The ports themselves live in `ports.ts`.
  *
- * Same host, different port is a different *origin*, which is all the
- * cross-origin frame fixtures need: `postMessage`, `MessageChannel` transfer,
- * and `document.domain` all behave exactly as they do across hostnames.
+ * They are allocated from the ephemeral range per run rather than hard-coded,
+ * so the suite can never adopt a foreign server that happens to answer on a
+ * well-known port. Two ports on the same host are two different *origins*,
+ * which is all the cross-origin frame fixtures need: `postMessage`,
+ * `MessageChannel` transfer, and `document.domain` all behave exactly as they
+ * do across hostnames.
  */
-export const SECONDARY_PORT = 8788;
-
-export const PRIMARY_ORIGIN = `http://${FIXTURE_HOST}:${PRIMARY_PORT}`;
-export const SECONDARY_ORIGIN = `http://${FIXTURE_HOST}:${SECONDARY_PORT}`;
 
 /** Cheap liveness endpoint for Playwright's `webServer.url`. */
 export const READY_PATH = "/__ready";
+
+/**
+ * What `READY_PATH` answers with.
+ *
+ * Playwright's `webServer` readiness probe only checks that *something*
+ * responds. A token lets `globalSetup` assert the responder is the fixture
+ * server rather than an unrelated process (TST-09).
+ */
+export const READY_TOKEN = "vimium-webkit-fixtures";
 
 /**
  * Token substituted into `.html` fixtures by the server.

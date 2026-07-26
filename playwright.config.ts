@@ -11,9 +11,16 @@
  */
 
 import { defineConfig, devices } from "@playwright/test";
-import { PRIMARY_ORIGIN, READY_PATH } from "./test/e2e/harness/config.ts";
+import { READY_PATH } from "./test/e2e/harness/config.ts";
+import { primaryOrigin } from "./test/e2e/harness/ports.ts";
 
-const isCi = Deno.env.get("CI") !== undefined;
+// `!!` rather than a presence check: `CI=` (empty) is how a shell disables a
+// variable it cannot unset, and it should not enable the CI-only gates.
+const isCi = !!Deno.env.get("CI");
+
+// Resolving here — at config load, before any worker starts — is what publishes
+// the port pair into the environment that workers and the server inherit.
+const origin = primaryOrigin();
 
 export default defineConfig({
   testDir: "./test/e2e",
@@ -22,7 +29,9 @@ export default defineConfig({
 
   fullyParallel: true,
   forbidOnly: isCi,
-  retries: isCi ? 1 : 0,
+  // No retries anywhere. A retry turns a flake into a pass, and this suite
+  // synchronises on real signals rather than sleeps, so a failure is a failure.
+  retries: 0,
   // Hint detection on `link-dense.html` is deliberately heavy; the default
   // 30 s is not enough headroom on a cold WebKit build.
   timeout: 60_000,
@@ -33,7 +42,7 @@ export default defineConfig({
   globalSetup: "./test/e2e/harness/global-setup.ts",
 
   use: {
-    baseURL: PRIMARY_ORIGIN,
+    baseURL: origin,
     trace: isCi ? "retain-on-failure" : "off",
     screenshot: "only-on-failure",
     video: "off",
@@ -69,8 +78,10 @@ export default defineConfig({
   webServer: {
     // One process, two ports: the cross-origin fixtures need a second origin.
     command: "deno run -A test/e2e/harness/server.ts",
-    url: `${PRIMARY_ORIGIN}${READY_PATH}`,
-    reuseExistingServer: !isCi,
+    url: `${origin}${READY_PATH}`,
+    // Ports are unique per run, so there is nothing legitimate to reuse — and
+    // reuse is precisely how a foreign server gets adopted (TST-09).
+    reuseExistingServer: false,
     stdout: "ignore",
     stderr: "pipe",
     timeout: 30_000,

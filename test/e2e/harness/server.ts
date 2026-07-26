@@ -1,7 +1,8 @@
 /**
  * The fixture server.
  *
- * Two ports, one document root. `file://` would have been simpler, but
+ * Two ports, one document root, both allocated at run time (`ports.ts`).
+ * `file://` would have been simpler, but
  * `strict-csp.html` needs a real `Content-Security-Policy` *response header*
  * (a `<meta http-equiv>` is not equivalent — it cannot carry a policy that is
  * in force before the first byte of the document is parsed, which is exactly
@@ -15,14 +16,13 @@
 import {
   FIXTURE_DIR,
   FIXTURE_HOST,
-  PRIMARY_PORT,
   READY_PATH,
-  SECONDARY_ORIGIN,
+  READY_TOKEN,
   SECONDARY_ORIGIN_TOKEN,
-  SECONDARY_PORT,
   STRICT_CSP_FIXTURE,
   STRICT_CSP_HEADER,
 } from "./config.ts";
+import { fixturePorts, secondaryOrigin } from "./ports.ts";
 import { extensionOf, joinPath, normaliseSegments } from "./paths.ts";
 import { repoRoot } from "./root.ts";
 
@@ -67,7 +67,9 @@ const notFound = (pathname: string): Response =>
 const handle = async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
   if (url.pathname === READY_PATH) {
-    return new Response("ready\n", {
+    // Identifies *this* server, so an unrelated process answering on the same
+    // port cannot be mistaken for the fixture host.
+    return new Response(`${READY_TOKEN}\n`, {
       headers: { "content-type": "text/plain; charset=utf-8" },
     });
   }
@@ -87,7 +89,7 @@ const handle = async (request: Request): Promise<Response> => {
     // Fixtures reference the second origin symbolically so the port lives in
     // exactly one place (`harness/config.ts`).
     return new Response(
-      text.replaceAll(SECONDARY_ORIGIN_TOKEN, SECONDARY_ORIGIN),
+      text.replaceAll(SECONDARY_ORIGIN_TOKEN, secondaryOrigin()),
       { headers: headersFor(pathname, type) },
     );
   }
@@ -100,8 +102,9 @@ const handle = async (request: Request): Promise<Response> => {
   }
 };
 
-export const startFixtureServer = (): readonly Deno.HttpServer[] =>
-  [PRIMARY_PORT, SECONDARY_PORT].map((port) =>
+export const startFixtureServer = (): readonly Deno.HttpServer[] => {
+  const { primary, secondary } = fixturePorts();
+  return [primary, secondary].map((port) =>
     Deno.serve({
       hostname: FIXTURE_HOST,
       port,
@@ -110,5 +113,6 @@ export const startFixtureServer = (): readonly Deno.HttpServer[] =>
       },
     }, handle)
   );
+};
 
 if (import.meta.main) startFixtureServer();

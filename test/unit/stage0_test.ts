@@ -1,11 +1,14 @@
 import { assert, assertEquals, assertFalse } from "@std/assert";
 import { bootStage0, isLiveRealm, isTopFrame } from "~/boot/stage0.ts";
+import {
+  type GlobalScope,
+  poisonGlobals,
+  withGlobals,
+} from "./support/globals.ts";
 
 const GUARD = Symbol.for("vimium-webkit.stage0");
 
 const GLOBALS = ["navigator", "document", "self", "top"] as const;
-
-type GlobalName = (typeof GLOBALS)[number];
 
 type Realm = "live-top" | "absent" | "hostile";
 
@@ -17,13 +20,10 @@ type Realm = "live-top" | "absent" | "hostile";
  * anti-fingerprinting shim does. `typeof` does not survive it either — it
  * performs the same read.
  */
-const withRealm = (realm: Realm): { restore(): void } => {
-  const saved = GLOBALS.map(
-    (name) =>
-      [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const,
-  );
+const withRealm = (realm: Realm): GlobalScope => {
+  if (realm === "hostile") return poisonGlobals(...GLOBALS);
 
-  const values: Record<GlobalName, unknown> = realm === "live-top"
+  const values: Readonly<Record<string, unknown>> = realm === "live-top"
     ? {
       navigator: { userAgent: "test" },
       document: {},
@@ -37,37 +37,11 @@ const withRealm = (realm: Realm): { restore(): void } => {
       top: undefined,
     };
 
-  for (const name of GLOBALS) {
-    if (realm === "hostile") {
-      Object.defineProperty(globalThis, name, {
-        configurable: true,
-        get: () => {
-          throw new TypeError(
-            `undefined is not an object (evaluating '${name}')`,
-          );
-        },
-      });
-      continue;
-    }
-    Object.defineProperty(globalThis, name, {
-      value: values[name],
-      configurable: true,
-      writable: true,
-    });
-  }
-
-  return {
-    restore: () => {
-      Reflect.deleteProperty(globalThis, GUARD);
-      for (const [name, descriptor] of saved) {
-        if (descriptor === undefined) {
-          Reflect.deleteProperty(globalThis, name);
-        } else {
-          Object.defineProperty(globalThis, name, descriptor);
-        }
-      }
-    },
-  };
+  // The double-injection guard is realm state too: leaving it behind would
+  // make the *next* `bootStage0` return `null` for the wrong reason.
+  return withGlobals(values, () => {
+    Reflect.deleteProperty(globalThis, GUARD);
+  });
 };
 
 Deno.test("stage0 installs in a live realm", () => {

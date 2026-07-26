@@ -1,24 +1,9 @@
 import { assert, assertEquals, assertFalse } from "@std/assert";
 import { probeCapabilities } from "~/platform/capabilities.ts";
+import { type GlobalScope, withDescriptors } from "./support/globals.ts";
 
-const withNavigator = (
-  descriptor: PropertyDescriptor,
-): { restore(): void } => {
-  const saved = Object.getOwnPropertyDescriptor(globalThis, "navigator");
-  Object.defineProperty(globalThis, "navigator", {
-    configurable: true,
-    ...descriptor,
-  });
-  return {
-    restore: () => {
-      if (saved === undefined) {
-        Reflect.deleteProperty(globalThis, "navigator");
-      } else {
-        Object.defineProperty(globalThis, "navigator", saved);
-      }
-    },
-  };
-};
+const withNavigator = (descriptor: PropertyDescriptor): GlobalScope =>
+  withDescriptors({ navigator: descriptor });
 
 const throwing = (): never => {
   // The shape reported from Safari, verbatim.
