@@ -64,11 +64,14 @@ records the pages you visit so the omnibar can rank them. It:
 
 ### If your manager has no storage
 
-Some managers expose no value store. The script then falls back to
-`localStorage`, and says so in the settings dialog and in a one-time warning —
-which matters, because Safari erases script-writable storage after seven days
-without a visit to a site. Where even that is unavailable, settings last only
-until the page closes.
+Some managers expose no value store. The script then keeps your settings in
+memory only, and says so in the settings dialog and in a one-time warning. They
+last until the page closes.
+
+The script does **not** fall back to `localStorage`. The page owns that store,
+so your settings, your marks, your history — and the credential that admits a
+frame to the cross-frame session — would be readable and writable by every
+script on the site.
 
 ## What crosses a frame boundary
 
@@ -76,6 +79,11 @@ The script runs in every frame and coordinates them so that a hint in an iframe
 can be typed from the top of the page. Over that channel travel: frame
 identifiers, hint labels, hint indices, and the enabled/disabled verdict for the
 page.
+
+Every message on that channel is encrypted and authenticated. The two frames
+derive the key from a credential that only the value store of your userscript
+manager holds, so a page that takes a copy of the channel reads nothing and can
+send nothing.
 
 Your settings do **not**. Neither do the contents of text fields: a hint's label
 is derived from an element's text, its `aria-label`, its `<label>`, or its
