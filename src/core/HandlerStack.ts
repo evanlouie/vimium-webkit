@@ -68,7 +68,21 @@ export type HandlerEventName = keyof HandlerEventMap;
  * the stored handler needs nothing when the key path runs it.
  */
 export type Handler<R = never> =
-  & { readonly name: string }
+  & {
+    readonly name: string;
+    /**
+     * Clean up after a body of this handler failed.
+     *
+     * The stack removes the frame first, and then calls this. The frame is
+     * usually one part of something larger — a mode holds an indicator, a
+     * singleton group, an overlay and its exit bodies — and only the owner can
+     * release the rest. This body must not suspend. See `ARCHITECTURE.md`
+     * section 3.
+     */
+    readonly onDefect?: (
+      cause: Cause.Cause<never>,
+    ) => Effect.Effect<void, never, R>;
+  }
   & {
     readonly [K in HandlerEventName]?: (
       event: HandlerEventMap[K],
@@ -153,11 +167,14 @@ export class HandlerStack extends Context.Service<HandlerStack, {
             if (key === "name") continue;
             const body = (handler as Record<string, unknown>)[key];
             if (typeof body !== "function") continue;
+            // Every other member is a body that takes one argument: an event,
+            // or the cause for `onDefect`. The argument passes through, and
+            // only the services are added.
             const run = body as (
-              event: Event,
-            ) => Effect.Effect<HandlerResult, never, R>;
-            bound[key] = (event: Event) =>
-              Effect.provideContext(run(event), services);
+              argument: unknown,
+            ) => Effect.Effect<unknown, never, R>;
+            bound[key] = (argument: unknown) =>
+              Effect.provideContext(run(argument), services);
           }
           return bound as unknown as BoundHandler;
         });
@@ -237,12 +254,24 @@ export class HandlerStack extends Context.Service<HandlerStack, {
               result = outcome.value;
             } else {
               // A handler that fails must not block the key path for the whole
-              // page. Drop the frame and continue.
+              // page. Drop the frame, tell its owner, and continue. The owner
+              // holds everything else that belongs to the frame.
               yield* Effect.logError(
                 `the "${entry.handler.name}" handler failed during ${name}`,
                 Cause.pretty(outcome.cause),
               );
               yield* remove(entry.id);
+              const onDefect = entry.handler.onDefect;
+              if (onDefect !== undefined) {
+                yield* Effect.catchCause(
+                  onDefect(outcome.cause),
+                  (cause) =>
+                    Effect.logError(
+                      `the owner of "${entry.handler.name}" failed to clean up`,
+                      Cause.pretty(cause),
+                    ),
+                );
+              }
               result = CONTINUE_BUBBLING;
             }
 
