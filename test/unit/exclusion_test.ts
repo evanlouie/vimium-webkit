@@ -106,6 +106,55 @@ describe("Exclusion", () => {
       assert.isTrue(Option.isNone(compilePattern(`/${"a".repeat(2000)}/`)));
     }));
 
+  it.effect("drops a raw expression that can backtrack", () =>
+    Effect.sync(() => {
+      // The page chooses the URL. A raw expression with this shape turns one
+      // crafted URL into a frozen startup, and the 4,096-character limit on
+      // the URL does not help: `(a+)+$` needs minutes against forty
+      // characters. Such a rule is dropped, and the user keeps every other
+      // rule.
+      const bombs = [
+        "/(a+)+$/",
+        "/(a|a)*$/",
+        "/https://(x|x)+\\.test/",
+        "/.*.*x/",
+        "/(\\w+\\s?)*$/",
+      ];
+      for (const pattern of bombs) {
+        assert.isTrue(
+          Option.isNone(compilePattern(pattern)),
+          `${pattern} compiled`,
+        );
+        assert.isTrue(
+          Option.isNone(patternToRegExp(pattern)),
+          `${pattern} was still described`,
+        );
+      }
+    }));
+
+  it.effect("keeps a raw expression that matches in linear time", () =>
+    Effect.sync(() => {
+      // A hostile URL for each pattern, and a deadline for the whole set. A
+      // pattern that survives the check must stay bounded on any input.
+      const hostile = `https://${"a".repeat(3000)}!`;
+      const patterns = [
+        "/https://(mail|inbox)\\.google\\.com/.*/",
+        "/.*/",
+        "/https://[a-z]+\\.test/[0-9]*/",
+        "/^https?://example\\.com/.*$/",
+      ];
+
+      const started = performance.now();
+      for (const pattern of patterns) {
+        const compiled = compilePattern(pattern);
+        assert.isTrue(Option.isSome(compiled), `${pattern} was dropped`);
+        if (Option.isNone(compiled)) continue;
+        compiled.value(hostile);
+      }
+      const elapsed = performance.now() - started;
+      assert.isBelow(elapsed, 200, `the match took ${elapsed}ms`);
+    }));
+
   it.effect("refuses an absurdly long URL instead of scanning it", () =>
     Effect.sync(() => {
       assert.strictEqual(matches("/.*/", "https://example.com/"), true);
@@ -170,6 +219,7 @@ describe("Exclusion", () => {
     Effect.sync(() => {
       const set = makeExclusionSet(rules(
         { pattern: "/[unclosed/", passKeys: "" },
+        { pattern: "/(a+)+$/", passKeys: "" },
         { pattern: "https://app.test/*", passKeys: "j" },
       ));
       assert.strictEqual(set.size, 1);
