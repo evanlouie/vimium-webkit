@@ -133,9 +133,10 @@ const MAX_LINK_TEXT = 256;
 /**
  * The greatest counter that one link accepts.
  *
- * A counter that reaches this value ends the link. A page that draws hints
- * every second needs a year to get there, and a frame that sends a million
- * messages is broken in some other way.
+ * A counter that reaches this value makes the link go quiet: the sender stops,
+ * and the link stays open with no traffic. A page that draws hints every second
+ * needs 12 days to reach it, and a frame that sends a million messages has a
+ * defect of another kind.
  */
 export const MAX_SEAL_SEQUENCE = 1_000_000;
 
@@ -413,13 +414,15 @@ export type SealedMessage = typeof sealedSchema.Type;
  * clear text, so a derivation that used the same text would publish the key.
  * The prefix holds letters that a handshake identifier cannot hold, and the
  * schema accepts hexadecimal identifiers only, so the two texts can never be
- * the same.
+ * the same. The version is the version of the protocol, which is the number
+ * that `sealedAad` uses as well.
  */
 export const linkKeyPayload = (
   token: string,
   helloId: string,
   frameId: string,
-): string => `${PROTOCOL_MAGIC}/link/v1:${token}:${helloId}:${frameId}`;
+): string =>
+  `${PROTOCOL_MAGIC}/link/v${PROTOCOL_VERSION}:${token}:${helloId}:${frameId}`;
 
 /**
  * The associated data of one sealed message.
