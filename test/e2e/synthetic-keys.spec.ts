@@ -42,6 +42,24 @@ const dispatchKeys = (vw: Vimium, keys: readonly string[]): Promise<void> =>
     }
   }, keys);
 
+/** Dispatch one key, and say whether anything called `preventDefault`. */
+const dispatchKeyAndAsk = (vw: Vimium, key: string): Promise<boolean> =>
+  vw.page.evaluate((name: string) => {
+    const event = new KeyboardEvent("keydown", {
+      key: name,
+      code: `Key${name.toUpperCase()}`,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    globalThis.dispatchEvent(event);
+    return event.defaultPrevented;
+  }, key);
+
+/** How many overlay hosts this page has. One means that we started. */
+const overlayCount = (vw: Vimium): Promise<number> =>
+  vw.page.locator("vimium-webkit-overlay").count();
+
 test.describe("a synthetic keyboard event", () => {
   test("runs no command once the application is live", async ({ vw }) => {
     await vw.open("/scrollables.html");
@@ -69,5 +87,24 @@ test.describe("a synthetic keyboard event", () => {
     await vw.page.waitForTimeout(SETTLE_MS);
 
     expect((await vw.scrollOffsets()).y).toBe(0);
+  });
+
+  /**
+   * The guard is the outer check, and it has its own observable effect.
+   *
+   * The guard suppresses the key that starts the application, and then builds
+   * the whole runtime. A page must be able to do neither.
+   */
+  test("does not start the application on a cold page", async ({ vw }) => {
+    await vw.page.goto("/scrollables.html");
+
+    const prevented = await dispatchKeyAndAsk(vw, "j");
+    await vw.page.waitForTimeout(SETTLE_MS);
+
+    // The page keeps its own key: nothing called `preventDefault` on it.
+    expect(prevented).toBe(false);
+    // The overlay host is the visible proof that the application started. The
+    // top frame starts on its own 1200 ms after load, which is later than this.
+    expect(await overlayCount(vw)).toBe(0);
   });
 });
