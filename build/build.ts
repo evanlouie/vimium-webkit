@@ -11,7 +11,7 @@
  */
 
 import { watch } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import type { OutputChunk, RollupOutput } from "rollup";
 import { build as viteBuild } from "vite";
 import { defaultSettings } from "~/settings/schema.ts";
@@ -175,6 +175,11 @@ const main = async (): Promise<void> => {
     if (violations.length > 0) {
       console.error(`\n${violations.length} invariant violation(s):`);
       console.error(formatViolations(violations));
+      // Remove it. `test/e2e/harness/bundle.ts` decides whether to rebuild by
+      // mtime, so a rejected artefact left on disk is newer than every source
+      // file — and the next bare `playwright test` would run the whole suite
+      // against a bundle this build has already refused.
+      await rm(artefact, { force: true });
       return false;
     }
 
@@ -183,6 +188,7 @@ const main = async (): Promise<void> => {
     const boot = await verifyBundleBoots(artefact);
     if (!boot.ok) {
       console.error(`\nthe bundle does not boot: ${boot.error}`);
+      await rm(artefact, { force: true });
       return false;
     }
 

@@ -247,6 +247,15 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       const outcome = await runtime.runPromise(
         Effect.result(groups.settings.write(next)),
       );
+      // Adopt what was *stored*, not what was offered. The schema repairs a
+      // bad field rather than rejecting it, so the two differ, and this frame
+      // went on using the un-repaired value. The top frame happened to be
+      // corrected by the `pushSettings` round trip below; a subframe has no
+      // coordinator, so it kept the wrong value until the next refresh.
+      settings = groups.settings.current();
+      mappings = compile(settings, caps);
+      normalMode.recompiled();
+      ui.syncColorScheme();
       frames.pushSettings();
       return Result.isSuccess(outcome);
     },
@@ -257,6 +266,9 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       const outcome = await runtime.runPromise(
         Effect.result(groups.settings.write(settings)),
       );
+      settings = groups.settings.current();
+      mappings = compile(settings, caps);
+      normalMode.recompiled();
       return Result.isSuccess(outcome);
     },
   });

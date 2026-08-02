@@ -40,8 +40,10 @@ const IDLE_WINDOW_MS = 1_500;
  * tree about one run in three — which teaches everyone to re-run the suite,
  * and that is the end of the gate.
  *
- * Each is roughly 3× its measured idle value: loose enough to survive a busy
- * CI box, tight enough to catch the doubling this migration produced.
+ * Each is roughly 3–5× its measured idle value. That is loose: it will not
+ * catch a doubling, and it is not meant to — it is a tripwire for the order of
+ * magnitude, sized so it stays quiet on a loaded 2-vCPU CI runner. A gate that
+ * fails at random is a gate everyone learns to re-run.
  */
 const EVAL_FRAMES = 20;
 const EVAL_BUDGET_MS: Readonly<Record<string, number>> = {
@@ -55,7 +57,12 @@ test.describe("performance", () => {
     "the artefact stays affordable to evaluate in every frame",
     async ({ page }, testInfo) => {
       const source = readBundle();
-      const budget = EVAL_BUDGET_MS[testInfo.project.name] ?? 1_800;
+      const budget = EVAL_BUDGET_MS[testInfo.project.name];
+      // Rather than defaulting: an unknown project would otherwise be handed the
+      // loosest ceiling silently, which is how a new engine gets no gate at all.
+      if (budget === undefined) {
+        throw new Error(`no evaluation budget for ${testInfo.project.name}`);
+      }
 
       await page.setContent(
         `<!doctype html><html><body>${

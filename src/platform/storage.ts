@@ -120,6 +120,17 @@ const describeCause = (cause: unknown): string => {
 export type IssueListener = (issue: StorageError) => void;
 
 /**
+ * Internal signal: the hydration a joiner was waiting on did not finish.
+ *
+ * Never surfaces. `hydrate()` is declared as unable to fail, and its only
+ * handler catches this to start a fresh read.
+ */
+class HydrationAbandoned extends Schema.TaggedErrorClass<HydrationAbandoned>()(
+  "HydrationAbandoned",
+  {},
+) {}
+
+/**
  * The per-frame façade over a `ValueBackend`.
  *
  * Reads are cached in memory after the first hydration: on quoid every read is
@@ -210,7 +221,7 @@ export class ValueGroup<T> {
    * A permanent memo would answer that second call from the first read's cache
    * and the tab would never see another tab's write.
    */
-  #inFlight: Deferred.Deferred<T> | null = null;
+  #inFlight: Deferred.Deferred<T, HydrationAbandoned> | null = null;
   #pendingWrite: T | undefined;
   #unwatch: (() => void) | null = null;
 
@@ -282,6 +293,17 @@ export class ValueGroup<T> {
    */
   #outstanding = 0;
 
+  /**
+   * The highest epoch that actually reached the backend.
+   *
+   * The distinction the epoch alone cannot draw: `#epoch` says a mutation was
+   * *decided*, this says one *landed*. Standing aside because a later epoch
+   * exists is only safe once that later epoch has committed — otherwise a
+   * `reset()` defers to a write that then fails or is interrupted, and the
+   * value the user asked to erase stays on disk under a reported success.
+   */
+  #committed = 0;
+
   constructor(store: ValueStore, backend: ValueBackend, spec: GroupSpec<T>) {
     this.#store = store;
     this.#backend = backend;
@@ -313,9 +335,19 @@ export class ValueGroup<T> {
   hydrate(): Effect.Effect<T> {
     return Effect.gen({ self: this }, function*() {
       const existing = this.#inFlight;
-      if (existing !== null) return yield* Deferred.await(existing);
+      if (existing !== null) {
+        // A joiner whose leader was interrupted takes over rather than
+        // settling for the cache. It asked for a read; handing it whatever
+        // happened to be in memory answers a different question, and at boot
+        // that answer is the defaults.
+        return yield* Effect.catchTag(
+          Deferred.await(existing),
+          "HydrationAbandoned",
+          () => this.hydrate(),
+        );
+      }
 
-      const deferred = yield* Deferred.make<T>();
+      const deferred = yield* Deferred.make<T, HydrationAbandoned>();
       this.#inFlight = deferred;
       // `onExit` rather than a plain completion, so an interrupted hydration
       // still releases anyone waiting on it instead of parking them for good.
@@ -325,12 +357,13 @@ export class ValueGroup<T> {
           Effect.sync(() => {
             this.#inFlight = null;
           }).pipe(Effect.andThen(
-            // Joiners get a value even when the *first* caller was
-            // interrupted. Forwarding that exit would interrupt callers that
-            // were perfectly healthy, and `hydrate()` promises it cannot fail.
+            // Never forward the exit: an interrupt aimed at the leader would
+            // kill joiners that were perfectly healthy, and `hydrate()`
+            // promises it cannot fail. They are told the read was abandoned
+            // instead, and start their own.
             Exit.isSuccess(exit)
-              ? Deferred.done(deferred, exit)
-              : Deferred.succeed(deferred, this.current()),
+              ? Deferred.succeed(deferred, exit.value)
+              : Deferred.fail(deferred, new HydrationAbandoned()),
           )),
       );
     });
@@ -707,6 +740,12 @@ export class ValueGroup<T> {
             return Effect.mapError(
               this.#backend.set(this.#key, encoded),
               (cause) => this.#issue("backend", cause.detail, cause, "write"),
+            ).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  this.#committed = Math.max(this.#committed, epoch);
+                })
+              ),
             );
           }),
         ),
@@ -744,10 +783,21 @@ export class ValueGroup<T> {
             // a `write()` issued after this reset can reach the backend first
             // — and erasing it afterwards would discard a value its caller has
             // already been told was saved.
-            if (epoch !== this.#epoch) return Effect.succeed(defaults);
+            // Against what *committed*, not what was merely decided. A later
+            // write that has already landed should stop the erase, because its
+            // caller has been told it was saved. A later write that has only
+            // been issued should not, because it may never land — and this is
+            // the privacy control, where reporting an erase that did not
+            // happen is the one outcome it must never produce.
+            if (this.#committed > epoch) return Effect.succeed(defaults);
             return this.#backend.remove(this.#key).pipe(
               Effect.mapError((cause) =>
                 this.#issue("backend", cause.detail, cause, "write")
+              ),
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  this.#committed = Math.max(this.#committed, epoch);
+                })
               ),
               Effect.as(defaults),
             );
@@ -782,7 +832,10 @@ export class ValueGroup<T> {
       // asynchronous, so one already in flight when a local `reset()` or
       // `write()` happened is carrying a value this frame has since replaced —
       // and this was the only route into the cache with no invalidation on it.
-      this.#publish(this.#epoch, this.#decode(raw));
+      // A fresh epoch, not `this.#epoch`: passing the current value made the
+      // comparison in `#publish` a tautology, so a read already in the backend
+      // could still publish over a notification that arrived first.
+      this.#publish(++this.#epoch, this.#decode(raw));
     });
   }
 

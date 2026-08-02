@@ -429,7 +429,10 @@ test("a hydrate joiner is unaffected when the first caller is interrupted", asyn
   // `Deferred.done(deferred, exit)` used to forward an *interrupt* to every
   // joiner, so a healthy second caller died because the first was cancelled —
   // and `hydrate()` declares that it cannot fail.
-  const fake = fakeBackend(false);
+  // The read must actually suspend, or the interrupt lands after it has
+  // finished and the test proves nothing: with a synchronous fake, mutating
+  // this branch either way still passed.
+  const fake = gatedBackend();
   fake.map.set(
     "vimium-webkit:test",
     JSON.stringify({ schemaVersion: 2, data: { count: 1, label: "disk" } }),
@@ -439,7 +442,15 @@ test("a hydrate joiner is unaffected when the first caller is interrupted", asyn
   const value = await Effect.runPromise(Effect.gen(function*() {
     const first = yield* Effect.forkChild(group.hydrate());
     const joiner = yield* Effect.forkChild(group.hydrate());
+    yield* Effect.sleep(5);
     yield* Fiber.interrupt(first);
+    // Two releases: the leader's abandoned read, then the joiner's own.
+    yield* Effect.forkChild(
+      Effect.repeat(
+        Effect.sync(() => fake.gates.shift()?.()).pipe(Effect.delay(5)),
+        { times: 5 },
+      ),
+    );
     // Whatever happened to the first caller, the joiner still gets a value.
     return yield* Fiber.join(joiner);
   }));
@@ -683,4 +694,63 @@ test("an invalid value never reaches the cache", async () => {
   );
   assert(Result.isFailure(outcome));
   assertEquals(group.current(), defaults());
+});
+
+test("reset erases even when a later write never lands", async () => {
+  // `reset()` stood aside whenever a *later epoch existed* — but an epoch bump
+  // marks intent, not commitment. Order matters: the reset is issued first, a
+  // write is issued after it, and that write then fails. The reset saw a newer
+  // epoch, skipped its `remove` entirely, and reported success — on the
+  // privacy control, with the value still on disk.
+  const map = new Map<string, string>();
+  const gates: Array<() => void> = [];
+  let failWrites = false;
+  const backend: ValueBackend = {
+    kind: "gm-async",
+    get: (key) =>
+      Effect.promise(async () => {
+        await new Promise<void>((resolve) => gates.push(resolve));
+        return Option.fromNullishOr(map.get(key) ?? null);
+      }),
+    set: (key, value) =>
+      failWrites
+        ? Effect.fail(
+          new GmError({ reason: "failed", api: "setValue", detail: "nope" }),
+        )
+        : Effect.sync(() => {
+          map.set(key, value);
+        }),
+    remove: (key) =>
+      Effect.sync(() => {
+        map.delete(key);
+      }),
+    list: () => Effect.sync((): readonly string[] => [...map.keys()]),
+    watch: null,
+  };
+
+  const store = new ValueStore(backend);
+  const group = store.group(spec());
+  map.set(
+    "vimium-webkit:test",
+    JSON.stringify({ schemaVersion: 2, data: { count: 7, label: "secret" } }),
+  );
+
+  // A read holds the permit, so the reset and the write both queue behind it.
+  const reading = attempt(group.hydrate());
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const reset = attempt(group.reset());
+  failWrites = true;
+  const doomed = attempt(group.write({ count: 8, label: "newer" }));
+
+  gates.shift()?.();
+  await Promise.all([reading, reset, doomed]);
+
+  assert(Result.isSuccess(await reset));
+  assert(Result.isFailure(await doomed), "the write must have failed");
+  assertEquals(
+    map.get("vimium-webkit:test"),
+    undefined,
+    "a reset that reported success must have erased the key",
+  );
 });
