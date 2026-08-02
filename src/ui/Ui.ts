@@ -41,8 +41,10 @@
  */
 
 import {
+  Cause,
   Context,
   Effect,
+  Exit,
   FiberHandle,
   Layer,
   Option,
@@ -258,6 +260,16 @@ export const outOfDateHostProperties = (
  * action attaches the host again.
  */
 const REATTACH_LIMIT = 32;
+
+/**
+ * How long the host must stay attached before the count goes back to zero.
+ *
+ * The cap protects against a loop, and a loop happens inside one task. A
+ * single-page application that replaces `documentElement` on each route is not
+ * a loop, and a lifetime cap would take the guard away from it after 32
+ * routes. One quiet second ends the loop and gives the guard back.
+ */
+const REATTACH_RESET_MS = 1000;
 
 // ---------------------------------------------------------------------------
 // Exposure to assistive technology
@@ -622,6 +634,16 @@ export class Ui extends Context.Service<Ui, {
         // ---------------------------------------------------------------
 
         const reattachments = yield* Ref.make(0);
+        // One quiet second puts the count back to zero. A new reattachment
+        // interrupts the fiber that the one before it started.
+        const reattachReset = yield* FiberHandle.make<void, never>();
+
+        // The services of this layer, for the observer callback. The callback
+        // is an imperative caller, and `runSyncExitWith` is the bridge that
+        // `ARCHITECTURE.md` section 3 names. `platform/Dom.ts` uses the same
+        // helper for a listener.
+        const services = yield* Effect.context<never>();
+        const runGuard = Effect.runSyncExitWith(services);
 
         /**
          * Watch the two places from which the host can disappear.
@@ -648,7 +670,7 @@ export class Ui extends Context.Service<Ui, {
         yield* Effect.acquireRelease(
           dom.probeOr(() => {
             const observer = new MutationObserver(() => {
-              Effect.runSyncExit(Effect.gen(function*() {
+              const exit = runGuard(Effect.gen(function*() {
                 // A new `documentElement` is a different node, so the
                 // registration is renewed on each report.
                 yield* dom.probeOr(() => {
@@ -668,7 +690,18 @@ export class Ui extends Context.Service<Ui, {
                   return;
                 }
                 yield* ensureAttached;
+                yield* FiberHandle.run(
+                  reattachReset,
+                  Effect.andThen(
+                    Effect.sleep(REATTACH_RESET_MS),
+                    Ref.set(reattachments, 0),
+                  ),
+                );
               }));
+              // A defect inside the guard must not disappear. The overlay is
+              // gone at this moment, so a silent failure looks like a page
+              // that won.
+              if (Exit.isFailure(exit)) reportGuardFailure(exit.cause);
             });
             watch(observer);
             return Option.some(observer);
@@ -957,4 +990,18 @@ const FALLBACK_VIEWPORT: ViewportRect = {
   width: 0,
   height: 0,
   scale: 1,
+};
+
+/**
+ * Say that the removal guard failed.
+ *
+ * `console.error` and not a logger, for the same reason as in
+ * `platform/Dom.ts`: this runs inside a callback of the browser, where a
+ * throw would go nowhere and silence is the worse outcome.
+ */
+const reportGuardFailure = (cause: Cause.Cause<never>): void => {
+  console.error(
+    "[vimium-webkit] the overlay removal guard failed",
+    Cause.pretty(cause),
+  );
 };

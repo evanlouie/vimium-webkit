@@ -232,4 +232,34 @@ test.describe("the overlay host after a removal", () => {
     expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
       .toBeGreaterThan(300);
   });
+
+  test("guards a page that lives longer than the cap", async ({ vw, page }) => {
+    await vw.open("/hostile-overlay.html");
+
+    // The cap is 32, and it protects against a loop inside one task. A page
+    // that replaces its document element on each route is not a loop, so a
+    // count that only grew took the guard away from a long session. One quiet
+    // second puts the count back to zero.
+    const burst = async (): Promise<void> => {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        // oxlint-disable-next-line no-await-in-loop
+        await removeHost(page);
+        // oxlint-disable-next-line no-await-in-loop
+        await expect.poll(() => hostCount(page)).toBe(1);
+      }
+    };
+
+    await burst();
+    // Longer than the reset, so that the count goes back to zero.
+    await page.waitForTimeout(1500);
+    await burst();
+
+    // 40 removals, which is more than the cap. The guard still answers.
+    expect(await removeHost(page)).toBe(true);
+    await expect.poll(() => hostCount(page)).toBe(1);
+
+    await openHelp(page);
+    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
+      .toBeGreaterThan(300);
+  });
 });
