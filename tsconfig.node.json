@@ -26,6 +26,7 @@
     "types": [
       "node"
     ],
+    "baseUrl": ".",
     "paths": {
       "~/*": [
         "./src/*"
