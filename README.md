@@ -205,11 +205,14 @@ unmapAll            " start from nothing
 ```
 
 Settings are stored with your userscript manager wherever it offers a value
-store, which is durable. A manager that offers none leaves your settings in
-memory for the life of the page, and the script tells you so, in the settings
-dialog and in a one-time warning. The script never writes your settings, marks
-or history to `localStorage`: the page owns that store, so every script on the
-site could read and change them.
+store, which is durable. A manager that offers none leaves your settings, your
+marks and your history in memory for the life of the page, and the script tells
+you so, in the settings dialog and in a one-time warning. The frames of a page
+also stay apart on such a manager: link hints across frames and frame focus are
+off, and a frame does not learn that you excluded the page. The script never
+writes your settings, marks or history to `localStorage`: the page owns that
+store, so every script on the site could read and change them, and it could also
+read the credential that admits a frame to the cross-frame session.
 
 ### Every setting
 

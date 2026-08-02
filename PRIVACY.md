@@ -64,9 +64,15 @@ records the pages you visit so the omnibar can rank them. It:
 
 ### If your manager has no storage
 
-Some managers expose no value store. The script then keeps your settings in
-memory only, and says so in the settings dialog and in a one-time warning. They
-last until the page closes.
+Some managers expose no value store. The script then keeps your settings, your
+marks and your history in memory only, and says so in the settings dialog and in
+a one-time warning. They last until the page closes.
+
+The cross-frame session is off as well. The credential that admits a frame lives
+in the value store of the manager and nowhere else, so with no such store the
+frames of a page cannot form a session. Link hints across frames and frame focus
+stop working, and a frame inside the page does not learn that you excluded the
+page.
 
 The script does **not** fall back to `localStorage`. The page owns that store,
 so your settings, your marks, your history — and the credential that admits a
@@ -83,7 +89,8 @@ page.
 Every message on that channel is encrypted and authenticated. The two frames
 derive the key from a credential that only the value store of your userscript
 manager holds, so a page that takes a copy of the channel reads nothing and can
-send nothing.
+send nothing. Where the manager gives no value store there is no credential, and
+the channel does not exist at all: see "If your manager has no storage" above.
 
 Your settings do **not**. Neither do the contents of text fields: a hint's label
 is derived from an element's text, its `aria-label`, its `<label>`, or its
