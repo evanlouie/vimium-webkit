@@ -268,6 +268,20 @@ export class ValueGroup<T> {
    */
   #epoch = 0;
 
+  /**
+   * Mutations that have been decided but not yet committed.
+   *
+   * The epoch alone was not enough, and the reason is subtle: a bump marks
+   * *intent*, and the commit happens later. A read that starts after the bump
+   * therefore sees an unmoved epoch and believes itself current, even though a
+   * write is still on its way to the backend — so it publishes the value that
+   * write is replacing, and the next `update()` persists the reversion.
+   *
+   * Counting outstanding mutations closes that window: a read must not publish
+   * while any write or reset is in flight, whatever the epoch says.
+   */
+  #outstanding = 0;
+
   constructor(store: ValueStore, backend: ValueBackend, spec: GroupSpec<T>) {
     this.#store = store;
     this.#backend = backend;
@@ -364,8 +378,27 @@ export class ValueGroup<T> {
    * write would put the reverted value back on disk.
    */
   #publish(epoch: number, value: T): T {
+    // Three ways this read can be out of date: the epoch moved, a mutation is
+    // still in flight, or one is waiting in a debounce window. Only the first
+    // is visible in the epoch.
     if (epoch !== this.#epoch) return this.current();
+    if (this.#outstanding > 0) return this.current();
+    if (this.#pendingWrite !== undefined) return this.current();
     return this.#adopt(value);
+  }
+
+  /** Run a mutation, counting it as outstanding for its whole lifetime. */
+  #mutating<A, E>(effect: Effect.Effect<A, E>): Effect.Effect<A, E> {
+    return Effect.acquireUseRelease(
+      Effect.sync(() => {
+        this.#outstanding++;
+      }),
+      () => effect,
+      () =>
+        Effect.sync(() => {
+          this.#outstanding--;
+        }),
+    );
   }
 
   #decode(raw: string | undefined): T {
@@ -469,14 +502,33 @@ export class ValueGroup<T> {
    */
   write(value: T): Effect.Effect<void, StorageError> {
     return Effect.gen({ self: this }, function*() {
+      // Validated *before* it is cached, and the decoded value is what gets
+      // cached. Two faults came from doing this the other way round: an
+      // invalid value poisoned `current()` for the life of the frame even
+      // though it never reached storage, and where a schema *repairs* a field
+      // rather than rejecting it — which `field()` does for every setting —
+      // memory kept the bad value while disk got the repaired one, so the
+      // setting silently reverted on the next page load after the user was
+      // told it was saved.
+      const validated = decodeUnknownResult(this.#spec.schema)(value);
+      if (Result.isFailure(validated)) {
+        return yield* Effect.fail(this.#issue(
+          "invalid",
+          "refusing to persist a value that fails its own schema",
+          describeDecodeError(validated.failure),
+          "write",
+        ));
+      }
+      const accepted = validated.success;
+
       // A read already in the backend is now carrying an older value than the
       // one the user just produced; it must not publish over this.
       this.#epoch++;
-      this.#cached = value;
+      this.#cached = accepted;
       const debounce = this.#spec.writeDebounceMs ?? 0;
-      if (debounce <= 0) return yield* this.#flushValue(value);
+      if (debounce <= 0) return yield* this.#flushValue(accepted);
 
-      this.#pendingWrite = value;
+      this.#pendingWrite = accepted;
       if (this.#writeFiber !== null) yield* Fiber.interrupt(this.#writeFiber);
 
       // Shared: everyone waiting on this debounce window gets the outcome of
@@ -519,6 +571,11 @@ export class ValueGroup<T> {
 
       if (pending === undefined) {
         if (settlement !== null) yield* Deferred.succeed(settlement, undefined);
+        // Taking and releasing the permit waits for a commit that a debounce
+        // fiber has already started. Returning without it reported "flushed"
+        // with the value still in the backend — which is exactly the promise
+        // `dispose()` relies on before it closes the runtime.
+        yield* this.#backendLock.withPermits(1)(Effect.void);
         return;
       }
 
@@ -591,6 +648,10 @@ export class ValueGroup<T> {
             "the write was superseded by a reset",
             undefined,
             "write",
+            // As at the other two `cancelled` sites: the caller asked for this
+            // discard, so it is not an error to show beside the "erased"
+            // message that caused it.
+            { report: false },
           ),
         );
       }
@@ -626,27 +687,29 @@ export class ValueGroup<T> {
         );
       }
 
-      return this.#backendLock.withPermits(1)(
-        Effect.suspend(() => {
-          // Re-checked here, inside the permit and immediately before the
-          // backend call: by now a `reset()` may have erased the key, and
-          // writing this value would resurrect it.
-          if (epoch !== this.#epoch) {
-            return Effect.fail(
-              this.#issue(
-                "cancelled",
-                "the write was superseded before it reached storage",
-                undefined,
-                "write",
-                { report: false },
-              ),
+      return this.#mutating(
+        this.#backendLock.withPermits(1)(
+          Effect.suspend(() => {
+            // Re-checked here, inside the permit and immediately before the
+            // backend call: by now a `reset()` may have erased the key, and
+            // writing this value would resurrect it.
+            if (epoch !== this.#epoch) {
+              return Effect.fail(
+                this.#issue(
+                  "cancelled",
+                  "the write was superseded before it reached storage",
+                  undefined,
+                  "write",
+                  { report: false },
+                ),
+              );
+            }
+            return Effect.mapError(
+              this.#backend.set(this.#key, encoded),
+              (cause) => this.#issue("backend", cause.detail, cause, "write"),
             );
-          }
-          return Effect.mapError(
-            this.#backend.set(this.#key, encoded),
-            (cause) => this.#issue("backend", cause.detail, cause, "write"),
-          );
-        }),
+          }),
+        ),
       );
     });
   }
@@ -670,15 +733,25 @@ export class ValueGroup<T> {
 
       // Void every write issued before now, in flight or not. This is the
       // invalidation the lock alone could not express.
-      this.#epoch++;
+      const epoch = ++this.#epoch;
       const defaults = this.#spec.defaults();
       this.#adopt(defaults);
-      return yield* this.#backendLock.withPermits(1)(
-        this.#backend.remove(this.#key).pipe(
-          Effect.mapError((cause) =>
-            this.#issue("backend", cause.detail, cause, "write")
-          ),
-          Effect.as(defaults),
+      return yield* this.#mutating(
+        this.#backendLock.withPermits(1)(
+          Effect.suspend(() => {
+            // Re-checked inside the permit, as `#flushValue` does. The
+            // semaphore lets a fresh acquirer barge ahead of a queued one, so
+            // a `write()` issued after this reset can reach the backend first
+            // — and erasing it afterwards would discard a value its caller has
+            // already been told was saved.
+            if (epoch !== this.#epoch) return Effect.succeed(defaults);
+            return this.#backend.remove(this.#key).pipe(
+              Effect.mapError((cause) =>
+                this.#issue("backend", cause.detail, cause, "write")
+              ),
+              Effect.as(defaults),
+            );
+          }),
         ),
       );
     });
@@ -705,7 +778,11 @@ export class ValueGroup<T> {
   #ensureWatching(): void {
     if (this.#unwatch !== null || this.#backend.watch === null) return;
     this.#unwatch = this.#backend.watch(this.#key, (raw) => {
-      this.#adopt(this.#decode(raw));
+      // Through `#publish`, not `#adopt`. A manager notification is
+      // asynchronous, so one already in flight when a local `reset()` or
+      // `write()` happened is carrying a value this frame has since replaced —
+      // and this was the only route into the cache with no invalidation on it.
+      this.#publish(this.#epoch, this.#decode(raw));
     });
   }
 

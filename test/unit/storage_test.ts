@@ -443,7 +443,10 @@ test("a hydrate joiner is unaffected when the first caller is interrupted", asyn
     // Whatever happened to the first caller, the joiner still gets a value.
     return yield* Fiber.join(joiner);
   }));
-  assert(value.count === 1 || value.count === 0);
+  // The value on disk, not the defaults: `hydrate()` declares it cannot fail,
+  // so a joiner must be served the read, not a fallback. `0 || 1` accepted
+  // both of the only two reachable answers and so asserted nothing.
+  assertEquals(value, { count: 1, label: "disk" });
 });
 
 test("reset waits for a flush that is already touching the backend", async () => {
@@ -638,4 +641,46 @@ test("a write during a hydration is not reverted by the read it overtook", async
   await settled;
 
   assertEquals(group.current(), { count: 2, label: "user" });
+});
+
+test("a repaired value is cached as repaired, not as it was offered", async () => {
+  // The settings schema repairs a bad field rather than rejecting it, so the
+  // outbound check could not fail for that group. Memory kept the bad value
+  // while disk got the repaired one, and the setting silently reverted on the
+  // next page load — after the dialog had said "Settings saved".
+  const repairing = Schema.Struct({
+    count: Schema.Number.pipe(
+      Schema.catchDecoding(() => Effect.succeed(Option.some(0))),
+    ),
+    label: Schema.String,
+  });
+  const fake = fakeBackend(false);
+  const group = new ValueStore(fake.backend).group({
+    name: "test",
+    schema: repairing as unknown as typeof schema,
+    defaults,
+    schemaVersion: 2,
+  });
+
+  await run(
+    group.write({ count: "nonsense" as unknown as number, label: "x" }),
+  );
+
+  const stored = JSON.parse(fake.map.get("vimium-webkit:test") ?? "{}").data;
+  assertEquals(stored, { count: 0, label: "x" });
+  assertEquals(group.current(), stored, "the cache must agree with the disk");
+});
+
+test("an invalid value never reaches the cache", async () => {
+  // It was written to `#cached` before validation, so `current()` and
+  // `update()` served a value that had been refused by storage.
+  const fake = fakeBackend(false);
+  const group = new ValueStore(fake.backend).group(spec());
+  await run(group.hydrate());
+
+  const outcome = await attempt(
+    group.write({ count: "not a number" as unknown as number, label: "x" }),
+  );
+  assert(Result.isFailure(outcome));
+  assertEquals(group.current(), defaults());
 });

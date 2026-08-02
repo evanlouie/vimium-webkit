@@ -12,7 +12,7 @@ npm run serve:fixtures         # just the fixture server, for poking by hand
 npm run check                  # type-check the config and the specs
 ```
 
-Current status: **204 passing** across the three projects, and no `test.fail()`
+Current status: **216 passing** across the three projects, and no `test.fail()`
 annotations. There is no list of known-broken behaviour here: a spec either
 asserts what the product does or it is deleted.
 

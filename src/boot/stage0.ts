@@ -5,7 +5,7 @@
  * presses a key. With 5–20 frames on a typical page this is the classic
  * userscript CPU sink, so the budget here is brutal: no DOM writes, no
  * `getComputedStyle`, no storage access, no Effect runtime, and no imports
- * beyond this file. Target: under 1 ms and under 5 KB (§5.2, CI invariant 3).
+ * beyond this file. Target: under 1 ms and under 3 KB (§5.2, CI invariant 3).
  *
  * Everything else is deferred to Stage 1, which is only reached when the user
  * actually asks for something.

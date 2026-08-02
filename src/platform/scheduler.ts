@@ -118,6 +118,7 @@ export const nextFrame = (): Promise<number> =>
 export const rafCoalesce = <A extends readonly unknown[]>(
   fn: (...args: A) => void,
 ): ((...args: A) => void) & { cancel: () => void } => {
+  // `requestAnimationFrame`, not a timer: this handle really is a `number`.
   let handle: number | null = null;
   let pending: A | null = null;
 

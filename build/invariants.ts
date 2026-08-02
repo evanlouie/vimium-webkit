@@ -375,12 +375,19 @@ export const checkInvariants = async (
   //     at `document-start`, so a throw there takes the whole extension with
   //     it, Stage 0 included, before a single key is pressed.
   //
-  //     Scanned in the code, with comments and strings blanked, so prose about
+  //     The *identifier* is banned, not the member access. An earlier version
+  //     of this rule required `process` to be followed by `.` or `[`, which
+  //     the `define` substitutions already remove — so it was green whether or
+  //     not the rewrite that actually matters had run, and could not fail on
+  //     the thing it was added for. `global` keeps the member form, because
+  //     this project has its own `global:` keys and `#global` fields.
+  //
+  //     Scanned in the code with comments and strings blanked, so prose about
   //     an "in-process channel" does not fire it.
   for (
     const hit of scan(
       input.code,
-      /(?<![\w$.])(process|global|Buffer|__dirname|__filename)\s*[.[]|(?<![\w$.])require\s*\(|["'`]node:/g,
+      /(?<![\w$.])(process|Buffer|__dirname|__filename)(?![\w$])|(?<![\w$.])global\s*[.[]|(?<![\w$.])require\s*\(/g,
     )
   ) {
     violations.push({
@@ -388,6 +395,17 @@ export const checkInvariants = async (
       file: "dist/vimium-webkit.user.js",
       line: hit.line,
       message: `the bundle reads a Node global: ${hit.text.slice(0, 80)}`,
+    });
+  }
+
+  // `node:` specifiers are checked in the raw text, not the stripped code:
+  // `stripNonCode` blanks string literals, and an import specifier is always
+  // one — so the stripped form could never contain it.
+  if (/["'`]node:/.test(input.code)) {
+    violations.push({
+      rule: "no-node-globals",
+      file: "dist/vimium-webkit.user.js",
+      message: "the bundle references a `node:` module specifier",
     });
   }
 

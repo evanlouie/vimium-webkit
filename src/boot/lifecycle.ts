@@ -45,7 +45,7 @@ const CLICK_SETTLE_MS = 60;
 export class Lifecycle {
   readonly #options: LifecycleOptions;
   #url = location.href;
-  #interval: number | null = null;
+  #interval: ReturnType<typeof setInterval> | null = null;
   #disposed = false;
 
   readonly #check = (): void => {

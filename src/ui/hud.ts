@@ -32,7 +32,7 @@ class Hud implements HudApi {
   readonly #element: HTMLDivElement;
   readonly #text: HTMLSpanElement;
 
-  #timer: number | null = null;
+  #timer: ReturnType<typeof setTimeout> | null = null;
   #indicator: string | null = null;
   /** A transient `show()`/`error()` message is on screen and still within its
    * timer. Tracked separately from the sticky indicator because entering or

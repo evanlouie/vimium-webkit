@@ -1152,7 +1152,7 @@ the budget.
 1. No `eval`, `new Function`, `document.write`, or inline event-handler strings.
 2. No `<style>` string concatenation outside the documented Safari <16.4
    fallback.
-3. Stage 0 chunk ≤ 5 KB.
+3. Stage 0 chunk ≤ 3 KB.
 4. Total bundle ≤ 1.5 MB unminified (headroom under Greasy Fork's 2 MB).
 5. `@version` matches `package.json`.
 6. Every `GM_`/`GM.` reference goes through `platform/gm.ts` — enforced by a
@@ -1292,7 +1292,7 @@ established on WebKit, Chromium, and Firefox.
 | **V8**  | Does an "Apple domain" injection blocklist exist? (We found no evidence)                                                                                | ⚪️ Needs real Safari                                                                                                            | [§7.11](#711-pages-where-we-cannot-run)                                      |
 | **V9**  | Is the iOS 18 `unlimitedStorage` ~3 MB regression resolved?                                                                                             | ⚪️ Needs a real iOS device. The frecency index is capped at 5 000 entries with LRU eviction meanwhile                           | Frecency index cap                                                           |
 | **V10** | Does `MessagePort` transfer over cross-origin `postMessage` work reliably in Safari content-script world?                                               | 🟢 **Yes.** `test/e2e/frames.spec.ts` completes the handshake and activates remote hints across origins on all three engines    | [§6.5](#65-cross-frame-coordination) — the whole frame protocol              |
-| **V11** | Measured Stage 0 cost per frame on a 20-frame page in Safari                                                                                            | 🟢 Stage 0 bundles to **3.7 KB** (5 KB budget, CI-enforced); `perf.spec.ts` shows subframes scheduling zero timers and zero rAF | The performance budget                                                       |
+| **V11** | Measured Stage 0 cost per frame on a 20-frame page in Safari                                                                                            | 🟢 Stage 0 bundles to **2.5 KB** (5 KB budget, CI-enforced); `perf.spec.ts` shows subframes scheduling zero timers and zero rAF | The performance budget                                                       |
 | **V12** | Does quoid's `GM.getValue` latency at Stage 1 cause a perceptible key-buffering delay?                                                                  | ⚪️ Latency is stubbed at zero in the harness, but the promise-only path boots correctly (`csp.spec.ts`, capability-floor case)  | [§5.2](#52-boot-sequence)                                                    |
 
 ### Defects the suite found, all since fixed

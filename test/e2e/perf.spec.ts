@@ -33,48 +33,63 @@ const IDLE_WINDOW_MS = 1_500;
 /**
  * Frames to evaluate the artefact in, and the ceiling for the total.
  *
- * A ceiling, not a target, and measured across frames rather than per frame so
- * one slow frame on a busy CI box cannot fail it. Measured at ~86 ms on a warm
- * developer machine and ~3× that headless and cold, so 600 ms leaves room for
- * a real change while still catching a doubling.
+ * Per engine, because they are not comparable: on an idle machine the same
+ * artefact in 21 frames costs ~75 ms in WebKit, ~58 ms in Chromium and ~500 ms
+ * in Firefox. A single ceiling calibrated on WebKit put Firefox at 85% of it
+ * before anything else was running, and the suite went red on an unchanged
+ * tree about one run in three — which teaches everyone to re-run the suite,
+ * and that is the end of the gate.
+ *
+ * Each is roughly 3× its measured idle value: loose enough to survive a busy
+ * CI box, tight enough to catch the doubling this migration produced.
  */
 const EVAL_FRAMES = 20;
-const EVAL_BUDGET_MS = 600;
+const EVAL_BUDGET_MS: Readonly<Record<string, number>> = {
+  webkit: 400,
+  chromium: 400,
+  firefox: 1_800,
+};
 
 test.describe("performance", () => {
-  test("the artefact stays affordable to evaluate in every frame", async ({ page }) => {
-    const source = readBundle();
+  test(
+    "the artefact stays affordable to evaluate in every frame",
+    async ({ page }, testInfo) => {
+      const source = readBundle();
+      const budget = EVAL_BUDGET_MS[testInfo.project.name] ?? 1_800;
 
-    await page.setContent(
-      `<!doctype html><html><body>${
-        Array.from(
-          { length: EVAL_FRAMES },
-          () => `<iframe src="about:blank"></iframe>`,
-        ).join("")
-      }</body></html>`,
-    );
+      await page.setContent(
+        `<!doctype html><html><body>${
+          Array.from(
+            { length: EVAL_FRAMES },
+            () => `<iframe src="about:blank"></iframe>`,
+          ).join("")
+        }</body></html>`,
+      );
 
-    // Every frame, because that is what a manager does at `document-start`.
-    let total = 0;
-    let measured = 0;
-    for (const frame of page.frames()) {
-      // Sequential on purpose: evaluating twenty frames at once would measure
-      // contention rather than the per-frame cost.
-      // eslint-disable-next-line no-await-in-loop
-      const ms = await frame.evaluate((code) => {
-        const started = performance.now();
-        (0, eval)(code);
-        return performance.now() - started;
-      }, source).catch(() => null);
-      if (typeof ms === "number") {
-        total += ms;
-        measured++;
+      // Every frame, because that is what a manager does at `document-start`.
+      let total = 0;
+      let measured = 0;
+      for (const frame of page.frames()) {
+        // Sequential on purpose: evaluating twenty frames at once would measure
+        // contention rather than the per-frame cost.
+        // eslint-disable-next-line no-await-in-loop
+        const ms = await frame.evaluate((code) => {
+          const started = performance.now();
+          (0, eval)(code);
+          return performance.now() - started;
+        }, source).catch(() => null);
+        if (typeof ms === "number") {
+          total += ms;
+          measured++;
+        }
       }
-    }
 
-    expect(measured).toBeGreaterThan(EVAL_FRAMES);
-    expect(total).toBeLessThan(EVAL_BUDGET_MS);
-  });
+      // Every frame, not merely most of them: a frame that failed to evaluate
+      // would otherwise make the total look good.
+      expect(measured).toBe(EVAL_FRAMES + 1);
+      expect(total).toBeLessThan(budget);
+    },
+  );
 
   test("hint generation on a link-dense page stays under budget", async ({ vw }) => {
     await vw.open("/link-dense.html");
