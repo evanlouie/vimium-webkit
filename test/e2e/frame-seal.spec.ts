@@ -16,8 +16,8 @@
  *    with it.
  *
  * Every message on a port is now sealed with a key that both ends derive from
- * the manager-private credential. The page holds the port, and the port is
- * worth nothing.
+ * the manager-private credential. The page holds the port, and the port gives
+ * no access.
  */
 
 import { expect, test } from "./harness/fixtures.ts";
