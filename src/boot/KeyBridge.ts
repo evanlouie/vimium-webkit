@@ -12,7 +12,7 @@
 
 import { Effect, type Scope } from "effect";
 import { HandlerStack } from "~/core/HandlerStack.ts";
-import { Keyboard } from "~/core/Keyboard.ts";
+import { isUserEvent, Keyboard } from "~/core/Keyboard.ts";
 import { Dom } from "~/platform/Dom.ts";
 
 /**
@@ -21,6 +21,16 @@ import { Dom } from "~/platform/Dom.ts";
  * `click`, `focus` and `blur` are here, and not in the guard, because they only
  * mean something once modes exist, and because `focus` and `blur` occur
  * constantly on a busy page.
+ *
+ * A `keydown` or a `keyup` that the page made is dropped here. The page can
+ * dispatch a `KeyboardEvent` that names any key, and a mapped key runs a
+ * command that can open a tab, navigate or write the clipboard. `isTrusted`
+ * separates the user from the page, and only the browser can set it.
+ *
+ * `focus` and `blur` keep the composed path. A focus inside an open shadow root
+ * is retargeted to the host before a window listener sees it, so a handler that
+ * needs the true node reads `event.composedPath()`. `features/Insert.ts` does
+ * that.
  */
 export const attachKeyBridge: Effect.Effect<
   void,
@@ -34,14 +44,20 @@ export const attachKeyBridge: Effect.Effect<
   yield* dom.listen(
     "window",
     "keydown",
-    (event) => Effect.asVoid(stack.bubble("keydown", event)),
+    (event) =>
+      isUserEvent(event)
+        ? Effect.asVoid(stack.bubble("keydown", event))
+        : Effect.void,
     { capture: true },
   );
 
   yield* dom.listen(
     "window",
     "keyup",
-    (event) => Effect.asVoid(stack.bubble("keyup", event)),
+    (event) =>
+      isUserEvent(event)
+        ? Effect.asVoid(stack.bubble("keyup", event))
+        : Effect.void,
     { capture: true },
   );
 

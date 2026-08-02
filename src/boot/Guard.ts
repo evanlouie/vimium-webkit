@@ -160,6 +160,13 @@ export const awaitActivation: Effect.Effect<
 
   yield* dom.listen("window", "keydown", (event) =>
     Effect.gen(function*() {
+      // A key that the page made, and not the user. The check is inline,
+      // because the guard imports nothing above the platform. A page can
+      // dispatch a `KeyboardEvent` that names any key, and only the browser can
+      // set `isTrusted`. Such a key must not start the application, and it must
+      // not enter the buffer, because the application replays the buffer and
+      // would then run the command that the page chose.
+      if (event.isTrusted !== true) return;
       if (isEditable(event.target)) yield* Ref.set(typed, true);
       if (Option.isSome(yield* Deferred.poll(started))) return;
       if (isUninteresting(event)) return;

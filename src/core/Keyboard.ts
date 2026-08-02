@@ -59,6 +59,21 @@ export const MEDIA_KEYS: ReadonlySet<string> = new Set([
   "<space>",
 ]);
 
+/**
+ * Did the browser make this event, or did the page?
+ *
+ * A page can call `dispatchEvent` with a `KeyboardEvent` that names any key.
+ * The browser marks such an event `isTrusted === false`, and only the browser
+ * can set the flag to `true`. A synthetic key must therefore never reach a
+ * command: a command can open a tab, navigate, close a tab or write the
+ * clipboard, and the user pressed nothing.
+ *
+ * The test is strict on purpose. A page can also dispatch an object that is not
+ * an `Event` at all, so every value except `true` is refused.
+ */
+export const isUserEvent = (event: Pick<Event, "isTrusted">): boolean =>
+  event.isTrusted === true;
+
 interface KeyState {
   /** Never empty. Element 0 is the trie root. */
   readonly nodes: ReadonlyArray<TrieNode>;
@@ -276,6 +291,10 @@ export class Keyboard extends Context.Service<Keyboard, {
         event: KeyboardEvent,
       ): Effect.Effect<HandlerResult> =>
         Effect.gen(function*() {
+          // A key that the page made. It gives no command, and it does not
+          // touch the pending sequence.
+          if (!isUserEvent(event)) return CONTINUE_BUBBLING;
+
           // Composition, from an input method or from a dead key. Without this
           // guard we eat keystrokes in the middle of composition, which is the
           // most damaging failure for a user of a CJK language, and one that
@@ -343,6 +362,7 @@ export class Keyboard extends Context.Service<Keyboard, {
 
       const onKeyup = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
         Effect.gen(function*() {
+          if (!isUserEvent(event)) return CONTINUE_BUBBLING;
           if (!event.code) return CONTINUE_BUBBLING;
           const taken = yield* Ref.modify(
             suppressedCodes,
