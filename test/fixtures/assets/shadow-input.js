@@ -2,8 +2,8 @@
  * A text field inside an open shadow root.
  *
  * External, and not inline, so that every fixture is served under the same
- * rules. The CSP fixture is the only one that needs it, but a fixture set where
- * only one page is disciplined is a fixture set that drifts.
+ * rules. The CSP fixture is the only one that needs it. But a fixture set
+ * where only one page is disciplined is a fixture set that drifts.
  */
 
 const host = document.getElementById("widget-host");

@@ -3,16 +3,15 @@
  *
  * A page can call `dispatchEvent` with a `KeyboardEvent` that names any key.
  * Every such event carries `isTrusted === false`, and only the browser can set
- * that flag to `true`. If a synthetic key reached the dispatcher, a page could
- * run any mapped command: open a tab, navigate, close a tab or write the
- * clipboard, with no user input at all.
+ * that flag to `true`. A synthetic key that reached the dispatcher would let a
+ * page run any mapped command. Such a command can open a tab, navigate, close
+ * a tab or write the clipboard, with no user input at all.
  *
  * The bundle is injected with `addInitScript`, so it shares the realm of the
  * page. That is the worst case, and it is the case that these tests use.
  *
- * `smoothScroll: false`, because what is under test is *whether* the page
- * scrolled, and an exact offset asserted mid-animation would be a flake
- * generator.
+ * `smoothScroll: false`. What is under test is *whether* the page scrolled. An
+ * exact offset asserted mid-animation would be a flake generator.
  */
 
 import { expect, test, type Vimium } from "./harness/fixtures.ts";
@@ -78,8 +77,8 @@ test.describe("a synthetic keyboard event", () => {
 
   test("is not held during startup and replayed", async ({ vw }) => {
     // No `vw.open`: the key must land while the guard is still waiting. The
-    // guard holds a real key and the application replays it, so a synthetic key
-    // that entered the buffer would run its command a moment later.
+    // guard holds a real key, and the application replays it. A synthetic key
+    // that entered the buffer would therefore run its command a moment later.
     await vw.page.goto("/scrollables.html");
     await dispatchKeys(vw, ["j"]);
 

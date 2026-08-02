@@ -5,9 +5,9 @@
  * `isTrusted === false`, and only the browser can set that flag to `true`.
  *
  * The two directions are both attacks. A `blur` that names the focused field
- * leaves insert mode, and the next true key of the user then runs a command
- * while the caret is still in the field. A `focus` on a text field starts
- * insert mode, and every binding of the user then stops.
+ * leaves insert mode. The next true key of the user then runs a command while
+ * the caret is still in the field. A `focus` on a text field starts insert
+ * mode, and every binding of the user then stops.
  *
  * The bundle is injected with `addInitScript`, so it shares the realm of the
  * page. That is the worst case, and it is the case that these tests use.

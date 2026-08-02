@@ -17,9 +17,9 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Layer, Ref, Stream, SubscriptionRef } from "effect";
 import { Commands } from "~/core/Commands.ts";
+import { Exclusions } from "~/core/Exclusions.ts";
 import { HandlerStack } from "~/core/HandlerStack.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
-import { Exclusions } from "~/core/Exclusions.ts";
 import { Mappings } from "~/core/Mappings.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";

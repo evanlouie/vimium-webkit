@@ -8,9 +8,9 @@
  * `test/unit/keyboard_test.ts`. This spec covers the media side, where the
  * answer comes from what has focus and therefore needs a browser.
  *
- * `smoothScroll: false`, because what is under test is *which* of the page and
- * the application acted, and an exact offset asserted mid-animation would be a
- * flake generator.
+ * `smoothScroll: false`. What is under test is *which* of the page and the
+ * application acted. An exact offset asserted mid-animation would be a flake
+ * generator.
  */
 
 import { expect, test, type Vimium } from "./harness/fixtures.ts";

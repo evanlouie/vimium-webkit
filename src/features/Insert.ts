@@ -90,8 +90,8 @@ const ownsFocus = (target: EventTarget | null): boolean =>
  * The node that the event truly started at.
  *
  * A `focus` or a `blur` inside a shadow root is retargeted to the host before
- * any window listener sees it, so `event.target` names the host and not the
- * field. A page that keeps its search box in a web component therefore looked
+ * any window listener sees it. `event.target` therefore names the host, and not
+ * the field. A page that keeps its search box in a web component looked
  * unfocused. Every key that the user typed into it ran a command.
  *
  * `composedPath()[0]` is the true node while the root is open. A closed root

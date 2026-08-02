@@ -3,8 +3,8 @@
  *
  * A `focus` or a `blur` that starts inside a shadow root is retargeted to the
  * host before a window listener sees it. `composedTarget` gives the true node
- * back, so the tests here press the two cases that matter: an open root, where
- * the path holds the field, and an empty path, where the retargeted target is
+ * back. The tests here press the two cases that matter. An open root puts the
+ * field at the head of the path. An empty path leaves the retargeted target as
  * the only answer there is.
  *
  * The rest of insert mode needs a DOM, and `test/e2e/shadow-input.spec.ts`

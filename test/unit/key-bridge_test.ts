@@ -4,7 +4,7 @@
  * Only the browser can set `isTrusted`. The bridge is the one door into the
  * mode stack, so it is where a page-made event must stop. A key that the page
  * made would otherwise run a command. A `focus` or a `blur` that the page made
- * would move insert mode, and the next true key of the user would then run a
+ * would move insert mode. The next true key of the user would then run a
  * command inside a text field.
  *
  * The test replaces `Dom` with a stub that records each listener. It then calls

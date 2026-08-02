@@ -3,12 +3,11 @@
  *
  * A `focus` event that starts inside a shadow root is retargeted to the host
  * before a window listener sees it. Insert mode read `event.target`, so a page
- * that keeps its search box in a web component looked unfocused, and every
- * mapped key that the user typed there ran a command instead of a character.
+ * that keeps its search box in a web component looked unfocused. Every mapped
+ * key that the user typed there ran a command instead of a character.
  *
- * `smoothScroll: false`, because what is under test is *whether* the page
- * scrolled, and an exact offset asserted mid-animation would be a flake
- * generator.
+ * `smoothScroll: false`. What is under test is *whether* the page scrolled. An
+ * exact offset asserted mid-animation would be a flake generator.
  */
 
 import { expect, test, type Vimium } from "./harness/fixtures.ts";
@@ -75,8 +74,8 @@ test.describe("a text field in an open shadow root", () => {
  *
  * `grabBackFocus` takes the focus back from a page that stole it on load. It
  * must not do that to a user who is typing. The guard learns that the user
- * typed from the key events that arrive before the application exists, and a
- * key inside an open shadow root names the host at a window listener.
+ * typed from the key events that arrive before the application exists. A key
+ * inside an open shadow root names the host at a window listener.
  */
 test.describe("a user who types into a shadow field before the start", () => {
   test.use({ settingsPatch: { ...DETERMINISTIC, grabBackFocus: true } });

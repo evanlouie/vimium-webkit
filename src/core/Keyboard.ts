@@ -76,8 +76,9 @@ export const MEDIA_KEYS: ReadonlySet<string> = new Set([
  * command. A command can open a tab, navigate, close a tab or write the
  * clipboard, and the user pressed nothing.
  *
- * The test is strict on purpose. A page can also dispatch an object that is not
- * an `Event` at all, so every value except `true` is refused.
+ * The test is strict on purpose. `dispatchEvent` refuses an object that is not
+ * an `Event`, but other paths do not. A page can hand such an object to a
+ * handler of ours directly, so every value except `true` is refused.
  */
 export const isUserEvent = (event: Pick<Event, "isTrusted">): boolean =>
   event.isTrusted === true;

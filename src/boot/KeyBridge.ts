@@ -29,7 +29,7 @@ import { Dom } from "~/platform/Dom.ts";
  * can set it.
  *
  * A page-made `focus` or `blur` is as dangerous as a page-made key. A `blur`
- * that names the focused field leaves insert mode, and the next true key of the
+ * that names the focused field leaves insert mode. The next true key of the
  * user then runs a command inside a text field. A `focus` on any text field
  * starts insert mode and stops every binding.
  *
