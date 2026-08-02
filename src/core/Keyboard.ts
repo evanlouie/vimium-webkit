@@ -250,8 +250,13 @@ export class Keyboard extends Context.Service<Keyboard, {
       /**
        * Take one key into the trie walk.
        *
-       * The effect calls itself at most once, when a binding that an earlier
-       * key accepted must run before this key is read again from the root.
+       * The key can go back to `onKeydown` once. That happens when a binding
+       * that an earlier key accepted must run before this key is read again.
+       * The key then truly starts at the root: the pass keys, the media keys
+       * and the pass counter all read it as a first key.
+       *
+       * The recursion is bounded at one call. `reset` clears the deferred
+       * binding before the key goes back, so the branch cannot run twice.
        */
       const advance = (
         notation: string,
@@ -274,9 +279,9 @@ export class Keyboard extends Context.Service<Keyboard, {
 
           // A binding that the keys so far accepted, and a key that cannot
           // extend the sequence any further. The binding runs now, with the
-          // count that the user typed before it, and this key starts again at
-          // the root. Without this, `map g scrollUp` could never run while
-          // `map gg scrollToTop` also existed.
+          // count that the user typed before it. The key then starts again at
+          // the root, through `onKeydown`. Without this, `map g scrollUp` could
+          // never run while `map gg scrollToTop` also existed.
           if (
             Option.isSome(current.deferred) &&
             !continuesSequence(current.nodes, notation)
@@ -285,7 +290,10 @@ export class Keyboard extends Context.Service<Keyboard, {
             const count = current.count === 0 ? 1 : current.count;
             yield* reset;
             yield* runCommand(command, options, count, event);
-            return yield* advance(notation, event);
+            // Back to the top of the rules, and not to the trie walk. A key
+            // that the exclusion or a media player owns must go to the page,
+            // and `passNextKey` may have just claimed this very key.
+            return yield* onKeydown(event);
           }
 
           const candidates = trieCandidates(current.nodes, notation);
@@ -403,8 +411,8 @@ export class Keyboard extends Context.Service<Keyboard, {
 
           // The count prefix and the trie walk both live in `advance`, which
           // reads the state again. A binding that an earlier key accepted can
-          // run there first, and the key then starts at the root, where a digit
-          // is a count once more.
+          // run there first. The key then comes back to this function, where a
+          // digit is a count once more and every rule above applies again.
           return yield* advance(notation, event);
         });
 

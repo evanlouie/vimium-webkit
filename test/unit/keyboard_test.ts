@@ -430,6 +430,86 @@ describe("Keyboard", () => {
   });
 
   /**
+   * The key that ends a sequence starts again at the root.
+   *
+   * A pass key, a media key and the pass counter all apply to a first key
+   * only. The key that ends a sequence becomes a first key, so every one of
+   * those rules must read it again.
+   */
+  describe("a key that restarts at the root", () => {
+    it.effect("goes to the page when the exclusion names it", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder([
+          "scrollUp",
+          "scrollToTop",
+          "scrollDown",
+        ]);
+
+        yield* stack.bubble("keydown", asEvent(new Press("g")));
+        const promised = new Press("j");
+        const toPage = yield* stack.bubble("keydown", asEvent(promised));
+
+        // `g` ran, because the sequence ended. `j` belongs to the page, and
+        // the user promised it before any of this.
+        assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
+        assert.isTrue(toPage);
+        assert.isFalse(promised.defaultPrevented);
+      }).pipe(Effect.provide(layerFor({
+        mappings: [
+          "map g scrollUp",
+          "map gg scrollToTop",
+          "map j scrollDown",
+        ].join("\n"),
+        exclusion: { enabled: true, passKeys: "j" },
+      }))));
+
+    it.effect("is the key that a deferred passNextKey passes", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const keyboard = yield* Keyboard;
+        const commands = yield* Commands;
+        const calls = yield* recorder(["scrollToTop", "scrollDown"]);
+
+        // The real body, because the point of the test is the order. The
+        // counter must hold the pass before the next key is read.
+        yield* commands.register(
+          "passNextKey",
+          ({ count }) =>
+            Effect.andThen(
+              Ref.update(calls, (current) => [
+                ...current,
+                `passNextKey:${count}`,
+              ]),
+              keyboard.passNextKey(count),
+            ),
+        );
+
+        yield* stack.bubble("keydown", asEvent(new Press("g")));
+        const passed = new Press("x");
+        const toPage = yield* stack.bubble("keydown", asEvent(passed));
+
+        // `x` is the key after the command, so `x` is the key that passes.
+        assert.deepEqual(yield* Ref.get(calls), ["passNextKey:1"]);
+        assert.isTrue(toPage);
+        assert.isFalse(passed.defaultPrevented);
+
+        // The counter held one pass, and `x` used it.
+        yield* stack.bubble("keydown", asEvent(new Press("x")));
+        assert.deepEqual(yield* Ref.get(calls), [
+          "passNextKey:1",
+          "scrollDown:1",
+        ]);
+      }).pipe(Effect.provide(layerFor({
+        mappings: [
+          "map g passNextKey",
+          "map gg scrollToTop",
+          "map x scrollDown",
+        ].join("\n"),
+      }))));
+  });
+
+  /**
    * `mapkey` and the keys that belong to the page.
    *
    * An exclusion rule names a *physical* key, because the user gives that key
