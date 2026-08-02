@@ -12,6 +12,13 @@
  * interface that shows nothing. The answers are the important priority on every
  * inline declaration, a check before each visible action, and a mutation
  * observer that puts the host back.
+ *
+ * There is a limit, and it is written here because a test cannot hold it. The
+ * host is a descendant of `documentElement`, and CSS gives a descendant no way
+ * out of its ancestors. A page rule of `html { opacity: 0 }`,
+ * `html { transform: scale(0) }` or `html { content-visibility: hidden }`
+ * therefore hides the overlay. Such a page hides itself as well, so the user
+ * sees a blank page. `SECURITY.md` names this limit.
  */
 
 import type { Page } from "@playwright/test";
@@ -50,6 +57,15 @@ const removeHost = (page: Page): Promise<boolean> =>
     return remover === undefined ? false : remover();
   });
 
+/** Take one declaration off the host, as one line of page script can. */
+const stripHostProperty = (page: Page, property: string): Promise<boolean> =>
+  page.evaluate((name: string): boolean => {
+    const strip = (globalThis as unknown as {
+      stripVimiumHostProperty?: (property: string) => boolean;
+    }).stripVimiumHostProperty;
+    return strip === undefined ? false : strip(name);
+  }, property);
+
 const hostCount = (page: Page): Promise<number> =>
   page.locator("vimium-webkit-overlay").count();
 
@@ -76,6 +92,108 @@ test.describe("the overlay host under hostile CSS", () => {
     expect(box?.width ?? 0).toBeGreaterThan(300);
     expect(box?.height ?? 0).toBeGreaterThan(100);
   });
+
+  test("keeps a size that the page cannot take away", async ({ vw, page }) => {
+    await vw.open("/hostile-overlay.html");
+
+    // The stylesheet of the page writes `width: 0 !important` and
+    // `height: 0 !important`. A zero-sized host draws nothing at all.
+    const viewport = page.viewportSize();
+    expect(Number.parseFloat(await hostStyle(page, "width")))
+      .toBeGreaterThan((viewport?.width ?? 1280) / 2);
+    expect(Number.parseFloat(await hostStyle(page, "height")))
+      .toBeGreaterThan((viewport?.height ?? 800) / 2);
+  });
+});
+
+test.describe("the overlay host where the engine has no visual viewport", () => {
+  // `window.visualViewport` is absent in an older engine and in some frames.
+  // The size of the host must not depend on it, because only the sync writes
+  // a pixel size and only that sync defeats `width: 0 !important`.
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      try {
+        Object.defineProperty(globalThis, "visualViewport", {
+          configurable: true,
+          get: () => undefined,
+        });
+      } catch {
+        // An engine that refuses the definition keeps its own viewport, and
+        // the assertions below then hold for the other reason.
+      }
+    });
+  });
+
+  test("keeps its size from the declaration alone", async ({ vw, page }) => {
+    await vw.open("/hostile-overlay.html");
+
+    // The realm must truly have none, or this proves nothing. `HOST_STYLE`
+    // declares `width` and `height` itself, so the size does not depend on
+    // the sync. The unit test holds that declaration; here we hold the result.
+    expect(
+      await page.evaluate(
+        () =>
+          (globalThis as { visualViewport?: unknown }).visualViewport ===
+            undefined,
+      ),
+    ).toBe(true);
+
+    const viewport = page.viewportSize();
+    expect(Number.parseFloat(await hostStyle(page, "width")))
+      .toBeGreaterThan((viewport?.width ?? 1280) / 2);
+    expect(Number.parseFloat(await hostStyle(page, "height")))
+      .toBeGreaterThan((viewport?.height ?? 800) / 2);
+
+    await openHelp(page);
+    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
+      .toBeGreaterThan(300);
+  });
+
+  test("keeps its size after page script strips `all`", async ({ vw, page }) => {
+    await vw.open("/hostile-overlay.html");
+
+    // `style.removeProperty("all")` takes every longhand off the host in one
+    // call, and the page rule of `width: 0 !important` then has nothing to
+    // beat. The guard must see the loss and write the whole declaration list
+    // again. This realm has no visual viewport, so nothing else writes a size.
+    expect(await stripHostProperty(page, "all")).toBe(true);
+    await openHelp(page);
+
+    const viewport = page.viewportSize();
+    expect(Number.parseFloat(await hostStyle(page, "width")))
+      .toBeGreaterThan((viewport?.width ?? 1280) / 2);
+    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
+      .toBeGreaterThan(300);
+  });
+});
+
+test.describe("the overlay host after page script strips a declaration", () => {
+  // Page script owns the host, because the host is in the light DOM. One call
+  // of `style.removeProperty` gives the important page rule the win, and the
+  // guard must see it. A removed declaration reads back with an empty value
+  // and an empty priority.
+  for (
+    const [property, intact] of [
+      ["clip-path", "none"],
+      ["filter", "none"],
+      ["transform", "none"],
+      ["display", "block"],
+      ["visibility", "visible"],
+      ["opacity", "1"],
+    ] as const
+  ) {
+    test(`repairs ${property}`, async ({ vw, page }) => {
+      await vw.open("/hostile-overlay.html");
+      expect(await stripHostProperty(page, property)).toBe(true);
+
+      // The guard runs before each action that makes something visible.
+      await openHelp(page);
+      expect(await hostStyle(page, property)).toBe(intact);
+
+      const box = await overlayBox(page, ".vw-dialog");
+      expect(box?.width ?? 0).toBeGreaterThan(300);
+    });
+  }
 });
 
 test.describe("the overlay host after a removal", () => {
