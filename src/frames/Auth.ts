@@ -17,6 +17,15 @@
  * id of the handshake attempt and the id of the frame. A page can read those
  * three values, and it still cannot produce the HMAC.
  *
+ * ## Where the credential may live
+ *
+ * The credential goes into the value store of the userscript manager, and
+ * nowhere else. A store that the page can read, or a store that one frame
+ * cannot share with another, gives no admission at all. Every operation here
+ * then fails with `unavailable`, and the frames of the page stay apart. That is
+ * the safe result, because a page that can read the credential can join the
+ * session and drive a click inside a document of another origin.
+ *
  * `crypto.subtle` is absent in a context that is not secure, which means a
  * plain `http:` page. There is no route around that, and there is no
  * unauthenticated join. A page without HTTPS keeps its frames apart, which is
@@ -24,6 +33,7 @@
  */
 
 import { Context, Effect, Layer, Option, Ref, Schema } from "effect";
+import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 import { Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
 
@@ -133,12 +143,17 @@ export class FrameAuth extends Context.Service<FrameAuth, {
     signature: string,
   ) => Effect.Effect<boolean, FrameAuthError>;
 }>()("vimium/frames/FrameAuth") {
-  static readonly layer: Layer.Layer<FrameAuth, never, Storage | Realm> = Layer
+  static readonly layer: Layer.Layer<
+    FrameAuth,
+    never,
+    Storage | Realm | KeyValueStore
+  > = Layer
     .effect(
       FrameAuth,
       Effect.gen(function*() {
         const storage = yield* Storage;
         const realm = yield* Realm;
+        const kv = yield* KeyValueStore;
         const cache = yield* Ref.make(Option.none<CachedKey>());
 
         /** Web Crypto, read again for each call, and never held. */
@@ -152,6 +167,25 @@ export class FrameAuth extends Context.Service<FrameAuth, {
               }),
             );
           });
+
+        /**
+         * A store that the page can read is not a store for a credential.
+         *
+         * The frames of the page then stay apart. A same-origin child of a
+         * hostile page could otherwise read the credential out of
+         * `localStorage` and calculate a valid proof.
+         */
+        const privateStore: Effect.Effect<void, FrameAuthError> = kv
+            .managerPrivate
+          ? Effect.void
+          : Effect.fail(
+            new FrameAuthError({
+              reason: "unavailable",
+              detail:
+                "the manager has no private value store, so a credential " +
+                "would be readable by the page",
+            }),
+          );
 
         const createSecret = Effect.try({
           try: (): string => {
@@ -167,6 +201,8 @@ export class FrameAuth extends Context.Service<FrameAuth, {
         });
 
         const secret = Effect.fn("FrameAuth.secret")(function*() {
+          yield* privateStore;
+
           // Read storage again, and do not trust the value in memory. The top
           // frame can write the credential after a child frame has started.
           const stored = yield* storage.session.hydrate;

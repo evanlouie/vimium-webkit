@@ -39,6 +39,7 @@ const storedSettings = (
       kind: "memory",
       durable: false,
       watchable: false,
+      managerPrivate: false,
       get: (key) =>
         Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
       set: (key, value) =>

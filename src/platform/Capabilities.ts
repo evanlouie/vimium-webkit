@@ -262,16 +262,11 @@ export const degradationWarnings = (
 ): readonly string[] => {
   const warnings: string[] = [];
 
-  if (report.value === "localstorage-fallback") {
+  if (report.value === "memory") {
     warnings.push(
-      "Settings are stored in localStorage, and Safari erases them after " +
-        "7 days without a visit. Install Tampermonkey or Userscripts for " +
-        "durable storage.",
-    );
-  } else if (report.value === "memory") {
-    warnings.push(
-      "No storage is available. Settings and marks are lost when this page " +
-        "unloads.",
+      "No durable storage is available. Your userscript manager gives no " +
+        "value store, so settings and marks are lost when this page unloads. " +
+        "Install Tampermonkey or Userscripts for durable storage.",
     );
   }
 

@@ -56,6 +56,7 @@ const makeBackend: Effect.Effect<Backend> = Effect.gen(function*() {
     kind: "memory",
     durable: false,
     watchable: false,
+    managerPrivate: false,
     get: (key) =>
       Effect.flatMap(Ref.get(broken), (isBroken) =>
         isBroken

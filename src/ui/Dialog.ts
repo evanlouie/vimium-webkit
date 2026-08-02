@@ -78,11 +78,11 @@ const OVERLAY_CHECK_MS = 500;
  * Where the settings in this dialog are kept.
  *
  * Said out loud, and said truthfully, because it changes what the user must
- * expect. The old text claimed that settings never go to `localStorage`, while
- * the store falls back to exactly that on a manager with no value API, and
- * `Capabilities` warns about it in the same session. Two parts of the interface
- * that disagree about where the data of the user lives are worse than either
- * message alone.
+ * expect. Settings live in the value store of the userscript manager. A
+ * manager that gives no such store leaves them in memory, and `Capabilities`
+ * warns about that in the same session. Two parts of the interface that
+ * disagree about where the data of the user lives are worse than either message
+ * alone.
  */
 const storageExplanation = (backend: KeyValueKind): string => {
   const preamble = "There is no options page for a userscript, so settings " +
@@ -92,13 +92,10 @@ const storageExplanation = (backend: KeyValueKind): string => {
     case "gm-async":
       return `${preamble}They are stored with your userscript manager, which ` +
         "is durable and survives Safari's seven-day storage purge.";
-    case "localstorage-fallback":
-      return `${preamble}Your userscript manager offers no storage, so they ` +
-        "are kept in localStorage, which Safari erases after seven days " +
-        "without a visit to this site.";
     case "memory":
-      return `${preamble}No storage is available at all, so they last only ` +
-        "until this page is closed.";
+      return `${preamble}Your userscript manager gives no value store, and ` +
+        "the page owns every other store, so they last only until this page " +
+        "is closed.";
   }
 };
 
