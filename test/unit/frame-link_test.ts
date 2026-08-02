@@ -5,15 +5,16 @@
  * takes a copy of the `MessagePort` that a `JOIN` transfers. The link is what
  * makes that copy worthless. These tests hold a real `MessageChannel`, and they
  * play the part of the page on it: they read the traffic, they send a message
- * that is not sealed, they send a sealed message again, and they send a message
- * back to the frame that made it.
+ * that is not sealed, they send a sealed message again, they send a message
+ * back to the frame that made it, and they flood the port.
  *
  * The ciphers come from two `FrameAuth` instances over one store, which is the
  * value store of a userscript manager as two frames of a page see it.
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer, Option, Queue, Scope, Stream } from "effect";
+import { Effect, Layer, Logger, Option, Queue, Scope, Stream } from "effect";
+import { References } from "effect";
 import {
   ENVELOPE,
   type FrameWire,
@@ -21,7 +22,12 @@ import {
   WIRE_TARGET_TOP,
 } from "~/domain/FrameMessage.ts";
 import { FrameAuth, type FrameHandshake } from "~/frames/Auth.ts";
-import { type Link, makeSealedLink, type PortHost } from "~/frames/Bus.ts";
+import {
+  type Link,
+  MAILBOX_CAPACITY,
+  makeSealedLink,
+  type PortHost,
+} from "~/frames/Bus.ts";
 import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 import { type FrameId, Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
@@ -307,5 +313,97 @@ describe("the sealed link of a port", () => {
           );
         }).pipe(Effect.provide(frameLayer(kv, false, CHILD_FRAME)));
       }).pipe(Effect.provide(frameLayer(kv, true, TOP_FRAME)));
+    }));
+
+  it.live("drops a flood, keeps the memory bounded and says so", () =>
+    Effect.gen(function*() {
+      const kv = storeLayer;
+      const delivered = yield* Queue.unbounded<unknown>();
+      /** Every line that the link logged. */
+      const logged: string[] = [];
+      const capture = Logger.make<unknown, void>(({ message }) => {
+        logged.push(String(message));
+      });
+
+      /** More messages than the mailbox holds, in one synchronous burst. */
+      const FLOOD = MAILBOX_CAPACITY + 40;
+
+      yield* Effect.gen(function*() {
+        const top = yield* FrameAuth;
+        const topCipher = yield* top.cipher(HANDSHAKE);
+
+        yield* Effect.gen(function*() {
+          const child = yield* FrameAuth;
+          const childCipher = yield* child.cipher(HANDSHAKE);
+
+          const channel = new MessageChannel();
+          yield* makeSealedLink(
+            host,
+            channel.port2,
+            topCipher,
+            "down",
+            (data) =>
+              Effect.sync(() => {
+                Queue.offerUnsafe(delivered, data);
+              }),
+          );
+
+          // The page holds a copy of the port, so it decides how fast messages
+          // arrive. Each message is sealed and every counter rises, so nothing
+          // here is refused for any reason but the ceiling of the mailbox.
+          const flood: unknown[] = [];
+          for (let seq = 0; seq < FLOOD; seq += 1) {
+            flood.push(
+              yield* childCipher.seal("up", seq, JSON.stringify(wire("a"))),
+            );
+          }
+
+          // One synchronous burst. No fiber of the link can run inside this
+          // loop, so the mailbox holds everything that it accepts.
+          yield* Effect.sync(() => {
+            for (const sealed of flood) {
+              channel.port2.dispatchEvent(
+                new MessageEvent("message", { data: sealed }),
+              );
+            }
+          });
+
+          let count = 0;
+          while (Option.isSome(yield* nextOf(delivered))) count += 1;
+          assert.strictEqual(
+            count,
+            MAILBOX_CAPACITY,
+            "the mailbox took more messages than it may hold",
+          );
+
+          // The link reports the drop.
+          assert.isTrue(
+            logged.some((line) => line.includes("mailbox")),
+            "the link dropped a message and said nothing",
+          );
+
+          // A drop leaves a gap in the counter, and a gap is safe. The counter
+          // only has to rise, so the next true message still opens.
+          const later = yield* childCipher.seal(
+            "up",
+            FLOOD + 1,
+            JSON.stringify(wire("b")),
+          );
+          channel.port2.dispatchEvent(
+            new MessageEvent("message", { data: later }),
+          );
+          const arrived = yield* nextOf(delivered);
+          assert.isTrue(
+            Option.isSome(arrived),
+            "a message after the flood did not arrive",
+          );
+          if (Option.isNone(arrived)) return;
+          assert.deepEqual(arrived.value, wire("b"));
+        }).pipe(Effect.provide(frameLayer(kv, false, CHILD_FRAME)));
+      }).pipe(
+        Effect.provide(frameLayer(kv, true, TOP_FRAME)),
+        Effect.provide(Logger.layer([capture])),
+        Effect.provideService(References.MinimumLogLevel, "Debug"),
+      );
     }));
 });
