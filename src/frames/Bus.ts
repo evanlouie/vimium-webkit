@@ -22,6 +22,22 @@
  * request with `serve`. Two services that need each other therefore do not
  * import each other, and the layer graph stays a tree.
  *
+ * ## The port is not the capability
+ *
+ * A page reads every `message` event that a window of the page receives, so it
+ * takes a copy of the port that a `JOIN` transfers. Every message on a port is
+ * therefore sealed with a key that both ends derive from the manager-private
+ * credential and from the three values of the handshake. Read
+ * `frames/Auth.ts`. The `WELCOME` is the first sealed message, so a page can
+ * neither read the session nor forge an admission.
+ *
+ * Each link holds one counter for each direction. A message that arrives with a
+ * counter that is not greater than the last one is dropped before it is opened,
+ * so a message cannot be played again. A link has one outbox and one mailbox,
+ * and one fiber for each. A caller therefore never waits for Web Crypto, which
+ * matters because a hint activation leaves from inside a `keydown` listener,
+ * and because each queue keeps the order that the counters need.
+ *
  * ## Frames that we will never reach
  *
  * A frame with a CSP `sandbox` gets no injection in Safari or in Firefox. An
@@ -41,6 +57,7 @@ import {
   Layer,
   Option,
   PubSub,
+  Queue,
   Ref,
   Result,
   Schema,
@@ -53,15 +70,18 @@ import {
   type FrameMessage,
   type FrameWire,
   type JoinMessage,
-  joinProofPayload,
+  MAX_SEAL_SEQUENCE,
   type MessageKind,
   NO_REQUEST_ID,
   parseChallenge,
+  parseSealed,
   parseWelcome,
   parseWindowToTop,
   parseWire,
   peekKind,
   REQUEST_DEADLINE_MS,
+  type SealDirection,
+  type SealedMessage,
   type WelcomeMessage,
   WIRE_TARGET_ALL,
   WIRE_TARGET_TOP,
@@ -73,7 +93,7 @@ import {
   Realm,
   WAKE_MESSAGE,
 } from "~/platform/Realm.ts";
-import { FrameAuth } from "./Auth.ts";
+import { FrameAuth, type FrameCipher } from "./Auth.ts";
 
 // ---------------------------------------------------------------------------
 // Bounds and delays
@@ -266,15 +286,44 @@ const isAnnounceRequest = (data: unknown): boolean => {
     raw["kind"] === ANNOUNCE_MESSAGE.kind;
 };
 
+/** Read the text of an opened message. A text that is not JSON is dropped. */
+const readJson = (text: string): Option.Option<unknown> => {
+  try {
+    return Option.some(JSON.parse(text) as unknown);
+  } catch {
+    return Option.none();
+  }
+};
+
+/** The other direction of travel. */
+const opposite = (direction: SealDirection): SealDirection =>
+  direction === "up" ? "down" : "up";
+
 // ---------------------------------------------------------------------------
 // Internal state
 // ---------------------------------------------------------------------------
+
+/**
+ * One sealed port.
+ *
+ * The link owns the counter of each direction, the order of what it sends and
+ * the fiber that opens what arrives. Nothing outside it touches the port.
+ *
+ * `send` does not suspend and does not fail. It puts the message in the outbox
+ * of the link, and one fiber seals it and posts it. That order is the order of
+ * the counter, and it is also what keeps the key path synchronous: a hint
+ * activation and a relayed keystroke leave from inside a `keydown` listener,
+ * and Web Crypto is asynchronous.
+ */
+export interface Link {
+  readonly send: (message: FrameWire | WelcomeMessage) => Effect.Effect<void>;
+}
 
 /** One admitted child frame, as the coordinator holds it. */
 interface FrameRecord {
   readonly frameId: FrameId;
   readonly source: Window;
-  readonly port: MessagePort;
+  readonly link: Link;
   /** Closes the port and removes its listener. */
   readonly release: Effect.Effect<void>;
 }
@@ -288,9 +337,155 @@ interface Challenge {
 /** One handshake attempt of a child frame. */
 interface Attempt {
   readonly helloId: string;
-  readonly port: MessagePort;
+  readonly link: Link;
   readonly release: Effect.Effect<void>;
 }
+
+// ---------------------------------------------------------------------------
+// The link of one port
+// ---------------------------------------------------------------------------
+
+/**
+ * Hand one sealed message to a port.
+ *
+ * A post to a port whose document is gone does not throw, and the message is
+ * dropped in silence. Liveness is therefore the work of the sweep, and every
+ * request has a deadline in any case. Only a payload that the browser cannot
+ * clone fails here, and a sealed message is one string and one number.
+ */
+const postTo = (
+  port: MessagePort,
+  message: SealedMessage,
+): Effect.Effect<void, FrameError> =>
+  Effect.try({
+    try: () => {
+      port.postMessage(message);
+    },
+    catch: (cause) =>
+      new FrameError({
+        reason: "failed",
+        detail: `the port refused the message: ${describe(cause)}`,
+      }),
+  });
+
+/**
+ * What a link needs from the browser: one listener on a port.
+ *
+ * The `Dom` service satisfies it. A test can satisfy it as well, without a
+ * document.
+ */
+export interface PortHost {
+  readonly listenOn: Dom["Service"]["listenOn"];
+}
+
+/**
+ * Build the link of one port.
+ *
+ * `outbound` is the direction that this frame sends in. The link opens what
+ * arrives in the other direction, so a message that is sent back to its sender
+ * never opens. A message of another link, or one that a holder of the port kept
+ * and sent again, does not open either.
+ *
+ * Two fibers and two queues, and no lock. One fiber seals what the outbox
+ * holds, and one fiber opens what the mailbox holds. Each queue keeps its
+ * order, so the counters and the wire always agree, and neither the caller nor
+ * the listener ever waits for Web Crypto.
+ *
+ * The port, its listener and the two fibers belong to the enclosing scope. To
+ * close that scope is to close the link.
+ */
+export const makeSealedLink = Effect.fn("FrameBus.link")(function*(
+  host: PortHost,
+  port: MessagePort,
+  cipher: FrameCipher,
+  outbound: SealDirection,
+  receive: (data: unknown) => Effect.Effect<void>,
+) {
+  const inbound = opposite(outbound);
+  const nextSeq = yield* Ref.make(0);
+  const lastSeen = yield* Ref.make(-1);
+  const outbox = yield* Queue.unbounded<FrameWire | WelcomeMessage>();
+  const mailbox = yield* Queue.unbounded<SealedMessage>();
+
+  const sealAndPost = (
+    message: FrameWire | WelcomeMessage,
+  ): Effect.Effect<void> =>
+    Effect.gen(function*() {
+      const seq = yield* Ref.modify(
+        nextSeq,
+        (current) => [current, current + 1],
+      );
+      if (seq > MAX_SEAL_SEQUENCE) {
+        yield* Effect.logDebug("this link has sent as many messages as it may");
+        return;
+      }
+      const text = yield* Effect.orElseSucceed(
+        Effect.try(() => JSON.stringify(message)),
+        () => "",
+      );
+      if (text.length === 0) return;
+
+      const sealed = yield* Effect.result(cipher.seal(outbound, seq, text));
+      if (Result.isFailure(sealed)) {
+        yield* Effect.logDebug(
+          `could not seal a message: ${sealed.failure.detail}`,
+        );
+        return;
+      }
+      yield* Effect.ignore(postTo(port, sealed.success));
+    });
+
+  const open = (sealed: SealedMessage): Effect.Effect<void> =>
+    Effect.gen(function*() {
+      // A counter that does not rise is a message that we have already seen, or
+      // one that a holder of the port kept and sent again.
+      const last = yield* Ref.get(lastSeen);
+      if (sealed.seq <= last) return;
+
+      const opened = yield* Effect.orElseSucceed(
+        cipher.open(inbound, sealed),
+        () => Option.none<string>(),
+      );
+      if (Option.isNone(opened)) return;
+      yield* Ref.set(lastSeen, sealed.seq);
+
+      const parsed = readJson(opened.value);
+      if (Option.isNone(parsed)) return;
+      yield* receive(parsed.value);
+    });
+
+  yield* Effect.forkScoped(
+    Effect.forever(Effect.flatMap(Queue.take(outbox), sealAndPost)),
+  );
+  yield* Effect.forkScoped(
+    Effect.forever(Effect.flatMap(Queue.take(mailbox), open)),
+  );
+
+  yield* host.listenOn(port, "message", (event) =>
+    Effect.sync(() => {
+      const sealed = parseSealed((event as MessageEvent).data);
+      if (Option.isSome(sealed)) {
+        Queue.offerUnsafe(mailbox, sealed.value);
+      }
+    }));
+
+  yield* Effect.acquireRelease(
+    Effect.sync(() => {
+      port.start();
+    }),
+    () =>
+      Effect.sync(() => {
+        port.close();
+      }),
+  );
+
+  return {
+    send: (message) =>
+      Effect.sync(() => {
+        Queue.offerUnsafe(outbox, message);
+      }),
+  } satisfies Link;
+});
 
 // ---------------------------------------------------------------------------
 // The service
@@ -416,30 +611,6 @@ export class FrameBus extends Context.Service<FrameBus, {
           });
         });
 
-      /**
-       * Hand one message to a port.
-       *
-       * A post to a port whose document is gone does not throw, and the message
-       * is dropped in silence. Liveness is therefore the work of the sweep, and
-       * every request has a deadline in any case. Only a payload that the
-       * browser cannot clone fails here, and every payload of ours is plain
-       * data.
-       */
-      const postTo = (
-        port: MessagePort,
-        message: FrameWire | WelcomeMessage,
-      ): Effect.Effect<void, FrameError> =>
-        Effect.try({
-          try: () => {
-            port.postMessage(message);
-          },
-          catch: (cause) =>
-            new FrameError({
-              reason: "failed",
-              detail: `the port refused the message: ${describe(cause)}`,
-            }),
-        });
-
       // ---------------------------------------------------------------------
       // The registry of the coordinator
       // ---------------------------------------------------------------------
@@ -485,7 +656,7 @@ export class FrameBus extends Context.Service<FrameBus, {
       ): Effect.Effect<void> =>
         Effect.forEach(
           open.filter((record) => record.frameId !== wire.from),
-          (record) => Effect.ignore(postTo(record.port, wire)),
+          (record) => record.link.send(wire),
           { discard: true },
         );
 
@@ -589,7 +760,7 @@ export class FrameBus extends Context.Service<FrameBus, {
             detail: `no frame with the id ${wire.to}`,
           });
         }
-        yield* postTo(target.port, wire);
+        yield* target.link.send(wire);
       });
 
       const attemptRef = yield* Effect.acquireRelease(
@@ -613,7 +784,7 @@ export class FrameBus extends Context.Service<FrameBus, {
             detail: "this frame has no link to the top frame",
           });
         }
-        yield* postTo(attempt.value.port, wire);
+        yield* attempt.value.link.send(wire);
       });
 
       const route = realm.isTop ? routeInTop : routeInChild;
@@ -730,12 +901,13 @@ export class FrameBus extends Context.Service<FrameBus, {
       });
 
       /**
-       * Read one message that came over the port of an admitted frame.
+       * Read one message that a child frame sent on its link.
        *
-       * The check of `from` runs before anything acts on the message. The port
-       * identifies the sender, so a frame can only speak for itself. To
-       * attribute a message to a frame that did not send it would break the
-       * order that every frame must agree on.
+       * The link has already opened the message, so the sender holds the
+       * credential. The check of `from` runs before anything acts on the
+       * message. The link identifies the sender, so a frame can only speak for
+       * itself. To attribute a message to a frame that did not send it would
+       * break the order that every frame must agree on.
        */
       const receiveFromChild = (
         frameId: FrameId,
@@ -766,6 +938,7 @@ export class FrameBus extends Context.Service<FrameBus, {
         source: Window,
         frameId: FrameId,
         helloId: string,
+        cipher: FrameCipher,
       ) {
         const current = yield* Ref.get(records);
 
@@ -798,13 +971,14 @@ export class FrameBus extends Context.Service<FrameBus, {
           Scope.close(scope, Exit.void),
         );
 
-        yield* Scope.provide(
+        const link = yield* Scope.provide(
           Effect.gen(function*() {
-            yield* dom.listenOn(
+            const built = yield* makeSealedLink(
+              dom,
               port,
-              "message",
-              (event) =>
-                receiveFromChild(frameId, (event as MessageEvent).data),
+              cipher,
+              "down",
+              (data) => receiveFromChild(frameId, data),
             );
             // `messageerror` is the only failure event that a port gives. A
             // payload that cannot be cloned means that the peer is not the code
@@ -812,33 +986,25 @@ export class FrameBus extends Context.Service<FrameBus, {
             yield* dom.listenOn(port, "messageerror", () => {
               return Effect.ignore(removeRecord(frameId));
             });
-            yield* Effect.acquireRelease(
-              Effect.sync(() => {
-                port.start();
-              }),
-              () =>
-                Effect.sync(() => {
-                  port.close();
-                }),
-            );
+            return built;
           }),
           scope,
         );
 
-        const record: FrameRecord = { frameId, source, port, release };
+        const record: FrameRecord = { frameId, source, link, release };
         const next = [...rest, record];
         yield* Ref.set(records, next);
 
         const nonce = yield* Ref.get(nonceRef);
         if (Option.isSome(nonce)) {
-          yield* Effect.ignore(postTo(port, {
+          yield* link.send({
             ...ENVELOPE,
             kind: "WELCOME",
             nonce: nonce.value,
             frameId,
             helloId,
             frames: rosterOf(next),
-          }));
+          });
         }
         yield* publishRoster(next);
       });
@@ -847,30 +1013,45 @@ export class FrameBus extends Context.Service<FrameBus, {
        * Finish a join that passed the cheap checks.
        *
        * The proof is checked before anything is registered. It proves that the
-       * frame can read manager-private storage, which page code cannot do.
+       * frame can read manager-private storage, which page code cannot do. The
+       * key of the link comes from the same credential, so a holder of a copy
+       * of the port can neither read the session nor speak in it.
        */
       const completeJoin = Effect.fn("FrameBus.completeJoin")(function*(
         port: MessagePort,
         source: Window,
         message: JoinMessage,
       ) {
-        const payload = joinProofPayload(
-          message.token,
-          message.helloId,
-          message.frameId,
-        );
+        const handshake = {
+          token: message.token,
+          helloId: message.helloId,
+          frameId: message.frameId,
+        };
         const proven = yield* Effect.orElseSucceed(
-          auth.verify(payload, message.proof),
+          auth.verifyJoin(handshake, message.proof),
           () => false,
         );
         const stillThere = yield* knownWindow(source);
+        const closePort = Effect.sync(() => {
+          port.close();
+        });
         if (!proven || Option.isNone(stillThere)) {
-          yield* Effect.sync(() => {
-            port.close();
-          });
+          yield* closePort;
           return;
         }
-        yield* admit(port, source, asFrameId(message.frameId), message.helloId);
+
+        const cipher = yield* Effect.result(auth.cipher(handshake));
+        if (Result.isFailure(cipher)) {
+          yield* closePort;
+          return;
+        }
+        yield* admit(
+          port,
+          source,
+          asFrameId(message.frameId),
+          message.helloId,
+          cipher.success,
+        );
       });
 
       /**
@@ -1017,17 +1198,27 @@ export class FrameBus extends Context.Service<FrameBus, {
         const helloId = yield* randomId;
         if (Option.isNone(helloId)) return;
 
-        const payload = joinProofPayload(
+        const handshake = {
           token,
-          helloId.value,
-          realm.frameId,
-        );
-        const signed = yield* Effect.result(auth.sign(payload));
+          helloId: helloId.value,
+          frameId: realm.frameId,
+        };
+        const signed = yield* Effect.result(auth.joinProof(handshake));
         if (Result.isFailure(signed)) {
           // No credential means no admission. A frame that cannot read
           // manager-private storage must stay outside the session.
           yield* Effect.logDebug(
             `frame join is not possible: ${signed.failure.detail}`,
+          );
+          return;
+        }
+
+        // The same credential gives the key of the port. Both ends derive it
+        // from the three values of this attempt, and neither one sends it.
+        const cipher = yield* Effect.result(auth.cipher(handshake));
+        if (Result.isFailure(cipher)) {
+          yield* Effect.logDebug(
+            `frame join is not possible: ${cipher.failure.detail}`,
           );
           return;
         }
@@ -1039,23 +1230,14 @@ export class FrameBus extends Context.Service<FrameBus, {
         const channel = built.success;
 
         const scope = yield* Scope.make();
-        yield* Scope.provide(
-          Effect.gen(function*() {
-            yield* dom.listenOn(
-              channel.port1,
-              "message",
-              (event) => receiveFromTop((event as MessageEvent).data),
-            );
-            yield* Effect.acquireRelease(
-              Effect.sync(() => {
-                channel.port1.start();
-              }),
-              () =>
-                Effect.sync(() => {
-                  channel.port1.close();
-                }),
-            );
-          }),
+        const link = yield* Scope.provide(
+          makeSealedLink(
+            dom,
+            channel.port1,
+            cipher.success,
+            "up",
+            (data) => receiveFromTop(data),
+          ),
           scope,
         );
 
@@ -1063,7 +1245,7 @@ export class FrameBus extends Context.Service<FrameBus, {
           attemptRef,
           Option.some<Attempt>({
             helloId: helloId.value,
-            port: channel.port1,
+            link,
             release: Scope.close(scope, Exit.void),
           }),
         );
@@ -1130,9 +1312,15 @@ export class FrameBus extends Context.Service<FrameBus, {
 
       if (realm.isTop) {
         // The coordinator owns the session nonce. It never travels except in a
-        // `WELCOME`, which goes over a port that only an admitted frame holds.
+        // `WELCOME`, which is the first sealed message of a link. A page that
+        // holds a copy of the port cannot open it.
         const created = yield* randomId;
         yield* Ref.set(nonceRef, created);
+
+        // The credential of the session already exists here. `FrameAuth`
+        // creates or loads it when its layer is built, which is before this
+        // layer, so the first child that answers a challenge finds a frame
+        // that can verify its proof.
 
         // Registration is accepted at any time and for ever. `document-start`
         // is not reliable on WebKit, a page inserts frames after load, and a
@@ -1155,6 +1343,11 @@ export class FrameBus extends Context.Service<FrameBus, {
         yield* dom.listen("window", "pagehide", (event) =>
           // A page that is kept is suspended, and not gone. To say goodbye
           // would leave the restored page outside the session.
+          //
+          // The message is put in the outbox here, and the fiber of the link
+          // seals it. The document may go before that happens. This message was
+          // always best effort, which is why the coordinator sweeps the frames
+          // tree as well.
           event.persisted
             ? Effect.void
             : Effect.ignore(send(toTop, { kind: "GOODBYE" })));
