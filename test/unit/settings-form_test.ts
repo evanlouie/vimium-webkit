@@ -18,6 +18,7 @@ import {
   adjustedFields,
   parseExclusionText,
   parseLines,
+  refusedFields,
   SETTINGS_FIELDS,
   SETTINGS_SECTIONS,
 } from "~/ui/Dialog.ts";
@@ -114,6 +115,60 @@ describe("the settings form", () => {
         ["Hide the HUD", "Page that a new tab opens"].toSorted(),
       );
       assert.deepEqual(adjustedFields(base, base), []);
+    }));
+
+  it.effect("names a field whose text it refused", () =>
+    Effect.sync(() => {
+      // The write function keeps the stored value here, so the offered
+      // settings and the stored settings agree and `adjustedFields` finds
+      // nothing. Without this list the user saw the old value come back with
+      // no reason for it.
+      const field = (key: string) => {
+        const found = SETTINGS_FIELDS.find((one) => String(one.key) === key);
+        assert.isDefined(found, `${key} has no control`);
+        return found;
+      };
+      const refused = refusedFields([
+        { field: field("linkHintNumbers"), text: "1" },
+        { field: field("linkHintCharacters"), text: "a" },
+        { field: field("scrollStepSize"), text: "0" },
+        { field: field("historyIndexLimit"), text: "90000" },
+        { field: field("searchUrl"), text: "https://example.com/?q=%s" },
+        { field: field("smoothScroll"), text: "true" },
+      ]);
+      assert.deepEqual(refused, [
+        "Digits that choose among filtered hints",
+        "Link hint characters",
+        "Scroll step size (px)",
+        "Entries kept in the index",
+      ]);
+    }));
+
+  it.effect("says nothing about a value that it can use", () =>
+    Effect.sync(() => {
+      const base = defaultSettings();
+      const offered = SETTINGS_FIELDS.map((one) => ({
+        field: one,
+        text: one.kind === "toggle"
+          ? String(one.read(base))
+          : one.read(base),
+      }));
+      assert.deepEqual(refusedFields(offered), []);
+    }));
+
+  it.effect("lets every number control say what it refuses", () =>
+    Effect.sync(() => {
+      for (const field of SETTINGS_FIELDS) {
+        if (field.kind !== "number") continue;
+        assert.isDefined(
+          field.refuses,
+          `the field for ${String(field.key)} cannot report a refusal`,
+        );
+        assert.isTrue(
+          field.refuses?.("not a number") ?? false,
+          `the field for ${String(field.key)} accepted text as a number`,
+        );
+      }
     }));
 
   it.effect("reads a list of lines, and drops the empty ones", () =>
