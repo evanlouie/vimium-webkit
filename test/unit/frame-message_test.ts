@@ -270,8 +270,12 @@ describe("FrameMessage", () => {
       const key = linkKeyPayload(token, helloId, frameId);
       assert.notStrictEqual(proof, key);
       // A hexadecimal token can never spell the prefix of the key payload, so
-      // no handshake that the schema accepts can make the two texts meet.
-      assert.isTrue(key.startsWith(`${PROTOCOL_MAGIC}/link/v1:`));
+      // no handshake that the schema accepts can make the two texts meet. The
+      // label carries the version of the protocol, and not a version of its
+      // own, so one number names the wire.
+      assert.isTrue(
+        key.startsWith(`${PROTOCOL_MAGIC}/link/v${PROTOCOL_VERSION}:`),
+      );
       assert.isFalse(/^[0-9a-f]/.test(key));
       assert.isTrue(/^[0-9a-f]/.test(proof));
     }));
