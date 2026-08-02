@@ -71,8 +71,7 @@ const MATCH_BUDGET_MS = 50;
 /**
  * The clock for the budget.
  *
- * `performance` is absent in some hosts. This is the same reading that
- * `~/domain/FindQuery.ts` takes for its own probe.
+ * `performance` is absent in some hosts.
  */
 const now = (): number =>
   typeof performance !== "undefined" ? performance.now() : Date.now();

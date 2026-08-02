@@ -228,9 +228,52 @@ describe("FindQuery", () => {
       }
     }));
 
+  it.effect("decides without running the pattern", () =>
+    Effect.sync(() => {
+      // Each of these defeated the timed probe that stood here before.
+      //
+      // `(a|a|a|a)*$` is the probe bomb: twenty characters of `a` take more
+      // than a minute, so the probe *was* the freeze that it looked for.
+      //
+      // The two `\s*` patterns pass a twenty-character probe in some
+      // milliseconds, and then grow with a power of the length: eighty
+      // characters cost 1.5 seconds, and a paragraph costs minutes.
+      //
+      // The check now reads the text and never runs it, so the whole set is
+      // decided in well under one frame.
+      const bombs = [
+        "(a|a|a|a)*$",
+        "\\s*\\s*\\s*\\s*\\s*\\s*$",
+        "^ *a* *a* *$",
+        "(?:a|ab)*$",
+        "(a?){10}a{10}$",
+      ];
+
+      const started = performance.now();
+      for (const source of bombs) {
+        const query = parseFindQuery(source, regexMode);
+        assert.isTrue(
+          Option.isSome(query.error),
+          `${source} compiled with no complaint`,
+        );
+        assert.isTrue(Option.isNone(toRegExp(query)));
+      }
+      const elapsed = performance.now() - started;
+      assert.isBelow(elapsed, 50, `the decision took ${elapsed}ms`);
+    }));
+
   it.effect("still allows an ordinary quantifier", () =>
     Effect.sync(() => {
-      for (const source of ["a+", "\\d{2,4}", "(?:foo|bar)+", "[a-z]*x"]) {
+      for (
+        const source of [
+          "a+",
+          "\\d{2,4}",
+          "(?:foo|bar)+",
+          "[a-z]*x",
+          "colou?r",
+          "^https://(mail|inbox)\\.example\\.com/.*$",
+        ]
+      ) {
         const query = parseFindQuery(source, regexMode);
         assert.isTrue(
           Option.isNone(query.error),
@@ -238,6 +281,27 @@ describe("FindQuery", () => {
         );
         assert.isTrue(Option.isSome(toRegExp(query)));
       }
+    }));
+
+  it.effect("never refuses a query that a user types as text", () =>
+    Effect.sync(() => {
+      // A literal query is escaped before it becomes an expression, so the
+      // safety check must never take a plain search away from a user.
+      for (
+        const text of [
+          "a+b",
+          "(a*)*",
+          "* * *",
+          "sign   in",
+          "c:\\\\windows",
+          "ПРИВЕТ",
+        ]
+      ) {
+        const query = parseFindQuery(text, literal);
+        assert.isTrue(Option.isNone(query.error), `${text} was refused`);
+        assert.isTrue(Option.isSome(toRegExp(query)));
+      }
+      assert.isTrue(Option.isNone(wordQuery("a+b").error));
     }));
 
   it.effect("refuses an absurdly long pattern", () =>
