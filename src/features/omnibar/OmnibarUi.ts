@@ -206,6 +206,14 @@ export const OMNIBAR_CSS: string = `
 
 export interface OmnibarViewOptions {
   readonly placeholder: string;
+  /**
+   * What assistive technology calls the field.
+   *
+   * It falls back to a fixed name. The placeholder is not a name: it changes
+   * with the source, and a reader that already announces it would say the same
+   * words twice.
+   */
+  readonly ariaLabel?: string;
   /** The text changed. This body may suspend; the view runs it in a fiber. */
   readonly onInput: (value: string) => Effect.Effect<void>;
   /**
@@ -235,6 +243,14 @@ export interface OmnibarView {
   /** True while the event belongs to our own overlay. */
   readonly ownsFocus: (target: EventTarget | null) => boolean;
 }
+
+/**
+ * What a screen reader calls the omnibar field.
+ *
+ * One name for every source. A name that changed with the source would tell
+ * the user that the control changed, and it did not.
+ */
+const OMNIBAR_NAME = "Vimium-WebKit omnibar";
 
 /** Build the overlay. It exists for as long as the enclosing scope. */
 export const makeOmnibarView = (
@@ -293,7 +309,7 @@ export const makeOmnibarView = (
         input.setAttribute("autocorrect", "off");
         // The field has no visible label, and the placeholder disappears as
         // soon as the user types.
-        input.setAttribute("aria-label", options.placeholder);
+        input.setAttribute("aria-label", options.ariaLabel ?? OMNIBAR_NAME);
         field.appendChild(input);
 
         const list = doc.createElement("ul");

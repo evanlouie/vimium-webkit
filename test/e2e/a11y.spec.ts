@@ -379,8 +379,20 @@ test.describe("the accessibility tree", () => {
     await vw.press("o");
     await waitForOverlay(page, ".vw-omnibar__input");
 
-    expect(await overlayAttribute(page, ".vw-omnibar__input", "aria-label"))
-      .not.toBeNull();
+    // A name of its own, and not the placeholder: the placeholder changes with
+    // the source, and a reader that announces it would say it twice.
+    const name = await overlayAttribute(
+      page,
+      ".vw-omnibar__input",
+      "aria-label",
+    );
+    const placeholder = await overlayAttribute(
+      page,
+      ".vw-omnibar__input",
+      "placeholder",
+    );
+    expect(name ?? "").not.toBe("");
+    expect(name).not.toBe(placeholder);
     expect(await overlayAriaHidden(page, ".vw-omnibar__input")).toBe(false);
   });
 });
