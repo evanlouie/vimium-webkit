@@ -74,14 +74,20 @@ export const verifyBundleBoots = async (
   try {
     const page = await browser.newPage();
     const failures: string[] = [];
-    page.on("pageerror", (error) => failures.push(String(error)));
+    page.on("pageerror", (error) => {
+      failures.push(String(error));
+    });
 
     // A real document, at the point a userscript at `document-start` sees one.
     await page.setContent("<!doctype html><html><body></body></html>");
     await page.evaluate(source);
 
     // Give any microtask-deferred boot work a turn to throw.
-    await page.evaluate(() => new Promise((done) => setTimeout(done, 50)));
+    await page.evaluate(() =>
+      new Promise((done) => {
+        setTimeout(done, 50);
+      })
+    );
 
     if (failures.length > 0) {
       return { ok: false, error: failures.join("; ") };

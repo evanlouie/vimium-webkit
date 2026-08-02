@@ -91,7 +91,9 @@ const sizeReport = (chunk: OutputChunk): readonly ModuleSize[] =>
     .map(([module, meta]) => ({
       module: module.startsWith(ROOT)
         ? module.slice(ROOT.length + 1)
-        : module.replace(/^\0/, ""),
+        // Rollup prefixes virtual module identifiers with NUL.
+        // oxlint-disable-next-line no-control-regex
+        : module.replace(/^\u0000/, ""),
       bytes: meta.renderedLength,
     }))
     .filter((entry) => entry.bytes > 0)

@@ -1098,7 +1098,7 @@ the budget.
 | Bundler                 | Vite (rollup), format `iife`, target `safari16`              |
 | Runtime validation      | `Schema`, from Effect v4                                     |
 | Error handling          | `Effect` + `Schema.TaggedErrorClass`                         |
-| Format / lint           | `dprint`, `eslint`                                           |
+| Format / lint           | `dprint`, `oxlint`                                           |
 | Unit tests              | Vitest                                                       |
 | DOM / integration tests | Playwright (WebKit + Chromium + Firefox channels)            |
 | Task runner             | `npm run`                                                    |

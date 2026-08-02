@@ -82,7 +82,7 @@ export const mapChunked = async <T, R>(
     if (index < items.length) {
       // Sequential by design: the whole point is to hand control back between
       // slices, which cannot be parallelised away.
-      // eslint-disable-next-line no-await-in-loop
+      // oxlint-disable-next-line no-await-in-loop
       await yieldToEventLoop();
     }
   }
@@ -108,7 +108,9 @@ export const yieldToEventLoop = (): Promise<void> =>
   });
 
 export const nextFrame = (): Promise<number> =>
-  new Promise((resolve) => requestAnimationFrame(resolve));
+  new Promise((resolve) => {
+    requestAnimationFrame(resolve);
+  });
 
 /**
  * Coalesce calls into at most one per animation frame, keeping the most recent

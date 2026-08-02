@@ -1,0 +1,52 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "error"
+  },
+  "plugins": ["typescript"],
+  "env": {
+    "browser": true,
+    "builtin": true,
+    "node": true
+  },
+  "ignorePatterns": [
+    "dist/**",
+    "node_modules/**",
+    "test-results/**",
+    "playwright-report/**",
+    ".coverage/**",
+    "coverage/**",
+    "test/fixtures/**"
+  ],
+  "options": {
+    "typeAware": true,
+    "denyWarnings": true,
+    "reportUnusedDisableDirectives": "error"
+  },
+  "rules": {
+    "eqeqeq": "error",
+    "no-await-in-loop": "error",
+    "no-unused-vars": [
+      "error",
+      {
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_"
+      }
+    ],
+    "typescript/explicit-module-boundary-types": "error",
+    "typescript/no-explicit-any": "error",
+    "typescript/no-misused-spread": "off",
+    "typescript/strict-void-return": "error"
+  },
+  "overrides": [
+    {
+      "files": ["test/**/*.ts"],
+      "rules": {
+        "typescript/explicit-module-boundary-types": "off",
+        "typescript/no-base-to-string": "off",
+        "typescript/strict-void-return": "off",
+        "typescript/unbound-method": "off"
+      }
+    }
+  ]
+}

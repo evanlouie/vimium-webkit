@@ -79,7 +79,7 @@ test.describe("performance", () => {
       for (const frame of page.frames()) {
         // Sequential on purpose: evaluating twenty frames at once would measure
         // contention rather than the per-frame cost.
-        // eslint-disable-next-line no-await-in-loop
+        // oxlint-disable-next-line no-await-in-loop
         const ms = await frame.evaluate((code) => {
           const started = performance.now();
           (0, eval)(code);

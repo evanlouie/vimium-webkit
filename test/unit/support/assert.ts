@@ -92,7 +92,7 @@ export const assertAlmostEquals = (
 
 export const assertThrows = (
   fn: () => unknown,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // oxlint-disable-next-line typescript/no-explicit-any
   ErrorClass?: new(...args: any[]) => Error,
   messageIncludes?: string,
   message?: string,

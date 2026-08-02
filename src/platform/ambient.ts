@@ -52,16 +52,18 @@ export const clipboardWriter = ():
   | null =>
   probe(() => {
     const clipboard = navigator.clipboard;
-    const write = clipboard?.writeText;
-    return typeof write === "function" ? write.bind(clipboard) : null;
+    return typeof clipboard?.writeText === "function"
+      ? clipboard.writeText.bind(clipboard)
+      : null;
   }, null);
 
 /** `navigator.clipboard.readText`, already bound. */
 export const clipboardReader = (): (() => Promise<string>) | null =>
   probe(() => {
     const clipboard = navigator.clipboard;
-    const read = clipboard?.readText;
-    return typeof read === "function" ? read.bind(clipboard) : null;
+    return typeof clipboard?.readText === "function"
+      ? clipboard.readText.bind(clipboard)
+      : null;
   }, null);
 
 /** `navigator.storage`, or `null` if it is absent or unreadable. */

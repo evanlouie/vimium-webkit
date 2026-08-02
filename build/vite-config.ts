@@ -105,7 +105,8 @@ export const bundleConfig = (options: BundleOptions): InlineConfig => ({
       // split out into a chunk the manager would never fetch.
       external: [],
       output: {
-        inlineDynamicImports: true,
+        // Vite 8 disables code splitting for IIFE library builds. Its
+        // `inlineDynamicImports` option is redundant and produces a warning.
         // Effect relies on module-level initialisation, so `moduleSideEffects`
         // must stay at its default. Forcing it to `false` produced a bundle 60%
         // smaller that threw on load. See `build/verify-bundle.ts`.

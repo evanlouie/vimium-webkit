@@ -43,7 +43,7 @@ class Hud implements HudApi {
 
   constructor(options: HudOptions) {
     this.#root = options.root;
-    this.#hidden = options.hidden;
+    this.#hidden = () => options.hidden();
 
     const doc = options.root.shadow.ownerDocument;
     this.#element = doc.createElement("div");
@@ -247,7 +247,7 @@ class ActivePrompt {
       if (!this.#done) this.#finish(null);
     });
 
-    this.result.finally(onSettled);
+    void this.result.finally(onSettled);
   }
 
   setStatus(text: string): void {

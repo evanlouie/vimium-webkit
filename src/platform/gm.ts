@@ -295,7 +295,6 @@ export interface ValueBackend {
   get(key: string): Effect.Effect<Option.Option<string>, GmError>;
   set(key: string, value: string): Effect.Effect<void, GmError>;
   remove(key: string): Effect.Effect<void, GmError>;
-  list(): Effect.Effect<readonly string[], GmError>;
   /** Cross-tab change notification; `null` when the manager has no primitive. */
   readonly watch:
     | ((key: string, onChange: (raw: string | undefined) => void) => () => void)
@@ -313,8 +312,7 @@ const asOption = (value: GmValue | undefined): Option.Option<string> =>
   Option.fromNullishOr(asString(value) ?? null);
 
 const syncBackend = (surface: GmSurface): ValueBackend | null => {
-  const { getValueSync, setValueSync, deleteValueSync, listValuesSync } =
-    surface;
+  const { getValueSync, setValueSync, deleteValueSync } = surface;
   if (!getValueSync || !setValueSync || !deleteValueSync) return null;
 
   const watcher = surface.addValueChangeListener;
@@ -330,10 +328,6 @@ const syncBackend = (surface: GmSurface): ValueBackend | null => {
       attempt("GM_deleteValue", () => {
         deleteValueSync(key);
       }),
-    list: () =>
-      listValuesSync
-        ? attempt("GM_listValues", () => [...listValuesSync()])
-        : Effect.fail(unavailable("GM_listValues")),
     watch: watcher
       ? (key, onChange) => {
         const id = watcher(key, (_name, _old, newValue) => {
@@ -358,7 +352,7 @@ const syncBackend = (surface: GmSurface): ValueBackend | null => {
 const asyncBackend = (surface: GmSurface): ValueBackend | null => {
   const ns = surface.namespace;
   if (!ns?.getValue || !ns.setValue || !ns.deleteValue) return null;
-  const { getValue, setValue, deleteValue, listValues } = ns;
+  const { getValue, setValue, deleteValue } = ns;
 
   return {
     kind: "gm-async",
@@ -372,10 +366,6 @@ const asyncBackend = (surface: GmSurface): ValueBackend | null => {
       attemptAsync("GM.deleteValue", async () => {
         await deleteValue(key);
       }),
-    list: () =>
-      listValues
-        ? attemptAsync("GM.listValues", async () => [...(await listValues())])
-        : Effect.fail(unavailable("GM.listValues")),
     watch: null,
   };
 };
@@ -414,17 +404,6 @@ const localStorageBackend = (prefix: string): ValueBackend | null => {
       attempt("localStorage.removeItem", () => {
         store.removeItem(scoped(key));
       }),
-    list: () =>
-      attempt("localStorage.key", () => {
-        const keys: string[] = [];
-        for (let i = 0; i < store.length; i++) {
-          const key = store.key(i);
-          if (key !== null && key.startsWith(prefix)) {
-            keys.push(key.slice(prefix.length));
-          }
-        }
-        return keys;
-      }),
     watch: (key, onChange) => {
       const listener = (event: StorageEvent): void => {
         if (event.key === scoped(key)) onChange(event.newValue ?? undefined);
@@ -449,7 +428,6 @@ const memoryBackend = (): ValueBackend => {
       Effect.sync(() => {
         map.delete(key);
       }),
-    list: () => Effect.sync((): readonly string[] => [...map.keys()]),
     watch: null,
   };
 };

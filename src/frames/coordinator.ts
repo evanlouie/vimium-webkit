@@ -218,7 +218,9 @@ export class FrameCoordinator {
     });
     // `messageerror` is the only failure event a port emits; an
     // unclonable payload means the peer is not who we think it is.
-    port.addEventListener("messageerror", () => this.#registry.remove(frameId));
+    port.addEventListener("messageerror", () => {
+      this.#registry.remove(frameId);
+    });
     port.start();
   }
 

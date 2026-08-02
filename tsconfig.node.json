@@ -26,7 +26,6 @@
     "types": [
       "node"
     ],
-    "baseUrl": ".",
     "paths": {
       "~/*": [
         "./src/*"
@@ -38,7 +37,6 @@
   "include": [
     "build/**/*.ts",
     "test/**/*.ts",
-    "*.ts",
-    "eslint.config.js"
+    "*.ts"
   ]
 }

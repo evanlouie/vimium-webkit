@@ -286,7 +286,9 @@ export class FrameRegistry {
     this.sweep();
     const tree = this.#root === null ? [] : collectFrameWindows(this.#root);
     const position = new Map<Window, number>();
-    tree.forEach((frame, index) => position.set(frame, index));
+    tree.forEach((frame, index) => {
+      position.set(frame, index);
+    });
 
     return [...this.#records.values()]
       .map((record) => ({

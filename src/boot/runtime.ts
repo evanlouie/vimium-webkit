@@ -48,8 +48,9 @@ export const appLayer = (surface: GmSurface): Layer.Layer<AppServices> =>
   Layer.mergeAll(
     Clipboard.layer,
     Tabs.layer,
-    Gm.layerFrom(surface),
   ).pipe(
+    // `mergeAll` builds its inputs in parallel. Supply `Gm` outside that
+    // parallel group because both service layers require it.
     Layer.provideMerge(Gm.layerFrom(surface)),
     Layer.provideMerge(Layer.mergeAll(LoggingLayer, TracingLayer)),
   );

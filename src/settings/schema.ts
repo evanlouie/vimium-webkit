@@ -79,7 +79,7 @@ const hasQueryPlaceholder = (value: string): boolean => value.includes("%s");
 export const settingsSchema = Schema.Struct({
   // --- Scrolling ---
   scrollStepSize: field(
-    Schema.Number.check(
+    Schema.Finite.check(
       Schema.isGreaterThanOrEqualTo(1),
       Schema.isLessThanOrEqualTo(10_000),
     ),
@@ -187,7 +187,7 @@ export const settingsSchema = Schema.Struct({
   enableHistoryIndex: field(Schema.Boolean, false),
   historyIndexDenylist: field(Schema.mutable(Schema.Array(Schema.String)), []),
   historyIndexLimit: field(
-    Schema.Number.check(
+    Schema.Finite.check(
       Schema.isGreaterThanOrEqualTo(0),
       Schema.isLessThanOrEqualTo(50_000),
     ),
@@ -235,27 +235,23 @@ export const settingsGroup: GroupSpec<Settings> = {
 // ---------------------------------------------------------------------------
 
 export /**
- * `isFinite` on every unbounded number, because `Schema.Number` accepts `NaN`.
+ * Use `Schema.Finite` for every persisted number.
  *
- * Zod's `z.number()` rejected `NaN` and `Infinity`; Effect's does not. That
- * matters here rather than academically: `storage.ts` validates on the way
- * *out* precisely so a bad value is caught where it was produced, and a `NaN`
- * that passes is written as `null` by `JSON.stringify` — which then fails the
- * check on the way back in and resets the whole group, taking every other
- * field with it. The bounded fields reject `NaN` incidentally through their
- * comparisons; these have no bounds to hide behind.
+ * `Schema.Number` accepts `NaN` and infinities. A `NaN` becomes `null` during
+ * JSON encoding. The next read then rejects the group and restores defaults.
+ * `Schema.Finite` rejects these values before storage receives them.
  */
 const localMarkSchema = Schema.Struct({
-  scrollX: Schema.Number.check(Schema.isFinite()),
-  scrollY: Schema.Number.check(Schema.isFinite()),
-  savedAt: Schema.Number.check(Schema.isFinite()),
+  scrollX: Schema.Finite,
+  scrollY: Schema.Finite,
+  savedAt: Schema.Finite,
 });
 
 export const globalMarkSchema = Schema.Struct({
   url: Schema.String,
-  scrollX: Schema.Number.check(Schema.isFinite()),
-  scrollY: Schema.Number.check(Schema.isFinite()),
-  savedAt: Schema.Number.check(Schema.isFinite()),
+  scrollX: Schema.Finite,
+  scrollY: Schema.Finite,
+  savedAt: Schema.Finite,
 });
 
 export const marksSchema = Schema.Struct({
@@ -361,8 +357,8 @@ export const findHistoryGroup: GroupSpec<FindHistory> = {
 export const visitSchema = Schema.Struct({
   url: Schema.String,
   title: Schema.String,
-  visitCount: Schema.Number.check(Schema.isFinite()),
-  lastVisit: Schema.Number.check(Schema.isFinite()),
+  visitCount: Schema.Finite,
+  lastVisit: Schema.Finite,
 });
 
 export const historyIndexSchema = Schema.Struct({
@@ -392,7 +388,7 @@ export const sessionSchema = Schema.Struct({
     Schema.Struct({
       url: Schema.String,
       title: Schema.String,
-      heartbeat: Schema.Number.check(Schema.isFinite()),
+      heartbeat: Schema.Finite,
     }),
   )),
   /** One-time warnings already shown, keyed by id. */
@@ -406,7 +402,7 @@ export const sessionSchema = Schema.Struct({
    */
   zoomByOrigin: Schema.Record(
     Schema.String,
-    Schema.Number.check(Schema.isFinite()),
+    Schema.Finite,
   ),
 });
 

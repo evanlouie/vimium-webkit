@@ -161,7 +161,9 @@ export class ValueStore {
 
   onIssue(listener: IssueListener): () => void {
     this.#issueListeners.add(listener);
-    return () => this.#issueListeners.delete(listener);
+    return () => {
+      this.#issueListeners.delete(listener);
+    };
   }
 
   report(issue: StorageError): void {
@@ -545,12 +547,12 @@ export class ValueGroup<T> {
       // told it was saved.
       const validated = decodeUnknownResult(this.#spec.schema)(value);
       if (Result.isFailure(validated)) {
-        return yield* Effect.fail(this.#issue(
+        return yield* this.#issue(
           "invalid",
           "refusing to persist a value that fails its own schema",
           describeDecodeError(validated.failure),
           "write",
-        ));
+        );
       }
       const accepted = validated.success;
 
@@ -645,7 +647,7 @@ export class ValueGroup<T> {
         ),
         Effect.result,
       );
-      if (Result.isFailure(outcome)) return yield* Effect.fail(outcome.failure);
+      if (Result.isFailure(outcome)) return yield* outcome.failure;
     });
   }
 

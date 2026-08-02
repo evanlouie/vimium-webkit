@@ -21,7 +21,18 @@
     "noUnusedParameters": true,
     "lib": ["ESNext", "DOM", "DOM.Iterable", "DOM.AsyncIterable"],
     "types": [],
-    "baseUrl": ".",
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        "diagnostics": true,
+        "diagnosticSeverity": {
+          "floatingEffect": "error"
+        },
+        "ignoreEffectErrorsInTscExitCode": false,
+        "ignoreEffectWarningsInTscExitCode": false,
+        "ignoreEffectSuggestionsInTscExitCode": true
+      }
+    ],
     "paths": {
       "~/*": ["./src/*"]
     }

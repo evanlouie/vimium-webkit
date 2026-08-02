@@ -143,7 +143,7 @@ export const writeClipboard = (
           // Activation was already spent by the time we get here, so the only
           // viable retry is the manager's, which does not need it.
           Effect.catch((denied) =>
-            Effect.catch(gmCopy(surface, text), () => Effect.fail(denied))
+            Effect.mapError(gmCopy(surface, text), () => denied)
           ),
         ),
       });

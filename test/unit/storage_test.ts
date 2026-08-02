@@ -38,7 +38,6 @@ const fakeBackend = (withWatch: boolean): Fake => {
       Effect.sync(() => {
         map.delete(key);
       }),
-    list: () => Effect.sync((): readonly string[] => [...map.keys()]),
     watch: withWatch
       ? (key, onChange) => {
         watchers.set(key, onChange);
@@ -486,7 +485,6 @@ test("reset waits for a flush that is already touching the backend", async () =>
         log.push("remove");
         map.delete(key);
       }),
-    list: () => Effect.sync((): readonly string[] => [...map.keys()]),
     watch: null,
   };
 
@@ -532,7 +530,6 @@ test("two flushes cannot overlap, so writes reach storage in order", async () =>
         log.push("remove");
         map.delete(key);
       }),
-    list: () => Effect.sync((): readonly string[] => [...map.keys()]),
     watch: null,
   };
 
@@ -552,7 +549,7 @@ test("two flushes cannot overlap, so writes reach storage in order", async () =>
   // Sequential by design: each release must be observed before the next.
   while (gates.length > 0 || log.length < 4) {
     gates.shift()?.();
-    // eslint-disable-next-line no-await-in-loop
+    // oxlint-disable-next-line no-await-in-loop
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   await Promise.all([first, second, flushed]);
@@ -593,7 +590,6 @@ const gatedBackend = (): {
         Effect.sync(() => {
           map.delete(key);
         }),
-      list: () => Effect.sync((): readonly string[] => [...map.keys()]),
       watch: null,
     },
   };
@@ -646,7 +642,7 @@ test("a write during a hydration is not reverted by the read it overtook", async
   const settled = Promise.all([hydrating, writing]);
   for (let i = 0; i < 10; i++) {
     fake.gates.shift()?.();
-    // eslint-disable-next-line no-await-in-loop
+    // oxlint-disable-next-line no-await-in-loop
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   await settled;
@@ -724,7 +720,6 @@ test("reset erases even when a later write never lands", async () => {
       Effect.sync(() => {
         map.delete(key);
       }),
-    list: () => Effect.sync((): readonly string[] => [...map.keys()]),
     watch: null,
   };
 

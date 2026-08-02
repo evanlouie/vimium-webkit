@@ -33,7 +33,7 @@ const inOrder = async (
   steps: readonly (() => Promise<unknown>)[],
 ): Promise<void> => {
   for (const step of steps) {
-    // eslint-disable-next-line no-await-in-loop
+    // oxlint-disable-next-line no-await-in-loop
     await step();
   }
 };
