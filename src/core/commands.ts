@@ -124,7 +124,7 @@ const openFromClipboard = (app: AppContext, newTab: boolean): void => {
   // this origin wrote the clipboard, so the HUD input is the *primary* path and
   // the read is only an attempt to pre-fill it (§6.4). Started before the
   // prompt so the read races the user, not the other way round.
-  const attempt = app.runtime.runFork(
+  app.runtime.runFork(
     Clipboard.use((clipboard) => clipboard.read).pipe(
       Effect.tap((text) =>
         Effect.sync(() => {
@@ -137,7 +137,6 @@ const openFromClipboard = (app: AppContext, newTab: boolean): void => {
       Effect.ignore,
     ),
   );
-  void attempt;
 
   void app.hud.prompt({
     label: newTab ? "Open in new tab:" : "Open:",

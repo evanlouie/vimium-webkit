@@ -14,7 +14,7 @@
  * index, tabs we opened ourselves) and says so on every row.
  */
 
-import { Effect } from "effect";
+import { Clock, Effect } from "effect";
 import type {
   AppContext,
   CommandDef,
@@ -298,9 +298,9 @@ export const createOmnibar = (app: AppContext): OmnibarLiteApi => {
   // -------------------------------------------------------------------------
 
   const registerOpenedTab = (url: string, title: string): void => {
-    const now = Date.now();
-    app.runtime.runFork(Effect.ignore(
-      app.groups.session.update((current): SessionState => ({
+    app.runtime.runFork(Effect.ignore(Effect.gen(function*() {
+      const now = yield* Clock.currentTimeMillis;
+      return yield* app.groups.session.update((current): SessionState => ({
         ...current,
         // Pruned on every write: a list of tabs that are no longer alive is
         // both misleading in the completion list and unbounded growth in
@@ -309,8 +309,8 @@ export const createOmnibar = (app: AppContext): OmnibarLiteApi => {
           { url, title, heartbeat: now },
           ...liveTabs(current.knownTabs, now).filter((tab) => tab.url !== url),
         ],
-      })),
-    ));
+      }));
+    })));
   };
 
   const openInNewTab = (url: string): void => {
@@ -494,16 +494,16 @@ export const createOmnibar = (app: AppContext): OmnibarLiteApi => {
     const known = app.groups.session.current().knownTabs;
     if (!known.some((tab) => tab.url === url)) return;
 
-    const now = Date.now();
     const title = document.title;
-    app.runtime.runFork(Effect.ignore(
-      app.groups.session.update((current): SessionState => ({
+    app.runtime.runFork(Effect.ignore(Effect.gen(function*() {
+      const now = yield* Clock.currentTimeMillis;
+      return yield* app.groups.session.update((current): SessionState => ({
         ...current,
         knownTabs: liveTabs(current.knownTabs, now).map((tab) =>
           tab.url === url ? { url, title, heartbeat: now } : tab
         ),
-      })),
-    ));
+      }));
+    })));
   };
 
   return {

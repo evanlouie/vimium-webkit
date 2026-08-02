@@ -21,6 +21,19 @@ export interface BootResult {
 /** Set to skip the check when no browser is installed. Prints a warning. */
 const SKIP = "VIMIUM_SKIP_BOOT_CHECK";
 
+/**
+ * The artefact must also be *big enough to be the extension*.
+ *
+ * "Does not throw" is only half of "boots", and an empty file satisfies it.
+ * The failure this check exists for — a tree-shaking setting that deleted 60%
+ * of the bundle — was caught only because that particular dead bundle happened
+ * to throw. One that quietly removed everything would have shipped.
+ *
+ * A floor rather than an exact size: the ceiling is `BUNDLE_BUDGET_BYTES` in
+ * `invariants.ts`, and between the two there is room to work.
+ */
+const BUNDLE_FLOOR_BYTES = 200 * 1024;
+
 export const verifyBundleBoots = async (
   artefactPath: string,
 ): Promise<BootResult> => {
@@ -30,6 +43,14 @@ export const verifyBundleBoots = async (
   }
 
   const source = await readFile(artefactPath, "utf8");
+  const bytes = new TextEncoder().encode(source).length;
+  if (bytes < BUNDLE_FLOOR_BYTES) {
+    return {
+      ok: false,
+      error: `the artefact is ${bytes} bytes, under the ` +
+        `${BUNDLE_FLOOR_BYTES}-byte floor — it cannot contain the extension`,
+    };
+  }
 
   const { webkit } = await import("playwright");
   let browser: Awaited<ReturnType<typeof webkit.launch>> | undefined;

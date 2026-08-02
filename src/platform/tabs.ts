@@ -231,13 +231,9 @@ export class Tabs extends Context.Service<Tabs, {
     Tabs,
     Effect.gen(function*() {
       const { surface } = yield* Gm;
+      // Plain delegation, not `Effect.fn`; see the note in `clipboard.ts`.
       return Tabs.of({
-        open: Effect.fn("Tabs.open")(function*(
-          url: string,
-          options: OpenTabOptions = {},
-        ) {
-          return yield* openTab(surface, url, options);
-        }),
+        open: (url, options = {}) => openTab(surface, url, options),
         closeCurrent: closeCurrentTab(surface),
         navigate: (url, replace, trust) => navigate(url, replace, trust),
       });

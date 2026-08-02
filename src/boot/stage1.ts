@@ -80,10 +80,17 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
   let reportIssue: (message: string) => void = (message) => {
     startupIssues.push(message);
   };
+  // `StorageError` is raised on the way out as well as on the way in, so the
+  // message has to say which. Reporting a rejected *save* as "could not be
+  // read; using defaults" is wrong twice over, and wrong in the one place the
+  // user might otherwise re-enter the value they just lost.
   store.onIssue((issue) => {
     reportIssue(
-      `Stored ${issue.group} could not be read (${issue.reason}); using defaults. ` +
-        "Open Settings to review.",
+      issue.direction === "write"
+        ? `Could not save ${issue.group}: ${issue.detail}. ` +
+          "Your change applies to this tab only."
+        : `Stored ${issue.group} could not be read (${issue.reason}); ` +
+          "using defaults. Open Settings to review.",
     );
   });
 

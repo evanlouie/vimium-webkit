@@ -1,40 +1,44 @@
 {
-  "lsp": {
-    "deno": {
-      "settings": {
-        "deno": {
-          "enable": true,
-        },
-      },
-    },
-  },
   "languages": {
     "JavaScript": {
-      "language_servers": [
-        "deno",
-        "!typescript-language-server",
-        "!vtsls",
-        "!eslint",
-      ],
-      "formatter": "language_server",
+      "formatter": {
+        "external": {
+          "command": "npx",
+          "arguments": ["dprint", "fmt", "--stdin", "{buffer_path}"]
+        }
+      }
     },
     "TypeScript": {
-      "language_servers": [
-        "deno",
-        "!typescript-language-server",
-        "!vtsls",
-        "!eslint",
-      ],
-      "formatter": "language_server",
+      "formatter": {
+        "external": {
+          "command": "npx",
+          "arguments": ["dprint", "fmt", "--stdin", "{buffer_path}"]
+        }
+      }
     },
     "TSX": {
-      "language_servers": [
-        "deno",
-        "!typescript-language-server",
-        "!vtsls",
-        "!eslint",
-      ],
-      "formatter": "language_server",
+      "formatter": {
+        "external": {
+          "command": "npx",
+          "arguments": ["dprint", "fmt", "--stdin", "{buffer_path}"]
+        }
+      }
     },
-  },
+    "JSON": {
+      "formatter": {
+        "external": {
+          "command": "npx",
+          "arguments": ["dprint", "fmt", "--stdin", "{buffer_path}"]
+        }
+      }
+    },
+    "Markdown": {
+      "formatter": {
+        "external": {
+          "command": "npx",
+          "arguments": ["dprint", "fmt", "--stdin", "{buffer_path}"]
+        }
+      }
+    }
+  }
 }

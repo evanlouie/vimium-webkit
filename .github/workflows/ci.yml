@@ -62,11 +62,14 @@ jobs:
 
       # The build executes its own artefact in WebKit before it will pass, so
       # the browser has to be here too. See `build/verify-bundle.ts`.
+      # Keyed by browser set. A single key would let the webkit-only jobs
+      # populate it first, and `actions/cache` does not save on a hit — so the
+      # e2e matrix would re-download chromium and firefox on every run.
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          key: playwright-${{ runner.os }}-webkit-${{ hashFiles('package-lock.json') }}
       - run: npx playwright install --with-deps webkit
 
       - run: npm run build
@@ -102,8 +105,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          key: playwright-${{ runner.os }}-${{ matrix.project }}-webkit-${{ hashFiles('package-lock.json') }}
 
+      # WebKit as well as the matrix browser: `globalSetup` builds the bundle
+      # if it is stale, and the build executes its own artefact in WebKit.
       - name: Install browsers
         run: npx playwright install --with-deps ${{ matrix.project }} webkit
 
@@ -150,11 +155,14 @@ jobs:
             exit 1
           fi
 
+      # Keyed by browser set. A single key would let the webkit-only jobs
+      # populate it first, and `actions/cache` does not save on a hit — so the
+      # e2e matrix would re-download chromium and firefox on every run.
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          key: playwright-${{ runner.os }}-webkit-${{ hashFiles('package-lock.json') }}
       - run: npx playwright install --with-deps webkit
 
       - run: npm run build

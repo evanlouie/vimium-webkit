@@ -26,8 +26,7 @@
     "**/test-results",
     "**/playwright-report",
     "**/.coverage",
-    "**/*-lock.json",
-    "EFFECT_V4_MIGRATION.md"
+    "**/*-lock.json"
   ],
   "plugins": [
     "./node_modules/@dprint/typescript/plugin.wasm",

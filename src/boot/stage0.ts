@@ -380,7 +380,7 @@ export const wakeSubframes = (): void => {
     }
   };
 
-  // `globalThis` is the window at runtime; the ambient Deno type for it simply
+  // `globalThis` is the window at runtime; the ambient Node type for it simply
   // does not carry the `Window` interface.
   visit(globalThis as unknown as Window, 0);
 };

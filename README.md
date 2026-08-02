@@ -353,7 +353,7 @@ src/
   features/   Hints, find, visual/caret, scroller, marks, insert, omnibar
   ui/         One closed shadow root, styled through CSSOM
   frames/     Top-frame coordinator over postMessage + transferred MessagePort
-  settings/   Zod schema, defaults, migrations
+  settings/   Effect Schema, defaults, migrations
 ```
 
 Three decisions carry most of the weight:

@@ -47,7 +47,8 @@ const reservePort = (): number => {
   const output = execFileSync(
     process.execPath,
     ["-e", RESERVE_SCRIPT, FIXTURE_HOST],
-    { encoding: "utf8" },
+    // Bounded, so a wedged child cannot stall the whole run at config load.
+    { encoding: "utf8", timeout: 10_000 },
   );
   const port = Number(output.trim());
   if (!Number.isInteger(port) || port <= 0) {

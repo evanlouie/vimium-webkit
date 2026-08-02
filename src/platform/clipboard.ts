@@ -222,10 +222,12 @@ export class Clipboard extends Context.Service<Clipboard, {
     Clipboard,
     Effect.gen(function*() {
       const { surface } = yield* Gm;
+      // Plain delegation, not `Effect.fn`. The span wrapper costs about 3 µs
+      // per call and `runtime.ts` disables the tracer precisely because
+      // nothing exports the spans — so on the keystroke path it would be pure
+      // overhead around an effect that already exists.
       return Clipboard.of({
-        write: Effect.fn("Clipboard.write")(function*(text: string) {
-          return yield* writeClipboard(surface, text);
-        }),
+        write: (text) => writeClipboard(surface, text),
         read: readClipboard,
       });
     }),

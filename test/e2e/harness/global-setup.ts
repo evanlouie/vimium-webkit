@@ -3,7 +3,7 @@
  * the thing answering on the fixture port is actually ours.
  *
  * Runs once, in the main process, before any worker starts — which is exactly
- * where a build belongs, since several workers racing on one esbuild output is
+ * where a build belongs, since several workers racing on one bundler output is
  * a good way to observe a half-written file.
  */
 

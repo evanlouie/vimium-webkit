@@ -11,7 +11,7 @@
  * from `MessagePort`s handed to us by frames we do not control, so every
  * inbound payload is decoded against a schema and dropped on failure — there is
  * no "probably fine" path. Keep this module free of DOM access so it stays
- * unit-testable under `deno test`.
+ * unit-testable without a DOM.
  *
  * ## Security posture
  *
@@ -637,7 +637,7 @@ export const parseInbound = (
  * A per-session nonce, distributed top-down in `WELCOME`.
  *
  * 128 bits from the CSPRNG. `crypto.getRandomValues` is available in every
- * target (Safari 11+) and in Deno, so there is no fallback path to get wrong.
+ * target (Safari 11+) and in Node, so there is no fallback path to get wrong.
  * Also used for the one-shot admission tokens and for per-attempt `helloId`s,
  * where the same properties are wanted for the same reason.
  */

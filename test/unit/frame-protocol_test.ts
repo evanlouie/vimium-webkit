@@ -52,12 +52,15 @@ import { assert, assertEquals } from "./support/assert.ts";
 //
 // These never run. They fail the build instead, which is the point: both
 // assignments are relied upon by files this module is forbidden to edit.
+//
+// Exported only so `noUnusedLocals` does not delete the assertion as dead. The
+// binding is the assertion: assigning `true` to `never` is what fails.
 // ---------------------------------------------------------------------------
 
 type _HintsApiSatisfiesBridge = LocalHintsApi extends LocalHintsBridge ? true
   : never;
 type _FrameLinkSatisfiesApi = FrameLink extends FrameLinkApi ? true : never;
-const _contracts: [_HintsApiSatisfiesBridge, _FrameLinkSatisfiesApi] = [
+export const _contracts: [_HintsApiSatisfiesBridge, _FrameLinkSatisfiesApi] = [
   true,
   true,
 ];
@@ -491,7 +494,7 @@ test("sortDescriptors ignores the secondary flag", () => {
 // ---------------------------------------------------------------------------
 // Coordinator round trip
 //
-// Driven entirely over loopback channels, so it runs under `deno test` with no
+// Driven entirely over loopback channels, so it runs under Vitest with no
 // DOM. `root: null` disables the frames-tree checks, which are the one part
 // that genuinely needs a browser.
 // ---------------------------------------------------------------------------

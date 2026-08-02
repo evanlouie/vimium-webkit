@@ -15,6 +15,7 @@ import {
   Deferred,
   Duration,
   Effect,
+  Exit,
   Fiber,
   Option,
   Result,
@@ -38,9 +39,22 @@ export const StorageFailureReason = Schema.Literals([
 
 export type StorageFailureReason = typeof StorageFailureReason.Type;
 
+/**
+ * Which way the value was travelling when it went wrong.
+ *
+ * The same reasons arise reading and writing, and the two need different words
+ * to the user: a failed read means the defaults are now in force, a failed
+ * write means their change did not persist. One sentence for both said
+ * "could not be read; using defaults" over a rejected save.
+ */
+export const StorageDirection = Schema.Literals(["read", "write"]);
+
+export type StorageDirection = typeof StorageDirection.Type;
+
 export class StorageError
   extends Schema.TaggedErrorClass<StorageError>()("StorageError", {
     reason: StorageFailureReason,
+    direction: StorageDirection,
     group: Schema.String,
     detail: Schema.String,
     cause: Schema.optional(Schema.Defect()),
@@ -244,7 +258,14 @@ export class ValueGroup<T> {
         (exit) =>
           Effect.sync(() => {
             this.#inFlight = null;
-          }).pipe(Effect.andThen(Deferred.done(deferred, exit))),
+          }).pipe(Effect.andThen(
+            // Joiners get a value even when the *first* caller was
+            // interrupted. Forwarding that exit would interrupt callers that
+            // were perfectly healthy, and `hydrate()` promises it cannot fail.
+            Exit.isSuccess(exit)
+              ? Deferred.done(deferred, exit)
+              : Deferred.succeed(deferred, this.current()),
+          )),
       );
     });
   }
@@ -408,11 +429,7 @@ export class ValueGroup<T> {
    */
   flush(): Effect.Effect<void, StorageError> {
     return Effect.gen({ self: this }, function*() {
-      if (this.#writeFiber !== null) {
-        const fiber = this.#writeFiber;
-        this.#writeFiber = null;
-        yield* Fiber.interrupt(fiber);
-      }
+      yield* this.#interruptWriteFiber();
 
       const pending = this.#pendingWrite;
       const settlement = this.#settlement;
@@ -424,13 +441,47 @@ export class ValueGroup<T> {
         return;
       }
 
-      const outcome = yield* Effect.result(this.#flushValue(pending));
-      if (settlement !== null) {
-        yield* Result.isSuccess(outcome)
-          ? Deferred.succeed(settlement, undefined)
-          : Deferred.fail(settlement, outcome.failure);
-      }
+      // `onExit`, not the success path: an interruption between here and the
+      // completion would otherwise leave the deferred unfulfilled and park
+      // every fiber waiting on it for the life of the frame.
+      // `onExit` on the raw effect, before `Effect.result` — which turns a
+      // failure into a *successful* Result and would hand every waiter a
+      // success. Doing it here also covers interruption, which would otherwise
+      // leave the deferred unfulfilled and park its waiters for the life of
+      // the frame.
+      const outcome = yield* this.#flushValue(pending).pipe(
+        Effect.onExit((exit) =>
+          settlement === null ? Effect.void : Deferred.done(settlement, exit)
+        ),
+        Effect.result,
+      );
       if (Result.isFailure(outcome)) return yield* Effect.fail(outcome.failure);
+    });
+  }
+
+  /** Stop the sleeping debounce fiber, if there is one. */
+  #interruptWriteFiber(): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function*() {
+      if (this.#writeFiber === null) return;
+      const fiber = this.#writeFiber;
+      this.#writeFiber = null;
+      yield* Fiber.interrupt(fiber);
+    });
+  }
+
+  /**
+   * Drop any pending debounced write and release whoever is waiting on it.
+   *
+   * Settled rather than abandoned: a `write()` parked on the shared `Deferred`
+   * would otherwise wait for a flush that is never going to happen.
+   */
+  #cancelPendingWrite(): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function*() {
+      yield* this.#interruptWriteFiber();
+      this.#pendingWrite = undefined;
+      const settlement = this.#settlement;
+      this.#settlement = null;
+      if (settlement !== null) yield* Deferred.succeed(settlement, undefined);
     });
   }
 
@@ -445,6 +496,7 @@ export class ValueGroup<T> {
           "invalid",
           "refusing to persist a value that fails its own schema",
           describeDecodeError(validated.failure),
+          "write",
         ));
       }
 
@@ -457,13 +509,13 @@ export class ValueGroup<T> {
         encoded = JSON.stringify(envelope);
       } catch (cause) {
         return Effect.fail(
-          this.#issue("malformed", "value is not serialisable", cause),
+          this.#issue("malformed", "value is not serialisable", cause, "write"),
         );
       }
 
       return Effect.mapError(
         this.#backend.set(this.#key, encoded),
-        (cause) => this.#issue("backend", cause.detail, cause),
+        (cause) => this.#issue("backend", cause.detail, cause, "write"),
       );
     });
   }
@@ -478,11 +530,19 @@ export class ValueGroup<T> {
 
   /** Delete the persisted value and revert to defaults in memory. */
   reset(): Effect.Effect<T, StorageError> {
-    return Effect.suspend(() => {
+    return Effect.gen({ self: this }, function*() {
+      // Cancel the debounce first. Without this the sleeping fiber wakes after
+      // the key has been removed and writes the pre-reset value straight back:
+      // `:clear-history` erased the index, said so, and up to two seconds later
+      // the visit still inside the debounce window reappeared on disk.
+      yield* this.#cancelPendingWrite();
+
       const defaults = this.#spec.defaults();
       this.#adopt(defaults);
-      return this.#backend.remove(this.#key).pipe(
-        Effect.mapError((cause) => this.#issue("backend", cause.detail, cause)),
+      return yield* this.#backend.remove(this.#key).pipe(
+        Effect.mapError((cause) =>
+          this.#issue("backend", cause.detail, cause, "write")
+        ),
         Effect.as(defaults),
       );
     });
@@ -517,9 +577,11 @@ export class ValueGroup<T> {
     reason: StorageFailureReason,
     detail: string,
     cause?: unknown,
+    direction: StorageDirection = "read",
   ): StorageError {
     const issue = new StorageError({
       reason,
+      direction,
       group: this.#spec.name,
       detail: cause === undefined
         ? detail

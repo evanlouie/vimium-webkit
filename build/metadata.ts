@@ -2,7 +2,7 @@
  * The userscript metadata block.
  *
  * Generated rather than hand-maintained so that `@version` can be derived from
- * `deno.json` (CI invariant 5) and so the `@grant` list cannot drift away from
+ * `package.json` (CI invariant 5) and so the `@grant` list cannot drift away from
  * what `platform/gm.ts` actually probes for.
  */
 

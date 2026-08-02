@@ -1,4 +1,4 @@
-import { Effect, Option, Result, Schema } from "effect";
+import { Effect, Fiber, Option, Result, Schema } from "effect";
 import { test } from "vitest";
 import { GmError, type ValueBackend } from "~/platform/gm.ts";
 import {
@@ -399,4 +399,44 @@ test("hydrateAll covers every registered group", async () => {
   // user's whole persisted value with the defaults plus one change.
   assertEquals(one.peek(), defaults());
   assertEquals(two.peek(), defaults());
+});
+
+test("reset cancels a pending write instead of letting it resurrect", async () => {
+  // The bug: `reset()` removed the key but left the debounce fiber sleeping,
+  // so the value reset had just erased was written straight back. Reachable
+  // from `:clear-history`, which debounces for two seconds — so the HUD said
+  // the index was erased and the visit reappeared on disk afterwards.
+  const fake = fakeBackend(false);
+  const group = new ValueStore(fake.backend).group(debouncedSpec(20));
+
+  const pending = attempt(group.write({ count: 7, label: "secret" }));
+  await run(group.reset());
+  assertEquals(fake.map.get("vimium-webkit:test"), undefined);
+
+  // Past the debounce window the write must not have come back.
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assertEquals(fake.map.get("vimium-webkit:test"), undefined);
+  // And the caller waiting on it must have been released, not parked.
+  assert(Result.isSuccess(await pending));
+});
+
+test("a hydrate joiner is unaffected when the first caller is interrupted", async () => {
+  // `Deferred.done(deferred, exit)` used to forward an *interrupt* to every
+  // joiner, so a healthy second caller died because the first was cancelled —
+  // and `hydrate()` declares that it cannot fail.
+  const fake = fakeBackend(false);
+  fake.map.set(
+    "vimium-webkit:test",
+    JSON.stringify({ schemaVersion: 2, data: { count: 1, label: "disk" } }),
+  );
+  const group = new ValueStore(fake.backend).group(spec());
+
+  const value = await Effect.runPromise(Effect.gen(function*() {
+    const first = yield* Effect.forkChild(group.hydrate());
+    const joiner = yield* Effect.forkChild(group.hydrate());
+    yield* Fiber.interrupt(first);
+    // Whatever happened to the first caller, the joiner still gets a value.
+    return yield* Fiber.join(joiner);
+  }));
+  assert(value.count === 1 || value.count === 0);
 });

@@ -33,11 +33,11 @@ export interface InvariantInput {
  * twenty frames, and an unminified measurement charges the file for its own
  * documentation — which is a budget that punishes exactly the wrong thing. The
  * shipped bundle is not minified, but nothing in it is charged per-frame
- * separately either: the whole 380 KB IIFE is what an engine sees at
+ * separately either: the whole ~580 KB IIFE is what an engine sees at
  * `document-start`, and that is the `bundle-budget` line's problem, not this
  * one's.
  *
- * 3 KB against a measured 2.2 KB: enough headroom for a real change, not enough
+ * 3 KB against a measured 2.5 KB: enough headroom for a real change, not enough
  * to absorb a rewrite unnoticed.
  */
 export const STAGE0_BUDGET_BYTES = 3 * 1024;
@@ -318,7 +318,7 @@ export const checkInvariants = async (
       rule: "version-match",
       file: "build/metadata.ts",
       message:
-        `metadata @version does not match deno.json (${input.declaredVersion})`,
+        `metadata @version does not match package.json (${input.declaredVersion})`,
     });
   }
 

@@ -6,14 +6,15 @@
  * one place bytes are budgeted. Testing them therefore means mutating process
  * state that every other test module shares.
  *
- * That is safe under `deno test`'s sequential default and unsafe the moment
- * anyone adds `--parallel` to the `test` task, which is why the restore logic
- * lives here once rather than in three subtly different copies (TST-15).
+ * That is safe only while test files run one at a time, which is why the
+ * restore logic lives here once rather than in three subtly different copies
+ * (TST-15).
  *
  * > [!WARNING]
- * > Do not add `--parallel` to `deno task test` while any module imports this
- * > one. `deno test` runs every module in a single isolate; `globalThis` is
- * > process state, and the isolation here is temporal, not structural.
+ * > Do not relax `singleThread` or `fileParallelism` in `vitest.config.ts`
+ * > while any module imports this one. Vitest shares one `globalThis` across
+ * > files in that configuration; the isolation here is temporal, not
+ * > structural.
  *
  * Every helper returns a disposable, so callers can use `using` and cannot
  * forget the `finally`.

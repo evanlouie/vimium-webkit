@@ -1,9 +1,9 @@
 /**
  * Constants shared by the Playwright config, the fixture server, and the specs.
  *
- * This module is loaded by *two different runtimes* — Deno (for the fixture
- * server and `deno check`) and Playwright's own loader (for the config and the
- * specs) — so it must stay free of imports and of anything runtime-specific.
+ * This module is loaded through *two different loaders* — `tsx` (for the
+ * fixture server) and Playwright's own (for the config and the specs) — so it
+ * must stay free of imports and of anything loader-specific.
  */
 
 export const FIXTURE_HOST = "127.0.0.1";

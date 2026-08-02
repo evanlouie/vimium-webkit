@@ -24,7 +24,7 @@
  * >    engine and never touches this index.
  */
 
-import { Effect } from "effect";
+import { Clock, Effect } from "effect";
 import type { AppContext } from "~/core/context.ts";
 import { storageManager } from "~/platform/ambient.ts";
 import type { HistoryIndex, Visit } from "~/settings/schema.ts";
@@ -287,16 +287,16 @@ export const createHistoryIndex = (app: AppContext): HistoryIndexApi => {
       if (url === null) return;
 
       const limit = app.settings().historyIndexLimit;
-      const at = Date.now();
       const title = document.title.trim().slice(0, 300);
 
       // Fire-and-forget: a storage failure is already reported to the store's
       // issue listeners, and a page visit is not worth a HUD message.
-      app.runtime.runFork(Effect.ignore(
-        app.groups.history.update((current): HistoryIndex => ({
+      app.runtime.runFork(Effect.ignore(Effect.gen(function*() {
+        const at = yield* Clock.currentTimeMillis;
+        return yield* app.groups.history.update((current): HistoryIndex => ({
           visits: [...mergeVisit(current.visits, { url, title, at }, limit)],
-        })),
-      ));
+        }));
+      })));
     },
 
     visits: (): readonly Visit[] => app.groups.history.current().visits,

@@ -351,7 +351,7 @@ src/
     lifecycle.ts         pageshow/pagehide, SPA URL-change detection
   platform/
     capabilities.ts      Runtime probe -> Capabilities record
-    gm.ts                neverthrow-wrapped GM_* shim with fallbacks
+    gm.ts                Effect-wrapped GM_* shim with fallbacks
     storage.ts           Namespaced, cached, schema-validated value store
     clipboard.ts         Activation-aware write; guarded read
     tabs.ts              openInTab / close / focus, with Tier-C messaging
@@ -379,28 +379,30 @@ src/
     styles.ts            CSS as template strings (no external files)
   frames/
     registry.ts          Frame discovery, MessageChannel handshake
-    protocol.ts          Zod-validated message schemas
+    protocol.ts          Schema-validated message schemas
     coordinator.ts       Top-frame broker: hints, focus election
   settings/
-    schema.ts            Zod schema + defaults + migrations
+    schema.ts            Effect Schema + defaults + migrations
 ```
 
 ### 5.5 Language and error handling
 
 - **TypeScript, strict, no `any`.** `unknown` + narrowing at every boundary.
-- **[Zod](https://zod.dev) v4 (`zod/mini`)** for: the settings schema, the
+- **[Effect](https://effect.website) v4 `Schema`** for: the settings schema, the
   cross-frame message protocol, and parsing anything read out of `GM_getValue`.
   Storage is shared across script versions and frames — treat it as untrusted.
-- **[neverthrow](https://github.com/supermacro/neverthrow)** for the capability
-  layer, storage, clipboard, and tab operations. Every one of these can fail for
-  manager-specific reasons, and `Result` forces us to have a HUD message for
-  each failure rather than an unhandled rejection.
+- **`Effect`** for the capability layer, storage, clipboard, and tab operations.
+  Every one of these can fail for manager-specific reasons, and a typed error
+  channel forces us to have a HUD message for each failure rather than an
+  unhandled rejection.
 - Hot paths (key dispatch, hint rect computation) stay plain and
-  allocation-free; `Result` is for I/O boundaries, not for the inner loop.
+  allocation-free; `Effect` is for I/O boundaries, not for the inner loop. Where
+  an effect is reached from a key handler it is run with `runSync`, which cannot
+  suspend and so cannot spend the browser's transient activation.
 
 > [!NOTE]
-> **Bundle budget.** `zod/mini` + `neverthrow` cost roughly 15–20 KB minified.
-> Greasy Fork's ceiling is 2 MB _unminified_, so there is ample headroom — but
+> **Bundle budget.** Effect costs roughly 150 KB unminified. Greasy Fork's
+> ceiling is 2 MB _unminified_, so there is ample headroom — but
 > parse-and-compile cost is paid **per frame**, so keep the Stage 0 chunk free
 > of both. Measure the Stage 0 chunk in the profiler; target < 5 KB.
 
@@ -625,7 +627,7 @@ Design points, adapted from Vimium's protocol:
 
 **Security note — accept and document.** A malicious page can post messages that
 look like our protocol. Mitigations: validate `event.source` against the frames
-tree, validate payloads with Zod, and use a per-session nonce distributed
+tree, validate payloads with `Schema`, and use a per-session nonce distributed
 top-down. None of this is airtight in page world (the page shares our realm),
 but in content world the page cannot read the nonce. Worst realistic case is
 spoofed hint descriptors pointing at page-controlled elements — which the page
@@ -816,8 +818,8 @@ const caretAt = (x: number, y: number) => {
 - **Storage**: one GM key per logical group (`settings`, `mappings`, `marks`,
   `history`, `findHistory`) rather than one giant blob — reduces write
   amplification and lets a corrupt group be reset independently.
-- **Validation**: Zod-parse on every read. On parse failure, fall back to
-  defaults and HUD a message with a `:reset-settings` hint. Never throw at boot.
+- **Validation**: schema-decode on every read. On failure, fall back to defaults
+  and HUD a message with a `:reset-settings` hint. Never throw at boot.
 - **Migrations**: a `schemaVersion` integer and an ordered migration list, run
   at Stage 1. Vimium's own `migratePre2_0` / `migratePre2_4` history is a
   warning: build this in from v0.1.
@@ -1086,18 +1088,20 @@ the budget.
 
 ### 9.1 Toolchain
 
-Deno, matching upstream Vimium's choice and the project's conventions.
+> [!NOTE]
+> This section described the original Deno toolchain. The project moved to Node,
+> Vite and Effect v4; the table below is the current state.
 
-| Concern                 | Tool                                                          |
-| ----------------------- | ------------------------------------------------------------- |
-| Language                | TypeScript, `strict: true`, `noUncheckedIndexedAccess: true`  |
-| Bundler                 | `esbuild` via `npm:esbuild`, format `iife`, target `safari16` |
-| Runtime validation      | `zod/mini` v4                                                 |
-| Error handling          | `neverthrow`                                                  |
-| Format / lint           | `deno fmt`, `deno lint`                                       |
-| Unit tests              | `deno test`                                                   |
-| DOM / integration tests | Playwright (WebKit + Chromium + Firefox channels)             |
-| Task runner             | `deno task`                                                   |
+| Concern                 | Tool                                                         |
+| ----------------------- | ------------------------------------------------------------ |
+| Language                | TypeScript, `strict: true`, `noUncheckedIndexedAccess: true` |
+| Bundler                 | Vite (rollup), format `iife`, target `safari16`              |
+| Runtime validation      | `Schema`, from Effect v4                                     |
+| Error handling          | `Effect` + `Schema.TaggedErrorClass`                         |
+| Format / lint           | `dprint`, `eslint`                                           |
+| Unit tests              | Vitest                                                       |
+| DOM / integration tests | Playwright (WebKit + Chromium + Firefox channels)            |
+| Task runner             | `npm run`                                                    |
 
 ### 9.2 Build outputs
 
@@ -1150,7 +1154,7 @@ Deno, matching upstream Vimium's choice and the project's conventions.
    fallback.
 3. Stage 0 chunk ≤ 5 KB.
 4. Total bundle ≤ 1.5 MB unminified (headroom under Greasy Fork's 2 MB).
-5. `@version` matches `deno.json`.
+5. `@version` matches `package.json`.
 6. Every `GM_`/`GM.` reference goes through `platform/gm.ts` — enforced by a
    lint rule, not convention.
 7. Every command in the registry has a tier annotation and, for Tier C, a
@@ -1166,7 +1170,7 @@ Deno, matching upstream Vimium's choice and the project's conventions.
 
 | Layer                   | Tool                                                | Scope                                                                                                                                                             |
 | ----------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Unit**                | `deno test`                                         | Key notation, trie construction, mapping parser, hint-string generation, scoring, rect math, exclusion globs, settings migrations                                 |
+| **Unit**                | Vitest                                              | Key notation, trie construction, mapping parser, hint-string generation, scoring, rect math, exclusion globs, settings migrations                                 |
 | **DOM integration**     | Playwright, WebKit + Chromium + Firefox             | Hint detection fixtures (shadow DOM, image maps, `content-visibility`, occlusion, false positives), find engine, scroller ancestor discovery, visual-mode motions |
 | **Manager conformance** | Manual matrix + a `:capabilities` self-report       | Each manager × each platform; the capability probe is the artifact                                                                                                |
 | **Real-world corpus**   | Playwright against a fixed list of hard sites       | GitHub, Google, Gmail, Reddit, YouTube, Twitter/X, Wikipedia, MDN, Hacker News, Notion, Figma (closed shadow roots), a strict-CSP site, a heavy-iframe site       |
@@ -1204,7 +1208,7 @@ document.
 
 - Build pipeline, metadata block, CI invariants.
 - Stage 0/1 boot with double-injection guard and `pageshow` re-arm.
-- Capability probe + `platform/gm.ts` + storage with Zod schema and migrations.
+- Capability probe + `platform/gm.ts` + storage with `Schema` and migrations.
 - `HandlerStack`, `Mode`, `KeyHandlerMode`, key notation, mapping parser.
 - Closed-shadow-root UI host + HUD with mode indicator.
 - Commands: scrolling (`j k h l d u gg G`), history (`H L`), reload, `gu`/`gU`,
@@ -1225,7 +1229,7 @@ diffing hint targets against Vimium in Chrome.
 
 ### Phase 3 — Cross-frame
 
-- Frame registry, `MessageChannel` handshake, Zod-validated protocol.
+- Frame registry, `MessageChannel` handshake, `Schema`-validated protocol.
 - Hint broker with deterministic ordering and per-frame timeouts.
 - Focus election, `gf`/`gF`.
 

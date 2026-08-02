@@ -2,7 +2,7 @@
  * The `@std/assert` surface this suite uses, on Node's assertion library.
  *
  * The suite moved from `deno test` to Vitest during the Effect migration. The
- * 296 tests here are the safety net for that migration, so rewriting 749
+ * 296 tests here are the safety net for that migration, so rewriting 736
  * assertions into `expect(...)` form was the one change most likely to weaken
  * the net while appearing to be a tidy-up. Six functions is a smaller surface
  * to get right, and it leaves every call site — and therefore every reviewed
@@ -46,7 +46,13 @@ export const assertEquals = <T>(
   expected: T,
   message?: string,
 ): void => {
-  deepStrictEqual(actual, expected, message);
+  // Not `deepStrictEqual(actual, expected, message)`. Passing an explicit
+  // `undefined` message is rejected outright by Node 26 with "The "message"
+  // argument must be one of type string or function" — which replaces the
+  // actual/expected diff, the entire reason to use this assertion, with a
+  // phantom complaint about the assertion itself.
+  if (message === undefined) deepStrictEqual(actual, expected);
+  else deepStrictEqual(actual, expected, message);
 };
 
 export const assertNotEquals = <T>(
@@ -54,22 +60,33 @@ export const assertNotEquals = <T>(
   expected: T,
   message?: string,
 ): void => {
-  notDeepStrictEqual(actual, expected, message);
+  if (message === undefined) notDeepStrictEqual(actual, expected);
+  else notDeepStrictEqual(actual, expected, message);
 };
 
-/** Default tolerance matches `@std/assert`. */
+/**
+ * Tolerance follows `@std/assert`, which is *relative* to `expected`.
+ *
+ * An absolute `1e-7` looks equivalent and is not: against `expected = 1000` it
+ * is a thousand times stricter, and against `expected = 0.001` a hundred times
+ * looser. Every current call site compares against a small integer, where the
+ * two agree — which is exactly how a wrong default survives unnoticed until
+ * somebody asserts on a small number.
+ */
 export const assertAlmostEquals = (
   actual: number,
   expected: number,
-  tolerance = 1e-7,
+  tolerance?: number,
   message?: string,
 ): void => {
   if (Object.is(actual, expected)) return;
+  const limit = tolerance ??
+    (Number.isFinite(expected) ? Math.abs(expected * 1e-7) : 1e-7);
   const delta = Math.abs(actual - expected);
-  if (delta <= tolerance) return;
+  if (delta <= limit) return;
   throw new AssertionError(
     message ??
-      `expected ${actual} to be within ${tolerance} of ${expected} (delta ${delta})`,
+      `expected ${actual} to be within ${limit} of ${expected} (delta ${delta})`,
   );
 };
 

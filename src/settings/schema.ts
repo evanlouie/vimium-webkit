@@ -234,17 +234,28 @@ export const settingsGroup: GroupSpec<Settings> = {
 // Marks
 // ---------------------------------------------------------------------------
 
-export const localMarkSchema = Schema.Struct({
-  scrollX: Schema.Number,
-  scrollY: Schema.Number,
-  savedAt: Schema.Number,
+export /**
+ * `isFinite` on every unbounded number, because `Schema.Number` accepts `NaN`.
+ *
+ * Zod's `z.number()` rejected `NaN` and `Infinity`; Effect's does not. That
+ * matters here rather than academically: `storage.ts` validates on the way
+ * *out* precisely so a bad value is caught where it was produced, and a `NaN`
+ * that passes is written as `null` by `JSON.stringify` — which then fails the
+ * check on the way back in and resets the whole group, taking every other
+ * field with it. The bounded fields reject `NaN` incidentally through their
+ * comparisons; these have no bounds to hide behind.
+ */
+const localMarkSchema = Schema.Struct({
+  scrollX: Schema.Number.check(Schema.isFinite()),
+  scrollY: Schema.Number.check(Schema.isFinite()),
+  savedAt: Schema.Number.check(Schema.isFinite()),
 });
 
 export const globalMarkSchema = Schema.Struct({
   url: Schema.String,
-  scrollX: Schema.Number,
-  scrollY: Schema.Number,
-  savedAt: Schema.Number,
+  scrollX: Schema.Number.check(Schema.isFinite()),
+  scrollY: Schema.Number.check(Schema.isFinite()),
+  savedAt: Schema.Number.check(Schema.isFinite()),
 });
 
 export const marksSchema = Schema.Struct({
@@ -350,8 +361,8 @@ export const findHistoryGroup: GroupSpec<FindHistory> = {
 export const visitSchema = Schema.Struct({
   url: Schema.String,
   title: Schema.String,
-  visitCount: Schema.Number,
-  lastVisit: Schema.Number,
+  visitCount: Schema.Number.check(Schema.isFinite()),
+  lastVisit: Schema.Number.check(Schema.isFinite()),
 });
 
 export const historyIndexSchema = Schema.Struct({
@@ -381,7 +392,7 @@ export const sessionSchema = Schema.Struct({
     Schema.Struct({
       url: Schema.String,
       title: Schema.String,
-      heartbeat: Schema.Number,
+      heartbeat: Schema.Number.check(Schema.isFinite()),
     }),
   )),
   /** One-time warnings already shown, keyed by id. */
@@ -393,7 +404,10 @@ export const sessionSchema = Schema.Struct({
    * written far more often and a corrupt entry should not cost the user their
    * key mappings.
    */
-  zoomByOrigin: Schema.Record(Schema.String, Schema.Number),
+  zoomByOrigin: Schema.Record(
+    Schema.String,
+    Schema.Number.check(Schema.isFinite()),
+  ),
 });
 
 export type SessionState = typeof sessionSchema.Type;

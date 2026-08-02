@@ -201,7 +201,7 @@ export class Vimium {
    */
   async boot(frame: Frame = this.page.mainFrame()): Promise<void> {
     await frame.evaluate(() => {
-      // `globalThis` *is* the window here; the cast is only because the Deno
+      // `globalThis` *is* the window here; the cast is only because the Node
       // type for it does not carry the `Window` interface.
       const view = globalThis as unknown as Window;
       view.dispatchEvent(

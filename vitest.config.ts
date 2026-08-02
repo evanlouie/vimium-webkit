@@ -11,6 +11,12 @@
  * modules read ambient globals directly, and `test/unit/support/globals.ts`
  * lends `globalThis` out and takes it back. That isolation is temporal, not
  * structural, so two files must never run at once.
+ *
+ * `isolate: false` shares one module registry across files, which is what
+ * `deno test`'s single isolate did too. It does mean `module-graph_test.ts`
+ * may import a module another file has already loaded, so its "does no work at
+ * import time" property is strongest when that file runs first — it is a net,
+ * not a proof.
  */
 
 import { fileURLToPath } from "node:url";

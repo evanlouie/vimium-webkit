@@ -24,8 +24,8 @@ default hint pipeline and the default scroll path ended up with no coverage at
 all while the suite was green.
 
 The suite runs on Node: the fixture server, the bundle build and the harness all
-use Node APIs, and Playwright's runner drives them directly. Running
-`npx playwright test` directly will fail with a clear message.
+use Node APIs, and Playwright's runner drives them directly. `npm run test:e2e`
+is a thin wrapper around `npx playwright test`; either works.
 
 ---
 
