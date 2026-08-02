@@ -6,10 +6,13 @@ on:
     # does not start this workflow at all, which made the `release` job below
     # unreachable: its `refs/tags/v` guard could never be true.
     #
-    # `main` rather than `**`: a branch push and its pull request fired both
+    # `master` rather than `**`: a branch push and its pull request fired both
     # triggers on different refs, so the concurrency group could not cancel
     # either and every commit ran the whole matrix twice.
-    branches: [main]
+    #
+    # `master`, and not `main`. This repository has no `main`, so that name
+    # matched nothing and no push to the mainline started a run at all.
+    branches: [master]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
