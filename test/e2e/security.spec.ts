@@ -76,13 +76,13 @@ const probeSelfAdmission = (waitMs: number): Promise<ProbeResult> =>
     // Shape 1: the original attack — one `HELLO`, port attached, addressed at
     // our own window.
     globalThis.postMessage(
-      { magic: MAGIC, v: 1, kind: "HELLO" },
+      { magic: MAGIC, v: 2, kind: "HELLO" },
       "*",
       [withPort.port2],
     );
 
     // Shape 2: announce, then try to redeem a token we were never issued.
-    globalThis.postMessage({ magic: MAGIC, v: 1, kind: "HELLO" }, "*");
+    globalThis.postMessage({ magic: MAGIC, v: 2, kind: "HELLO" }, "*");
     const forged = new MessageChannel();
     forged.port1.addEventListener(
       "message",
@@ -90,7 +90,14 @@ const probeSelfAdmission = (waitMs: number): Promise<ProbeResult> =>
     );
     forged.port1.start();
     globalThis.postMessage(
-      { magic: MAGIC, v: 1, kind: "JOIN", token: "guessed", helloId: "x" },
+      {
+        magic: MAGIC,
+        v: 2,
+        kind: "JOIN",
+        token: "guessed",
+        helloId: "x",
+        proof: "forged",
+      },
       "*",
       [forged.port2],
     );
@@ -129,6 +136,62 @@ test.describe("frame admission", () => {
     expect(result.welcomed).toBe(false);
     expect(result.nonceLeaked).toBe(false);
     expect(result.settingsLeaked).toBe(false);
+  });
+
+  test("a page-owned child cannot answer a real challenge", async ({ vw, page }) => {
+    await vw.open("/index.html");
+
+    const admitted = await page.evaluate(
+      (waitMs: number) =>
+        new Promise<boolean>((resolve) => {
+          const marker = `attack-${Math.random()}`;
+          const onResult = (event: MessageEvent): void => {
+            const data: unknown = event.data;
+            if (
+              typeof data !== "object" || data === null ||
+              (data as Record<string, unknown>)["marker"] !== marker
+            ) return;
+            globalThis.removeEventListener("message", onResult);
+            resolve((data as Record<string, unknown>)["welcomed"] === true);
+          };
+          globalThis.addEventListener("message", onResult);
+
+          const frame = document.createElement("iframe");
+          frame.srcdoc = `<script>
+            const marker = ${JSON.stringify(marker)};
+            let welcomed = false;
+            addEventListener("message", (event) => {
+              const message = event.data;
+              if (message?.magic !== "vimium-webkit/frames" ||
+                  message?.v !== 2 || message?.kind !== "CHALLENGE") return;
+              const channel = new MessageChannel();
+              channel.port1.onmessage = (reply) => {
+                if (reply.data?.kind === "WELCOME") welcomed = true;
+              };
+              channel.port1.start();
+              top.postMessage({
+                magic: "vimium-webkit/frames",
+                v: 2,
+                kind: "JOIN",
+                token: message.token,
+                helloId: "page-owned",
+                proof: "forged"
+              }, "*", [channel.port2]);
+            });
+            top.postMessage({
+              magic: "vimium-webkit/frames", v: 2, kind: "HELLO"
+            }, "*");
+            setTimeout(() => parent.postMessage({ marker, welcomed }, "*"),
+              ${waitMs});
+          </script>`;
+          document.body.appendChild(frame);
+        }),
+      REPLY_WINDOW_MS,
+    );
+
+    expect(admitted, "a page-owned child received a privileged port").toBe(
+      false,
+    );
   });
 
   test("settings never cross the frame boundary at all", async ({ vw, page }) => {

@@ -40,6 +40,7 @@ import type {
   HintMode,
   RemoteHintDescriptor,
 } from "~/core/context.ts";
+import { signFrameJoin } from "~/frames/auth.ts";
 import { withDeadline } from "~/platform/scheduler.ts";
 import { FrameCoordinator } from "./coordinator.ts";
 import {
@@ -127,6 +128,8 @@ export interface LocalHintsBridge {
 
 export interface FrameLinkOptions {
   readonly isTop: boolean;
+  /** Read the credential from manager-private storage before each handshake. */
+  readonly frameSecret?: () => Promise<string>;
   /** Called on the top frame to resolve exclusions from its own URL. */
   readonly resolveExclusion?: () => EffectiveExclusion;
   /** Bound by stage1 so the coordinator can ask *this* frame for its hints. */
@@ -278,7 +281,7 @@ class FrameEndpoint {
         return;
 
       case "COLLECT_HINTS":
-        void this.#answerCollect(message.requestId, message.mode);
+        this.#answerCollect(message.requestId, message.mode).catch(() => {});
         return;
 
       case "HINTS_RESULT": {
@@ -567,6 +570,7 @@ export const createFrameLink = (options: FrameLinkOptions): FrameLink => {
     coordinator = new FrameCoordinator({
       root: view,
       resolveExclusion: options.resolveExclusion,
+      frameSecret: options.frameSecret,
     });
     coordinator.attach(view);
 
@@ -580,7 +584,7 @@ export const createFrameLink = (options: FrameLinkOptions): FrameLink => {
     endpoint.bindTransport((message) => broker.receive(frameId, message));
     teardown.push(() => broker.dispose());
   } else {
-    teardown.push(connectToTop(view, endpoint));
+    teardown.push(connectToTop(view, endpoint, options.frameSecret));
   }
 
   // Keeps the coordinator's `gf` cursor pointing at the frame the user is
@@ -592,7 +596,12 @@ export const createFrameLink = (options: FrameLinkOptions): FrameLink => {
   // Safari caches pages with `unload` handlers into bfcache and never runs
   // `unload`, so `pagehide`/`pageshow` is the only correct lifecycle signal
   // (§7.10). `connectToTop` re-runs the handshake on a persisted restore.
-  const onPageHide = (): void => endpoint.sendGoodbye();
+  const onPageHide = (event: PageTransitionEvent): void => {
+    // A persisted page is suspended, not gone. Its top-frame loopback cannot
+    // re-run the child-only handshake on `pageshow`, so removing it here left
+    // the restored coordinator unable to start another cross-frame round.
+    if (!event.persisted) endpoint.sendGoodbye();
+  };
   view.addEventListener("pagehide", onPageHide);
   teardown.push(() => view.removeEventListener("pagehide", onPageHide));
 
@@ -642,7 +651,11 @@ export const createFrameLink = (options: FrameLinkOptions): FrameLink => {
  * announce itself before the top frame has installed its listener, and the
  * message is then simply gone.
  */
-const connectToTop = (view: Window, endpoint: FrameEndpoint): () => void => {
+const connectToTop = (
+  view: Window,
+  endpoint: FrameEndpoint,
+  frameSecret?: () => Promise<string>,
+): () => void => {
   const timers: Array<ReturnType<typeof setTimeout>> = [];
   let port: MessagePort | null = null;
   let closed = false;
@@ -666,8 +679,12 @@ const connectToTop = (view: Window, endpoint: FrameEndpoint): () => void => {
     }
   };
 
-  const join = (token: string, origin: string): void => {
+  const join = async (token: string, origin: string): Promise<void> => {
+    if (closed || frameSecret === undefined) return;
+    const helloId = createNonce();
+    const proof = await signFrameJoin(await frameSecret(), token, helloId);
     if (closed) return;
+
     const channel = new MessageChannel();
     port?.close();
     port = channel.port1;
@@ -687,12 +704,11 @@ const connectToTop = (view: Window, endpoint: FrameEndpoint): () => void => {
       }
     });
 
-    const helloId = createNonce();
     endpoint.expectWelcome(helloId);
 
     try {
       top.postMessage(
-        { ...ENVELOPE, kind: "JOIN", token, helloId },
+        { ...ENVELOPE, kind: "JOIN", token, helloId, proof },
         // The origin the challenge came from, so the port cannot be delivered
         // to a document that merely happens to be at `window.top` now. An
         // opaque origin reports `"null"`, which is not a valid `targetOrigin`.
@@ -714,7 +730,9 @@ const connectToTop = (view: Window, endpoint: FrameEndpoint): () => void => {
       allowedKinds: TOP_TO_WINDOW_KINDS,
     });
     if (message === null || message.kind !== "CHALLENGE") return;
-    join(message.token, event.origin);
+    join(message.token, event.origin).catch(() => {
+      // A missing or unreadable private credential means no admission.
+    });
   };
 
   view.addEventListener("message", onWindowMessage);

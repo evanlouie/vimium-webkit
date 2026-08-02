@@ -10,6 +10,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { relative } from "node:path";
 import { pathToFileURL } from "node:url";
+import { parseAst } from "rollup/parseAst";
 
 export interface Violation {
   readonly rule: string;
@@ -35,7 +36,7 @@ export interface InvariantInput {
  * twenty frames, and an unminified measurement charges the file for its own
  * documentation — which is a budget that punishes exactly the wrong thing. The
  * shipped bundle is not minified, but nothing in it is charged per-frame
- * separately either: the whole ~580 KB IIFE is what an engine sees at
+ * separately either: the whole ~890 KB IIFE is what an engine sees at
  * `document-start`, and that is the `bundle-budget` line's problem, not this
  * one's.
  *
@@ -125,10 +126,7 @@ const sourceFiles = async (root: string): Promise<string[]> => {
  * explaining why `<style>` is banned contains the word `createElement("style")`.
  * Replacing rather than deleting keeps reported line numbers accurate.
  */
-export const stripNonCode = (
-  source: string,
-  stripStrings = true,
-): string => {
+export const stripNonCode = (source: string): string => {
   const out = source.split("");
   const blank = (from: number, to: number): void => {
     for (let i = from; i < to && i < out.length; i++) {
@@ -171,7 +169,7 @@ export const stripNonCode = (
         if (current === "\n" && quote !== "`") break;
         cursor++;
       }
-      if (stripStrings) blank(index, Math.min(cursor + 1, source.length));
+      blank(index, Math.min(cursor + 1, source.length));
       index = cursor + 1;
       continue;
     }
@@ -180,6 +178,48 @@ export const stripNonCode = (
   }
 
   return out.join("");
+};
+
+/** True when executable code contains a `node:` string literal. */
+export const hasNodeSpecifier = (source: string): boolean => {
+  const pending: unknown[] = [parseAst(source)];
+  const seen = new Set<object>();
+
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (Array.isArray(value)) {
+      pending.push(...value);
+      continue;
+    }
+    if (typeof value !== "object" || value === null || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+
+    const node = value as Record<string, unknown>;
+    if (
+      node["type"] === "Literal" && typeof node["value"] === "string" &&
+      node["value"].startsWith("node:")
+    ) {
+      return true;
+    }
+    if (node["type"] === "TemplateElement") {
+      const templateValue = node["value"];
+      if (
+        typeof templateValue === "object" && templateValue !== null &&
+        typeof (templateValue as Record<string, unknown>)["raw"] === "string" &&
+        ((templateValue as Record<string, unknown>)["raw"] as string)
+          .startsWith(
+            "node:",
+          )
+      ) {
+        return true;
+      }
+    }
+
+    pending.push(...Object.values(node));
+  }
+  return false;
 };
 
 const scan = (
@@ -401,11 +441,12 @@ export const checkInvariants = async (
     });
   }
 
-  // Preserve strings because a module specifier is one. Remove comments
-  // because Vite 8 preserves Effect's API examples, including documentation
-  // such as `import * as assert from "node:assert"`. Those examples are not
-  // executable imports.
-  if (/["'`]node:/.test(stripNonCode(input.code, false))) {
+  // Parse rather than remove comments with a regular expression. Vite 8 keeps
+  // Effect examples such as `import * as assert from "node:assert"` inside
+  // documentation comments. A hand-written comment scanner also mistook the
+  // escaped `//` in `/https?:\\/\\//` for a line comment and hid the next real
+  // string. Rollup already parses this exact generated language.
+  if (hasNodeSpecifier(input.code)) {
     violations.push({
       rule: "no-node-globals",
       file: "dist/vimium-webkit.user.js",
@@ -453,10 +494,23 @@ const checkCommandTiers = async (
   }
 
   const commands: unknown = (build as () => unknown)();
-  if (!Array.isArray(commands)) return violations;
+  if (!Array.isArray(commands)) {
+    return [{
+      rule: "command-tiers",
+      file: "src/core/commands.ts",
+      message: "buildCommands must return an array",
+    }];
+  }
 
   for (const entry of commands) {
-    if (typeof entry !== "object" || entry === null) continue;
+    if (typeof entry !== "object" || entry === null) {
+      violations.push({
+        rule: "command-tiers",
+        file: "src/core/commands.ts",
+        message: "buildCommands returned a malformed command entry",
+      });
+      continue;
+    }
     const record = entry as Record<string, unknown>;
     const name = typeof record["name"] === "string"
       ? record["name"]

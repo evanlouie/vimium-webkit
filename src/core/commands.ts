@@ -154,12 +154,18 @@ const openFromClipboard = (app: AppContext, newTab: boolean): void => {
     ),
   );
 
-  void app.hud.prompt({
+  app.hud.prompt({
     label: newTab ? "Open in new tab:" : "Open:",
     placeholder: "paste a URL (⌘V)",
   }).then((value) => {
     if (value === null || value.trim().length === 0) return;
     app.runtime.runFork(go(app, value.trim(), newTab));
+  }).catch((cause: unknown) => {
+    app.hud.error(
+      `Open prompt failed: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
   });
 };
 
@@ -832,7 +838,7 @@ export const buildCommands = (): readonly CommandDef[] => [
     "misc",
     "Erase the local history index",
     ({ app }) => {
-      void app.omnibar.clearHistory().then(
+      app.omnibar.clearHistory().then(
         () => app.hud.show("Local history index erased"),
         (cause: unknown) => {
           // `.detail`, not `.message`: every error here is a

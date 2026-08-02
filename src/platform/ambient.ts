@@ -52,8 +52,11 @@ export const clipboardWriter = ():
   | null =>
   probe(() => {
     const clipboard = navigator.clipboard;
-    return typeof clipboard?.writeText === "function"
-      ? clipboard.writeText.bind(clipboard)
+    if (clipboard === undefined) return null;
+    const write: unknown = Reflect.get(clipboard, "writeText");
+    return typeof write === "function"
+      ? (text: string) =>
+        Reflect.apply(write, clipboard, [text]) as Promise<void>
       : null;
   }, null);
 
@@ -61,8 +64,10 @@ export const clipboardWriter = ():
 export const clipboardReader = (): (() => Promise<string>) | null =>
   probe(() => {
     const clipboard = navigator.clipboard;
-    return typeof clipboard?.readText === "function"
-      ? clipboard.readText.bind(clipboard)
+    if (clipboard === undefined) return null;
+    const read: unknown = Reflect.get(clipboard, "readText");
+    return typeof read === "function"
+      ? () => Reflect.apply(read, clipboard, []) as Promise<string>
       : null;
   }, null);
 

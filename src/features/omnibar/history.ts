@@ -257,8 +257,10 @@ export const createHistoryIndex = (app: AppContext): HistoryIndexApi => {
    * very first page load of a session cannot slip through before we know.
    */
   let privacy: PrivacyProbe | null = null;
-  void detectPrivateBrowsing().then((result) => {
+  detectPrivateBrowsing().then((result) => {
     privacy = result;
+  }).catch(() => {
+    // Keep the conservative `null` state. Recording stays disabled.
   });
 
   const blockedBy = (): RecordingBlock | null => {

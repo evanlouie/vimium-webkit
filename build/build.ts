@@ -209,7 +209,9 @@ const main = async (): Promise<void> => {
   watch(`${ROOT}/src`, { recursive: true }, () => {
     if (pending !== undefined) clearTimeout(pending);
     pending = setTimeout(() => {
-      void build();
+      build().catch((cause: unknown) => {
+        console.error(cause);
+      });
     }, 120);
   });
 };

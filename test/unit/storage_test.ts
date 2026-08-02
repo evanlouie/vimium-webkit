@@ -749,3 +749,161 @@ test("reset erases even when a later write never lands", async () => {
     "a reset that reported success must have erased the key",
   );
 });
+
+test("a transient read failure cannot turn defaults into an update", async () => {
+  const fake = fakeBackend(false);
+  fake.map.set(
+    "vimium-webkit:test",
+    JSON.stringify({ schemaVersion: 2, data: { count: 7, label: "secret" } }),
+  );
+  let failRead = true;
+  const backend: ValueBackend = {
+    ...fake.backend,
+    get: (key) =>
+      failRead
+        ? Effect.fail(
+          new GmError({ reason: "failed", api: "getValue", detail: "offline" }),
+        )
+        : fake.backend.get(key),
+  };
+  const group = new ValueStore(backend).group(spec());
+
+  assertEquals(await run(group.hydrate()), defaults());
+  const rejected = await attempt(
+    group.update((value) => ({ ...value, count: value.count + 1 })),
+  );
+  assert(Result.isFailure(rejected));
+  assertEquals(
+    JSON.parse(fake.map.get("vimium-webkit:test") ?? "null").data,
+    { count: 7, label: "secret" },
+  );
+
+  failRead = false;
+  assertEquals(await run(group.hydrate()), { count: 7, label: "secret" });
+  await run(group.update((value) => ({ ...value, count: value.count + 1 })));
+  assertEquals(group.current(), { count: 8, label: "secret" });
+});
+
+test("subscribers receive successful local writes", async () => {
+  const fake = fakeBackend(false);
+  const group = new ValueStore(fake.backend).group(spec());
+  const seen: Shape[] = [];
+  const unsubscribe = group.subscribe((value) => seen.push(value));
+
+  await run(group.write({ count: 3, label: "local" }));
+  unsubscribe();
+
+  assertEquals(seen, [{ count: 3, label: "local" }]);
+});
+
+test("an interrupted asynchronous set cannot undo a reset", async () => {
+  const map = new Map<string, string>();
+  let startSet: (() => void) | null = null;
+  let releaseSet: (() => void) | null = null;
+  let removes = 0;
+  const started = new Promise<void>((resolve) => {
+    startSet = resolve;
+  });
+  const backend: ValueBackend = {
+    kind: "gm-async",
+    get: (key) => Effect.succeed(Option.fromNullishOr(map.get(key) ?? null)),
+    set: (key, value) =>
+      Effect.promise(async () => {
+        startSet?.();
+        await new Promise<void>((resolve) => {
+          releaseSet = resolve;
+        });
+        map.set(key, value);
+      }),
+    remove: (key) =>
+      Effect.sync(() => {
+        removes++;
+        map.delete(key);
+      }),
+    watch: null,
+  };
+  const group = new ValueStore(backend).group(spec());
+  const writeFiber = Effect.runFork(
+    group.write({ count: 9, label: "abandoned" }),
+  );
+  await started;
+
+  const interrupted = Effect.runPromise(Fiber.interrupt(writeFiber));
+  const reset = attempt(group.reset());
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assertEquals(
+    removes,
+    0,
+    "reset must wait for the continuing backend promise",
+  );
+
+  const unblockSet: unknown = releaseSet;
+  assert(typeof unblockSet === "function");
+  unblockSet();
+  await interrupted;
+  assert(Result.isSuccess(await reset));
+  assertEquals(map.get("vimium-webkit:test"), undefined);
+});
+
+test("flush waits for an older commit queued behind a read", async () => {
+  const map = new Map<string, string>();
+  let releaseGet: (() => void) | null = null;
+  let releaseSet: (() => void) | null = null;
+  const backend: ValueBackend = {
+    kind: "gm-async",
+    get: (key) =>
+      Effect.promise(async () => {
+        await new Promise<void>((resolve) => {
+          releaseGet = resolve;
+        });
+        return Option.fromNullishOr(map.get(key) ?? null);
+      }),
+    set: (key, value) =>
+      Effect.promise(async () => {
+        await new Promise<void>((resolve) => {
+          releaseSet = resolve;
+        });
+        map.set(key, value);
+      }),
+    remove: (key) =>
+      Effect.sync(() => {
+        map.delete(key);
+      }),
+    watch: null,
+  };
+  const group = new ValueStore(backend).group({
+    ...spec(),
+    writeDebounceMs: 1,
+  });
+
+  const hydration = run(group.hydrate());
+  while (releaseGet === null) {
+    // oxlint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  const write = attempt(group.write({ count: 4, label: "queued" }));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  let flushed = false;
+  const flush = run(group.flush()).then(() => {
+    flushed = true;
+  });
+  const unblockGet: unknown = releaseGet;
+  assert(typeof unblockGet === "function");
+  unblockGet();
+  while (releaseSet === null) {
+    // oxlint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assertEquals(flushed, false, "flush returned before the queued set settled");
+
+  const unblockSet: unknown = releaseSet;
+  assert(typeof unblockSet === "function");
+  unblockSet();
+  await Promise.all([hydration, write, flush]);
+  assertEquals(
+    JSON.parse(map.get("vimium-webkit:test") ?? "null").data,
+    { count: 4, label: "queued" },
+  );
+});

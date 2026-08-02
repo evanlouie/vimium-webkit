@@ -383,6 +383,8 @@ export const historyGroup: GroupSpec<HistoryIndex> = {
 // ---------------------------------------------------------------------------
 
 export const sessionSchema = Schema.Struct({
+  /** HMAC key shared by userscript frames through manager-private storage. */
+  frameSecret: field(Schema.String, ""),
   /** Tabs we opened via `GM_openInTab`, heartbeated so Omnibar-lite can list them. */
   knownTabs: Schema.mutable(Schema.Array(
     Schema.Struct({
@@ -414,10 +416,14 @@ export const sessionGroup: GroupSpec<SessionState> = {
   name: "session",
   schema: sessionSchema,
   defaults: (): SessionState => ({
+    frameSecret: "",
     knownTabs: [],
     acknowledged: [],
     zoomByOrigin: {},
   }),
   schemaVersion: SESSION_SCHEMA_VERSION,
-  writeDebounceMs: 1000,
+  // The frame-authentication credential must reach sibling frames before the
+  // first handshake. Session writes are small; correctness is worth the extra
+  // manager calls.
+  writeDebounceMs: 0,
 };

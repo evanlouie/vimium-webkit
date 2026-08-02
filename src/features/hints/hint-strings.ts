@@ -11,6 +11,8 @@
 
 /** Reverse by code point, so astral characters in a custom alphabet survive. */
 export const reverseString = (value: string): string =>
+  // Intentional code-point split. Hint alphabets contain characters, not words.
+  // oxlint-disable-next-line typescript/no-misused-spread
   [...value].reverse().join("");
 
 /**
@@ -51,6 +53,8 @@ export const hintStrings = (
   alphabet: string,
 ): readonly string[] => {
   if (linkCount <= 0) return [];
+  // Intentional code-point split. See `reverseString`.
+  // oxlint-disable-next-line typescript/no-misused-spread
   const chars = [...alphabet];
   if (chars.length < 2) return [];
 
@@ -78,6 +82,8 @@ export const numberToHintString = (
   value: number,
   characterSet: string,
 ): string => {
+  // Intentional code-point split. See `reverseString`.
+  // oxlint-disable-next-line typescript/no-misused-spread
   const chars = [...characterSet];
   const base = chars.length;
   if (base < 2 || !Number.isFinite(value) || value < 1) return "";

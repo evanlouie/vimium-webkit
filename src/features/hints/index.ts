@@ -263,7 +263,7 @@ export const createHints = (app: AppContext): LocalHintsApi => {
       if (reason === "escape" && session === current) teardown();
     });
 
-    void start(current).catch((cause: unknown) => {
+    start(current).catch((cause: unknown) => {
       if (session === current) teardown();
       if (cause instanceof AbortedError) return;
       app.hud.error(

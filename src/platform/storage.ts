@@ -294,6 +294,10 @@ export class ValueGroup<T> {
    * while any write or reset is in flight, whatever the epoch says.
    */
   #outstanding = 0;
+  /** Completed whenever the current set of mutations becomes idle. */
+  #idle: Deferred.Deferred<void> | null = null;
+  /** The last backend read failure. Updates must not build on its defaults. */
+  #readFailure: StorageError | null = null;
 
   /**
    * The highest epoch that actually reached the backend.
@@ -390,13 +394,26 @@ export class ValueGroup<T> {
       // next write put back on disk.
       return this.#backendLock.withPermits(1)(
         this.#backend.get(this.#key).pipe(
-          Effect.map((raw) =>
-            this.#publish(epoch, this.#decode(Option.getOrUndefined(raw)))
-          ),
+          Effect.map((raw) => {
+            this.#readFailure = null;
+            return this.#publish(
+              epoch,
+              this.#decode(Option.getOrUndefined(raw)),
+            );
+          }),
           Effect.catch((cause) =>
             Effect.sync(() => {
-              this.#issue("backend", cause.detail, cause, "read");
-              return this.#publish(epoch, this.#spec.defaults());
+              // Do not publish defaults after a transport failure. They are a
+              // fallback answer for this caller, not authoritative state. An
+              // unrelated `update()` must not persist them over valid disk
+              // data when the backend recovers.
+              this.#readFailure = this.#issue(
+                "backend",
+                cause.detail,
+                cause,
+                "read",
+              );
+              return this.current();
             })
           ),
         ),
@@ -426,14 +443,29 @@ export class ValueGroup<T> {
   #mutating<A, E>(effect: Effect.Effect<A, E>): Effect.Effect<A, E> {
     return Effect.acquireUseRelease(
       Effect.sync(() => {
+        if (this.#outstanding === 0) this.#idle = Deferred.makeUnsafe<void>();
         this.#outstanding++;
       }),
       () => effect,
       () =>
         Effect.sync(() => {
           this.#outstanding--;
+          if (this.#outstanding === 0 && this.#idle !== null) {
+            Deferred.doneUnsafe(this.#idle, Effect.void);
+            this.#idle = null;
+          }
         }),
     );
+  }
+
+  /** Wait for every mutation that has already reached `#mutating`. */
+  #awaitMutations(): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      const idle = this.#idle;
+      return idle === null
+        ? Effect.void
+        : Deferred.await(idle).pipe(Effect.andThen(this.#awaitMutations()));
+    });
   }
 
   #decode(raw: string | undefined): T {
@@ -559,7 +591,7 @@ export class ValueGroup<T> {
       // A read already in the backend is now carrying an older value than the
       // one the user just produced; it must not publish over this.
       this.#epoch++;
-      this.#cached = accepted;
+      this.#adopt(accepted);
       const debounce = this.#spec.writeDebounceMs ?? 0;
       if (debounce <= 0) return yield* this.#flushValue(accepted);
 
@@ -606,11 +638,11 @@ export class ValueGroup<T> {
 
       if (pending === undefined) {
         if (settlement !== null) yield* Deferred.succeed(settlement, undefined);
-        // Taking and releasing the permit waits for a commit that a debounce
-        // fiber has already started. Returning without it reported "flushed"
-        // with the value still in the backend — which is exactly the promise
-        // `dispose()` relies on before it closes the runtime.
-        yield* this.#backendLock.withPermits(1)(Effect.void);
+        // A fresh semaphore acquirer can barge ahead of an older queued write.
+        // Waiting on the permit therefore did not fence a commit and `flush()`
+        // returned early in 969/1000 gated schedules. Wait for the mutation
+        // lifecycle itself instead.
+        yield* this.#awaitMutations();
         return;
       }
 
@@ -648,6 +680,7 @@ export class ValueGroup<T> {
         Effect.result,
       );
       if (Result.isFailure(outcome)) return yield* outcome.failure;
+      yield* this.#awaitMutations();
     });
   }
 
@@ -739,14 +772,21 @@ export class ValueGroup<T> {
                 ),
               );
             }
-            return Effect.mapError(
-              this.#backend.set(this.#key, encoded),
-              (cause) => this.#issue("backend", cause.detail, cause, "write"),
-            ).pipe(
-              Effect.tap(() =>
-                Effect.sync(() => {
-                  this.#committed = Math.max(this.#committed, epoch);
-                })
+            // A JavaScript promise continues after its Effect fiber receives
+            // an interrupt. Keep the permit until that promise settles, or a
+            // successful reset can remove the key and then be undone by the
+            // abandoned `set` completing afterwards.
+            return Effect.uninterruptible(
+              Effect.mapError(
+                this.#backend.set(this.#key, encoded),
+                (cause) => this.#issue("backend", cause.detail, cause, "write"),
+              ).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    this.#committed = Math.max(this.#committed, epoch);
+                    this.#readFailure = null;
+                  })
+                ),
               ),
             );
           }),
@@ -758,6 +798,11 @@ export class ValueGroup<T> {
   /** Read-modify-write against the cached value. */
   update(mutate: (current: T) => T): Effect.Effect<T, StorageError> {
     return Effect.suspend(() => {
+      // A backend failure returns defaults to `hydrate()` so boot can continue,
+      // but those defaults are not a safe read-modify-write base. Refuse until
+      // a later hydration succeeds or the caller explicitly replaces the full
+      // value with `write()`.
+      if (this.#readFailure !== null) return Effect.fail(this.#readFailure);
       const next = mutate(this.current());
       return Effect.as(this.write(next), next);
     });
@@ -792,16 +837,19 @@ export class ValueGroup<T> {
             // the privacy control, where reporting an erase that did not
             // happen is the one outcome it must never produce.
             if (this.#committed > epoch) return Effect.succeed(defaults);
-            return this.#backend.remove(this.#key).pipe(
-              Effect.mapError((cause) =>
-                this.#issue("backend", cause.detail, cause, "write")
+            return Effect.uninterruptible(
+              this.#backend.remove(this.#key).pipe(
+                Effect.mapError((cause) =>
+                  this.#issue("backend", cause.detail, cause, "write")
+                ),
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    this.#committed = Math.max(this.#committed, epoch);
+                    this.#readFailure = null;
+                  })
+                ),
+                Effect.as(defaults),
               ),
-              Effect.tap(() =>
-                Effect.sync(() => {
-                  this.#committed = Math.max(this.#committed, epoch);
-                })
-              ),
-              Effect.as(defaults),
             );
           }),
         ),
@@ -834,6 +882,13 @@ export class ValueGroup<T> {
       // asynchronous, so one already in flight when a local `reset()` or
       // `write()` happened is carrying a value this frame has since replaced —
       // and this was the only route into the cache with no invalidation on it.
+      // Local intent wins while it is pending or committing. A notification
+      // says another tab committed, but replacing the value this frame's user
+      // has just chosen would be more surprising; our later commit becomes the
+      // last writer. This policy also keeps the pending value and its epoch
+      // together instead of silently rebasing old intent onto a remote epoch.
+      if (this.#pendingWrite !== undefined || this.#outstanding > 0) return;
+
       // A fresh epoch, not `this.#epoch`: passing the current value made the
       // comparison in `#publish` a tautology, so a read already in the backend
       // could still publish over a notification that arrived first.

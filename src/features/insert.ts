@@ -318,7 +318,9 @@ export const createInsert = (
     exit: () => mode.exitInsert(),
     isActive: () => mode.isInserting(),
     focusInput: (count) => mode.focusInput(count),
-    ensureEntered: () => void mode.enter(),
+    ensureEntered: () => {
+      mode.enter();
+    },
     seedFromFocus: () => mode.seedFromFocus(),
     grabBackFocus: (hasTyped) => mode.grabBackFocus(hasTyped),
   };

@@ -100,7 +100,6 @@ type SyncGetValue = (
 ) => GmValue | undefined;
 type SyncSetValue = (key: string, value: GmValue) => void;
 type SyncDeleteValue = (key: string) => void;
-type SyncListValues = () => readonly string[];
 type OpenInTab = (
   url: string,
   options?: GmOpenInTabOptions | boolean,
@@ -135,7 +134,6 @@ export interface GmSurface {
   readonly getValueSync: SyncGetValue | null;
   readonly setValueSync: SyncSetValue | null;
   readonly deleteValueSync: SyncDeleteValue | null;
-  readonly listValuesSync: SyncListValues | null;
   readonly openInTabSync: OpenInTab | null;
   readonly setClipboardSync: SetClipboard | null;
   readonly xhrSync: Xhr | null;
@@ -185,9 +183,6 @@ export const detectGmSurface = (): GmSurface => {
     ),
     deleteValueSync: binding(() =>
       typeof GM_deleteValue === "function" ? GM_deleteValue : undefined
-    ),
-    listValuesSync: binding(() =>
-      typeof GM_listValues === "function" ? GM_listValues : undefined
     ),
     openInTabSync: binding(() =>
       typeof GM_openInTab === "function" ? GM_openInTab : undefined
@@ -514,8 +509,10 @@ export const setClipboard = (
     const write = ns.setClipboard;
     return attempt("GM.setClipboard", () => {
       // May return a promise on some managers; we intentionally do not await —
-      // the caller is inside an activation-sensitive synchronous task.
-      void write(text, "text/plain");
+      // the caller is inside an activation-sensitive synchronous task. Attach
+      // a rejection handler so a manager failure is not an unhandled promise.
+      const result = write(text, "text/plain");
+      if (result instanceof Promise) result.catch(() => {});
     });
   }
   if (surface.setClipboardSync) {
@@ -572,10 +569,13 @@ export const xmlHttpRequest = (
       };
       const returned: unknown = impl(details);
       if (returned instanceof Promise) {
-        void returned.then((value: unknown) => {
-          handle = (value ?? undefined) as GmXhrHandle | undefined;
-          if (aborted) handle?.abort?.();
-        });
+        returned.then(
+          (value: unknown) => {
+            handle = (value ?? undefined) as GmXhrHandle | undefined;
+            if (aborted) handle?.abort?.();
+          },
+          reject,
+        );
       } else if (returned !== null && typeof returned === "object") {
         handle = returned as GmXhrHandle;
       }

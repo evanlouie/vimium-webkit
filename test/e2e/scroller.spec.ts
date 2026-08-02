@@ -28,6 +28,28 @@ const focus = (vw: Vimium, id: string): Promise<void> =>
 const STEP = 60;
 
 test.describe("scrolling", () => {
+  test("the activation key is suppressed before Stage 1 replays it", async ({ vw }) => {
+    // Do not call `vw.open`: it explicitly wakes and waits for Stage 1. This
+    // key must land while Stage 0 is still hydrating the application.
+    await vw.page.goto("/scrollables.html");
+    await vw.page.evaluate(() => {
+      (globalThis as typeof globalThis & { __pageKeys?: number }).__pageKeys =
+        0;
+      globalThis.addEventListener("keydown", () => {
+        const scope = globalThis as typeof globalThis & { __pageKeys?: number };
+        scope.__pageKeys = (scope.__pageKeys ?? 0) + 1;
+      });
+    });
+
+    await vw.page.keyboard.press("j");
+    await expect.poll(async () => (await vw.scrollOffsets()).y).toBe(STEP);
+    expect(
+      await vw.page.evaluate(() =>
+        (globalThis as typeof globalThis & { __pageKeys?: number }).__pageKeys
+      ),
+    ).toBe(0);
+  });
+
   test("`j`/`k` scroll the document by one step", async ({ vw }) => {
     await vw.open("/scrollables.html");
 

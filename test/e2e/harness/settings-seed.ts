@@ -29,6 +29,8 @@ const STORAGE_PREFIX = "vimium-webkit:";
 const SETTINGS_SCHEMA_VERSION = 1;
 
 export const SETTINGS_KEY = `${STORAGE_PREFIX}settings`;
+const SESSION_KEY = `${STORAGE_PREFIX}session`;
+const FRAME_SECRET = "e2e-manager-private-frame-credential";
 
 /**
  * Overrides for specs that trade realism for determinism.
@@ -80,6 +82,17 @@ export const seedWithSettings = (
   patch: Partial<Settings> = {},
 ): Readonly<Record<string, string>> => ({
   [SETTINGS_KEY]: envelope({ ...shippedDefaults(), ...patch }),
+  // A real manager shares private storage across frames. Each harness frame
+  // has its own in-page Map, so seed the same credential into every one.
+  [SESSION_KEY]: JSON.stringify({
+    schemaVersion: 1,
+    data: {
+      frameSecret: FRAME_SECRET,
+      knownTabs: [],
+      acknowledged: [],
+      zoomByOrigin: {},
+    },
+  }),
 });
 
 /** The effective settings a spec will run under. */

@@ -218,6 +218,12 @@ class Stage0Impl implements Stage0 {
     }
     if (isUninteresting(event)) return;
     if (this.#buffer.length < MAX_BUFFERED_KEYS) this.#buffer.push(event);
+    // Stage 1 replays this exact event after hydration. Suppress it now, while
+    // browser dispatch is still synchronous, or the page acts once and the
+    // replayed mapping acts again. This is also required for activation-bound
+    // commands: `preventDefault` after the awaited boot is too late.
+    event.preventDefault();
+    event.stopImmediatePropagation();
     this.#activate("keydown");
   };
 

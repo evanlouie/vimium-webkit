@@ -57,6 +57,7 @@ import { createVisual } from "~/features/visual/index.ts";
 import { createMarks } from "~/features/marks.ts";
 import { createInsert, mediaPlayerHasFocus } from "~/features/insert.ts";
 import { createOmnibar } from "~/features/omnibar/index.ts";
+import { createFrameSecret } from "~/frames/auth.ts";
 import { createFrameLink } from "~/frames/index.ts";
 
 import { watchLifecycle } from "./lifecycle.ts";
@@ -145,6 +146,20 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
   const isTop = isTopFrame();
   const exclusions = () => new ExclusionSet(settings.exclusionRules);
 
+  // Only the top frame creates the credential. Child frames re-read it from
+  // manager-private storage when challenged. The page can observe handshake
+  // messages, but it cannot calculate their HMAC without this value.
+  if (isTop && groups.session.current().frameSecret.length === 0) {
+    await runtime.runPromise(groups.session.write({
+      ...groups.session.current(),
+      frameSecret: createFrameSecret(),
+    }));
+  }
+  const frameSecret = async (): Promise<string> => {
+    await runtime.runPromise(groups.session.hydrate());
+    return groups.session.current().frameSecret;
+  };
+
   // Declared before `app` so features can close over it; assigned immediately
   // after, because several of them need `app` in turn.
   let appRef: AppContext | null = null;
@@ -176,6 +191,7 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
 
   const frames = createFrameLink({
     isTop,
+    frameSecret,
     resolveExclusion: () => {
       const rule = exclusions().match(location.href);
       return { enabled: rule.enabled, passKeys: rule.passKeys };
@@ -192,7 +208,9 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       // source into every frame on the page — and made the handshake an
       // exfiltration channel for the user's exclusion patterns. This is a
       // prompt to re-read our own storage, not a source of truth.
-      void reloadSettings();
+      reloadSettings().catch((cause: unknown) => {
+        reportIssue(`Could not reload settings: ${String(cause)}`);
+      });
 
       // The top frame resolves exclusions from its own URL, so a subframe only
       // learns the verdict when it is welcomed. Until this ran, a subframe that
@@ -415,12 +433,16 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       // The observer is watching media elements that no longer exist, and a
       // soft navigation is the point at which "muted" stops meaning anything.
       teardownCommandObservers();
-      void app().refresh();
+      app().refresh().catch((cause: unknown) => {
+        reportIssue(`Could not refresh after navigation: ${String(cause)}`);
+      });
       if (isTop) omnibar().noteVisit();
     },
     onRestore: () => {
       stage0.rearm();
-      void app().refresh();
+      app().refresh().catch((cause: unknown) => {
+        reportIssue(`Could not refresh after restore: ${String(cause)}`);
+      });
     },
     onLeave: () => teardownCommandObservers(),
     // Marks debounce 100 ms, settings 250 ms and the history index 2 s; a
@@ -433,7 +455,11 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       // The portable substitute for `GM_addValueChangeListener`, which quoid
       // and Stay do not implement: re-read shared storage when the tab is
       // brought forward, so a settings change in another tab lands.
-      if (!store.supportsWatch) void app().refresh();
+      if (!store.supportsWatch) {
+        app().refresh().catch((cause: unknown) => {
+          reportIssue(`Could not refresh visible tab: ${String(cause)}`);
+        });
+      }
     },
   });
 
@@ -457,9 +483,13 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       // nothing on that path suspends before reaching the backend — an
       // invariant no test holds, and one retry or semaphore away from silent
       // data loss.
-      void runtime.runPromise(Effect.ignore(store.flushAll()))
-        .finally(() => {
-          void runtime.dispose();
+      runtime.runPromise(Effect.ignore(store.flushAll()))
+        .then(
+          () => runtime.dispose(),
+          () => runtime.dispose(),
+        )
+        .catch(() => {
+          // The page is leaving. There is no remaining UI for this failure.
         });
     },
   };

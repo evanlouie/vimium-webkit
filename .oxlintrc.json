@@ -26,6 +26,17 @@
   "rules": {
     "eqeqeq": "error",
     "no-await-in-loop": "error",
+    "no-case-declarations": "error",
+    "no-empty": "error",
+    "no-fallthrough": "error",
+    "no-prototype-builtins": "error",
+    "no-regex-spaces": "error",
+    "no-unexpected-multiline": "error",
+    "no-var": "error",
+    "no-void": "error",
+    "prefer-const": "error",
+    "prefer-rest-params": "error",
+    "prefer-spread": "error",
     "no-unused-vars": [
       "error",
       {
@@ -33,17 +44,25 @@
         "varsIgnorePattern": "^_"
       }
     ],
+    "typescript/ban-ts-comment": "error",
     "typescript/explicit-module-boundary-types": "error",
+    "typescript/no-array-constructor": "error",
+    "typescript/no-empty-object-type": "error",
     "typescript/no-explicit-any": "error",
-    "typescript/no-misused-spread": "off",
+    "typescript/no-namespace": "error",
+    "typescript/no-require-imports": "error",
+    "typescript/no-unnecessary-type-constraint": "error",
+    "typescript/no-unsafe-function-type": "error",
     "typescript/strict-void-return": "error"
   },
   "overrides": [
     {
       "files": ["test/**/*.ts"],
       "rules": {
+        "no-void": "off",
         "typescript/explicit-module-boundary-types": "off",
         "typescript/no-base-to-string": "off",
+        "typescript/no-misused-spread": "off",
         "typescript/strict-void-return": "off",
         "typescript/unbound-method": "off"
       }

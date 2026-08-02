@@ -104,13 +104,21 @@ export const createFind = (app: AppContext): FindApi => {
     app.hud.setIndicator(indicator);
 
     const history = app.groups.findHistory.current().queries;
-    void app.hud
+    app.hud
       .prompt(
         findPromptOptions({ backwards: options.backwards, history, onInput }),
       )
       .then((value) => {
         if (value === null) mode.cancel();
         else mode.commit(value);
+      })
+      .catch((cause: unknown) => {
+        mode.cancel();
+        app.hud.error(
+          `Find prompt failed: ${
+            cause instanceof Error ? cause.message : String(cause)
+          }`,
+        );
       });
   };
 

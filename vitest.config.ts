@@ -32,9 +32,8 @@ export default defineConfig({
     environment: "node",
     include: ["test/unit/**/*_test.ts"],
     pool: "threads",
-    poolOptions: {
-      threads: { singleThread: true, isolate: false },
-    },
+    maxWorkers: 1,
+    isolate: false,
     fileParallelism: false,
     coverage: {
       provider: "v8",

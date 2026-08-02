@@ -22,6 +22,27 @@ const trackErrors = (page: Page): string[] => {
   return errors;
 };
 
+/** Visible markers across the top frame and every reachable participant. */
+const markerCount = async (page: Page): Promise<number> => {
+  const counts = await Promise.all(
+    page.frames().map(async (frame) => {
+      try {
+        return await frame.evaluate(() => {
+          const host = globalThis as unknown as {
+            __vimiumHarness?: { shadow: ShadowRoot | null };
+          };
+          return host.__vimiumHarness?.shadow?.querySelectorAll(
+            ".vw-hint:not(.vw-hint--hidden)",
+          ).length ?? 0;
+        });
+      } catch {
+        return 0;
+      }
+    }),
+  );
+  return counts.reduce((total, count) => total + count, 0);
+};
+
 test.describe("nested same-origin frames", () => {
   test("activates a hint owned by the innermost frame", async ({ vw, page }) => {
     await vw.open("/nested-frames.html");
@@ -36,6 +57,29 @@ test.describe("nested same-origin frames", () => {
       );
       return frame?.url() ?? "";
     }).toContain("#level2-target");
+  });
+
+  test("a persisted restore keeps the top endpoint admitted", async ({ vw, page }) => {
+    await vw.open("/nested-frames.html");
+    await vw.bootAllFrames();
+
+    await page.evaluate(() =>
+      new Promise<void>((resolve) => {
+        globalThis.dispatchEvent(
+          new PageTransitionEvent("pagehide", { persisted: true }),
+        );
+        globalThis.dispatchEvent(
+          new PageTransitionEvent("pageshow", { persisted: true }),
+        );
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      })
+    );
+
+    await vw.startHints();
+    await vw.activateHint("Level two link");
+    await expect.poll(async () =>
+      page.frames().some((frame) => frame.url().endsWith("#level2-target"))
+    ).toBe(true);
   });
 
   test("activates a hint owned by the middle frame", async ({ vw, page }) => {
@@ -118,12 +162,14 @@ test.describe("srcdoc and about:blank frames", () => {
     await vw.startHints();
     await vw.press("Escape");
     await vw.waitForHintsGone();
+    await expect.poll(() => markerCount(page)).toBe(0);
 
     // A second round after an aborted one is where a leaked pending request or
     // an un-cleared singleton mode would show up.
     await vw.startHints();
     await vw.press("Escape");
     await vw.waitForHintsGone();
+    await expect.poll(() => markerCount(page)).toBe(0);
 
     expect(errors).toEqual([]);
     expect(page.url()).not.toContain("#");

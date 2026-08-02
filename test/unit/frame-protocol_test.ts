@@ -226,7 +226,13 @@ test("parseFrameMessage accepts a message of every kind", () => {
   const samples: readonly unknown[] = [
     hello(),
     { ...ENVELOPE, kind: "CHALLENGE", token: "t0" },
-    { ...ENVELOPE, kind: "JOIN", token: "t0", helloId: "h0" },
+    {
+      ...ENVELOPE,
+      kind: "JOIN",
+      token: "t0",
+      helloId: "h0",
+      proof: "proof",
+    },
     welcome(nonce),
     { ...ENVELOPE, kind: "ROSTER", nonce, frames: ["f0000", "f0001"] },
     {

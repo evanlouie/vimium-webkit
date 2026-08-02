@@ -20,12 +20,11 @@
  * same-origin iframe is *legitimately* in the frames tree. Window identity
  * proves "a window on this page", never "our code". The layers are therefore:
  *
- * 1. **Challenge-response admission.** A `HELLO` is only an announcement; it
- *    carries nothing and grants nothing. The coordinator answers it with a
- *    one-shot token posted *to that window alone*, and admits the frame only
- *    when the token comes back with a port attached. That is what binds the
- *    port to the window, and it is why the coordinator's own window can never
- *    admit itself.
+ * 1. **Authenticated challenge-response admission.** A `HELLO` is only an
+ *    announcement. The coordinator answers with a one-shot token. `JOIN` must
+ *    carry an HMAC over that token and its hello id. The key lives in manager-
+ *    private storage, which every injected frame can read and page code cannot.
+ *    The token is also bound to the source window and consumed once.
  * 2. **Targeted transfer.** The challenge tells the child the coordinator's
  *    origin, so the port is transferred with a real `targetOrigin` instead of
  *    `"*"`. The port is the capability; handing it to `"*"` was handing it to
@@ -37,10 +36,9 @@
  *    reads its own storage. What travels is the exclusion decision, which is
  *    two fields and genuinely has to come from the top frame's URL.
  *
- * None of this is airtight in page world, where the page shares our realm and
- * can read the token out of the message event. In content world it cannot. The
- * posture is to make the content-world case sound and to be honest about the
- * other one — not to pretend a nonce helps where the attacker can read it.
+ * A page can read a challenge in page world. That does not authenticate it:
+ * the challenge contains no manager-private key, and replay is prevented by
+ * the one-shot token and the hello id included in the HMAC.
  */
 
 import { Option, Schema } from "effect";
@@ -56,7 +54,7 @@ export const PROTOCOL_MAGIC = "vimium-webkit/frames";
  * between the top frame's load and a lazily-inserted iframe's — so a version
  * mismatch has to be a clean drop rather than a parse error somewhere deeper.
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** Vimium's number, and for Vimium's reason: a hung frame must not deadlock a mode. */
 export const REQUEST_DEADLINE_MS = 3000;
@@ -237,9 +235,8 @@ const helloSchema = Schema.Struct({
  * Top → child, over `window.postMessage`, addressed to one window.
  *
  * The token is one-shot and bound to the window it was posted to. It is *not*
- * the session nonce: it authorises exactly one `JOIN` and is then consumed, so
- * capturing it buys an attacker one registration they could have obtained by
- * announcing themselves anyway.
+ * the session nonce. Reading it is insufficient because `JOIN` also proves
+ * possession of the manager-private frame credential.
  */
 const challengeSchema = Schema.Struct({
   ...envelopeShape(),
@@ -260,6 +257,8 @@ const joinSchema = Schema.Struct({
   kind: Schema.Literal("JOIN"),
   token: idSchema,
   helloId: idSchema,
+  /** HMAC of the one-shot token and hello id with manager-private storage. */
+  proof: idSchema,
 });
 
 /** Top → child, over the port. Carries everything a frame needs to boot. */

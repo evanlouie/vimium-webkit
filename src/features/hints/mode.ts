@@ -368,6 +368,8 @@ export const FILTER_CONFIRM_DELAY_MS = 200;
 /** `"a"` → `"a"`, `"<space>"` → `" "`, `"<c-a>"` → `null`. */
 const printableChar = (notation: string): string | null => {
   if (notation === "<space>") return " ";
+  // A key notation is one Unicode code point or a bracketed token.
+  // oxlint-disable-next-line typescript/no-misused-spread
   return [...notation].length === 1 ? notation : null;
 };
 
@@ -403,7 +405,9 @@ export class HintMode extends Mode {
     super(config.app.modeHost, {
       name: "hints",
       indicator: INDICATORS[config.kind],
-      exitOnEscape: true,
+      // Hint mode handles Escape itself because the origin must relay it before
+      // teardown. The generic Mode handler exits before `#onKeydown` runs.
+      exitOnEscape: false,
       // Hint mode owns the keyboard outright: an unhandled key must not reach
       // the page, or `j` scrolls while the user is picking a link.
       suppressAllKeyboardEvents: true,
@@ -513,11 +517,17 @@ export class HintMode extends Mode {
     );
     if (notation === null) return SUPPRESS_EVENT;
 
+    // Escape tears the origin mode down. Relay it first, while the coordinator
+    // still has a live round, so participant frames remove their markers too.
+    // Activation keys stay local-first because copy modes need this keydown's
+    // transient user activation.
+    if (notation === "<esc>" && this.#crossFrame) {
+      this.#app.frames.broadcastKey(notation);
+    }
     this.handleKey(notation);
-    // Broadcast *after* handling so this frame activates from inside the
-    // keydown task; a copy mode that waited for the round trip would have lost
-    // its transient activation.
-    if (this.#crossFrame) this.#app.frames.broadcastKey(notation);
+    if (notation !== "<esc>" && this.#crossFrame) {
+      this.#app.frames.broadcastKey(notation);
+    }
     return SUPPRESS_EVENT;
   }
 

@@ -40,7 +40,7 @@
     "@effect/tsgo": "^0.24.3",
     "@playwright/test": "^1.56.0",
     "@types/node": "^22.20.0",
-    "@vitest/coverage-v8": "^3.2.4",
+    "@vitest/coverage-v8": "^4.1.10",
     "dprint": "^0.50.2",
     "oxlint": "^1.76.0",
     "oxlint-tsgolint": "^7.0.2001",
@@ -49,6 +49,6 @@
     "tsx": "^4.20.6",
     "typescript": "^7.0.2",
     "vite": "^8.2.0",
-    "vitest": "^3.2.4"
+    "vitest": "^4.1.10"
   }
 }

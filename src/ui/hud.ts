@@ -247,7 +247,7 @@ class ActivePrompt {
       if (!this.#done) this.#finish(null);
     });
 
-    void this.result.finally(onSettled);
+    this.result.then(onSettled, onSettled);
   }
 
   setStatus(text: string): void {

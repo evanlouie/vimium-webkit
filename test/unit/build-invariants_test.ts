@@ -1,18 +1,27 @@
 import { test } from "vitest";
-import { stripNonCode } from "../../build/invariants.ts";
+import { hasNodeSpecifier, stripNonCode } from "../../build/invariants.ts";
 import { assert, assertEquals } from "./support/assert.ts";
 
-test("the bundle scanner can preserve strings while removing comments", () => {
+test("the bundle scanner ignores module examples inside comments", () => {
   const source = `
     /** import * as assert from "node:assert" */
-    const value = "node:real";
+    const value = "browser";
     // import value from "node:comment"
   `;
 
-  const withoutComments = stripNonCode(source, false);
-  assert(!withoutComments.includes("node:assert"));
-  assert(!withoutComments.includes("node:comment"));
-  assert(withoutComments.includes('"node:real"'));
+  assertEquals(hasNodeSpecifier(source), false);
+  assertEquals(stripNonCode(source).includes("node:assert"), false);
+});
 
-  assertEquals(stripNonCode(source).includes("node:real"), false);
+test("a regular expression cannot hide a Node module specifier", () => {
+  const source = String.raw`
+    const protocol = /https?:\/\//;
+    const dependency = "node:fs";
+  `;
+
+  assert(hasNodeSpecifier(source));
+});
+
+test("template module specifiers are detected", () => {
+  assert(hasNodeSpecifier("const dependency = `node:path`;"));
 });

@@ -396,7 +396,11 @@ export class DialogController {
     const row = el(doc, "div", "vw-button-row");
     const resetButton = el(doc, "button", "vw-button", "Reset to defaults");
     resetButton.addEventListener("click", () => {
-      void this.#host.saveSettings(defaultSettings()).then(() => this.close());
+      this.#host.saveSettings(defaultSettings()).then((saved) => {
+        if (saved) this.close();
+      }).catch(() => {
+        // The host reports the storage error in the HUD.
+      });
     });
     const cancelButton = el(doc, "button", "vw-button", "Cancel");
     cancelButton.addEventListener("click", () => this.close());
@@ -421,7 +425,7 @@ export class DialogController {
         ...booleansFrom(checkboxes),
       };
 
-      void this.#host.saveSettings(next).then((saved) => {
+      this.#host.saveSettings(next).then((saved) => {
         const problems = this.#host.mappings().diagnostics.filter(
           (entry) => entry.severity === "error",
         );
@@ -433,10 +437,14 @@ export class DialogController {
             .join("\n");
           return;
         }
-        this.close();
         // The store has already put its own "could not save" line in the HUD;
         // `hud.show` would paint straight over it.
-        if (saved) this.#host.app.hud.show("Settings saved");
+        if (saved) {
+          this.close();
+          this.#host.app.hud.show("Settings saved");
+        }
+      }).catch(() => {
+        // The host reports the storage error in the HUD.
       });
     });
 

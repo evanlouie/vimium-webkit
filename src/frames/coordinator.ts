@@ -26,6 +26,7 @@ import type {
   HintMode,
   RemoteHintDescriptor,
 } from "~/core/context.ts";
+import { verifyFrameJoin } from "~/frames/auth.ts";
 import { withDeadline } from "~/platform/scheduler.ts";
 import {
   createNonce,
@@ -72,6 +73,8 @@ export interface CoordinatorOptions {
   readonly root: Window | null;
   /** Resolved from the *top frame's* URL; see `effectiveExclusion` below. */
   readonly resolveExclusion?: () => EffectiveExclusion;
+  /** Credential read from manager-private storage. Required for admission. */
+  readonly frameSecret?: () => Promise<string>;
 }
 
 interface PendingCollect {
@@ -88,6 +91,7 @@ interface Challenge {
 /** The hint round currently authorised to drive other frames. */
 interface ActiveRound {
   readonly originFrameId: FrameId;
+  readonly requestId: string;
   readonly mode: HintMode;
   readonly startedAt: number;
 }
@@ -210,8 +214,36 @@ export class FrameCoordinator {
     const port = event.ports[0];
     if (port === undefined) return;
 
+    this.#completeJoin(
+      port,
+      source,
+      message.token,
+      message.helloId,
+      message.proof,
+    ).catch(() => {
+      port.close();
+    });
+  }
+
+  async #completeJoin(
+    port: MessagePort,
+    source: Window,
+    token: string,
+    helloId: string,
+    proof: string,
+  ): Promise<void> {
+    const secret = await this.#options.frameSecret?.() ?? "";
+    if (!(await verifyFrameJoin(secret, token, helloId, proof))) {
+      port.close();
+      return;
+    }
+    if (this.#disposed || !this.#registry.isKnownWindow(source)) {
+      port.close();
+      return;
+    }
+
     const channel = messagePortChannel(port);
-    const frameId = this.#admit(channel, source, message.helloId);
+    const frameId = this.#admit(channel, source, helloId);
 
     port.addEventListener("message", (portEvent: MessageEvent) => {
       this.#receive(frameId, portEvent.data);
@@ -306,12 +338,18 @@ export class FrameCoordinator {
 
     switch (message.kind) {
       case "REQUEST_HINTS":
+        // One live round globally. Without this an admitted frame could start
+        // unlimited detection passes and descriptor aggregations in parallel.
+        if (this.#round !== null && this.#ownsLiveRound()) return;
         this.#round = {
           originFrameId: frameId,
+          requestId: message.requestId,
           mode: message.mode,
           startedAt: Date.now(),
         };
-        void this.#runHintRound(frameId, message.requestId, message.mode);
+        this.#runHintRound(frameId, message.requestId, message.mode).catch(
+          () => {},
+        );
         return;
 
       case "HINTS":
@@ -342,6 +380,7 @@ export class FrameCoordinator {
         // user is typing into has any business broadcasting them.
         if (this.#round?.originFrameId !== frameId) return;
         this.relayKey(frameId, message.notation);
+        if (message.notation === "<esc>") this.#round = null;
         return;
 
       case "FOCUS_FRAME":
@@ -374,15 +413,20 @@ export class FrameCoordinator {
     }
   }
 
-  /** Is `frameId` the frame that started the live round, in the same mode? */
-  #ownsRound(frameId: FrameId, mode: HintMode): boolean {
+  #ownsLiveRound(): boolean {
     const round = this.#round;
     if (round === null) return false;
     if (Date.now() - round.startedAt > ROUND_TTL_MS) {
       this.#round = null;
       return false;
     }
-    return round.originFrameId === frameId && round.mode === mode;
+    return true;
+  }
+
+  /** Is `frameId` the frame that started the live round, in the same mode? */
+  #ownsRound(frameId: FrameId, mode: HintMode): boolean {
+    return this.#ownsLiveRound() &&
+      this.#round?.originFrameId === frameId && this.#round.mode === mode;
   }
 
   // -------------------------------------------------------------------------
@@ -406,6 +450,10 @@ export class FrameCoordinator {
   ): Promise<void> {
     const descriptors = await this.collectHints(mode);
     if (this.#disposed) return;
+    if (
+      this.#round?.originFrameId !== originFrameId ||
+      this.#round.requestId !== requestId
+    ) return;
 
     // Strip the origin's own descriptors from its reply: it re-derives them
     // from the local hints it already holds. Upstream measured this as a 150%

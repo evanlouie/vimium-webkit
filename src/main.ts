@@ -22,7 +22,7 @@ const main = (): void => {
   const activate = (): void => {
     if (starting || stage0 === null) return;
     starting = true;
-    void startStage1(stage0)
+    startStage1(stage0)
       .then((started) => {
         stage1 = started;
       })

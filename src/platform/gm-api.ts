@@ -76,7 +76,6 @@ export interface GmNamespace {
   ) => Promise<GmValue | undefined>;
   readonly setValue?: (key: string, value: GmValue) => Promise<void>;
   readonly deleteValue?: (key: string) => Promise<void>;
-  readonly listValues?: () => Promise<readonly string[]>;
   readonly openInTab?: (
     url: string,
     options?: GmOpenInTabOptions | boolean,
@@ -111,8 +110,6 @@ declare global {
   ): GmValue | undefined;
   function GM_setValue(key: string, value: GmValue): void;
   function GM_deleteValue(key: string): void;
-  function GM_listValues(): readonly string[];
-
   function GM_addValueChangeListener(
     key: string,
     callback: (

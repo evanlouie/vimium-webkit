@@ -132,7 +132,6 @@ export const installPageHarness = (init: HarnessInit): void => {
     ) => Promise<GmValue | undefined>;
     readonly setValue: (key: string, value: GmValue) => Promise<void>;
     readonly deleteValue: (key: string) => Promise<void>;
-    readonly listValues: () => Promise<readonly string[]>;
     readonly openInTab: (
       url: string,
       options?: OpenInTabOptions | boolean,
@@ -146,7 +145,6 @@ export const installPageHarness = (init: HarnessInit): void => {
     GM_getValue?: (key: string, fallback?: GmValue) => GmValue | undefined;
     GM_setValue?: (key: string, value: GmValue) => void;
     GM_deleteValue?: (key: string) => void;
-    GM_listValues?: () => readonly string[];
     GM_openInTab?: (
       url: string,
       options?: OpenInTabOptions | boolean,
@@ -246,8 +244,6 @@ export const installPageHarness = (init: HarnessInit): void => {
   const writeValue = (key: string, value: GmValue): void => {
     state.store.set(key, String(value));
   };
-  const listKeys = (): readonly string[] => [...state.store.keys()];
-
   const recordTab = (
     url: string,
     options?: OpenInTabOptions | boolean,
@@ -283,7 +279,6 @@ export const installPageHarness = (init: HarnessInit): void => {
     host.GM_deleteValue = (key: string): void => {
       state.store.delete(key);
     };
-    host.GM_listValues = listKeys;
     host.GM_openInTab = recordTab;
     host.GM_setClipboard = recordClipboard;
     return;
@@ -302,7 +297,6 @@ export const installPageHarness = (init: HarnessInit): void => {
       state.store.delete(key);
       return Promise.resolve();
     },
-    listValues: () => Promise.resolve(listKeys()),
     openInTab: (url, options) => Promise.resolve(recordTab(url, options)),
     setClipboard: (data, type) => {
       recordClipboard(data, type);
