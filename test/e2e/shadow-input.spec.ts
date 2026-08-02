@@ -36,6 +36,15 @@ const shadowFieldValue = (vw: Vimium): Promise<string> =>
     return field === null ? "" : field.value;
   });
 
+/** Does the field inside the shadow root hold the caret? */
+const shadowFieldHasFocus = (vw: Vimium): Promise<boolean> =>
+  vw.page.evaluate(() => {
+    const host = document.getElementById("widget-host");
+    const root = host?.shadowRoot ?? null;
+    const field = root?.querySelector("input") ?? null;
+    return field !== null && root?.activeElement === field;
+  });
+
 test.describe("a text field in an open shadow root", () => {
   test("takes the keys that the user types", async ({ vw }) => {
     await vw.open("/shadow-input.html");
@@ -58,5 +67,32 @@ test.describe("a text field in an open shadow root", () => {
 
     await expect.poll(async () => (await vw.scrollOffsets()).y).toBe(STEP);
     expect(await shadowFieldValue(vw)).toBe("");
+  });
+});
+
+/**
+ * The guard, and a user who is already typing into a shadow field.
+ *
+ * `grabBackFocus` takes the focus back from a page that stole it on load. It
+ * must not do that to a user who is typing. The guard learns that the user
+ * typed from the key events that arrive before the application exists, and a
+ * key inside an open shadow root names the host at a window listener.
+ */
+test.describe("a user who types into a shadow field before the start", () => {
+  test.use({ settingsPatch: { ...DETERMINISTIC, grabBackFocus: true } });
+
+  test("keeps the field", async ({ vw }) => {
+    // No `vw.open`: the key must land while the guard is still waiting.
+    await vw.page.goto("/shadow-input.html");
+    await focusShadowField(vw);
+    await vw.type("j");
+
+    await vw.boot();
+    await vw.page.waitForTimeout(SETTLE_MS);
+
+    expect(await shadowFieldHasFocus(vw)).toBe(true);
+    // The guard left the key alone, so the character is in the field.
+    expect(await shadowFieldValue(vw)).toBe("j");
+    expect((await vw.scrollOffsets()).y).toBe(0);
   });
 });
