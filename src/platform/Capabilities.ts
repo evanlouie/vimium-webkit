@@ -265,8 +265,11 @@ export const degradationWarnings = (
   if (report.value === "memory") {
     warnings.push(
       "No durable storage is available. Your userscript manager gives no " +
-        "value store, so settings and marks are lost when this page unloads. " +
-        "Install Tampermonkey or Userscripts for durable storage.",
+        "value store, so your settings, marks and history are lost when this " +
+        "page unloads. The frames of a page also stay apart: link hints across " +
+        "frames and frame focus are off, and a frame does not learn that you " +
+        "excluded the page. Install Tampermonkey or Userscripts for durable " +
+        "storage.",
     );
   }
 
