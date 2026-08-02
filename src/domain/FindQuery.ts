@@ -15,6 +15,7 @@
  */
 
 import { Option } from "effect";
+import { regexSafetyError } from "~/domain/RegexSafety.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -279,79 +280,10 @@ export const parseFindQuery = (
   };
 };
 
-/**
- * Nested quantifiers: the shape that backtracks without an end.
- *
- * `(a+)+`, `(a*)*` and their family. A group that has a quantifier, and whose
- * body also has a quantifier. In `regexFindMode` a pattern from the user runs
- * against the whole page on *every* keystroke, and no code in JavaScript can
- * stop an `exec` that is inside such a pattern. Find mode owns the keyboard,
- * so the tab is lost.
- *
- * This is a cheap test on the text, and not a decision procedure.
- * `probeBacktracking` below finds the shapes that this test does not find.
- */
-const NESTED_QUANTIFIER = /\((?![?]:)[^)]*[+*][^)]*\)\s*[+*{]/u;
-
 /** The longest pattern from the user that we compile. */
 const MAX_PATTERN_LENGTH = 512;
 
-/**
- * The inputs that make a backtracking pattern show itself.
- *
- * They are short on purpose, and each one ends with a character that makes the
- * match *fail*. Catastrophic backtracking happens only on a match that fails.
- * At twenty characters a bad pattern costs tens of milliseconds, which is
- * measurable, and a safe pattern costs some hundredths. The probe itself
- * therefore cannot become the hang that it looks for.
- */
-const PROBE_LENGTH = 20;
-
-const PROBE_INPUTS: readonly string[] = [
-  `${"a".repeat(PROBE_LENGTH)}!`,
-  `${"0".repeat(PROBE_LENGTH)}!`,
-  `${"ab".repeat(PROBE_LENGTH / 2)}!`,
-  `${" ".repeat(PROBE_LENGTH)}!`,
-  `${"a0 ".repeat(PROBE_LENGTH / 4)}!`,
-];
-
-/**
- * The milliseconds that the whole probe may take before we refuse the pattern.
- *
- * The measured separation at `PROBE_LENGTH` is 0.02 to 0.05 ms for a safe
- * pattern, and 14 to 150 ms for a bad one. Eight is two orders of magnitude
- * above the first group, so a pause for garbage collection cannot make a safe
- * pattern refused.
- */
-const PROBE_BUDGET_MS = 8;
-
-/** The clock that the probe uses. `performance` is absent in some hosts. */
-const now = (): number =>
-  typeof performance !== "undefined" ? performance.now() : Date.now();
-
-/**
- * Does this pattern backtrack badly enough to be dangerous?
- *
- * The test measures, and does not analyse. The analytical question cannot be
- * decided from the source, and every rule on the text either refuses patterns
- * that users want (`(?:foo|bar)+`) or accepts patterns that hang (`(ab|a)*c`).
- * A run of the pattern is the only test that gives the truth.
- */
-const probeBacktracking = (regex: RegExp): boolean => {
-  const started = now();
-  for (const input of PROBE_INPUTS) {
-    try {
-      regex.lastIndex = 0;
-      regex.test(input);
-    } catch {
-      return false;
-    }
-    if (now() - started > PROBE_BUDGET_MS) return true;
-  }
-  return false;
-};
-
-/** A `None` when `source` and `flags` compile *and* are safe to run again and again. */
+/** A `None` when `source` and `flags` compile *and* are safe to run. */
 const compileError = (
   source: string,
   flags: string,
@@ -362,22 +294,23 @@ const compileError = (
     );
   }
 
-  let regex: RegExp;
   try {
-    regex = new RegExp(source, flags);
+    new RegExp(source, flags);
   } catch (cause) {
     return Option.some(
       cause instanceof Error ? cause.message : String(cause),
     );
   }
 
-  if (NESTED_QUANTIFIER.test(source) || probeBacktracking(regex)) {
-    return Option.some(
-      "this pattern backtracks badly enough to hang the page; " +
-        "try a simpler one",
-    );
-  }
-  return Option.none();
+  // The safety check reads the text of the pattern, and never runs it. A
+  // measurement cannot protect the page here, because the measurement is the
+  // hang: `(a|a|a|a)*$` takes minutes against twenty characters, and nothing
+  // in JavaScript can stop an `exec` that is inside such a pattern. Find mode
+  // owns the keyboard, so the tab is lost.
+  return Option.map(
+    regexSafetyError(source, flags),
+    (reason) => `${reason}; try a simpler one`,
+  );
 };
 
 /**
