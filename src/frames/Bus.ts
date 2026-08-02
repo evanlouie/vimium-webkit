@@ -122,6 +122,21 @@ const CHALLENGE_TTL_MS = 10_000;
 const MAX_PENDING_CHALLENGES = 64;
 
 /**
+ * The greatest number of sealed messages that one link holds.
+ *
+ * Page code holds a copy of the port that a `JOIN` transfers, so page code
+ * decides how fast messages arrive. One fiber opens one message at a time, and
+ * every open waits for Web Crypto, so an unbounded mailbox would let a page
+ * fill the memory of the tab with messages of 4 MB each.
+ *
+ * A full mailbox drops the new message. A flood then costs bounded memory, and
+ * it can push out a true message. That is a denial of service, and the holder
+ * of the port has that power in any case. A gap in the counter is safe, because
+ * the receiver only asks the counter to rise.
+ */
+export const MAILBOX_CAPACITY = 256;
+
+/**
  * The ceilings for the walk of the frames tree.
  *
  * A page with many advertisements nests frames without limit, and this walk
@@ -405,7 +420,8 @@ export const makeSealedLink = Effect.fn("FrameBus.link")(function*(
   const nextSeq = yield* Ref.make(0);
   const lastSeen = yield* Ref.make(-1);
   const outbox = yield* Queue.unbounded<FrameWire | WelcomeMessage>();
-  const mailbox = yield* Queue.unbounded<SealedMessage>();
+  // A ceiling, because page code holds a copy of the port and can flood it.
+  const mailbox = yield* Queue.dropping<SealedMessage>(MAILBOX_CAPACITY);
 
   const sealAndPost = (
     message: FrameWire | WelcomeMessage,
@@ -438,7 +454,9 @@ export const makeSealedLink = Effect.fn("FrameBus.link")(function*(
   const open = (sealed: SealedMessage): Effect.Effect<void> =>
     Effect.gen(function*() {
       // A counter that does not rise is a message that we have already seen, or
-      // one that a holder of the port kept and sent again.
+      // one that a holder of the port kept and sent again. A message that the
+      // full mailbox dropped leaves a gap, and a gap is safe: the counter only
+      // has to rise, and a page cannot seal the message that fills the gap.
       const last = yield* Ref.get(lastSeen);
       if (sealed.seq <= last) return;
 
@@ -462,11 +480,14 @@ export const makeSealedLink = Effect.fn("FrameBus.link")(function*(
   );
 
   yield* host.listenOn(port, "message", (event) =>
-    Effect.sync(() => {
+    Effect.suspend(() => {
       const sealed = parseSealed((event as MessageEvent).data);
-      if (Option.isSome(sealed)) {
-        Queue.offerUnsafe(mailbox, sealed.value);
-      }
+      if (Option.isNone(sealed)) return Effect.void;
+      // A full mailbox drops the new message and says so. To wait here is not
+      // a choice: the listener must not suspend, and a page that holds the
+      // port would otherwise decide how much memory this tab uses.
+      return Queue.offerUnsafe(mailbox, sealed.value) ? Effect.void : Effect
+        .logDebug("the mailbox of this link is full, so a message is dropped");
     }));
 
   yield* Effect.acquireRelease(
