@@ -9,8 +9,9 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Option } from "effect";
 import {
+  type HudLine,
   type HudState,
-  liveUrgency,
+  regionText,
   statusText,
   visibleLine,
 } from "~/ui/Hud.ts";
@@ -51,20 +52,35 @@ describe("exposure to assistive technology", () => {
     }));
 });
 
-describe("the HUD line", () => {
+describe("the two live regions of the HUD", () => {
+  const error: HudLine = { text: "No matches", tone: "error" };
+  const info: HudLine = { text: "3/17", tone: "info" };
+
   it.effect("interrupts the user for an error, and waits otherwise", () =>
     Effect.sync(() => {
-      assert.strictEqual(
-        liveUrgency(Option.some({ text: "No matches", tone: "error" })),
-        "assertive",
-      );
-      assert.strictEqual(
-        liveUrgency(Option.some({ text: "3/17", tone: "info" })),
-        "polite",
-      );
-      assert.strictEqual(liveUrgency(Option.none()), "polite");
+      // Two regions, and not one region whose politeness changes. Several
+      // readers keep the politeness that a region had when it entered the
+      // tree, so a region that became assertive with its text would announce
+      // an error politely, or not at all.
+      assert.deepEqual(regionText(Option.some(error)), {
+        polite: "",
+        urgent: "No matches",
+      });
+      assert.deepEqual(regionText(Option.some(info)), {
+        polite: "3/17",
+        urgent: "",
+      });
     }));
 
+  it.effect("clears both regions while the HUD says nothing", () =>
+    Effect.sync(() => {
+      // A region that kept the last text would hold two lines on screen, and
+      // a reader would say the older one again at the next change.
+      assert.deepEqual(regionText(Option.none()), { polite: "", urgent: "" });
+    }));
+});
+
+describe("the HUD line", () => {
   it.effect("says nothing while nothing is on screen", () =>
     Effect.sync(() => {
       assert.isTrue(Option.isNone(visibleLine(EMPTY_STATE)));

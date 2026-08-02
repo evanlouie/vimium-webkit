@@ -21,9 +21,12 @@
  *    a failure.
  * 3. **The auto-hide timer is a fiber, and not a timeout.** A new message
  *    interrupts the fiber that the message before it started.
- * 4. **The line is a live region.** The HUD layer stays in the accessibility
- *    tree, and the one line is a `role="status"` element. A live region must
- *    exist before its text changes, or the change is never announced.
+ * 4. **The line is two live regions.** The HUD layer stays in the
+ *    accessibility tree, and the one line is drawn into a `role="status"`
+ *    region or a `role="alert"` region. A live region must exist before its
+ *    text changes, or the change is never announced. Its politeness must not
+ *    change either, because several readers keep the politeness that the
+ *    region had when it entered the tree.
  */
 
 import {
@@ -87,16 +90,25 @@ export interface HudLine {
 }
 
 /**
- * How urgently assistive technology reads the HUD line.
+ * What each of the two live regions says.
  *
- * An error asks the user to act, so it interrupts. Everything else waits for
- * a pause in the speech, because the HUD also carries the mode indicator and
- * the half-typed keys, and those change with every key press.
+ * An error asks the user to act, so it goes to the assertive region and
+ * interrupts. Everything else goes to the polite region and waits for a pause
+ * in the speech, because the HUD also carries the mode indicator and the
+ * half-typed keys, and those change with every key press.
+ *
+ * The other region is always cleared. A region that kept the last text would
+ * hold two lines on screen, and a reader would say the older one again at the
+ * next change.
  */
-export const liveUrgency = (
+export const regionText = (
   line: Option.Option<HudLine>,
-): "polite" | "assertive" =>
-  Option.isSome(line) && line.value.tone === "error" ? "assertive" : "polite";
+): { readonly polite: string; readonly urgent: string } => {
+  if (Option.isNone(line)) return { polite: "", urgent: "" };
+  return line.value.tone === "error"
+    ? { polite: "", urgent: line.value.text }
+    : { polite: line.value.text, urgent: "" };
+};
 
 /** The live prompt, as the rest of the service sees it. */
 interface LivePrompt {
@@ -185,9 +197,10 @@ export class Hud extends Context.Service<Hud, {
 
       // The HUD layer stays in the accessibility tree for the whole session.
       // A live region must exist before its text changes, or the change is
-      // never announced. The region is empty while the HUD says nothing, and
-      // the other layers stay hidden, so this adds no noise for a user who
-      // reads the page.
+      // never announced. Both regions are empty while the HUD says nothing,
+      // and the other layers stay hidden, so this adds no noise for a user who
+      // reads the page. The host therefore keeps `aria-hidden` off from here
+      // to the end of the session.
       yield* ui.expose(hudLayer);
 
       const element = yield* Effect.acquireRelease(
@@ -205,24 +218,41 @@ export class Hud extends Context.Service<Hud, {
           }),
       );
 
-      const textSpan = yield* Effect.acquireRelease(
+      const regions = yield* Effect.acquireRelease(
         Effect.sync(() => {
-          const span = doc.createElement("span");
-          // The one line of the HUD is a status message: a mode name, a
-          // pending key sequence, a count, or a failure. `role="status"` names
-          // it, and `aria-atomic` makes a reader speak the whole line instead
-          // of the characters that changed.
-          span.setAttribute("role", "status");
-          span.setAttribute("aria-live", "polite");
-          span.setAttribute("aria-atomic", "true");
-          element.appendChild(span);
-          return span;
+          // Two regions, built once, and never changed again. The one line of
+          // the HUD is a status message: a mode name, a pending key sequence,
+          // a count, or a failure. A reader keeps the politeness that a region
+          // had when it entered the tree, so a region whose `aria-live`
+          // changed with its text could speak an error politely, or not at
+          // all. `aria-atomic` makes a reader speak the whole line instead of
+          // the characters that changed.
+          const make = (role: string, urgency: string): HTMLSpanElement => {
+            const span = doc.createElement("span");
+            span.setAttribute("role", role);
+            span.setAttribute("aria-live", urgency);
+            span.setAttribute("aria-atomic", "true");
+            element.appendChild(span);
+            return span;
+          };
+          return {
+            polite: make("status", "polite"),
+            urgent: make("alert", "assertive"),
+          };
         }),
-        (span) =>
+        (built) =>
           Effect.sync(() => {
-            span.remove();
+            built.polite.remove();
+            built.urgent.remove();
           }),
       );
+
+      /** Put the line in the region that fits its tone, and clear the other. */
+      const writeLine = (line: Option.Option<HudLine>): void => {
+        const text = regionText(line);
+        regions.polite.textContent = text.polite;
+        regions.urgent.textContent = text.urgent;
+      };
 
       const state = yield* Ref.make<HudState>(EMPTY_STATE);
       const nextPromptId = yield* Ref.make(0);
@@ -239,8 +269,7 @@ export class Hud extends Context.Service<Hud, {
             // The message slot sits beside the field, so an error that
             // arrives during a search stays on screen instead of vanishing.
             const line = current.transient;
-            textSpan.setAttribute("aria-live", liveUrgency(line));
-            textSpan.textContent = Option.isSome(line) ? line.value.text : "";
+            writeLine(line);
             element.dataset["tone"] = Option.isSome(line)
               ? line.value.tone
               : "info";
@@ -249,16 +278,11 @@ export class Hud extends Context.Service<Hud, {
             return;
           }
           const line = visibleLine(current);
-          textSpan.setAttribute("aria-live", liveUrgency(line));
+          writeLine(line);
           if (Option.isNone(line)) {
             element.dataset["visible"] = "false";
-            // The live region keeps its place in the tree, and loses its text.
-            // A region that still reads the last message would announce it
-            // again at the next change.
-            textSpan.textContent = "";
             return;
           }
-          textSpan.textContent = line.value.text;
           element.dataset["tone"] = line.value.tone;
           element.dataset["visible"] = "true";
         });

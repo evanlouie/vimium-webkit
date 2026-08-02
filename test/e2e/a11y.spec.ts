@@ -90,6 +90,33 @@ test.describe("the accessibility tree", () => {
     );
   });
 
+  test("an error goes to the assertive region, and stays out of the polite one", async ({ vw, page }) => {
+    await vw.open("/long-text.html");
+
+    // Both regions are built with the HUD, and neither changes its politeness
+    // again. A reader keeps the politeness that a region had when it entered
+    // the tree, so a region that became assertive with its text could speak an
+    // error politely, or not at all.
+    expect(await overlayAttribute(page, '.vw-hud [role="status"]', "aria-live"))
+      .toBe("polite");
+    expect(await overlayAttribute(page, '.vw-hud [role="alert"]', "aria-live"))
+      .toBe("assertive");
+
+    // A mark that nobody set is a failure, and a failure reaches the user
+    // through `Report`, which draws it with the error tone.
+    await vw.press("`");
+    await vw.press("z");
+    await vw.waitForHud("is not set");
+
+    expect(await overlayText(page, '.vw-hud [role="alert"]')).toContain(
+      "is not set",
+    );
+    expect(await overlayText(page, '.vw-hud [role="status"]')).toBe("");
+    // The politeness must be the same as before the error.
+    expect(await overlayAttribute(page, '.vw-hud [role="status"]', "aria-live"))
+      .toBe("polite");
+  });
+
   test("the find prompt has a name and a live status", async ({ vw, page }) => {
     await vw.open("/long-text.html");
     await vw.press("/");
