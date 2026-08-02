@@ -353,9 +353,6 @@ export class Keyboard extends Context.Service<Keyboard, {
           if (Option.isNone(rawKey)) return CONTINUE_BUBBLING;
           const raw = rawKey.value;
 
-          const compiled = mappings.compiledUnsafe();
-          const notation = compiled.keyRemap.get(raw) ?? raw;
-
           const remaining = yield* Ref.get(passNext);
           if (remaining > 0) {
             yield* Ref.set(passNext, remaining - 1);
@@ -371,11 +368,15 @@ export class Keyboard extends Context.Service<Keyboard, {
             return yield* suppress(event);
           }
 
+          // Every pass-through rule reads the *raw* notation, and not the
+          // remapped one. The user gives a physical key to the page, and
+          // `mapkey` describes what the key does for us. A test against the
+          // remapped notation captured a key that the exclusion promised to the
+          // page, and gave away a key that the exclusion did not name.
+
           // A pass key applies to a new sequence only. Once the user has
           // committed to `g`, the next key is ours even if it is in the set.
-          if (
-            atRoot && isPassKey(exclusions.effectiveUnsafe(), notation)
-          ) {
+          if (atRoot && isPassKey(exclusions.effectiveUnsafe(), raw)) {
             return CONTINUE_BUBBLING;
           }
 
@@ -383,12 +384,15 @@ export class Keyboard extends Context.Service<Keyboard, {
           // cheap set lookup goes first, because the check behind it walks the
           // document.
           if (
-            atRoot && MEDIA_KEYS.has(notation) &&
+            atRoot && MEDIA_KEYS.has(raw) &&
             settingsNow.passMediaKeys &&
             mediaPlayerHasFocus(dom.document)
           ) {
             return CONTINUE_BUBBLING;
           }
+
+          // The key is ours. `mapkey` now says which binding it drives.
+          const notation = mappings.compiledUnsafe().keyRemap.get(raw) ?? raw;
 
           // The count prefix and the trie walk both live in `advance`, which
           // reads the state again. A binding that an earlier key accepted can

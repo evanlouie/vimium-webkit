@@ -375,4 +375,50 @@ describe("Keyboard", () => {
         mappings: "map a scrollUp\nmap abc scrollToTop",
       }))));
   });
+
+  /**
+   * `mapkey` and the keys that belong to the page.
+   *
+   * An exclusion rule names a *physical* key, because the user gives that key
+   * to the page. `mapkey` says what the key does for us, which is a later
+   * question. The order of the two decides who gets the keystroke.
+   */
+  describe("a remapped key", () => {
+    const remap = "map k scrollUp\nmap j scrollDown\nmapkey j k";
+
+    it.effect("still goes to the page when the exclusion names it", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder(["scrollUp", "scrollDown"]);
+
+        const press = new Press("j");
+        const toPage = yield* stack.bubble("keydown", asEvent(press));
+
+        assert.deepEqual(yield* Ref.get(calls), []);
+        assert.isTrue(toPage);
+        assert.isFalse(press.defaultPrevented);
+      }).pipe(Effect.provide(layerFor({
+        mappings: remap,
+        exclusion: { enabled: true, passKeys: "j" },
+      }))));
+
+    it.effect("runs its command when the exclusion names the target key", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder(["scrollUp", "scrollDown"]);
+
+        // The user gave `k` to the page, and `j` is not `k`.
+        yield* stack.bubble("keydown", asEvent(new Press("j")));
+        assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
+
+        // The physical `k` is the one that the page keeps.
+        const kept = new Press("k");
+        const toPage = yield* stack.bubble("keydown", asEvent(kept));
+        assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
+        assert.isTrue(toPage);
+      }).pipe(Effect.provide(layerFor({
+        mappings: remap,
+        exclusion: { enabled: true, passKeys: "k" },
+      }))));
+  });
 });
