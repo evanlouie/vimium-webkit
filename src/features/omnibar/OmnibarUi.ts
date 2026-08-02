@@ -291,6 +291,9 @@ export const makeOmnibarView = (
         input.spellcheck = false;
         input.setAttribute("autocapitalize", "off");
         input.setAttribute("autocorrect", "off");
+        // The field has no visible label, and the placeholder disappears as
+        // soon as the user types.
+        input.setAttribute("aria-label", options.placeholder);
         field.appendChild(input);
 
         const list = doc.createElement("ul");
@@ -313,6 +316,10 @@ export const makeOmnibarView = (
     // The layer takes pointer events while the omnibar is open, and gives them
     // back to the page when the scope closes.
     yield* acceptPointerEvents(host);
+    // The omnibar is a true control, so assistive technology must reach it.
+    // The overlay host is hidden from the accessibility tree until a layer
+    // asks for attention like this.
+    yield* ui.expose(host);
 
     const rowElements = yield* Ref.make<readonly HTMLElement[]>([]);
 

@@ -632,6 +632,10 @@ export class Find extends Context.Service<Find, {
 
           return {
             label: options.backwards ? "?" : "/",
+            // A screen reader cannot read "/" as a name for the field.
+            ariaLabel: options.backwards
+              ? "Find backwards on the page"
+              : "Find on the page",
             placeholder: "search",
             onInput: runIncremental,
             onKeydown: (event: KeyboardEvent, value: string) =>
