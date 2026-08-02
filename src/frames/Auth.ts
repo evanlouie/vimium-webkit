@@ -9,7 +9,9 @@
  * The top frame creates the secret, and a child frame reads it. Only the top
  * frame creates it, because two frames that create one at the same time would
  * write two different values, and the frame that wrote last would lock the
- * other frames out.
+ * other frames out. The top frame creates it when this layer is built, which is
+ * before any handshake listener exists. A child that starts on a clean
+ * installation therefore finds a credential when it needs one.
  *
  * The secret never travels. What travels is an HMAC over a one-shot token, the
  * id of the handshake attempt and the id of the frame. A page can read those
@@ -259,6 +261,22 @@ export class FrameAuth extends Context.Service<FrameAuth, {
               }),
           });
         });
+
+        // The credential must exist before the first child asks to join. Only
+        // the top frame can create it, and a child cannot wait for a value that
+        // nobody writes. The top frame used to create it while it verified the
+        // first join, and no child could make a join to verify. A clean
+        // installation therefore kept every frame outside the session for the
+        // life of the page.
+        if (realm.isTop) {
+          yield* Effect.catch(
+            Effect.asVoid(secret()),
+            (error) =>
+              Effect.logDebug(
+                `no frame credential in this realm: ${error.detail}`,
+              ),
+          );
+        }
 
         return FrameAuth.of({ secret: secret(), sign, verify });
       }),
