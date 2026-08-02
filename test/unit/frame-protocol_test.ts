@@ -15,7 +15,7 @@
  * and independent of the order replies happen to arrive in.
  */
 
-import { assert, assertEquals } from "@std/assert";
+import { test } from "vitest";
 import type {
   FrameLinkApi,
   HintMode,
@@ -23,6 +23,11 @@ import type {
 } from "~/core/context.ts";
 import type { LocalHintsApi } from "~/features/hints/index.ts";
 import { FrameCoordinator } from "~/frames/coordinator.ts";
+import {
+  createFrameLink,
+  type FrameLink,
+  type LocalHintsBridge,
+} from "~/frames/index.ts";
 import {
   compareDescriptors,
   createNonce,
@@ -39,12 +44,8 @@ import {
   sortDescriptors,
   TOP_TO_FRAME_KINDS,
 } from "~/frames/protocol.ts";
-import {
-  createFrameLink,
-  type FrameLink,
-  type LocalHintsBridge,
-} from "~/frames/index.ts";
 import { loopbackChannel } from "~/frames/registry.ts";
+import { assert, assertEquals } from "./support/assert.ts";
 
 // ---------------------------------------------------------------------------
 // Type-level contracts
@@ -105,7 +106,7 @@ const flush = (turns = 3): Promise<void> =>
 // Envelope
 // ---------------------------------------------------------------------------
 
-Deno.test("parseFrameMessage rejects anything that is not our envelope", () => {
+test("parseFrameMessage rejects anything that is not our envelope", () => {
   for (
     const data of [
       undefined,
@@ -122,7 +123,7 @@ Deno.test("parseFrameMessage rejects anything that is not our envelope", () => {
   }
 });
 
-Deno.test("parseFrameMessage rejects a foreign protocol version", () => {
+test("parseFrameMessage rejects a foreign protocol version", () => {
   // Two script versions genuinely coexist when a manager updates between the
   // top frame's load and a lazily-inserted iframe's.
   assertEquals(
@@ -135,17 +136,17 @@ Deno.test("parseFrameMessage rejects a foreign protocol version", () => {
   );
 });
 
-Deno.test("parseFrameMessage rejects an unknown kind", () => {
+test("parseFrameMessage rejects an unknown kind", () => {
   assertEquals(parseFrameMessage({ ...ENVELOPE, kind: "EVAL" }), null);
 });
 
-Deno.test("parseFrameMessage strips unknown keys", () => {
+test("parseFrameMessage strips unknown keys", () => {
   const parsed = parseFrameMessage({ ...ENVELOPE, kind: "HELLO", evil: "x" });
   assertEquals(parsed, { ...ENVELOPE, kind: "HELLO" });
   assert(parsed !== null && !("evil" in parsed));
 });
 
-Deno.test("parseFrameMessage requires every field of a kind", () => {
+test("parseFrameMessage requires every field of a kind", () => {
   const nonce = createNonce();
   assertEquals(
     parseFrameMessage({ ...ENVELOPE, kind: "KEYSTROKE", nonce }),
@@ -173,7 +174,7 @@ Deno.test("parseFrameMessage requires every field of a kind", () => {
   );
 });
 
-Deno.test("parseFrameMessage bounds hostile payloads", () => {
+test("parseFrameMessage bounds hostile payloads", () => {
   const nonce = createNonce();
   const message = (descriptors: readonly unknown[]): unknown => ({
     ...ENVELOPE,
@@ -217,7 +218,7 @@ Deno.test("parseFrameMessage bounds hostile payloads", () => {
   assert(parseFrameMessage(message([descriptor("f0001", 0)])) !== null);
 });
 
-Deno.test("parseFrameMessage accepts a message of every kind", () => {
+test("parseFrameMessage accepts a message of every kind", () => {
   const nonce = createNonce();
   const samples: readonly unknown[] = [
     hello(),
@@ -298,7 +299,7 @@ Deno.test("parseFrameMessage accepts a message of every kind", () => {
   }
 });
 
-Deno.test("every HintMode survives the wire", () => {
+test("every HintMode survives the wire", () => {
   assertEquals(HINT_MODE_COVERAGE, true);
   const modes: readonly HintMode[] = [
     "activate",
@@ -339,7 +340,7 @@ Deno.test("every HintMode survives the wire", () => {
 // Direction and nonce
 // ---------------------------------------------------------------------------
 
-Deno.test("parseInbound enforces message direction", () => {
+test("parseInbound enforces message direction", () => {
   const nonce = createNonce();
   const roster = { ...ENVELOPE, kind: "ROSTER", nonce, frames: [] };
   // A child must not be able to talk the coordinator into believing it *is* the
@@ -359,7 +360,7 @@ Deno.test("parseInbound enforces message direction", () => {
   );
 });
 
-Deno.test("parseInbound drops a wrong or absent nonce", () => {
+test("parseInbound drops a wrong or absent nonce", () => {
   const nonce = createNonce();
   const goodbye = (value: string): unknown => ({
     ...ENVELOPE,
@@ -383,7 +384,7 @@ Deno.test("parseInbound drops a wrong or absent nonce", () => {
   );
 });
 
-Deno.test("parseInbound lets the handshake through without a nonce", () => {
+test("parseInbound lets the handshake through without a nonce", () => {
   // The handshake kinds necessarily precede nonce knowledge; their trust comes
   // from the transport instead — a token bound to one window, a port
   // transferred to one origin, and a `helloId` bound to one attempt.
@@ -401,13 +402,13 @@ Deno.test("parseInbound lets the handshake through without a nonce", () => {
   );
 });
 
-Deno.test("createNonce is unpredictable enough and unique", () => {
+test("createNonce is unpredictable enough and unique", () => {
   const nonces = new Set(Array.from({ length: 1000 }, createNonce));
   assertEquals(nonces.size, 1000);
   for (const nonce of nonces) assertEquals(nonce.length, 32);
 });
 
-Deno.test("request ids are unique per factory", () => {
+test("request ids are unique per factory", () => {
   const next = createRequestIdFactory("top");
   const ids = Array.from({ length: 500 }, next);
   assertEquals(new Set(ids).size, ids.length);
@@ -418,7 +419,7 @@ Deno.test("request ids are unique per factory", () => {
 // Ordering
 // ---------------------------------------------------------------------------
 
-Deno.test("frame ids sort lexicographically in numeric order", () => {
+test("frame ids sort lexicographically in numeric order", () => {
   // Descriptors are sorted by `frameId` *as a string*, so unpadded ids would
   // put frame 10 before frame 2.
   const ids = Array.from({ length: 24 }, (_, i) => formatFrameId(i));
@@ -427,7 +428,7 @@ Deno.test("frame ids sort lexicographically in numeric order", () => {
   assertEquals([...ids].sort(), ids);
 });
 
-Deno.test("compareDescriptors orders by frame, then by local index", () => {
+test("compareDescriptors orders by frame, then by local index", () => {
   assert(
     compareDescriptors(descriptor("f0000", 9), descriptor("f0001", 0)) < 0,
   );
@@ -440,7 +441,7 @@ Deno.test("compareDescriptors orders by frame, then by local index", () => {
   );
 });
 
-Deno.test("sortDescriptors is a total order, independent of arrival", () => {
+test("sortDescriptors is a total order, independent of arrival", () => {
   const canonical = [
     descriptor("f0000", 0),
     descriptor("f0000", 1),
@@ -471,14 +472,14 @@ Deno.test("sortDescriptors is a total order, independent of arrival", () => {
   }
 });
 
-Deno.test("sortDescriptors does not mutate its input", () => {
+test("sortDescriptors does not mutate its input", () => {
   const input = [descriptor("f0002", 0), descriptor("f0001", 0)];
   const copy = [...input];
   sortDescriptors(input);
   assertEquals(input, copy);
 });
 
-Deno.test("sortDescriptors ignores the secondary flag", () => {
+test("sortDescriptors ignores the secondary flag", () => {
   // `secondary` re-ranks hints *within* a frame's own detection pass; letting
   // it into the cross-frame comparator would make the global order depend on
   // per-frame heuristics that other frames cannot reproduce.
@@ -546,7 +547,7 @@ const inboxOf = (
   kind: FrameMessage["kind"],
 ): readonly FrameMessage[] => frame.inbox.filter((m) => m.kind === kind);
 
-Deno.test("a hint round merges every frame into one canonical order", async () => {
+test("a hint round merges every frame into one canonical order", async () => {
   const coordinator = new FrameCoordinator({ root: null });
   const origin = attachFrame(coordinator, owns(2));
   const second = attachFrame(coordinator, owns(3));
@@ -600,7 +601,7 @@ Deno.test("a hint round merges every frame into one canonical order", async () =
   coordinator.dispose();
 });
 
-Deno.test("a frame may only speak for itself", async () => {
+test("a frame may only speak for itself", async () => {
   const coordinator = new FrameCoordinator({ root: null });
   const origin = attachFrame(coordinator, owns(0));
   // Descriptors attributed to another frame are dropped. Not because the attack
@@ -630,7 +631,7 @@ Deno.test("a frame may only speak for itself", async () => {
   coordinator.dispose();
 });
 
-Deno.test("a stale nonce buys a frame nothing", async () => {
+test("a stale nonce buys a frame nothing", async () => {
   const coordinator = new FrameCoordinator({ root: null });
   const origin = attachFrame(coordinator, owns(0));
   await flush();
@@ -647,7 +648,7 @@ Deno.test("a stale nonce buys a frame nothing", async () => {
   coordinator.dispose();
 });
 
-Deno.test("keystrokes reach every frame but the one they happened in", async () => {
+test("keystrokes reach every frame but the one they happened in", async () => {
   const coordinator = new FrameCoordinator({ root: null });
   const origin = attachFrame(coordinator, owns(0));
   const other = attachFrame(coordinator, owns(0));
@@ -681,7 +682,7 @@ Deno.test("keystrokes reach every frame but the one they happened in", async () 
   coordinator.dispose();
 });
 
-Deno.test("a frame that did not start the round cannot drive it", async () => {
+test("a frame that did not start the round cannot drive it", async () => {
   // The exact escalation this closes: `ACTIVATE_HINT` ends in a programmatic
   // click, hover, focus or clipboard write inside a document of a *different
   // origin*, and it used to be relayed to whatever frame the sender named, with
@@ -743,7 +744,7 @@ Deno.test("a frame that did not start the round cannot drive it", async () => {
   coordinator.dispose();
 });
 
-Deno.test("a keystroke from a frame that is not the round's origin is dropped", async () => {
+test("a keystroke from a frame that is not the round's origin is dropped", async () => {
   const coordinator = new FrameCoordinator({ root: null });
   const origin = attachFrame(coordinator, owns(0));
   const bystander = attachFrame(coordinator, owns(0));
@@ -772,7 +773,7 @@ Deno.test("a keystroke from a frame that is not the round's origin is dropped", 
   coordinator.dispose();
 });
 
-Deno.test("gf walks the roster and wraps in both directions", async () => {
+test("gf walks the roster and wraps in both directions", async () => {
   const coordinator = new FrameCoordinator({ root: null });
   const first = attachFrame(coordinator, owns(0));
   const second = attachFrame(coordinator, owns(0));
@@ -793,7 +794,7 @@ Deno.test("gf walks the roster and wraps in both directions", async () => {
   coordinator.dispose();
 });
 
-Deno.test("the exclusion answer always comes from the top frame's URL", async () => {
+test("the exclusion answer always comes from the top frame's URL", async () => {
   // Upstream evaluates rules against `sender.tab.url`. A child resolving
   // locally would stop honouring a rule written for the page it lives in.
   const coordinator = new FrameCoordinator({
@@ -817,7 +818,7 @@ Deno.test("the exclusion answer always comes from the top frame's URL", async ()
   coordinator.dispose();
 });
 
-Deno.test("a throwing exclusion resolver degrades to enabled", async () => {
+test("a throwing exclusion resolver degrades to enabled", async () => {
   const coordinator = new FrameCoordinator({
     root: null,
     resolveExclusion: () => {
@@ -833,7 +834,7 @@ Deno.test("a throwing exclusion resolver degrades to enabled", async () => {
   coordinator.dispose();
 });
 
-Deno.test("frames may register at any time and the roster is republished", async () => {
+test("frames may register at any time and the roster is republished", async () => {
   // `document-start` is unreliable on WebKit and iframes are inserted long
   // after load, so nothing may treat the frame list as final.
   const coordinator = new FrameCoordinator({ root: null });
@@ -859,7 +860,7 @@ Deno.test("frames may register at any time and the roster is republished", async
   coordinator.dispose();
 });
 
-Deno.test("a silent frame cannot deadlock a hint round", async () => {
+test("a silent frame cannot deadlock a hint round", async () => {
   // The headline requirement: sandboxed iframes, `about:blank` frames below
   // Safari 18.4, and 30fps-throttled cross-origin frames all simply never
   // answer. Takes the full `REQUEST_DEADLINE_MS` by construction.
@@ -905,7 +906,7 @@ Deno.test("a silent frame cannot deadlock a hint round", async () => {
 // Degraded configuration
 // ---------------------------------------------------------------------------
 
-Deno.test("createFrameLink works with no DOM and no reachable top", async () => {
+test("createFrameLink works with no DOM and no reachable top", async () => {
   const activated: Array<[number, HintMode]> = [];
   const bridge: LocalHintsBridge = {
     collectLocal: () => Promise.resolve([]),

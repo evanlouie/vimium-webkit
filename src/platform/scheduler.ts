@@ -82,7 +82,7 @@ export const mapChunked = async <T, R>(
     if (index < items.length) {
       // Sequential by design: the whole point is to hand control back between
       // slices, which cannot be parallelised away.
-      // deno-lint-ignore no-await-in-loop
+      // eslint-disable-next-line no-await-in-loop
       await yieldToEventLoop();
     }
   }
@@ -153,7 +153,7 @@ export const withDeadline = async <T>(
   ms: number,
   fallback: T,
 ): Promise<T> => {
-  let timer: number | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const guard = new Promise<T>((resolve) => {
     timer = setTimeout(() => resolve(fallback), ms);
   });

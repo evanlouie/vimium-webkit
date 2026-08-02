@@ -12,8 +12,8 @@
  * whatever the answer, the top frame must not hang and must not throw.
  */
 
-import { expect, test } from "./harness/fixtures.ts";
 import type { Page } from "@playwright/test";
+import { expect, test } from "./harness/fixtures.ts";
 
 /** Collect uncaught page errors for the duration of a test. */
 const trackErrors = (page: Page): string[] => {

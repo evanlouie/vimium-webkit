@@ -1,12 +1,13 @@
-import { assert, assertEquals } from "@std/assert";
-import * as z from "zod/mini";
 import { errAsync, okAsync } from "neverthrow";
+import { test } from "vitest";
+import * as z from "zod/mini";
 import type { ValueBackend } from "~/platform/gm.ts";
 import {
   type Migration,
   type StorageIssue,
   ValueStore,
 } from "~/platform/storage.ts";
+import { assert, assertEquals } from "./support/assert.ts";
 
 interface Fake {
   readonly backend: ValueBackend;
@@ -58,13 +59,13 @@ const spec = (migrations?: readonly Migration[]) => ({
   migrations,
 });
 
-Deno.test("an absent value hydrates to the defaults", async () => {
+test("an absent value hydrates to the defaults", async () => {
   const fake = fakeBackend(false);
   const group = new ValueStore(fake.backend).group(spec());
   assertEquals(await group.hydrate(), defaults());
 });
 
-Deno.test("a written value round-trips through the envelope", async () => {
+test("a written value round-trips through the envelope", async () => {
   const fake = fakeBackend(false);
   const store = new ValueStore(fake.backend);
   const group = store.group(spec());
@@ -81,7 +82,7 @@ Deno.test("a written value round-trips through the envelope", async () => {
   assertEquals(await reread.hydrate(), { count: 3, label: "three" });
 });
 
-Deno.test("malformed JSON falls back to defaults and reports", async () => {
+test("malformed JSON falls back to defaults and reports", async () => {
   const fake = fakeBackend(false);
   fake.map.set("vimium-webkit:test", "{not json");
   const store = new ValueStore(fake.backend);
@@ -92,7 +93,7 @@ Deno.test("malformed JSON falls back to defaults and reports", async () => {
   assertEquals(issues[0]?.kind, "malformed");
 });
 
-Deno.test("a schema mismatch falls back to defaults and reports", async () => {
+test("a schema mismatch falls back to defaults and reports", async () => {
   const fake = fakeBackend(false);
   fake.map.set(
     "vimium-webkit:test",
@@ -106,7 +107,7 @@ Deno.test("a schema mismatch falls back to defaults and reports", async () => {
   assertEquals(issues[0]?.kind, "invalid");
 });
 
-Deno.test("migrations run in order and only forward", async () => {
+test("migrations run in order and only forward", async () => {
   const fake = fakeBackend(false);
   fake.map.set(
     "vimium-webkit:test",
@@ -136,7 +137,7 @@ Deno.test("migrations run in order and only forward", async () => {
   assertEquals(await group.hydrate(), { count: 5, label: "migrated" });
 });
 
-Deno.test("a throwing migration falls back to defaults and reports", async () => {
+test("a throwing migration falls back to defaults and reports", async () => {
   const fake = fakeBackend(false);
   fake.map.set(
     "vimium-webkit:test",
@@ -158,7 +159,7 @@ Deno.test("a throwing migration falls back to defaults and reports", async () =>
   assertEquals(issues[0]?.kind, "migration");
 });
 
-Deno.test("data written by a newer build is left alone", async () => {
+test("data written by a newer build is left alone", async () => {
   // Downgrading would destroy the newer tab's settings; using defaults for this
   // session is the conservative choice.
   const fake = fakeBackend(false);
@@ -174,7 +175,7 @@ Deno.test("data written by a newer build is left alone", async () => {
   assertEquals(fake.map.get("vimium-webkit:test"), stored);
 });
 
-Deno.test("pre-envelope data is treated as version 0", async () => {
+test("pre-envelope data is treated as version 0", async () => {
   const fake = fakeBackend(false);
   fake.map.set(
     "vimium-webkit:test",
@@ -184,7 +185,7 @@ Deno.test("pre-envelope data is treated as version 0", async () => {
   assertEquals(await group.hydrate(), { count: 7, label: "old" });
 });
 
-Deno.test("peek is synchronous and current() falls back to defaults", async () => {
+test("peek is synchronous and current() falls back to defaults", async () => {
   const fake = fakeBackend(false);
   const group = new ValueStore(fake.backend).group(spec());
   assertEquals(group.peek(), undefined);
@@ -193,7 +194,7 @@ Deno.test("peek is synchronous and current() falls back to defaults", async () =
   assertEquals(group.peek(), defaults());
 });
 
-Deno.test("update applies against the cached value", async () => {
+test("update applies against the cached value", async () => {
   const fake = fakeBackend(false);
   const group = new ValueStore(fake.backend).group(spec());
   await group.hydrate();
@@ -202,7 +203,7 @@ Deno.test("update applies against the cached value", async () => {
   assertEquals(group.current().count, 9);
 });
 
-Deno.test("reset clears storage and reverts in memory", async () => {
+test("reset clears storage and reverts in memory", async () => {
   const fake = fakeBackend(false);
   const group = new ValueStore(fake.backend).group(spec());
   await group.write({ count: 4, label: "x" });
@@ -211,7 +212,7 @@ Deno.test("reset clears storage and reverts in memory", async () => {
   assertEquals(group.current(), defaults());
 });
 
-Deno.test("subscribers see cross-tab changes when the backend supports it", async () => {
+test("subscribers see cross-tab changes when the backend supports it", async () => {
   const fake = fakeBackend(true);
   const store = new ValueStore(fake.backend);
   assertEquals(store.supportsWatch, true);
@@ -229,7 +230,7 @@ Deno.test("subscribers see cross-tab changes when the backend supports it", asyn
   assertEquals(seen.at(-1), { count: 42, label: "remote" });
 });
 
-Deno.test("a backend without a watch primitive reports it honestly", () => {
+test("a backend without a watch primitive reports it honestly", () => {
   // quoid and Stay have no change-listener primitive at all; `lifecycle.ts`
   // substitutes a re-read on `visibilitychange`, and it needs to know.
   assertEquals(new ValueStore(fakeBackend(false).backend).supportsWatch, false);
@@ -281,7 +282,7 @@ const failableBackend = (): {
   };
 };
 
-Deno.test("a debounced write resolves from the flush, not the timer", async () => {
+test("a debounced write resolves from the flush, not the timer", async () => {
   const fake = failableBackend();
   const group = new ValueStore(fake.backend).group(debouncedSpec(5));
   fake.fail = true;
@@ -296,7 +297,7 @@ Deno.test("a debounced write resolves from the flush, not the timer", async () =
   assertEquals(result.error.kind, "backend");
 });
 
-Deno.test("a superseded write settles rather than hanging", async () => {
+test("a superseded write settles rather than hanging", async () => {
   const fake = failableBackend();
   const group = new ValueStore(fake.backend).group(debouncedSpec(5));
 
@@ -316,7 +317,7 @@ Deno.test("a superseded write settles rather than hanging", async () => {
   });
 });
 
-Deno.test("flush() commits a pending write immediately", async () => {
+test("flush() commits a pending write immediately", async () => {
   const fake = failableBackend();
   const group = new ValueStore(fake.backend).group(debouncedSpec(10_000));
 
@@ -328,7 +329,7 @@ Deno.test("flush() commits a pending write immediately", async () => {
   assert((await pending).isOk(), "the pending write adopts the flush outcome");
 });
 
-Deno.test("flushAll commits every group", async () => {
+test("flushAll commits every group", async () => {
   const fake = failableBackend();
   const store = new ValueStore(fake.backend);
   const one = store.group({ ...debouncedSpec(10_000), name: "one" });
@@ -341,7 +342,7 @@ Deno.test("flushAll commits every group", async () => {
   assertEquals(fake.writes.length, 2);
 });
 
-Deno.test("hydrate does not resurrect a value a pending write is replacing", async () => {
+test("hydrate does not resurrect a value a pending write is replacing", async () => {
   const fake = failableBackend();
   const store = new ValueStore(fake.backend);
   const group = store.group(debouncedSpec(10_000));
@@ -355,7 +356,7 @@ Deno.test("hydrate does not resurrect a value a pending write is replacing", asy
   assertEquals(await group.hydrate(), { count: 2, label: "newer" });
 });
 
-Deno.test("a value that fails its own schema is never persisted", async () => {
+test("a value that fails its own schema is never persisted", async () => {
   const fake = failableBackend();
   const group = new ValueStore(fake.backend).group(spec());
 
@@ -369,7 +370,7 @@ Deno.test("a value that fails its own schema is never persisted", async () => {
   assertEquals(fake.writes.length, 0);
 });
 
-Deno.test("hydrateAll covers every registered group", async () => {
+test("hydrateAll covers every registered group", async () => {
   const fake = fakeBackend(false);
   const store = new ValueStore(fake.backend);
   const one = store.group({ ...spec(), name: "one" });

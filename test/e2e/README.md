@@ -5,11 +5,11 @@ Playwright specs that drive the **shipped bundle**
 Chromium, and Firefox.
 
 ```sh
-deno task test:e2e:install      # once: download the three browser builds
-deno task test:e2e              # run everything
-deno task test:e2e -- --project=webkit --headed
-deno task serve:fixtures        # just the fixture server, for poking by hand
-deno task check:e2e             # type-check the config and the specs
+npm run test:e2e:install       # once: download the three browser builds
+npm run test:e2e               # run everything
+npm run test:e2e -- --project=webkit --headed
+npm run serve:fixtures         # just the fixture server, for poking by hand
+npm run check                  # type-check the config and the specs
 ```
 
 Current status: **204 passing** across the three projects, and no `test.fail()`
@@ -23,9 +23,9 @@ block at a time, and say so. Forcing those two settings on every spec is how the
 default hint pipeline and the default scroll path ended up with no coverage at
 all while the suite was green.
 
-The suite is Deno-hosted — the fixture server, the bundle build, and the harness
-all use `Deno.*` — and Playwright's runner is invoked from inside that Deno
-process. Running `npx playwright test` directly will fail with a clear message.
+The suite runs on Node: the fixture server, the bundle build and the harness all
+use Node APIs, and Playwright's runner drives them directly. Running
+`npx playwright test` directly will fail with a clear message.
 
 ---
 

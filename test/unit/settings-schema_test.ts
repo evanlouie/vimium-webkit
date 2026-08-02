@@ -12,7 +12,7 @@
  *    to one search engine against the five shipped here.
  */
 
-import { assert, assertEquals } from "@std/assert";
+import { test } from "vitest";
 import {
   defaultSettings,
   findHistoryGroup,
@@ -27,6 +27,7 @@ import {
   settingsGroup,
   settingsSchema,
 } from "~/settings/schema.ts";
+import { assert, assertEquals } from "./support/assert.ts";
 
 const GROUPS = [
   settingsGroup,
@@ -36,7 +37,7 @@ const GROUPS = [
   sessionGroup,
 ];
 
-Deno.test("every group's defaults satisfy its own schema", () => {
+test("every group's defaults satisfy its own schema", () => {
   // `defaultSettings()` is `settingsSchema.parse({})`, so a field added without
   // a fallback would throw here rather than at a user's `document-start`.
   for (const group of GROUPS) {
@@ -45,7 +46,7 @@ Deno.test("every group's defaults satisfy its own schema", () => {
   }
 });
 
-Deno.test("a payload missing a field keeps the other twenty-four", () => {
+test("a payload missing a field keeps the other twenty-four", () => {
   const full = defaultSettings();
   const keys = Object.keys(full) as (keyof Settings)[];
   assert(keys.length > 20, "the point of this test is that there are many");
@@ -73,7 +74,7 @@ Deno.test("a payload missing a field keeps the other twenty-four", () => {
   }
 });
 
-Deno.test("one corrupt field costs exactly that field", () => {
+test("one corrupt field costs exactly that field", () => {
   const parsed = settingsSchema.safeParse({
     ...defaultSettings(),
     scrollStepSize: "sixty",
@@ -90,7 +91,7 @@ Deno.test("one corrupt field costs exactly that field", () => {
   assertEquals(parsed.data.searchUrl, "https://www.google.com/search?q=%s");
 });
 
-Deno.test("unknown keys from a newer build are dropped, not fatal", () => {
+test("unknown keys from a newer build are dropped, not fatal", () => {
   const parsed = settingsSchema.safeParse({
     ...defaultSettings(),
     somethingFromTheFuture: { nested: true },
@@ -99,7 +100,7 @@ Deno.test("unknown keys from a newer build are dropped, not fatal", () => {
   assertEquals("somethingFromTheFuture" in parsed.data, false);
 });
 
-Deno.test("hint characters must be distinct", () => {
+test("hint characters must be distinct", () => {
   // Duplicates silently make two hints answer to the same string.
   const parsed = settingsSchema.safeParse({
     ...defaultSettings(),
@@ -109,7 +110,7 @@ Deno.test("hint characters must be distinct", () => {
   assertEquals(parsed.data.linkHintCharacters, "sadfjklewcmpgh");
 });
 
-Deno.test("a search URL without %s falls back rather than discarding the query", () => {
+test("a search URL without %s falls back rather than discarding the query", () => {
   const parsed = settingsSchema.safeParse({
     ...defaultSettings(),
     searchUrl: "https://example.com/search",
@@ -118,7 +119,7 @@ Deno.test("a search URL without %s falls back rather than discarding the query",
   assertEquals(parsed.data.searchUrl, "https://www.google.com/search?q=%s");
 });
 
-Deno.test("the shipped defaults are the ones documented", () => {
+test("the shipped defaults are the ones documented", () => {
   const settings = defaultSettings();
   // The two that decide which code path every other test exercises.
   assertEquals(settings.filterLinkHints, false);
@@ -143,7 +144,7 @@ const markTable = (urls: number, at: (index: number) => number): Marks => {
   return { local, global: {} };
 };
 
-Deno.test("pruneMarks caps the number of URLs, keeping the newest", () => {
+test("pruneMarks caps the number of URLs, keeping the newest", () => {
   const now = Date.now();
   const marks = markTable(LOCAL_MARK_URL_LIMIT + 50, (index) => now - index);
   const pruned = pruneMarks(marks, now);
@@ -156,7 +157,7 @@ Deno.test("pruneMarks caps the number of URLs, keeping the newest", () => {
   );
 });
 
-Deno.test("pruneMarks expires stale marks", () => {
+test("pruneMarks expires stale marks", () => {
   const now = Date.now();
   const marks: Marks = {
     local: {

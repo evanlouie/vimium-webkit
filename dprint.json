@@ -1,0 +1,37 @@
+{
+  "typescript": {
+    "lineWidth": 80,
+    "indentWidth": 2,
+    "quoteStyle": "preferDouble",
+    "semiColons": "prefer",
+    "operatorPosition": "sameLine",
+    "arrowFunction.useParentheses": "force",
+    "quoteProps": "preserve",
+    "conditionalExpression.operatorPosition": "nextLine",
+    "conditionalType.operatorPosition": "nextLine",
+    "module.sortImportDeclarations": "maintain",
+    "module.sortExportDeclarations": "maintain"
+  },
+  "json": {
+    "lineWidth": 80,
+    "indentWidth": 2
+  },
+  "markdown": {
+    "lineWidth": 80,
+    "textWrap": "always"
+  },
+  "excludes": [
+    "**/node_modules",
+    "**/dist",
+    "**/test-results",
+    "**/playwright-report",
+    "**/.coverage",
+    "**/*-lock.json",
+    "EFFECT_V4_MIGRATION.md"
+  ],
+  "plugins": [
+    "./node_modules/@dprint/typescript/plugin.wasm",
+    "./node_modules/@dprint/json/plugin.wasm",
+    "./node_modules/@dprint/markdown/plugin.wasm"
+  ]
+}

@@ -142,8 +142,8 @@ export const createSuggester = (surface: GmSurface): Suggester => {
   const cache = new Map<string, CacheEntry>();
   let available = true;
 
-  let debounceTimer: number | null = null;
-  let abortTimer: number | null = null;
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let abortTimer: ReturnType<typeof setTimeout> | null = null;
   let abortInFlight: (() => void) | null = null;
   /** Bumped on every `request`; a late response with a stale token is dropped. */
   let generation = 0;

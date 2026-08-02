@@ -81,9 +81,6 @@ export class HandlerStack {
   #nextId: HandlerId = 0;
   #currentId: HandlerId | null = null;
 
-  /** Handler ids pushed during the current `bubbleEvent`, for `RESTART_BUBBLING`. */
-  #generation = 0;
-
   get depth(): number {
     return this.#stack.length;
   }
@@ -97,7 +94,6 @@ export class HandlerStack {
   push(handler: Handler): HandlerId {
     const id = ++this.#nextId;
     this.#stack.push({ id, handler });
-    this.#generation++;
     return id;
   }
 
@@ -105,7 +101,6 @@ export class HandlerStack {
   unshift(handler: Handler): HandlerId {
     const id = ++this.#nextId;
     this.#stack.unshift({ id, handler });
-    this.#generation++;
     return id;
   }
 
@@ -114,7 +109,6 @@ export class HandlerStack {
     const index = this.#stack.findIndex((entry) => entry.id === id);
     if (index !== -1) {
       this.#stack.splice(index, 1);
-      this.#generation++;
     }
   }
 
@@ -211,6 +205,5 @@ export class HandlerStack {
   /** Drop every handler. Used on `pagehide` and by the exclusion machinery. */
   reset(): void {
     this.#stack = [];
-    this.#generation++;
   }
 }

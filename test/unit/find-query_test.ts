@@ -7,7 +7,7 @@
  * error instead of throwing while the user is still typing it.
  */
 
-import { assert, assertEquals, assertNotEquals } from "@std/assert";
+import { test } from "vitest";
 import {
   escapeRegExp,
   hasUpperCase,
@@ -18,11 +18,12 @@ import {
   toRegExp,
   wordQuery,
 } from "~/features/find/query.ts";
+import { assert, assertEquals, assertNotEquals } from "./support/assert.ts";
 
 const literal = { regexFindMode: false };
 const regexMode = { regexFindMode: true };
 
-Deno.test("hasUpperCase is not limited to ASCII", () => {
+test("hasUpperCase is not limited to ASCII", () => {
   assert(!hasUpperCase("hello"));
   assert(hasUpperCase("Hello"));
   assert(hasUpperCase("ПРИВЕТ"));
@@ -31,21 +32,21 @@ Deno.test("hasUpperCase is not limited to ASCII", () => {
   assert(!hasUpperCase("1234-!?"));
 });
 
-Deno.test("smartcase: lower-case queries are case-insensitive", () => {
+test("smartcase: lower-case queries are case-insensitive", () => {
   const query = parseFindQuery("hello", literal);
   assert(query.ignoreCase);
   assert(query.smartcase);
   assert(query.flags.includes("i"));
 });
 
-Deno.test("smartcase: any upper-case character makes the query case-sensitive", () => {
+test("smartcase: any upper-case character makes the query case-sensitive", () => {
   const query = parseFindQuery("Hello", literal);
   assert(!query.ignoreCase);
   assert(query.smartcase);
   assert(!query.flags.includes("i"));
 });
 
-Deno.test("smartcase is overridden by an explicit directive", () => {
+test("smartcase is overridden by an explicit directive", () => {
   const forced = parseFindQuery("Hello\\i", literal);
   assert(forced.ignoreCase);
   assert(!forced.smartcase);
@@ -56,7 +57,7 @@ Deno.test("smartcase is overridden by an explicit directive", () => {
   assert(!pinned.smartcase);
 });
 
-Deno.test("stripDirectives removes single escapes and unescapes doubled ones", () => {
+test("stripDirectives removes single escapes and unescapes doubled ones", () => {
   assertEquals(stripDirectives("foo\\r").isRegex, true);
   assertEquals(stripDirectives("foo\\R").isRegex, false);
   assertEquals(stripDirectives("foo\\r").text, "foo");
@@ -67,7 +68,7 @@ Deno.test("stripDirectives removes single escapes and unescapes doubled ones", (
   assertEquals(doubled.isRegex, null);
 });
 
-Deno.test("regexFindMode selects the default kind", () => {
+test("regexFindMode selects the default kind", () => {
   assertEquals(parseFindQuery("a.c", literal).kind, "literal");
   assertEquals(parseFindQuery("a.c", regexMode).kind, "regex");
   // ...and the directive beats the setting, in both directions.
@@ -75,7 +76,7 @@ Deno.test("regexFindMode selects the default kind", () => {
   assertEquals(parseFindQuery("a.c\\R", regexMode).kind, "literal");
 });
 
-Deno.test("splitRegexLiteral recognises /pattern/flags", () => {
+test("splitRegexLiteral recognises /pattern/flags", () => {
   assertEquals(splitRegexLiteral("/foo/"), { body: "foo", flags: "" });
   assertEquals(splitRegexLiteral("/foo/i"), { body: "foo", flags: "i" });
   assertEquals(splitRegexLiteral("/a\\/b/"), { body: "a\\/b", flags: "" });
@@ -88,7 +89,7 @@ Deno.test("splitRegexLiteral recognises /pattern/flags", () => {
   assertEquals(splitRegexLiteral("and/or"), null);
 });
 
-Deno.test("/pattern/ is a regex even when regexFindMode is off", () => {
+test("/pattern/ is a regex even when regexFindMode is off", () => {
   const query = parseFindQuery("/a.c/", literal);
   assertEquals(query.kind, "regex");
   assertEquals(query.source, "a.c");
@@ -98,20 +99,20 @@ Deno.test("/pattern/ is a regex even when regexFindMode is off", () => {
   assert(compiled.test("abc"));
 });
 
-Deno.test("/pattern/i forces case-insensitivity over smartcase", () => {
+test("/pattern/i forces case-insensitivity over smartcase", () => {
   const query = parseFindQuery("/Foo/i", literal);
   assert(query.ignoreCase);
   assert(!query.smartcase);
   assertEquals(query.flags, "gi");
 });
 
-Deno.test("escapeRegExp neutralises metacharacters", () => {
+test("escapeRegExp neutralises metacharacters", () => {
   const escaped = escapeRegExp("a.c*[x]");
   assertEquals(new RegExp(escaped).test("a.c*[x]"), true);
   assertEquals(new RegExp(escaped).test("abc*[x]"), false);
 });
 
-Deno.test("literal queries tolerate collapsed whitespace", () => {
+test("literal queries tolerate collapsed whitespace", () => {
   // The engine folds every whitespace character to U+0020 without changing
   // length, so runs of spaces survive and the pattern has to allow for them.
   assertEquals(literalSource("sign in"), "sign +in");
@@ -121,7 +122,7 @@ Deno.test("literal queries tolerate collapsed whitespace", () => {
   assertNotEquals(literalSource("a.b c"), "a.b c");
 });
 
-Deno.test("an empty query is empty, not an error", () => {
+test("an empty query is empty, not an error", () => {
   const query = parseFindQuery("", literal);
   assert(query.isEmpty);
   assertEquals(query.error, null);
@@ -131,13 +132,13 @@ Deno.test("an empty query is empty, not an error", () => {
   assert(parseFindQuery("\\i", literal).isEmpty);
 });
 
-Deno.test("a malformed regex reports an error instead of throwing", () => {
+test("a malformed regex reports an error instead of throwing", () => {
   const query = parseFindQuery("/a(/", literal);
   assert(query.error !== null);
   assertEquals(toRegExp(query), null);
 });
 
-Deno.test("a literal query is never malformed", () => {
+test("a literal query is never malformed", () => {
   const query = parseFindQuery("a(", literal);
   assertEquals(query.error, null);
   const compiled = toRegExp(query);
@@ -145,7 +146,7 @@ Deno.test("a literal query is never malformed", () => {
   assert(compiled.test("a("));
 });
 
-Deno.test("toRegExp returns a fresh regex each call", () => {
+test("toRegExp returns a fresh regex each call", () => {
   // `lastIndex` is mutable state on a `g` regex; sharing one across searches
   // silently skips matches.
   const query = parseFindQuery("a", literal);
@@ -157,7 +158,7 @@ Deno.test("toRegExp returns a fresh regex each call", () => {
   assertEquals(second.lastIndex, 0);
 });
 
-Deno.test("wordQuery anchors on word boundaries", () => {
+test("wordQuery anchors on word boundaries", () => {
   const query = wordQuery("find");
   const compiled = toRegExp(query);
   assert(compiled !== null);
@@ -165,7 +166,7 @@ Deno.test("wordQuery anchors on word boundaries", () => {
   assertEquals(new RegExp(query.source, "i").test("refinance"), false);
 });
 
-Deno.test("wordQuery does not anchor a non-word token", () => {
+test("wordQuery does not anchor a non-word token", () => {
   const query = wordQuery("->");
   assertEquals(query.source.includes("\\b"), false);
   const compiled = toRegExp(query);
@@ -173,12 +174,12 @@ Deno.test("wordQuery does not anchor a non-word token", () => {
   assert(compiled.test("a -> b"));
 });
 
-Deno.test("wordQuery applies smartcase", () => {
+test("wordQuery applies smartcase", () => {
   assert(wordQuery("find").ignoreCase);
   assert(!wordQuery("Find").ignoreCase);
 });
 
-Deno.test("a catastrophically backtracking pattern is refused", () => {
+test("a catastrophically backtracking pattern is refused", () => {
   // `(a+)+$` against a long line backtracks exponentially, and find mode owns
   // the keyboard — so the tab is gone with no way to abort. The pattern is
   // re-run on every keystroke, which turns one typed character into a freeze.
@@ -195,7 +196,7 @@ Deno.test("a catastrophically backtracking pattern is refused", () => {
   }
 });
 
-Deno.test("ordinary quantifiers are still allowed", () => {
+test("ordinary quantifiers are still allowed", () => {
   for (const source of ["a+", "\\d{2,4}", "(?:foo|bar)+", "[a-z]*x"]) {
     const query = parseFindQuery(source, { regexFindMode: true });
     assertEquals(query.error, null, `${source} was refused`);
@@ -203,7 +204,7 @@ Deno.test("ordinary quantifiers are still allowed", () => {
   }
 });
 
-Deno.test("an absurdly long pattern is refused", () => {
+test("an absurdly long pattern is refused", () => {
   const query = parseFindQuery("a".repeat(600), { regexFindMode: true });
   assert(query.error !== null);
 });

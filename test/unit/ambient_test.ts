@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "@std/assert";
+import { test } from "vitest";
 import {
   clipboardReader,
   clipboardWriter,
@@ -6,8 +6,9 @@ import {
   storageManager,
   userAgent,
 } from "~/platform/ambient.ts";
-import { detectGmSurface, type GmSurface } from "~/platform/gm.ts";
 import { writeClipboard } from "~/platform/clipboard.ts";
+import { detectGmSurface, type GmSurface } from "~/platform/gm.ts";
+import { assert, assertEquals } from "./support/assert.ts";
 import {
   type GlobalScope,
   poisonGlobals,
@@ -25,12 +26,12 @@ const poison = (...names: readonly string[]): GlobalScope =>
 const define = (name: string, value: unknown): GlobalScope =>
   withGlobals({ [name]: value });
 
-Deno.test("probe answers with the fallback instead of throwing", () => {
+test("probe answers with the fallback instead of throwing", () => {
   assertEquals(probe(() => "read", "fallback"), "read");
   assertEquals(probe<string>(hostile, "fallback"), "fallback");
 });
 
-Deno.test("navigator accessors degrade to absent when the read throws", () => {
+test("navigator accessors degrade to absent when the read throws", () => {
   const navigator = poison("navigator");
   try {
     assertEquals(userAgent(), "");
@@ -42,7 +43,7 @@ Deno.test("navigator accessors degrade to absent when the read throws", () => {
   }
 });
 
-Deno.test("a hostile GM binding costs one API, not the whole surface", () => {
+test("a hostile GM binding costs one API, not the whole surface", () => {
   const poisoned = poison("GM_getValue");
   const healthy = define("GM_setValue", () => {});
   try {
@@ -60,7 +61,7 @@ Deno.test("a hostile GM binding costs one API, not the whole surface", () => {
  * `navigator`, not just an absent one \u2014 otherwise copying throws where it was
  * supposed to degrade to the manager's clipboard API.
  */
-Deno.test("writeClipboard falls back to the manager when navigator throws", () => {
+test("writeClipboard falls back to the manager when navigator throws", () => {
   const navigator = poison("navigator");
   const copied: string[] = [];
   const surface: GmSurface = {

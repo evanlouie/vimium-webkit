@@ -379,7 +379,7 @@ export class HintMode extends Mode {
   #digitQueue = "";
   #outcome: FilterOutcome;
   #activeIndex = 0;
-  #confirmTimer: number | null = null;
+  #confirmTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config: HintModeConfig) {
     super(config.app.modeHost, {
@@ -731,7 +731,7 @@ export const KEY_BUFFER_SAFETY_MS = 1000;
 export class KeyBufferMode extends Mode {
   readonly #keys: string[] = [];
   readonly #app: AppContext;
-  #timer: number | null = null;
+  #timer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(app: AppContext) {
     super(app.modeHost, {

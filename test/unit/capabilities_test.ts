@@ -1,5 +1,6 @@
-import { assert, assertEquals, assertFalse } from "@std/assert";
+import { test } from "vitest";
 import { probeCapabilities } from "~/platform/capabilities.ts";
+import { assert, assertEquals, assertFalse } from "./support/assert.ts";
 import { type GlobalScope, withDescriptors } from "./support/globals.ts";
 
 const withNavigator = (descriptor: PropertyDescriptor): GlobalScope =>
@@ -10,7 +11,7 @@ const throwing = (): never => {
   throw new TypeError("undefined is not an object (evaluating 'navigator')");
 };
 
-Deno.test("probeCapabilities reports honestly with no DOM at all", () => {
+test("probeCapabilities reports honestly with no DOM at all", () => {
   const caps = probeCapabilities();
 
   assertEquals(caps.manager, "unknown");
@@ -19,7 +20,7 @@ Deno.test("probeCapabilities reports honestly with no DOM at all", () => {
   assertFalse(caps.composedRanges);
 });
 
-Deno.test("probeCapabilities survives a navigator that throws when read", () => {
+test("probeCapabilities survives a navigator that throws when read", () => {
   const navigator = withNavigator({ get: throwing });
   try {
     const caps = probeCapabilities();
@@ -38,7 +39,7 @@ Deno.test("probeCapabilities survives a navigator that throws when read", () => 
  * passed it through \u2014 and then the `userAgent` getter threw, taking the whole
  * of Stage 1 with it. A `typeof` guard and `?.` both still perform the read.
  */
-Deno.test("probeCapabilities survives a userAgent getter that throws", () => {
+test("probeCapabilities survives a userAgent getter that throws", () => {
   const navigator = withNavigator({
     value: {
       get userAgent(): string {

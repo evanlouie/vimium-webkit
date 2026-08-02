@@ -9,7 +9,7 @@
  * one.
  */
 
-import { assertEquals } from "@std/assert";
+import { test } from "vitest";
 import {
   chunkStarts,
   collectSpans,
@@ -18,12 +18,13 @@ import {
   normaliseHaystack,
   wordAt,
 } from "~/features/find/engine.ts";
+import { assertEquals } from "./support/assert.ts";
 
 // ---------------------------------------------------------------------------
 // Whitespace folding
 // ---------------------------------------------------------------------------
 
-Deno.test("normaliseHaystack folds whitespace without changing length", () => {
+test("normaliseHaystack folds whitespace without changing length", () => {
   const source = "sign\n\tin\u00a0now\u2003please";
   const folded = normaliseHaystack(source);
   assertEquals(folded, "sign  in now please");
@@ -32,7 +33,7 @@ Deno.test("normaliseHaystack folds whitespace without changing length", () => {
   assertEquals(folded.length, source.length);
 });
 
-Deno.test("normaliseHaystack leaves ordinary text alone", () => {
+test("normaliseHaystack leaves ordinary text alone", () => {
   assertEquals(normaliseHaystack("hello world"), "hello world");
   assertEquals(normaliseHaystack(""), "");
 });
@@ -41,14 +42,14 @@ Deno.test("normaliseHaystack leaves ordinary text alone", () => {
 // Spans
 // ---------------------------------------------------------------------------
 
-Deno.test("collectSpans finds every non-overlapping match", () => {
+test("collectSpans finds every non-overlapping match", () => {
   assertEquals(collectSpans("abcabc", /abc/g), [
     { start: 0, end: 3 },
     { start: 3, end: 6 },
   ]);
 });
 
-Deno.test("collectSpans works with a non-global regex", () => {
+test("collectSpans works with a non-global regex", () => {
   // Callers should not have to remember the `g` flag; the engine clones.
   assertEquals(collectSpans("aXaXa", /a/), [
     { start: 0, end: 1 },
@@ -57,14 +58,14 @@ Deno.test("collectSpans works with a non-global regex", () => {
   ]);
 });
 
-Deno.test("collectSpans never mutates the caller's regex", () => {
+test("collectSpans never mutates the caller's regex", () => {
   const pattern = /a/g;
   pattern.lastIndex = 3;
   collectSpans("aaaa", pattern);
   assertEquals(pattern.lastIndex, 3);
 });
 
-Deno.test("collectSpans ignores zero-width matches instead of hanging", () => {
+test("collectSpans ignores zero-width matches instead of hanging", () => {
   // `x*` matches the empty string at every position; without the guard this
   // never advances and the tab locks up.
   assertEquals(collectSpans("aaa", /x*/g), []);
@@ -72,12 +73,12 @@ Deno.test("collectSpans ignores zero-width matches instead of hanging", () => {
   assertEquals(collectSpans("abc", /^/g), []);
 });
 
-Deno.test("collectSpans honours the limit", () => {
+test("collectSpans honours the limit", () => {
   assertEquals(collectSpans("aaaaa", /a/g, 2).length, 2);
   assertEquals(collectSpans("aaaaa", /a/g, 0).length, 0);
 });
 
-Deno.test("collectSpans on an empty haystack finds nothing", () => {
+test("collectSpans on an empty haystack finds nothing", () => {
   assertEquals(collectSpans("", /a/g), []);
 });
 
@@ -85,12 +86,12 @@ Deno.test("collectSpans on an empty haystack finds nothing", () => {
 // Offsets
 // ---------------------------------------------------------------------------
 
-Deno.test("chunkStarts is the exclusive prefix sum", () => {
+test("chunkStarts is the exclusive prefix sum", () => {
   assertEquals(chunkStarts([3, 0, 4, 2]), [0, 3, 3, 7]);
   assertEquals(chunkStarts([]), []);
 });
 
-Deno.test("locateOffset maps into the owning chunk", () => {
+test("locateOffset maps into the owning chunk", () => {
   const lengths = [3, 4, 2];
   const starts = chunkStarts(lengths);
 
@@ -100,7 +101,7 @@ Deno.test("locateOffset maps into the owning chunk", () => {
   assertEquals(locateOffset(starts, lengths, 8), { index: 2, offset: 1 });
 });
 
-Deno.test("locateOffset puts a boundary on the opening chunk by default", () => {
+test("locateOffset puts a boundary on the opening chunk by default", () => {
   const lengths = [3, 4];
   const starts = chunkStarts(lengths);
   // Offset 3 is both "end of chunk 0" and "start of chunk 1". A match *start*
@@ -108,7 +109,7 @@ Deno.test("locateOffset puts a boundary on the opening chunk by default", () => 
   assertEquals(locateOffset(starts, lengths, 3), { index: 1, offset: 0 });
 });
 
-Deno.test("locateOffset puts a boundary on the closing chunk when asked", () => {
+test("locateOffset puts a boundary on the closing chunk when asked", () => {
   const lengths = [3, 4];
   const starts = chunkStarts(lengths);
   // A match *end* wants the former, or the range gets a boundary in the next
@@ -117,7 +118,7 @@ Deno.test("locateOffset puts a boundary on the closing chunk when asked", () => 
   assertEquals(locateOffset(starts, lengths, 7, true), { index: 1, offset: 4 });
 });
 
-Deno.test("locateOffset rejects out-of-range offsets", () => {
+test("locateOffset rejects out-of-range offsets", () => {
   const lengths = [3];
   const starts = chunkStarts(lengths);
   assertEquals(locateOffset(starts, lengths, -1), null);
@@ -125,7 +126,7 @@ Deno.test("locateOffset rejects out-of-range offsets", () => {
   assertEquals(locateOffset([], [], 0), null);
 });
 
-Deno.test("a match spanning two chunks maps to both ends", () => {
+test("a match spanning two chunks maps to both ends", () => {
   // "sig" + "n in" — the shape produced by `<b>sig</b>n in`.
   const lengths = [3, 4];
   const starts = chunkStarts(lengths);
@@ -141,7 +142,7 @@ Deno.test("a match spanning two chunks maps to both ends", () => {
 // Word extraction
 // ---------------------------------------------------------------------------
 
-Deno.test("wordAt returns the word under the offset", () => {
+test("wordAt returns the word under the offset", () => {
   const text = "the quick brown fox";
   assertEquals(wordAt(text, 0), "the");
   assertEquals(wordAt(text, 2), "the");
@@ -149,13 +150,13 @@ Deno.test("wordAt returns the word under the offset", () => {
   assertEquals(wordAt(text, 16), "fox");
 });
 
-Deno.test("wordAt looks left when the caret sits just past a word", () => {
+test("wordAt looks left when the caret sits just past a word", () => {
   // Where a click usually leaves the caret; Vim does the same.
   assertEquals(wordAt("the quick", 3), "the");
   assertEquals(wordAt("the quick", 9), "quick");
 });
 
-Deno.test("wordAt returns nothing in open whitespace", () => {
+test("wordAt returns nothing in open whitespace", () => {
   // One space past the word still looks left; two do not.
   assertEquals(wordAt("a  b", 1), "a");
   assertEquals(wordAt("a  b", 2), "");
@@ -163,16 +164,16 @@ Deno.test("wordAt returns nothing in open whitespace", () => {
   assertEquals(wordAt("", 0), "");
 });
 
-Deno.test("wordAt treats digits and underscores as word characters", () => {
+test("wordAt treats digits and underscores as word characters", () => {
   assertEquals(wordAt("foo_bar42 baz", 4), "foo_bar42");
 });
 
-Deno.test("wordAt is not limited to ASCII", () => {
+test("wordAt is not limited to ASCII", () => {
   assertEquals(wordAt("привет мир", 2), "привет");
   assertEquals(wordAt("naïve café", 7), "café");
 });
 
-Deno.test("wordAt clamps an out-of-range offset", () => {
+test("wordAt clamps an out-of-range offset", () => {
   assertEquals(wordAt("word", 99), "word");
   assertEquals(wordAt("word", -5), "word");
 });
@@ -181,7 +182,7 @@ Deno.test("wordAt clamps an out-of-range offset", () => {
 // Initial match selection
 // ---------------------------------------------------------------------------
 
-Deno.test("firstMatchInView skips matches above the fold", () => {
+test("firstMatchInView skips matches above the fold", () => {
   assertEquals(
     firstMatchInView([
       { rect: { bottom: -120 } },
@@ -193,7 +194,7 @@ Deno.test("firstMatchInView skips matches above the fold", () => {
   );
 });
 
-Deno.test("firstMatchInView falls back to the first match", () => {
+test("firstMatchInView falls back to the first match", () => {
   assertEquals(firstMatchInView([{ rect: { bottom: -50 } }]), 0);
   assertEquals(firstMatchInView([{ rect: null }]), 0);
   assertEquals(firstMatchInView([]), 0);

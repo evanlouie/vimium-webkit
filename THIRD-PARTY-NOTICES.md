@@ -91,7 +91,12 @@ operation can fail for manager-specific reasons.
 
 ## Build-time only (not bundled)
 
+- [Vite](https://github.com/vitejs/vite) — MIT © 2019 Evan You & Vite
+  contributors
+- [Rollup](https://github.com/rollup/rollup) — MIT © 2017 these people
 - [esbuild](https://github.com/evanw/esbuild) — MIT © 2020 Evan Wallace
-- [`@luca/esbuild-deno-loader`](https://jsr.io/@luca/esbuild-deno-loader) — MIT
-- [Deno standard library](https://jsr.io/@std) — MIT
+- [TypeScript](https://github.com/microsoft/TypeScript) — Apache-2.0
+- [Vitest](https://github.com/vitest-dev/vitest) — MIT
+- [ESLint](https://github.com/eslint/eslint) — MIT
+- [dprint](https://github.com/dprint/dprint) — MIT
 - [Playwright](https://github.com/microsoft/playwright) — Apache-2.0

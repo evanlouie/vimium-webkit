@@ -7,7 +7,7 @@
  * always the digit that selects it.
  */
 
-import { assert, assertEquals } from "@std/assert";
+import { test } from "vitest";
 import {
   type FilterCandidate,
   filterHints,
@@ -15,6 +15,7 @@ import {
   matchedPrefixLength,
   scoreLinkText,
 } from "~/features/hints/filter.ts";
+import { assert, assertEquals } from "./support/assert.ts";
 
 const DIGITS = "0123456789";
 
@@ -27,18 +28,18 @@ const query = (text: string, digits = ""): {
   numberCharacters: string;
 } => ({ text, digits, numberCharacters: DIGITS });
 
-Deno.test("linkWords lowercases and splits on whitespace", () => {
+test("linkWords lowercases and splits on whitespace", () => {
   assertEquals(linkWords("  Sign   In Now\n"), ["sign", "in", "now"]);
   assertEquals(linkWords(""), []);
   assertEquals(linkWords("   "), []);
 });
 
-Deno.test("scoreLinkText zeroes a candidate missing any query word", () => {
+test("scoreLinkText zeroes a candidate missing any query word", () => {
   assertEquals(scoreLinkText(["sign", "out"], linkWords("Sign in")), 0);
   assert(scoreLinkText(["sign", "in"], linkWords("Sign in")) > 0);
 });
 
-Deno.test("scoreLinkText prefers prefix over substring", () => {
+test("scoreLinkText prefers prefix over substring", () => {
   const prefix = scoreLinkText(["sig"], linkWords("signal"));
   const substring = scoreLinkText(["igna"], linkWords("signal"));
   assert(
@@ -47,7 +48,7 @@ Deno.test("scoreLinkText prefers prefix over substring", () => {
   );
 });
 
-Deno.test("scoreLinkText prefers shorter link text", () => {
+test("scoreLinkText prefers shorter link text", () => {
   const short = scoreLinkText(["sign"], linkWords("Sign in"));
   const long = scoreLinkText(
     ["sign"],
@@ -56,12 +57,12 @@ Deno.test("scoreLinkText prefers shorter link text", () => {
   assert(short > long, `short ${short} should beat long ${long}`);
 });
 
-Deno.test("scoreLinkText is zero without a query or without words", () => {
+test("scoreLinkText is zero without a query or without words", () => {
   assertEquals(scoreLinkText([], linkWords("Sign in")), 0);
   assertEquals(scoreLinkText(["sign"], []), 0);
 });
 
-Deno.test("filterHints numbers every hint from 1 when the query is empty", () => {
+test("filterHints numbers every hint from 1 when the query is empty", () => {
   const outcome = filterHints(candidates("one", "two", "three"), query(""));
   assertEquals(outcome.matched.map((match) => match.hintString), [
     "1",
@@ -73,7 +74,7 @@ Deno.test("filterHints numbers every hint from 1 when the query is empty", () =>
   assertEquals(outcome.exact, null);
 });
 
-Deno.test("filterHints drops non-matching candidates", () => {
+test("filterHints drops non-matching candidates", () => {
   const outcome = filterHints(
     candidates("Sign in", "Sign out", "Search"),
     query("out"),
@@ -82,7 +83,7 @@ Deno.test("filterHints drops non-matching candidates", () => {
   assertEquals(outcome.matched[0]?.index, 1);
 });
 
-Deno.test("filterHints renumbers on every keystroke", () => {
+test("filterHints renumbers on every keystroke", () => {
   const all = candidates("Alpha", "Beta", "Gamma");
 
   const before = filterHints(all, query(""));
@@ -99,7 +100,7 @@ Deno.test("filterHints renumbers on every keystroke", () => {
   );
 });
 
-Deno.test("filterHints sorts by score, keeping document order on ties", () => {
+test("filterHints sorts by score, keeping document order on ties", () => {
   const outcome = filterHints(
     candidates("Downloads", "Download", "Download now please"),
     query("download"),
@@ -108,7 +109,7 @@ Deno.test("filterHints sorts by score, keeping document order on ties", () => {
   assertEquals(outcome.matched[0]?.index, 1);
 });
 
-Deno.test("filterHints narrows by the digit queue", () => {
+test("filterHints narrows by the digit queue", () => {
   const outcome = filterHints(
     candidates("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"),
     query("", "1"),
@@ -121,13 +122,13 @@ Deno.test("filterHints narrows by the digit queue", () => {
   assertEquals(outcome.exact?.hintString, "1");
 });
 
-Deno.test("filterHints reports an unambiguous digit selection", () => {
+test("filterHints reports an unambiguous digit selection", () => {
   const outcome = filterHints(candidates("a", "b", "c"), query("", "2"));
   assertEquals(outcome.candidates.length, 1);
   assertEquals(outcome.exact?.index, 1);
 });
 
-Deno.test("filterHints treats a lone text match as exact", () => {
+test("filterHints treats a lone text match as exact", () => {
   const outcome = filterHints(
     candidates("Sign in", "Sign out", "Search"),
     query("sea"),
@@ -136,14 +137,14 @@ Deno.test("filterHints treats a lone text match as exact", () => {
   assertEquals(outcome.exact?.index, 2);
 });
 
-Deno.test("filterHints yields nothing when the query matches nothing", () => {
+test("filterHints yields nothing when the query matches nothing", () => {
   const outcome = filterHints(candidates("one", "two"), query("zzz"));
   assertEquals(outcome.matched, []);
   assertEquals(outcome.candidates, []);
   assertEquals(outcome.exact, null);
 });
 
-Deno.test("filterHints combines the text and digit queues", () => {
+test("filterHints combines the text and digit queues", () => {
   const outcome = filterHints(
     candidates("Report A", "Report B", "Report C", "Summary"),
     query("report", "2"),
@@ -153,7 +154,7 @@ Deno.test("filterHints combines the text and digit queues", () => {
   assertEquals(outcome.exact?.hintString, "2");
 });
 
-Deno.test("matchedPrefixLength dims only a real prefix", () => {
+test("matchedPrefixLength dims only a real prefix", () => {
   assertEquals(matchedPrefixLength("12", "1"), 1);
   assertEquals(matchedPrefixLength("12", "12"), 2);
   assertEquals(matchedPrefixLength("12", "3"), 0);

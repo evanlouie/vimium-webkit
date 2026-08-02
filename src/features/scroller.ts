@@ -264,7 +264,7 @@ class Scroller implements ScrollerApi {
       return;
     }
 
-    existing?.handle && cancelAnimationFrame(existing.handle);
+    if (existing?.handle) cancelAnimationFrame(existing.handle);
     this.#start(element, axis, amount, event?.code ?? null);
   }
 

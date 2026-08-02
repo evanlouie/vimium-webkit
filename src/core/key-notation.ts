@@ -183,8 +183,7 @@ export const keyChar = (
  * Emission is always in this order so that trie keys are stable; *parsing* is
  * order-insensitive so that hand-written `<a-c-x>` still works.
  */
-const MODIFIER_ORDER = ["c", "a", "m", "s"] as const;
-type ModifierLetter = (typeof MODIFIER_ORDER)[number];
+type ModifierLetter = "c" | "a" | "m" | "s";
 
 const isNamedChar = (char: string): boolean =>
   char.length > 1 || NAMED_KEYS.has(char) || isFunctionKey(char);

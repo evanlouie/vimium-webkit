@@ -15,8 +15,8 @@
  * "the stylesheet applied" has no observable proxy outside it.
  */
 
-import { expect, test } from "./harness/fixtures.ts";
 import type { Page } from "@playwright/test";
+import { expect, test } from "./harness/fixtures.ts";
 import { overlayBox, overlayComputedStyle } from "./harness/overlay.ts";
 
 /** Pinned so the palette is the light one and the colour assertion is exact. */

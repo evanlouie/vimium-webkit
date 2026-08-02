@@ -1,10 +1,11 @@
-import { assert, assertEquals, assertFalse } from "@std/assert";
+import { test } from "vitest";
 import {
   bootStage0,
   isLiveRealm,
   isTopFrame,
   WAKE_MESSAGE,
 } from "~/boot/stage0.ts";
+import { assert, assertEquals, assertFalse } from "./support/assert.ts";
 import {
   type GlobalScope,
   poisonGlobals,
@@ -14,6 +15,23 @@ import {
 const GUARD = Symbol.for("vimium-webkit.stage0");
 
 const GLOBALS = ["navigator", "document", "self", "top", "parent"] as const;
+
+/**
+ * The event-target half of a realm.
+ *
+ * A browser `window` is an `EventTarget`; a Node `globalThis` is not. The Deno
+ * runtime this suite used to run under happened to provide one, so these tests
+ * silently borrowed the host's. Building it here instead states the dependency,
+ * and gives each test a listener set that cannot leak into the next one.
+ */
+const eventTargetGlobals = (): Readonly<Record<string, unknown>> => {
+  const target = new EventTarget();
+  return {
+    addEventListener: target.addEventListener.bind(target),
+    removeEventListener: target.removeEventListener.bind(target),
+    dispatchEvent: target.dispatchEvent.bind(target),
+  };
+};
 
 type Realm = "live-top" | "absent" | "hostile";
 
@@ -30,6 +48,7 @@ const withRealm = (realm: Realm): GlobalScope => {
 
   const values: Readonly<Record<string, unknown>> = realm === "live-top"
     ? {
+      ...eventTargetGlobals(),
       navigator: { userAgent: "test" },
       document: {},
       self: globalThis,
@@ -51,7 +70,7 @@ const withRealm = (realm: Realm): GlobalScope => {
   });
 };
 
-Deno.test("stage0 installs in a live realm", () => {
+test("stage0 installs in a live realm", () => {
   const realm = withRealm("live-top");
   try {
     assert(isLiveRealm());
@@ -66,7 +85,7 @@ Deno.test("stage0 installs in a live realm", () => {
   }
 });
 
-Deno.test("stage0 stays out of a realm with no globals", () => {
+test("stage0 stays out of a realm with no globals", () => {
   const realm = withRealm("absent");
   try {
     // The trap this guards against: with the bindings gone, the obvious
@@ -81,7 +100,7 @@ Deno.test("stage0 stays out of a realm with no globals", () => {
   }
 });
 
-Deno.test("stage0 never throws into a hostile realm", () => {
+test("stage0 never throws into a hostile realm", () => {
   const realm = withRealm("hostile");
   try {
     assertFalse(isLiveRealm());
@@ -95,7 +114,28 @@ Deno.test("stage0 never throws into a hostile realm", () => {
   }
 });
 
-Deno.test("stage0 does not activate if its realm dies after boot", () => {
+/**
+ * A `message` event whose `source` is a window, as a browser delivers it.
+ *
+ * Node's `MessageEvent` constructor accepts only a `MessagePort` as `source`,
+ * where the DOM also allows a `Window` — and a `Window` is precisely what
+ * Stage 0 checks for, since the whole point is that only an ancestor frame may
+ * wake it. Defining the property on the instance reproduces the shape the
+ * browser delivers without weakening what the test asserts.
+ */
+const messageEvent = (init: MessageEventInit): MessageEvent => {
+  const { source, ...rest } = init;
+  const event = new MessageEvent("message", rest);
+  if (source !== undefined && source !== null) {
+    Object.defineProperty(event, "source", {
+      value: source,
+      configurable: true,
+    });
+  }
+  return event;
+};
+
+test("stage0 does not activate if its realm dies after boot", () => {
   const live = withRealm("live-top");
   let activations = 0;
   const stage0 = bootStage0({ onActivate: () => activations++ });
@@ -104,7 +144,7 @@ Deno.test("stage0 does not activate if its realm dies after boot", () => {
   const dead = withRealm("absent");
   try {
     globalThis.dispatchEvent(
-      new MessageEvent("message", {
+      messageEvent({
         data: WAKE_MESSAGE,
         source: globalThis as unknown as MessageEventSource,
       }),
@@ -117,14 +157,14 @@ Deno.test("stage0 does not activate if its realm dies after boot", () => {
   }
 });
 
-Deno.test("only an ancestor can wake stage0", () => {
+test("only an ancestor can wake stage0", () => {
   const realm = withRealm("live-top");
   let activations = 0;
   const stage0 = bootStage0({ onActivate: () => activations++ });
   assert(stage0 !== null);
 
   const post = (init: MessageEventInit): void => {
-    globalThis.dispatchEvent(new MessageEvent("message", init));
+    globalThis.dispatchEvent(messageEvent(init));
   };
 
   try {
@@ -147,7 +187,7 @@ Deno.test("only an ancestor can wake stage0", () => {
   }
 });
 
-Deno.test("stage0 publishes a sentinel, never its instance", () => {
+test("stage0 publishes a sentinel, never its instance", () => {
   const realm = withRealm("live-top");
   const stage0 = bootStage0({ onActivate: () => {} });
   assert(stage0 !== null);

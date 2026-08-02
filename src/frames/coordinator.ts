@@ -105,7 +105,6 @@ export class FrameCoordinator {
   #rosterScheduled = false;
   #disposed = false;
   #detach: (() => void) | null = null;
-  #self: Window | null = null;
 
   constructor(options: CoordinatorOptions) {
     this.#options = options;
@@ -132,7 +131,6 @@ export class FrameCoordinator {
    * re-runs the handshake. There is no "boot window" to close.
    */
   attach(target: Window): void {
-    this.#self = target;
     const onMessage = (event: MessageEvent): void =>
       this.#onWindowMessage(event);
     target.addEventListener("message", onMessage);

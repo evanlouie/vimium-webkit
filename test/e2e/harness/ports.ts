@@ -15,6 +15,7 @@
  * and must stay free of runtime-specific APIs.
  */
 
+import { execFileSync } from "node:child_process";
 import { FIXTURE_HOST } from "./config.ts";
 
 /** Environment variable carrying the resolved `primary,secondary` pair. */
@@ -32,11 +33,26 @@ export interface FixturePorts {
  * server binding it. That is the same race every `port: 0` helper has, and it
  * is strictly better than a fixed port: the window is milliseconds wide and the
  * kernel does not hand out the same ephemeral port twice in that span.
+ *
+ * Synchronous by necessity: `playwright.config.ts` resolves the pair during
+ * module evaluation, before any worker starts. Node's `listen` is asynchronous
+ * and `address()` answers `null` until it completes, so the bind happens in a
+ * short-lived child process that this call blocks on.
  */
+const RESERVE_SCRIPT = `const s=require("node:net").createServer();` +
+  `s.listen(0,process.argv[1],()=>{const a=s.address();` +
+  `process.stdout.write(String(a.port));s.close()});`;
+
 const reservePort = (): number => {
-  const listener = Deno.listen({ hostname: FIXTURE_HOST, port: 0 });
-  const { port } = listener.addr as Deno.NetAddr;
-  listener.close();
+  const output = execFileSync(
+    process.execPath,
+    ["-e", RESERVE_SCRIPT, FIXTURE_HOST],
+    { encoding: "utf8" },
+  );
+  const port = Number(output.trim());
+  if (!Number.isInteger(port) || port <= 0) {
+    throw new Error(`could not reserve an ephemeral port (got ${output})`);
+  }
   return port;
 };
 
@@ -56,7 +72,7 @@ let cached: FixturePorts | null = null;
 export const fixturePorts = (): FixturePorts => {
   if (cached !== null) return cached;
 
-  const published = Deno.env.get(FIXTURE_PORTS_ENV);
+  const published = process.env[FIXTURE_PORTS_ENV];
   const parsed = published === undefined ? null : parsePair(published);
   if (parsed !== null) {
     cached = parsed;
@@ -70,7 +86,7 @@ export const fixturePorts = (): FixturePorts => {
   if (primary > secondary) [primary, secondary] = [secondary, primary];
 
   cached = { primary, secondary };
-  Deno.env.set(FIXTURE_PORTS_ENV, `${primary},${secondary}`);
+  process.env[FIXTURE_PORTS_ENV] = `${primary},${secondary}`;
   return cached;
 };
 

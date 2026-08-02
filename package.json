@@ -1,0 +1,54 @@
+{
+  "name": "@evanlouie/vimium-webkit",
+  "version": "0.1.1",
+  "description": "Vimium-style keyboard control for WebKit userscript managers",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/evanlouie/vimium-webkit.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsx --tsconfig tsconfig.node.json build/build.ts",
+    "build:dev": "tsx --tsconfig tsconfig.node.json build/build.ts --dev",
+    "watch": "tsx --tsconfig tsconfig.node.json build/build.ts --watch",
+    "check": "tsc -p tsconfig.src.json && tsc -p tsconfig.node.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "fmt": "dprint fmt",
+    "fmt:check": "dprint check",
+    "serve:fixtures": "tsx --tsconfig tsconfig.node.json test/e2e/harness/server.ts",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:install": "playwright install webkit chromium firefox",
+    "verify": "npm run fmt:check && npm run lint && npm run check && npm run test && npm run build && npm run test:e2e"
+  },
+  "dependencies": {
+    "effect": "4.0.0-beta.102"
+  },
+  "devDependencies": {
+    "@dprint/json": "^0.23.0",
+    "@dprint/markdown": "^0.22.1",
+    "@dprint/typescript": "^0.95.15",
+    "@eslint/js": "^9.39.1",
+    "@playwright/test": "^1.56.0",
+    "@types/node": "^22.20.0",
+    "@vitest/coverage-v8": "^3.2.4",
+    "dprint": "^0.50.2",
+    "eslint": "^9.39.1",
+    "neverthrow": "^8.2.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.4",
+    "vite": "^7.1.12",
+    "vitest": "^3.2.4",
+    "zod": "^4.1.12"
+  }
+}

@@ -5,7 +5,7 @@
  * being the thing every keystroke in the extension passes through.
  */
 
-import { assert, assertEquals, assertFalse } from "@std/assert";
+import { test } from "vitest";
 import {
   CONTINUE_BUBBLING,
   type Handler,
@@ -15,6 +15,7 @@ import {
   SUPPRESS_EVENT,
   SUPPRESS_PROPAGATION,
 } from "~/core/handler-stack.ts";
+import { assert, assertEquals, assertFalse } from "./support/assert.ts";
 
 interface FakeEvent {
   prevented: boolean;
@@ -41,7 +42,7 @@ const fakeEvent = (): FakeEvent & KeyboardEvent => {
   } as unknown as FakeEvent & KeyboardEvent;
 };
 
-Deno.test("push and unshift decide who sees an event first", () => {
+test("push and unshift decide who sees an event first", () => {
   const stack = new HandlerStack();
   const seen: string[] = [];
   const record = (name: string): Handler => ({
@@ -64,7 +65,7 @@ Deno.test("push and unshift decide who sees an event first", () => {
   assertEquals(seen, ["second", "first", "bottom"]);
 });
 
-Deno.test("every handler below the top runs, exactly once", () => {
+test("every handler below the top runs, exactly once", () => {
   // The regression, in the shape it was reported: with the walk indexing into
   // the live array, a handler that removes an entry *below* itself shifts
   // everything under it up by one — so the already-visited top handler is
@@ -101,7 +102,7 @@ Deno.test("every handler below the top runs, exactly once", () => {
   assertEquals(seen, ["C", "A"]);
 });
 
-Deno.test("a handler removed mid-walk does not still see the event", () => {
+test("a handler removed mid-walk does not still see the event", () => {
   const stack = new HandlerStack();
   const seen: string[] = [];
 
@@ -126,7 +127,7 @@ Deno.test("a handler removed mid-walk does not still see the event", () => {
   assertEquals(seen, ["remover"]);
 });
 
-Deno.test("SUPPRESS_EVENT prevents the default and stops propagation", () => {
+test("SUPPRESS_EVENT prevents the default and stops propagation", () => {
   const stack = new HandlerStack();
   let reachedBelow = false;
   stack.push({
@@ -145,7 +146,7 @@ Deno.test("SUPPRESS_EVENT prevents the default and stops propagation", () => {
   assertFalse(reachedBelow);
 });
 
-Deno.test("SUPPRESS_PROPAGATION leaves the default action alone", () => {
+test("SUPPRESS_PROPAGATION leaves the default action alone", () => {
   const stack = new HandlerStack();
   stack.push({ name: "top", keydown: () => SUPPRESS_PROPAGATION });
 
@@ -155,7 +156,7 @@ Deno.test("SUPPRESS_PROPAGATION leaves the default action alone", () => {
   assertEquals(event.stopped, true);
 });
 
-Deno.test("PASS_EVENT_TO_PAGE stops the walk without touching the event", () => {
+test("PASS_EVENT_TO_PAGE stops the walk without touching the event", () => {
   const stack = new HandlerStack();
   let reachedBelow = false;
   stack.push({
@@ -174,7 +175,7 @@ Deno.test("PASS_EVENT_TO_PAGE stops the walk without touching the event", () => 
   assertFalse(reachedBelow);
 });
 
-Deno.test("RESTART_BUBBLING re-runs the stack, including what was just pushed", () => {
+test("RESTART_BUBBLING re-runs the stack, including what was just pushed", () => {
   const stack = new HandlerStack();
   const seen: string[] = [];
   let pushed = false;
@@ -200,7 +201,7 @@ Deno.test("RESTART_BUBBLING re-runs the stack, including what was just pushed", 
   assertEquals(seen, ["opener", "opened"]);
 });
 
-Deno.test("an event with no interested handler reaches the page", () => {
+test("an event with no interested handler reaches the page", () => {
   const stack = new HandlerStack();
   stack.push({ name: "keys-only", keydown: () => SUPPRESS_EVENT });
   assertEquals(
@@ -209,7 +210,7 @@ Deno.test("an event with no interested handler reaches the page", () => {
   );
 });
 
-Deno.test("a throwing handler is dropped and the walk continues", () => {
+test("a throwing handler is dropped and the walk continues", () => {
   const stack = new HandlerStack();
   const errors: string[] = [];
   stack.onHandlerError((message) => errors.push(message));
@@ -236,7 +237,7 @@ Deno.test("a throwing handler is dropped and the walk continues", () => {
   assert(errors[0]?.includes("thrower"));
 });
 
-Deno.test("remove() defaults to the handler currently running", () => {
+test("remove() defaults to the handler currently running", () => {
   const stack = new HandlerStack();
   let self = 0;
   self = stack.push({
@@ -252,14 +253,14 @@ Deno.test("remove() defaults to the handler currently running", () => {
   assertEquals(stack.depth, 0);
 });
 
-Deno.test("remove() outside a walk removes nothing", () => {
+test("remove() outside a walk removes nothing", () => {
   const stack = new HandlerStack();
   stack.push({ name: "kept", keydown: () => CONTINUE_BUBBLING });
   stack.remove();
   assertEquals(stack.depth, 1);
 });
 
-Deno.test("reset drops everything", () => {
+test("reset drops everything", () => {
   const stack = new HandlerStack();
   stack.push({ name: "a", keydown: () => CONTINUE_BUBBLING });
   stack.push({ name: "b", keydown: () => CONTINUE_BUBBLING });

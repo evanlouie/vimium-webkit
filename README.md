@@ -30,7 +30,7 @@ worked around, is in [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md).
    from the latest release. Your manager will offer to install it and will check
    that URL for updates afterwards.
 
-   Building it yourself gives a byte-for-byte identical file: `deno task build`
+   Building it yourself gives a byte-for-byte identical file: `npm run build`
    writes `dist/vimium-webkit.user.js`. `dist/` is not committed, deliberately —
    a build output in version control is a second source of truth that goes stale
    the first time someone forgets to rebuild.
@@ -253,14 +253,14 @@ setting, not the whole configuration.
 `o` opens a completion overlay. It is deliberately **not** a ⌘L clone, because
 the two APIs that would make it one do not exist for a userscript:
 
-| Source             | Availability                                                   |
-| ------------------ | -------------------------------------------------------------- |
-| Commands (`:`)     | ✅ Full parity, including greyed-out Tier C entries            |
-| Search engines     | ✅ Vimium-compatible `keyword: url %s Description` config      |
+| Source             | Availability                                                  |
+| ------------------ | ------------------------------------------------------------- |
+| Commands (`:`)     | ✅ Full parity, including greyed-out Tier C entries           |
+| Search engines     | ✅ Vimium-compatible `keyword: url %s Description` config     |
 | Search suggestions | ⚠️ **Opt-in, off by default** — see below                      |
 | Local history      | ⚠️ **Opt-in, off by default** — see below                      |
-| Browser history    | ❌ No `chrome.history`                                         |
-| Bookmarks          | ❌ No `chrome.bookmarks`                                       |
+| Browser history    | ❌ No `chrome.history`                                        |
+| Bookmarks          | ❌ No `chrome.bookmarks`                                      |
 | Open tabs          | ⚠️ Only tabs _we_ opened, labelled "Recent" rather than "Tabs" |
 
 > [!WARNING]
@@ -287,25 +287,24 @@ the two APIs that would make it one do not exist for a userscript:
 ## Development
 
 ```
-deno task check      # type-check src/, build/, test/
-deno task check:e2e  # type-check the Playwright config and specs
-deno task test       # unit tests
-deno task test:e2e   # Playwright, against WebKit + Chromium + Firefox
-deno task coverage   # line coverage over every file in src/, not just the loaded ones
-deno task lint
-deno task build      # dist/vimium-webkit.user.js + invariant checks
-deno task verify     # everything above
+npm run check      # type-check src/ and build/ + test/ as separate projects
+npm run test       # unit tests
+npm run test:e2e   # Playwright, against WebKit + Chromium + Firefox
+npm run coverage   # line coverage over every file in src/, not just the loaded ones
+npm run lint
+npm run build      # dist/vimium-webkit.user.js + invariant checks
+npm run verify     # everything above
 ```
 
-`deno task test:e2e:install` fetches the browser binaries the first time.
+`npm run test:e2e:install` fetches the browser binaries the first time.
 
-`deno task coverage` reports over **all** of `src/`. A test module imports every
+`npm run coverage` reports over **all** of `src/`. A test module imports every
 file so that an untested one appears in the denominator instead of vanishing
 from the report — the difference between the two framings was 59% and 38%.
 
 ### Build invariants
 
-`deno task build` fails the build on any of these, because each one is a way the
+`npm run build` fails the build on any of these, because each one is a way the
 project could quietly stop working on WebKit:
 
 1. No `eval`, `new Function`, `document.write`, or inline event-handler strings
@@ -317,7 +316,7 @@ project could quietly stop working on WebKit:
    press a key.
 4. Bundle ≤ 1.5 MB unminified (Greasy Fork's ceiling is 2 MB, measured
    unminified).
-5. `@version` matches `deno.json`.
+5. `@version` matches `package.json`.
 6. Every `GM_*` / `GM.*` reference goes through `src/platform/gm.ts`.
 7. Every command carries a tier, and every Tier C command carries a user-facing
    explanation.
@@ -331,18 +330,18 @@ project could quietly stop working on WebKit:
 Releases are cut by CI, from a tag. The install link above resolves to
 `/releases/latest/download/`, so until a tag exists it 404s.
 
-1. Bump `version` in `deno.json` and commit it.
+1. Bump `version` in `package.json` and commit it.
 2. Tag it `v<version>` and push the tag.
 
 Pushing the tag runs the full pipeline — static checks, unit tests, build
 invariants, and Playwright against all three engines — and only then attaches
 `vimium-webkit.user.js` and `vimium-webkit.meta.js` to a GitHub release.
 
-The tag must match `deno.json`; CI refuses the release otherwise. The mismatch
-is worth failing over because it is invisible when it happens: managers decide
-whether to update by fetching `@updateURL` and comparing `@version` to the one
-they already have. A release tagged `v0.2.0` carrying `@version 0.1.0` reports
-no newer version, so every existing install silently stays where it is.
+The tag must match `package.json`; CI refuses the release otherwise. The
+mismatch is worth failing over because it is invisible when it happens: managers
+decide whether to update by fetching `@updateURL` and comparing `@version` to
+the one they already have. A release tagged `v0.2.0` carrying `@version 0.1.0`
+reports no newer version, so every existing install silently stays where it is.
 
 ### Architecture
 

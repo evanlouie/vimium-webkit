@@ -7,8 +7,9 @@
  * shim, Stage 0 growing until it costs real time in twenty frames.
  */
 
-import { walk } from "@std/fs";
-import { relative } from "@std/path";
+import { readdir, readFile } from "node:fs/promises";
+import { relative } from "node:path";
+import { pathToFileURL } from "node:url";
 
 export interface Violation {
   readonly rule: string;
@@ -91,16 +92,14 @@ const AMBIENT_GLOBAL_FILES: ReadonlySet<string> = new Set([
 ]);
 
 const sourceFiles = async (root: string): Promise<string[]> => {
-  const out: string[] = [];
-  for await (
-    const entry of walk(`${root}/src`, {
-      exts: [".ts"],
-      includeDirs: false,
-    })
-  ) {
-    out.push(entry.path);
-  }
-  return out.sort();
+  const entries = await readdir(`${root}/src`, {
+    recursive: true,
+    withFileTypes: true,
+  });
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".ts"))
+    .map((entry) => `${entry.parentPath}/${entry.name}`)
+    .sort();
 };
 
 /**
@@ -188,7 +187,7 @@ export const checkInvariants = async (
   const sources = await Promise.all(
     files.map(async (path) => ({
       rel: relative(input.root, path).replaceAll("\\", "/"),
-      contents: await Deno.readTextFile(path),
+      contents: await readFile(path, "utf8"),
     })),
   );
 
@@ -364,7 +363,9 @@ const checkCommandTiers = async (
   root: string,
 ): Promise<readonly Violation[]> => {
   const violations: Violation[] = [];
-  const module = await import(`file://${root}/src/core/commands.ts`);
+  const module = await import(
+    pathToFileURL(`${root}/src/core/commands.ts`).href
+  );
   const build: unknown = (module as Record<string, unknown>)["buildCommands"];
   if (typeof build !== "function") {
     return [{

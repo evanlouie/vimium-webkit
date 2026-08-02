@@ -7,9 +7,9 @@
  * a good way to observe a half-written file.
  */
 
+import { ensureBundle } from "./bundle.ts";
 import { READY_PATH, READY_TOKEN } from "./config.ts";
 import { primaryOrigin, secondaryOrigin } from "./ports.ts";
-import { ensureBundle } from "./bundle.ts";
 
 const assertFixtureServer = async (origin: string): Promise<void> => {
   const url = `${origin}${READY_PATH}`;

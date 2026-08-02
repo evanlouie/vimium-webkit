@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertFalse } from "@std/assert";
+import { test } from "vitest";
 import { HandlerStack } from "~/core/handler-stack.ts";
 import {
   activeModeNames,
@@ -9,6 +9,7 @@ import {
   type ModeHost,
   type ModeIndicator,
 } from "~/core/mode.ts";
+import { assert, assertEquals, assertFalse } from "./support/assert.ts";
 
 interface Harness {
   readonly host: ModeHost;
@@ -43,7 +44,7 @@ const clean = (fn: () => void): () => void => () => {
   }
 };
 
-Deno.test(
+test(
   "a mode can be entered, exited, and entered again",
   clean(() => {
     const { host, stack } = harness();
@@ -73,7 +74,7 @@ Deno.test(
   }),
 );
 
-Deno.test(
+test(
   "repeated enter/exit cycles do not grow the handler stack",
   clean(() => {
     const { host, stack } = harness();
@@ -89,7 +90,7 @@ Deno.test(
   }),
 );
 
-Deno.test(
+test(
   "entering twice without an exit is a no-op",
   clean(() => {
     const { host, stack } = harness();
@@ -105,7 +106,7 @@ Deno.test(
   }),
 );
 
-Deno.test(
+test(
   "onExit fires once per exit, with the reason",
   clean(() => {
     const { host } = harness();
@@ -130,7 +131,7 @@ Deno.test(
   }),
 );
 
-Deno.test(
+test(
   "onExit on a live re-entered mode queues rather than firing immediately",
   clean(() => {
     const { host } = harness();
@@ -152,7 +153,7 @@ Deno.test(
   }),
 );
 
-Deno.test(
+test(
   "a throwing exit handler does not stop the others",
   clean(() => {
     const { host } = harness();
@@ -177,7 +178,7 @@ Deno.test(
   }),
 );
 
-Deno.test(
+test(
   "a singleton group holds exactly one live mode",
   clean(() => {
     const { host, stack } = harness();
@@ -205,7 +206,7 @@ Deno.test(
   }),
 );
 
-Deno.test(
+test(
   "the indicator falls back to the innermost mode that has one",
   clean(() => {
     const { host, indicators } = harness();
@@ -225,7 +226,7 @@ Deno.test(
   }),
 );
 
-Deno.test(
+test(
   "exitAllModes clears the stack whatever the nesting",
   clean(() => {
     const { host, stack } = harness();
@@ -240,7 +241,7 @@ Deno.test(
   }),
 );
 
-Deno.test("isEscape accepts Escape and <c-[>", () => {
+test("isEscape accepts Escape and <c-[>", () => {
   const event = (init: Partial<KeyboardEvent>): KeyboardEvent =>
     init as KeyboardEvent;
 

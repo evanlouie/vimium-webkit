@@ -6,13 +6,14 @@
  * through, and despite being pure and synchronous.
  */
 
-import { assert, assertEquals } from "@std/assert";
-import { HandlerStack } from "~/core/handler-stack.ts";
-import { exitAllModes, type ModeHost } from "~/core/mode.ts";
-import { NormalMode } from "~/core/key-handler.ts";
-import { compileMappings } from "~/core/mappings.ts";
+import { test } from "vitest";
 import type { EffectiveRule } from "~/core/exclusions.ts";
 import { FULLY_ENABLED } from "~/core/exclusions.ts";
+import { HandlerStack } from "~/core/handler-stack.ts";
+import { NormalMode } from "~/core/key-handler.ts";
+import { compileMappings } from "~/core/mappings.ts";
+import { exitAllModes, type ModeHost } from "~/core/mode.ts";
+import { assert, assertEquals } from "./support/assert.ts";
 
 interface Run {
   readonly command: string;
@@ -102,7 +103,7 @@ const harness = (
   };
 };
 
-Deno.test("a single-key binding fires immediately", () => {
+test("a single-key binding fires immediately", () => {
   const vw = harness("map j scrollDown");
   try {
     vw.press("j");
@@ -112,7 +113,7 @@ Deno.test("a single-key binding fires immediately", () => {
   }
 });
 
-Deno.test("a two-key sequence waits for its second key", () => {
+test("a two-key sequence waits for its second key", () => {
   const vw = harness("map gg scrollToTop");
   try {
     vw.press("g");
@@ -124,7 +125,7 @@ Deno.test("a two-key sequence waits for its second key", () => {
   }
 });
 
-Deno.test("a bound prefix does not make its extension unreachable", () => {
+test("a bound prefix does not make its extension unreachable", () => {
   // `map g A` used to fire `A` on the first `g` and reset, so `gg` could never
   // be typed at all — and holding `g` fired `A` repeatedly.
   const vw = harness("map g A\nmap gg B");
@@ -139,7 +140,7 @@ Deno.test("a bound prefix does not make its extension unreachable", () => {
   }
 });
 
-Deno.test("a bound prefix still fires once the sequence dead-ends", () => {
+test("a bound prefix still fires once the sequence dead-ends", () => {
   const vw = harness("map g A\nmap gg B\nmap j scrollDown");
   try {
     vw.press("g");
@@ -152,7 +153,7 @@ Deno.test("a bound prefix still fires once the sequence dead-ends", () => {
   }
 });
 
-Deno.test("a deeper sequence is not shadowed by a shorter one mid-walk", () => {
+test("a deeper sequence is not shadowed by a shorter one mid-walk", () => {
   // `map c A` plus `map gcc B`: the `g`→`c` step produces both `c` (bound) and
   // `gc` (a live prefix), and picking the bound one made `gcc` unreachable.
   const vw = harness("map c A\nmap gcc B");
@@ -167,7 +168,7 @@ Deno.test("a deeper sequence is not shadowed by a shorter one mid-walk", () => {
   }
 });
 
-Deno.test("a count prefix multiplies the command", () => {
+test("a count prefix multiplies the command", () => {
   const vw = harness("map j scrollDown");
   try {
     vw.press("3");
@@ -179,7 +180,7 @@ Deno.test("a count prefix multiplies the command", () => {
   }
 });
 
-Deno.test("the count prefix is capped", () => {
+test("the count prefix is capped", () => {
   const vw = harness("map j scrollDown");
   try {
     for (const digit of "999999999") vw.press(digit);
@@ -190,7 +191,7 @@ Deno.test("the count prefix is capped", () => {
   }
 });
 
-Deno.test("`0` is bindable when no count is under way", () => {
+test("`0` is bindable when no count is under way", () => {
   const vw = harness("map 0 scrollToLeft\nmap j scrollDown");
   try {
     vw.press("0");
@@ -206,7 +207,7 @@ Deno.test("`0` is bindable when no count is under way", () => {
   }
 });
 
-Deno.test("`1`-`9` are bindable when the user has bound them", () => {
+test("`1`-`9` are bindable when the user has bound them", () => {
   // They used to be swallowed by the count prefix unconditionally, so
   // `map 1 scrollDown` compiled cleanly, produced no diagnostic, could never
   // fire, and pinned `1` in the HUD until Escape.
@@ -224,7 +225,7 @@ Deno.test("`1`-`9` are bindable when the user has bound them", () => {
   }
 });
 
-Deno.test("Escape abandons a partial sequence and is otherwise passed through", () => {
+test("Escape abandons a partial sequence and is otherwise passed through", () => {
   const vw = harness("map gg scrollToTop");
   try {
     vw.press("g");
@@ -236,7 +237,7 @@ Deno.test("Escape abandons a partial sequence and is otherwise passed through", 
   }
 });
 
-Deno.test("a pass key reaches the page only at the start of a sequence", () => {
+test("a pass key reaches the page only at the start of a sequence", () => {
   const vw = harness("map gg scrollToTop\nmap j scrollDown", {
     enabled: true,
     passKeys: "g",
@@ -255,7 +256,7 @@ Deno.test("a pass key reaches the page only at the start of a sequence", () => {
   }
 });
 
-Deno.test("a focused media player keeps the arrow keys and space", () => {
+test("a focused media player keeps the arrow keys and space", () => {
   // A YouTube watch page focuses its player shell on load, and the player owns
   // exactly these five keys — seek, volume, play/pause. Suppressing them in the
   // capture phase cost the user all three the moment the userscript was
@@ -278,7 +279,7 @@ Deno.test("a focused media player keeps the arrow keys and space", () => {
   }
 });
 
-Deno.test("a media key is still ours mid-sequence and after a count", () => {
+test("a media key is still ours mid-sequence and after a count", () => {
   const vw = harness("map z<down> scrollToTop\nmap <down> scrollDown");
   try {
     vw.mediaFocus = true;
@@ -298,7 +299,7 @@ Deno.test("a media key is still ours mid-sequence and after a count", () => {
   }
 });
 
-Deno.test("a focused media player does not get every other key", () => {
+test("a focused media player does not get every other key", () => {
   // YouTube binds `j`/`k`/`l` as well, but a Vim user pressing `j` on a video
   // page means "scroll", and always has.
   const vw = harness("map j scrollDown\nmap gg scrollToTop");
@@ -317,7 +318,7 @@ Deno.test("a focused media player does not get every other key", () => {
   }
 });
 
-Deno.test("passNextKey hands the next keystroke to the page", () => {
+test("passNextKey hands the next keystroke to the page", () => {
   const vw = harness("map j scrollDown");
   try {
     vw.press("j");
@@ -327,7 +328,7 @@ Deno.test("passNextKey hands the next keystroke to the page", () => {
   }
 });
 
-Deno.test("a modifier keydown is ignored rather than dispatched", () => {
+test("a modifier keydown is ignored rather than dispatched", () => {
   const vw = harness("map j scrollDown");
   try {
     vw.press("Shift", { shiftKey: true });
@@ -338,7 +339,7 @@ Deno.test("a modifier keydown is ignored rather than dispatched", () => {
   }
 });
 
-Deno.test("a composing keystroke belongs to the IME", () => {
+test("a composing keystroke belongs to the IME", () => {
   const vw = harness("map j scrollDown");
   try {
     vw.press("j", { isComposing: true });
@@ -350,7 +351,7 @@ Deno.test("a composing keystroke belongs to the IME", () => {
   }
 });
 
-Deno.test("recompiling restarts the walk cleanly", () => {
+test("recompiling restarts the walk cleanly", () => {
   const vw = harness("map gg scrollToTop");
   try {
     vw.press("g");

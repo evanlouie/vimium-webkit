@@ -176,7 +176,7 @@ export const installPageHarness = (init: HarnessInit): void => {
   // -- Closed shadow root capture -------------------------------------------
 
   const nativeAttachShadow = Element.prototype.attachShadow;
-  Element.prototype.attachShadow = function (
+  Element.prototype.attachShadow = function(
     this: Element,
     options: ShadowRootInit,
   ): ShadowRoot {

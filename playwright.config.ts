@@ -1,9 +1,8 @@
 /**
  * Playwright configuration for the DOM integration layer.
  *
- * Run it with `deno task test:e2e` — the suite is Deno-hosted (the fixture
- * server, the bundle build, and the harness all use `Deno.*`), and Playwright's
- * runner is invoked from inside that Deno process.
+ * Run it with `npm run test:e2e`. The fixture server, the bundle build and the
+ * harness all run on Node.
  *
  * > [!IMPORTANT]
  * > Playwright's WebKit build is **not Safari**. See `test/e2e/README.md` for
@@ -16,7 +15,7 @@ import { primaryOrigin } from "./test/e2e/harness/ports.ts";
 
 // `!!` rather than a presence check: `CI=` (empty) is how a shell disables a
 // variable it cannot unset, and it should not enable the CI-only gates.
-const isCi = !!Deno.env.get("CI");
+const isCi = !!process.env["CI"];
 
 // Resolving here — at config load, before any worker starts — is what publishes
 // the port pair into the environment that workers and the server inherit.
@@ -77,7 +76,7 @@ export default defineConfig({
 
   webServer: {
     // One process, two ports: the cross-origin fixtures need a second origin.
-    command: "deno run -A test/e2e/harness/server.ts",
+    command: "npm run serve:fixtures",
     url: `${origin}${READY_PATH}`,
     // Ports are unique per run, so there is nothing legitimate to reuse — and
     // reuse is precisely how a foreign server gets adopted (TST-09).

@@ -10,6 +10,7 @@ import { expect, test as base } from "@playwright/test";
 import type { Frame, Page } from "@playwright/test";
 import type { Settings } from "~/settings/schema.ts";
 import { readBundle } from "./bundle.ts";
+import { hudText, visibleHintMarkers } from "./overlay.ts";
 import {
   type CspViolation,
   type GmVariant,
@@ -18,7 +19,6 @@ import {
   installPageHarness,
 } from "./page-harness.ts";
 import { effectiveSettings, seedWithSettings } from "./settings-seed.ts";
-import { hudText, visibleHintMarkers } from "./overlay.ts";
 
 export { expect };
 export type { CspViolation, GmVariant, HarnessSnapshot };
@@ -33,7 +33,7 @@ const inOrder = async (
   steps: readonly (() => Promise<unknown>)[],
 ): Promise<void> => {
   for (const step of steps) {
-    // deno-lint-ignore no-await-in-loop
+    // eslint-disable-next-line no-await-in-loop
     await step();
   }
 };

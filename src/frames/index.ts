@@ -643,7 +643,7 @@ export const createFrameLink = (options: FrameLinkOptions): FrameLink => {
  * message is then simply gone.
  */
 const connectToTop = (view: Window, endpoint: FrameEndpoint): () => void => {
-  const timers: number[] = [];
+  const timers: Array<ReturnType<typeof setTimeout>> = [];
   let port: MessagePort | null = null;
   let closed = false;
 

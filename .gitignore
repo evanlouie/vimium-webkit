@@ -10,3 +10,10 @@
 # Editor / OS noise
 .DS_Store
 *.swp
+
+# TypeScript incremental build state
+*.tsbuildinfo
+
+# Coverage
+/coverage/
+/.coverage/

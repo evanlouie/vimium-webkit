@@ -17,6 +17,7 @@
  * several defects survived a green suite.
  */
 
+import { readFileSync } from "node:fs";
 import type { Settings } from "~/settings/schema.ts";
 import { joinPath } from "./paths.ts";
 import { repoRoot } from "./root.ts";
@@ -47,7 +48,7 @@ export const DETERMINISTIC: Partial<Settings> = {
 };
 
 /**
- * The shipped defaults, written by `deno task build`.
+ * The shipped defaults, written by `npm run build`.
  *
  * `globalSetup` guarantees the bundle is current before any worker starts, and
  * this file is emitted by the same build, so it cannot be stale relative to the
@@ -58,9 +59,9 @@ let cached: Settings | null = null;
 const shippedDefaults = (): Settings => {
   if (cached !== null) return cached;
   const path = joinPath(repoRoot(), "dist/default-settings.json");
-  const parsed: unknown = JSON.parse(Deno.readTextFileSync(path));
+  const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
   if (typeof parsed !== "object" || parsed === null) {
-    throw new Error(`${path} is not an object; run \`deno task build\``);
+    throw new Error(`${path} is not an object; run \`npm run build\``);
   }
   // Our own build output, validated by `settingsSchema` on the way in — the
   // cast asserts a shape the producer already guarantees.

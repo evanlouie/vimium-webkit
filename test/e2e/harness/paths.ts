@@ -1,11 +1,12 @@
 /**
- * Path and filesystem helpers, with no imports at all.
+ * Path and filesystem helpers.
  *
- * Deliberately hand-rolled rather than using `@std/path` and `@std/fs`:
- * Playwright's loader resolves imports Node-style and cannot see a JSR
- * specifier, so anything reachable from a spec file has to stay free of them.
- * (The Deno runtime itself is present — only the module resolver differs.)
+ * Deliberately hand-rolled rather than leaning on a path library: this module
+ * is reachable from spec files, which Playwright loads through its own
+ * transform, and keeping the surface small keeps it portable.
  */
+
+import { type Dirent, readdirSync, statSync } from "node:fs";
 
 /** Join an absolute base with a relative path. POSIX only; so is the CI. */
 export const joinPath = (base: string, relative: string): string => {
@@ -53,7 +54,7 @@ export const normaliseSegments = (path: string): readonly string[] => {
 
 export const mtimeOf = (path: string): number => {
   try {
-    return Deno.statSync(path).mtime?.getTime() ?? 0;
+    return statSync(path).mtimeMs;
   } catch {
     return 0;
   }
@@ -61,7 +62,7 @@ export const mtimeOf = (path: string): number => {
 
 export const isFile = (path: string): boolean => {
   try {
-    return Deno.statSync(path).isFile;
+    return statSync(path).isFile();
   } catch {
     return false;
   }
@@ -73,16 +74,16 @@ export const newestMtime = (
   suffixes: readonly string[],
 ): number => {
   let newest = 0;
-  let entries: Deno.DirEntry[];
+  let entries: readonly Dirent[];
   try {
-    entries = [...Deno.readDirSync(dir)];
+    entries = readdirSync(dir, { withFileTypes: true });
   } catch {
     return 0;
   }
 
   for (const entry of entries) {
     const path = joinPath(dir, entry.name);
-    if (entry.isDirectory) {
+    if (entry.isDirectory()) {
       newest = Math.max(newest, newestMtime(path, suffixes));
       continue;
     }

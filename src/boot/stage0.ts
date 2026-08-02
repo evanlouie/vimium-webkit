@@ -207,7 +207,7 @@ class Stage0Impl implements Stage0 {
   #handler: Stage0KeyHandler | null = null;
   #activated = false;
   #typedIntoEditable = false;
-  #idleTimer: number | null = null;
+  #idleTimer: ReturnType<typeof setTimeout> | null = null;
   #disposed = false;
 
   readonly #onKeydown = (event: KeyboardEvent): void => {

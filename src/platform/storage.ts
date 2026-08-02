@@ -155,7 +155,7 @@ export class ValueGroup<T> {
   #cached: T | undefined;
   #hydration: Promise<T> | null = null;
   #pendingWrite: T | undefined;
-  #writeTimer: number | null = null;
+  #writeTimer: ReturnType<typeof setTimeout> | null = null;
   #unwatch: (() => void) | null = null;
 
   /**

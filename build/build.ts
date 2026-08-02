@@ -5,86 +5,52 @@
  * size ceiling is measured *unminified*, its reviewers read the source, and a
  * userscript that a user cannot audit is one they should not install.
  *
- *   deno task build          production bundle + invariant checks
- *   deno task build:dev      dev bundle, sourcemap inline, invariants relaxed
- *   deno task watch          rebuild on change
+ *   npm run build          production bundle + invariant checks
+ *   npm run build:dev      dev bundle, sourcemap inline, invariants relaxed
+ *   npm run watch          rebuild on change
  */
 
-import * as esbuild from "esbuild";
-import { denoPlugins } from "@luca/esbuild-deno-loader";
-import { ensureDir } from "@std/fs";
-import { fromFileUrl, resolve } from "@std/path";
-import { BANNER_NOTICE, buildMetadata } from "./metadata.ts";
-import { checkInvariants, formatViolations } from "./invariants.ts";
+import { watch } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import type { OutputChunk, RollupOutput } from "rollup";
+import { build as viteBuild } from "vite";
 import { defaultSettings } from "~/settings/schema.ts";
+import { checkInvariants, formatViolations } from "./invariants.ts";
+import { BANNER_NOTICE, buildMetadata } from "./metadata.ts";
+import { verifyBundleBoots } from "./verify-bundle.ts";
+import { bundleConfig, type BundleOptions, ROOT } from "./vite-config.ts";
 
-const ROOT = resolve(fromFileUrl(import.meta.url), "../..");
 const DIST = `${ROOT}/dist`;
 const REPOSITORY = "https://github.com/evanlouie/vimium-webkit";
 
-/**
- * Bridge the loader's vendored esbuild types onto the pinned esbuild release.
- *
- * `@luca/esbuild-deno-loader` ships its own copy of esbuild's declarations, and
- * they lag the version we depend on (`entryPoints` gained an object form). The
- * plugin objects are structurally identical at runtime; only the `.d.ts` files
- * disagree. The cast goes through `unknown` rather than `any` so it stays
- * local, explicit, and greppable.
- */
-const loaderPlugins = (): esbuild.Plugin[] =>
-  denoPlugins({
-    configPath: `${ROOT}/deno.json`,
-  }) as unknown as esbuild.Plugin[];
-
-interface DenoConfig {
-  readonly version?: unknown;
-}
+const byteLength = (text: string): number =>
+  new TextEncoder().encode(text).length;
 
 const readVersion = async (): Promise<string> => {
-  const raw: unknown = JSON.parse(await Deno.readTextFile(`${ROOT}/deno.json`));
-  const version = (raw as DenoConfig).version;
+  const raw: unknown = JSON.parse(
+    await readFile(`${ROOT}/package.json`, "utf8"),
+  );
+  const version = (raw as { readonly version?: unknown }).version;
   if (typeof version !== "string") {
-    throw new Error("deno.json has no string `version`");
+    throw new Error("package.json has no string `version`");
   }
   return version;
 };
 
-interface BundleOptions {
-  readonly entry: string;
-  readonly dev: boolean;
-  /** Only for measurement; the shipped artefact is never minified. */
-  readonly minify?: boolean;
-}
-
-const bundle = async (options: BundleOptions): Promise<string> => {
-  const result = await esbuild.build({
-    plugins: loaderPlugins(),
-    entryPoints: [options.entry],
-    bundle: true,
-    write: false,
-    format: "iife",
-    // Safari 16.4 is the floor (`adoptedStyleSheets` on `ShadowRoot`), so
-    // esbuild must not emit anything newer. `safari16` also keeps private class
-    // fields and `??=` intact rather than down-levelling them into helpers.
-    target: ["safari16", "chrome111", "firefox101"],
-    platform: "browser",
-    charset: "utf8",
-    legalComments: "inline",
-    minify: options.minify === true,
-    sourcemap: options.dev ? "inline" : false,
-    treeShaking: true,
-    define: {
-      // Neither bundled dependency should ever take a Node branch.
-      "process.env.NODE_ENV": JSON.stringify(
-        options.dev ? "development" : "production",
-      ),
-    },
-  });
-
-  const file = result.outputFiles?.[0];
-  if (!file) throw new Error(`esbuild produced no output for ${options.entry}`);
-  return file.text;
+/** The single entry chunk Vite produced for a library build. */
+const entryChunk = (result: unknown): OutputChunk => {
+  const outputs = (Array.isArray(result)
+    ? (result[0] as RollupOutput).output
+    : (result as RollupOutput).output) ?? [];
+  const chunk = outputs.find(
+    (item): item is OutputChunk => item.type === "chunk" && item.isEntry,
+  );
+  if (!chunk) throw new Error("Vite produced no entry chunk");
+  return chunk;
 };
+
+const bundle = async (options: BundleOptions): Promise<OutputChunk> =>
+  entryChunk(await viteBuild(bundleConfig(options)));
 
 /**
  * Stage 0's cost, measured on its own.
@@ -93,18 +59,18 @@ const bundle = async (options: BundleOptions): Promise<string> => {
  * file. Bundling `boot/stage0.ts` in isolation is the honest proxy for what an
  * engine has to parse and execute before the user presses a key.
  *
- * Minified, deliberately. esbuild preserves JSDoc in an unminified bundle, so
+ * Minified, deliberately. A bundler preserves JSDoc in an unminified bundle, so
  * measuring the readable output made the budget a tax on comments — a rule that
  * fires when someone explains a subtlety is a rule that gets the comment
  * deleted instead.
  */
 const measureStage0 = async (): Promise<number> => {
-  const text = await bundle({
+  const chunk = await bundle({
     entry: `${ROOT}/src/boot/stage0.ts`,
     dev: false,
     minify: true,
   });
-  return new TextEncoder().encode(text).length;
+  return byteLength(chunk.code);
 };
 
 interface ModuleSize {
@@ -112,40 +78,24 @@ interface ModuleSize {
   readonly bytes: number;
 }
 
-const sizeReport = async (): Promise<readonly ModuleSize[]> => {
-  const result = await esbuild.build({
-    plugins: loaderPlugins(),
-    entryPoints: [`${ROOT}/src/main.ts`],
-    bundle: true,
-    write: false,
-    format: "iife",
-    target: ["safari16"],
-    platform: "browser",
-    minify: false,
-    metafile: true,
-  });
-
-  const inputs = result.metafile?.outputs;
-  if (!inputs) return [];
-
-  const entries: ModuleSize[] = [];
-  for (const output of Object.values(inputs)) {
-    for (const [module, meta] of Object.entries(output.inputs)) {
-      entries.push({
-        module: module.replace(`${ROOT}/`, ""),
-        bytes: meta.bytesInOutput,
-      });
-    }
-  }
-  return entries.sort((a, b) => b.bytes - a.bytes);
-};
+/** Per-module contribution to the bundle, largest first. */
+const sizeReport = (chunk: OutputChunk): readonly ModuleSize[] =>
+  Object.entries(chunk.modules)
+    .map(([module, meta]) => ({
+      module: module.startsWith(ROOT)
+        ? module.slice(ROOT.length + 1)
+        : module.replace(/^\0/, ""),
+      bytes: meta.renderedLength,
+    }))
+    .filter((entry) => entry.bytes > 0)
+    .sort((a, b) => b.bytes - a.bytes);
 
 const main = async (): Promise<void> => {
-  const dev = Deno.args.includes("--dev");
-  const watch = Deno.args.includes("--watch");
+  const dev = process.argv.includes("--dev");
+  const watching = process.argv.includes("--watch");
   const version = await readVersion();
 
-  await ensureDir(DIST);
+  await mkdir(DIST, { recursive: true });
 
   const metadata = buildMetadata({
     version,
@@ -156,36 +106,33 @@ const main = async (): Promise<void> => {
   });
 
   const build = async (): Promise<boolean> => {
-    const code = await bundle({ entry: `${ROOT}/src/main.ts`, dev });
-    const output = `${metadata}${BANNER_NOTICE}\n${code}`;
+    const chunk = await bundle({ entry: `${ROOT}/src/main.ts`, dev });
+    const output = `${metadata}${BANNER_NOTICE}\n${chunk.code}`;
+    const artefact = `${DIST}/vimium-webkit${dev ? ".dev" : ""}.user.js`;
 
-    await Deno.writeTextFile(
-      `${DIST}/vimium-webkit${dev ? ".dev" : ""}.user.js`,
-      output,
-    );
-    await Deno.writeTextFile(`${DIST}/vimium-webkit.meta.js`, metadata);
+    await writeFile(artefact, output);
+    await writeFile(`${DIST}/vimium-webkit.meta.js`, metadata);
 
     // The shipped defaults, as data.
     //
     // The e2e harness needs them, and it runs under Playwright's own module
-    // loader, which resolves neither the `~/` alias nor `npm:zod/mini`. A
-    // hand-copied literal was the alternative, and the one that used to live
+    // loader, which resolves neither the `~/` alias nor the bundler's aliases.
+    // A hand-copied literal was the alternative, and the one that used to live
     // there had already drifted to a single search engine against the five
     // here — so the harness seeded settings that no user has.
-    await Deno.writeTextFile(
+    await writeFile(
       `${DIST}/default-settings.json`,
       `${JSON.stringify(defaultSettings(), null, 2)}\n`,
     );
 
-    const report = await sizeReport();
-    await Deno.writeTextFile(
+    await writeFile(
       `${DIST}/report.json`,
       `${
         JSON.stringify(
           {
             version,
-            totalBytes: new TextEncoder().encode(output).length,
-            modules: report,
+            totalBytes: byteLength(output),
+            modules: sizeReport(chunk),
           },
           null,
           2,
@@ -202,7 +149,7 @@ const main = async (): Promise<void> => {
       metadataBlock: metadata,
     });
 
-    const totalKb = (new TextEncoder().encode(output).length / 1024).toFixed(1);
+    const totalKb = (byteLength(output) / 1024).toFixed(1);
     console.log(
       `vimium-webkit ${version} — ${totalKb} KB, Stage 0 ${
         (stage0Bytes / 1024).toFixed(1)
@@ -214,27 +161,33 @@ const main = async (): Promise<void> => {
       console.error(formatViolations(violations));
       return false;
     }
-    console.log("all invariants hold");
+
+    // Size is not correctness. A bundle that tree-shakes away a module Effect
+    // needs at load time is smaller *and* dead, and only running it says so.
+    const boot = await verifyBundleBoots(artefact);
+    if (!boot.ok) {
+      console.error(`\nthe bundle does not boot: ${boot.error}`);
+      return false;
+    }
+
+    console.log("all invariants hold; bundle boots");
     return true;
   };
 
-  if (!watch) {
-    const ok = await build();
-    await esbuild.stop();
-    if (!ok) Deno.exit(1);
+  if (!watching) {
+    if (!(await build())) process.exit(1);
     return;
   }
 
   await build();
   console.log("watching src/ …");
-  const watcher = Deno.watchFs(`${ROOT}/src`);
-  let pending: number | undefined;
-  for await (const _event of watcher) {
+  let pending: NodeJS.Timeout | undefined;
+  watch(`${ROOT}/src`, { recursive: true }, () => {
     if (pending !== undefined) clearTimeout(pending);
     pending = setTimeout(() => {
       void build();
     }, 120);
-  }
+  });
 };
 
-if (import.meta.main) await main();
+await main();
