@@ -81,6 +81,39 @@ export const overlayAriaHidden = (
     return false;
   }, selector);
 
+/**
+ * Where the focus sits inside the overlay.
+ *
+ * `document.activeElement` is the host from outside, because the root is
+ * closed. `shadow.activeElement` gives the true node, as a class list and a
+ * tag name, so a failure says which control has the focus.
+ */
+export const overlayActiveElement = (
+  page: Page,
+): Promise<string | null> =>
+  page.evaluate((): string | null => {
+    const host = globalThis as unknown as ShadowHost;
+    const shadow = host.__vimiumHarness?.shadow ?? null;
+    const node = shadow?.activeElement ?? null;
+    if (node === null) return null;
+    const classes = node.className === "" ? "" : `.${node.className}`;
+    return `${node.tagName.toLowerCase()}${classes}`;
+  });
+
+/** Does the focus sit inside this part of the overlay? */
+export const overlayFocusWithin = (
+  page: Page,
+  selector: string,
+): Promise<boolean> =>
+  page.evaluate((query: string): boolean => {
+    const host = globalThis as unknown as ShadowHost;
+    const shadow = host.__vimiumHarness?.shadow ?? null;
+    const container = shadow?.querySelector(query) ?? null;
+    const active = shadow?.activeElement ?? null;
+    if (container === null || active === null) return false;
+    return container === active || container.contains(active);
+  }, selector);
+
 /** Trimmed `textContent` of the first match inside the overlay, or `null`. */
 export const overlayText = (
   page: Page,
