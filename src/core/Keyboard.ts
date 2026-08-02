@@ -28,7 +28,14 @@ import {
 import { isPassKey } from "~/domain/Exclusion.ts";
 import { appendCountDigit, isCountDigit } from "~/domain/Key.ts";
 import { isComposing, isModifierKey, keyNotation } from "~/domain/Key.ts";
-import type { KeyBinding, TrieNode } from "~/domain/Mapping.ts";
+import {
+  canExtend,
+  continuesSequence,
+  deepestBinding,
+  type KeyBinding,
+  trieCandidates,
+  type TrieNode,
+} from "~/domain/Mapping.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { mediaPlayerHasFocus } from "~/platform/Elements.ts";
 import { Realm } from "~/platform/Realm.ts";
@@ -79,6 +86,15 @@ interface KeyState {
   readonly nodes: ReadonlyArray<TrieNode>;
   readonly count: number;
   readonly pending: ReadonlyArray<string>;
+  /**
+   * A binding that the keys so far accepted, and that a longer sequence can
+   * still replace.
+   *
+   * `map g scrollUp` together with `map gg scrollToTop` puts `scrollUp` here
+   * when the user presses `g`. The next key decides: `g` extends the sequence
+   * and runs `scrollToTop`, and any other key runs `scrollUp` first.
+   */
+  readonly deferred: Option.Option<KeyBinding>;
 }
 
 export class Keyboard extends Context.Service<Keyboard, {
@@ -135,6 +151,7 @@ export class Keyboard extends Context.Service<Keyboard, {
         nodes: [mappings.compiledUnsafe().trie],
         count: 0,
         pending: [],
+        deferred: Option.none(),
       });
       const passNext = yield* Ref.make(0);
       // The `event.code` values whose `keydown` we took. A page that listens
@@ -149,6 +166,7 @@ export class Keyboard extends Context.Service<Keyboard, {
           nodes: [mappings.compiledUnsafe().trie],
           count: 0,
           pending: [],
+          deferred: Option.none(),
         });
         if (current.pending.length > 0) {
           yield* SubscriptionRef.set(pending, null);
@@ -228,17 +246,48 @@ export class Keyboard extends Context.Service<Keyboard, {
           );
         });
 
+      /**
+       * Take one key into the trie walk.
+       *
+       * The effect calls itself at most once, when a binding that an earlier
+       * key accepted must run before this key is read again from the root.
+       */
       const advance = (
         notation: string,
         event: KeyboardEvent,
       ): Effect.Effect<HandlerResult> =>
         Effect.gen(function*() {
           const current = yield* Ref.get(state);
-          const candidates: TrieNode[] = [];
-          for (const node of current.nodes) {
-            const child = node.children.get(notation);
-            if (child) candidates.push(child);
+
+          if (isCountKey(current, notation)) {
+            const nextPending = [...current.pending, notation];
+            yield* Ref.set(state, {
+              nodes: current.nodes,
+              count: appendCountDigit(current.count, notation),
+              pending: nextPending,
+              deferred: current.deferred,
+            });
+            yield* showPending(nextPending);
+            return yield* suppress(event);
           }
+
+          // A binding that the keys so far accepted, and a key that cannot
+          // extend the sequence any further. The binding runs now, with the
+          // count that the user typed before it, and this key starts again at
+          // the root. Without this, `map g scrollUp` could never run while
+          // `map gg scrollToTop` also existed.
+          if (
+            Option.isSome(current.deferred) &&
+            !continuesSequence(current.nodes, notation)
+          ) {
+            const { command, options } = current.deferred.value;
+            const count = current.count === 0 ? 1 : current.count;
+            yield* reset;
+            yield* runCommand(command, options, count, event);
+            return yield* advance(notation, event);
+          }
+
+          const candidates = trieCandidates(current.nodes, notation);
 
           if (candidates.length === 0) {
             const wasPartial = current.nodes.length > 1 || current.count > 0;
@@ -253,18 +302,9 @@ export class Keyboard extends Context.Service<Keyboard, {
           // the node list is ordered shallowest first. If it can still be
           // extended, this sequence is not finished. Firing the shorter binding
           // here is what made `map gg` unreachable behind `map g`.
-          const deepest = candidates[candidates.length - 1];
-          const stillOpen = deepest !== undefined &&
-            deepest.children.size > 0;
+          const terminal = deepestBinding(candidates);
 
-          // Later candidates come from deeper entries, so the last binding
-          // found is the most specific match.
-          let terminal: Option.Option<KeyBinding> = Option.none();
-          for (const candidate of candidates) {
-            if (Option.isSome(candidate.binding)) terminal = candidate.binding;
-          }
-
-          if (!stillOpen && Option.isSome(terminal)) {
+          if (!canExtend(candidates) && Option.isSome(terminal)) {
             const { command, options } = terminal.value;
             const count = current.count === 0 ? 1 : current.count;
             // Reset first, so that a command which enters another mode finds a
@@ -282,6 +322,10 @@ export class Keyboard extends Context.Service<Keyboard, {
             ],
             count: current.count,
             pending: nextPending,
+            // A step that accepts no binding of its own keeps the earlier one.
+            // With `map a` and `map abc` bound, `ab` must still run `a` when
+            // the user stops there.
+            deferred: Option.isSome(terminal) ? terminal : current.deferred,
           });
           yield* showPending(nextPending);
           return yield* suppress(event);
@@ -346,17 +390,10 @@ export class Keyboard extends Context.Service<Keyboard, {
             return CONTINUE_BUBBLING;
           }
 
-          if (isCountKey(current, notation)) {
-            const nextPending = [...current.pending, notation];
-            yield* Ref.set(state, {
-              nodes: current.nodes,
-              count: appendCountDigit(current.count, notation),
-              pending: nextPending,
-            });
-            yield* showPending(nextPending);
-            return yield* suppress(event);
-          }
-
+          // The count prefix and the trie walk both live in `advance`, which
+          // reads the state again. A binding that an earlier key accepted can
+          // run there first, and the key then starts at the root, where a digit
+          // is a count once more.
           return yield* advance(notation, event);
         });
 

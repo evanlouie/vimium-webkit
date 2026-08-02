@@ -417,6 +417,77 @@ const insert = (trie: MutableTrieNode, binding: KeyBinding): void => {
 };
 
 // ---------------------------------------------------------------------------
+// The walk
+// ---------------------------------------------------------------------------
+
+/**
+ * The live nodes of a half-typed sequence, shallowest first.
+ *
+ * Element 0 is the root, and it stays there, so a new sequence can start inside
+ * one that the user abandoned. `g` and then `j` scrolls down, as upstream
+ * Vimium does.
+ */
+export type TrieCursor = readonly TrieNode[];
+
+/** The nodes that this key opens, in the order of the cursor. */
+export const trieCandidates = (
+  cursor: TrieCursor,
+  key: string,
+): readonly TrieNode[] => {
+  const found: TrieNode[] = [];
+  for (const node of cursor) {
+    const child = node.children.get(key);
+    if (child !== undefined) found.push(child);
+  }
+  return found;
+};
+
+/**
+ * Can the half-typed sequence take this key?
+ *
+ * The root is not part of the answer. A key that matches at the root only
+ * starts a new sequence; it does not continue the one that the user typed. The
+ * dispatcher asks this to learn whether a binding that it accepted earlier must
+ * run now.
+ */
+export const continuesSequence = (
+  cursor: TrieCursor,
+  key: string,
+): boolean => {
+  for (let index = 1; index < cursor.length; index++) {
+    if (cursor[index]?.children.has(key) === true) return true;
+  }
+  return false;
+};
+
+/**
+ * The binding of the most specific node.
+ *
+ * The cursor is shallowest first, so the last binding in it is the longest
+ * match, and the longest match wins.
+ */
+export const deepestBinding = (
+  cursor: TrieCursor,
+): Option.Option<KeyBinding> => {
+  let found: Option.Option<KeyBinding> = Option.none();
+  for (const node of cursor) {
+    if (Option.isSome(node.binding)) found = node.binding;
+  }
+  return found;
+};
+
+/**
+ * Can the most specific node take another key?
+ *
+ * While it can, the sequence is not finished, and a binding on the node waits.
+ * Firing it at once is what made `map gg` unreachable behind `map g`.
+ */
+export const canExtend = (cursor: TrieCursor): boolean => {
+  const deepest = cursor[cursor.length - 1];
+  return deepest !== undefined && deepest.children.size > 0;
+};
+
+// ---------------------------------------------------------------------------
 // Inspection (the help dialog and the tests)
 // ---------------------------------------------------------------------------
 

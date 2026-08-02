@@ -10,11 +10,15 @@ import { assert, describe, it } from "@effect/vitest";
 import { Effect, Option } from "effect";
 import { COMMANDS, DEFAULT_MAPPINGS } from "~/domain/Command.ts";
 import {
+  canExtend,
   compileMappings,
+  continuesSequence,
+  deepestBinding,
   formatDiagnostics,
   hasErrors,
   keysByCommand,
   readLogicalLines,
+  trieCandidates,
   type TrieNode,
 } from "~/domain/Mapping.ts";
 
@@ -273,5 +277,68 @@ describe("Mapping", () => {
       );
       assert.isNull(lookup(result.trie, ["j"]));
       assert.strictEqual(command(result.trie, ["J"]), "showHelp");
+    }));
+});
+
+/**
+ * The walk.
+ *
+ * The dispatcher holds a *list* of nodes, and not one node. Element 0 is the
+ * root, so a new sequence can start inside one that the user abandoned. These
+ * functions are what it asks of the trie.
+ */
+describe("the trie walk", () => {
+  const walkTrie = compile("map g scrollUp\nmap gg showHelp\nmap j scrollDown")
+    .trie;
+
+  /** The node at a key path. It must exist, or the test is wrong. */
+  const nodeAt = (keys: readonly string[]): TrieNode => {
+    const node = lookup(walkTrie, keys);
+    if (node === null) throw new Error(`no node at ${keys.join("")}`);
+    return node;
+  };
+
+  /** The cursor after the user pressed `g`: the root, and the `g` node. */
+  const afterG = (): readonly TrieNode[] => [walkTrie, nodeAt(["g"])];
+
+  it.effect("gives every node that a key opens", () =>
+    Effect.sync(() => {
+      // `g` opens `gg` from the `g` node, and `g` again from the root.
+      const candidates = trieCandidates(afterG(), "g");
+      assert.lengthOf(candidates, 2);
+      const deepest = deepestBinding(candidates);
+      assert.isTrue(Option.isSome(deepest));
+      assert.strictEqual(
+        Option.isSome(deepest) ? deepest.value.command : null,
+        "showHelp",
+      );
+    }));
+
+  it.effect("asks the root last, so the longest match wins", () =>
+    Effect.sync(() => {
+      // The `g` node carries `scrollUp` and the `gg` node carries `showHelp`.
+      // The deepest binding is the one that the user typed in full.
+      const candidates = trieCandidates(afterG(), "g");
+      assert.isFalse(canExtend(candidates));
+    }));
+
+  it.effect("says whether the half-typed sequence takes the key", () =>
+    Effect.sync(() => {
+      const cursor = afterG();
+      // `gg` exists, so `g` continues the sequence.
+      assert.isTrue(continuesSequence(cursor, "g"));
+      // `j` is bound, but only at the root. It starts a new sequence, and it
+      // does not continue this one.
+      assert.isFalse(continuesSequence(cursor, "j"));
+      assert.isFalse(continuesSequence(cursor, "x"));
+      // The root alone continues nothing.
+      assert.isFalse(continuesSequence([walkTrie], "g"));
+    }));
+
+  it.effect("says whether the most specific node takes another key", () =>
+    Effect.sync(() => {
+      assert.isTrue(canExtend([walkTrie, nodeAt(["g"])]));
+      assert.isFalse(canExtend([walkTrie, nodeAt(["g"]), nodeAt(["g", "g"])]));
+      assert.isFalse(canExtend([]));
     }));
 });

@@ -233,4 +233,146 @@ describe("Keyboard", () => {
         assert.isTrue(press.defaultPrevented);
       }).pipe(Effect.provide(layerFor({ mappings: "map j scrollDown" }))));
   });
+
+  /**
+   * A binding that is also the prefix of a longer one.
+   *
+   * The dispatcher accepts it and waits. The next key decides: it extends the
+   * sequence, or the accepted binding runs and the key starts again at the
+   * root.
+   */
+  describe("a prefix that is bound", () => {
+    const prefixMappings = [
+      "map g scrollUp",
+      "map gg scrollToTop",
+      "map j scrollDown",
+    ].join("\n");
+
+    const prefixLayer = layerFor({ mappings: prefixMappings });
+
+    it.effect("runs the longer mapping when the user completes it", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder([
+          "scrollUp",
+          "scrollToTop",
+          "scrollDown",
+        ]);
+
+        yield* stack.bubble("keydown", asEvent(new Press("g")));
+        assert.deepEqual(yield* Ref.get(calls), []);
+
+        yield* stack.bubble("keydown", asEvent(new Press("g")));
+        assert.deepEqual(yield* Ref.get(calls), ["scrollToTop:1"]);
+      }).pipe(Effect.provide(prefixLayer)));
+
+    it.effect("runs the prefix when a mapped key follows it", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder([
+          "scrollUp",
+          "scrollToTop",
+          "scrollDown",
+        ]);
+
+        yield* stack.bubble("keydown", asEvent(new Press("g")));
+        yield* stack.bubble("keydown", asEvent(new Press("j")));
+
+        // `g` ran, and `j` then started a sequence of its own.
+        assert.deepEqual(yield* Ref.get(calls), [
+          "scrollUp:1",
+          "scrollDown:1",
+        ]);
+      }).pipe(Effect.provide(prefixLayer)));
+
+    it.effect("runs the prefix when an unmapped key follows it", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder([
+          "scrollUp",
+          "scrollToTop",
+          "scrollDown",
+        ]);
+
+        yield* stack.bubble("keydown", asEvent(new Press("g")));
+        const stray = new Press("x");
+        const toPage = yield* stack.bubble("keydown", asEvent(stray));
+
+        assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
+        // The sequence is over, so the key that ended it belongs to the page.
+        assert.isTrue(toPage);
+      }).pipe(Effect.provide(prefixLayer)));
+
+    it.effect("gives the prefix the count that the user typed", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder([
+          "scrollUp",
+          "scrollToTop",
+          "scrollDown",
+        ]);
+
+        yield* stack.bubble(
+          "keydown",
+          asEvent(
+            new Press("3", {
+              code: "Digit3",
+            }),
+          ),
+        );
+        yield* stack.bubble("keydown", asEvent(new Press("g")));
+        yield* stack.bubble("keydown", asEvent(new Press("j")));
+
+        // The count belongs to the binding that the user typed it in front of.
+        // The key that ends the sequence starts a count of its own.
+        assert.deepEqual(yield* Ref.get(calls), [
+          "scrollUp:3",
+          "scrollDown:1",
+        ]);
+      }).pipe(Effect.provide(prefixLayer)));
+
+    it.effect("lets a digit start a count again after the prefix ran", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder([
+          "scrollUp",
+          "scrollToTop",
+          "scrollDown",
+        ]);
+
+        yield* stack.bubble("keydown", asEvent(new Press("g")));
+        yield* stack.bubble(
+          "keydown",
+          asEvent(
+            new Press("2", {
+              code: "Digit2",
+            }),
+          ),
+        );
+        assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
+
+        yield* stack.bubble("keydown", asEvent(new Press("j")));
+        assert.deepEqual(yield* Ref.get(calls), [
+          "scrollUp:1",
+          "scrollDown:2",
+        ]);
+      }).pipe(Effect.provide(prefixLayer)));
+
+    it.effect("keeps a binding that a deeper step accepted none", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder(["scrollUp", "scrollToTop"]);
+
+        // `ab` is a prefix of `abc` and carries no binding of its own, so the
+        // binding on `a` must survive the second key.
+        yield* stack.bubble("keydown", asEvent(new Press("a")));
+        yield* stack.bubble("keydown", asEvent(new Press("b")));
+        assert.deepEqual(yield* Ref.get(calls), []);
+
+        yield* stack.bubble("keydown", asEvent(new Press("x")));
+        assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
+      }).pipe(Effect.provide(layerFor({
+        mappings: "map a scrollUp\nmap abc scrollToTop",
+      }))));
+  });
 });
