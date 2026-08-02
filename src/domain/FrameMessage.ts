@@ -18,7 +18,9 @@
  * A hostile page can post a message that looks like our protocol. A page also
  * controls its own `srcdoc` and same-origin frames, and those frames are in the
  * frames tree by right. Window identity proves "a window on this page", and
- * never "our code". The protection is therefore in layers:
+ * never "our code". A page also reads every `message` event that a window of
+ * the page receives, so it takes a copy of the `MessagePort` that a `JOIN`
+ * transfers. The protection is therefore in layers:
  *
  * 1. **Authenticated challenge and response.** A `HELLO` is an announcement
  *    only. The coordinator answers with a one-shot token. A `JOIN` must carry
@@ -29,10 +31,17 @@
  *    coordinator, so the child transfers the port with a real `targetOrigin`
  *    and not with `"*"`. The port is the capability. To give it to `"*"` is to
  *    give it to whoever answers first.
- * 3. **Authorise, then validate.** `preauthorize` checks the envelope and the
+ * 3. **A sealed port.** Every message on the port is a `SEALED` message. The
+ *    two frames derive one AES-GCM key from the credential and from the three
+ *    values of the handshake, so the key belongs to one port and to one
+ *    attempt. The direction and the counter of each message go into the
+ *    associated data and into the initialisation vector. Page code that holds
+ *    a copy of the port therefore reads nothing, forges nothing, and cannot
+ *    play a message again or send it back.
+ * 4. **Authorise, then validate.** `preauthorize` checks the envelope and the
  *    session nonce with a direct property read, before any schema decode. An
  *    unauthorised sender can then not make us validate a large payload.
- * 4. **Nothing with a side effect crosses the wire.** Settings never travel.
+ * 5. **Nothing with a side effect crosses the wire.** Settings never travel.
  *    Every frame reads its own storage. What travels is the exclusion verdict,
  *    which is two fields, and which must come from the URL of the top frame.
  *
@@ -120,6 +129,24 @@ export const NO_REQUEST_ID = "";
  */
 const MAX_ID_LENGTH = 64;
 const MAX_LINK_TEXT = 256;
+
+/**
+ * The greatest counter that one link accepts.
+ *
+ * A counter that reaches this value ends the link. A page that draws hints
+ * every second needs a year to get there, and a frame that sends a million
+ * messages is broken in some other way.
+ */
+export const MAX_SEAL_SEQUENCE = 1_000_000;
+
+/**
+ * The greatest length of a sealed payload, in base64 characters.
+ *
+ * The largest payload that we send is a full set of descriptors, which is about
+ * 1.7 MB of text and about 2.3 MB of base64. This ceiling holds that, and it
+ * stops a peer from making us decode more.
+ */
+const MAX_SEALED_LENGTH = 4_000_000;
 const MAX_LOCAL_INDEX = 100_000;
 const MAX_DESCRIPTORS = 5_000;
 const MAX_NOTATION_LENGTH = 64;
@@ -129,6 +156,21 @@ const MAX_PASS_KEYS = 1024;
 const MAX_FRAMES = 512;
 
 const idSchema = Schema.String.check(Schema.isMaxLength(MAX_ID_LENGTH));
+
+/**
+ * An identifier of the handshake: a token, a hello id or a frame id.
+ *
+ * The alphabet is hexadecimal, because every such value comes from
+ * `crypto.getRandomValues`. The restriction is a security control, and not
+ * tidiness. `joinProofPayload` and `linkKeyPayload` join their parts with a
+ * separator, so a value that could hold a separator or a letter would let one
+ * payload spell out the other. A page that can make the child sign a text of
+ * its choice could then derive the key of the link. A hexadecimal value can
+ * spell neither payload.
+ */
+const handshakeIdSchema = Schema.String.check(
+  Schema.isPattern(/^[0-9a-f]{8,64}$/),
+);
 
 /** `localIndex` on the wire: an integer with a bound, and never negative. */
 const localIndexSchema = Schema.Int.check(
@@ -256,7 +298,7 @@ export const helloSchema = Schema.Struct({
 export const challengeSchema = Schema.Struct({
   ...envelopeShape(),
   kind: Schema.Literal("CHALLENGE"),
-  token: idSchema,
+  token: handshakeIdSchema,
 });
 
 /**
@@ -273,29 +315,34 @@ export const challengeSchema = Schema.Struct({
 export const joinSchema = Schema.Struct({
   ...envelopeShape(),
   kind: Schema.Literal("JOIN"),
-  token: idSchema,
-  helloId: idSchema,
-  frameId: idSchema,
+  token: handshakeIdSchema,
+  helloId: handshakeIdSchema,
+  frameId: handshakeIdSchema,
   /** The HMAC over the token, the hello id and the frame id. */
   proof: idSchema,
 });
 
 /**
- * Top to child, over the port. It admits the frame to the session.
+ * Top to child, inside a sealed message on the port. It admits the frame.
  *
  * It carries no settings and no exclusion verdict. The frame asks for the
  * verdict with an `EXCLUSION_REQUEST` when it needs one, and it reads its
  * settings from its own storage.
+ *
+ * It is the first message of the link, so it proves that the other end holds
+ * the credential. A page that copied the port cannot make one.
  */
 export const welcomeSchema = Schema.Struct({
   ...envelopeShape(),
   kind: Schema.Literal("WELCOME"),
-  nonce: idSchema,
+  nonce: handshakeIdSchema,
   /** The identity that the coordinator recorded, which the `JOIN` claimed. */
-  frameId: idSchema,
+  frameId: handshakeIdSchema,
   /** It gives back the `JOIN` that earned it. Anything else is a race or a spoof. */
-  helloId: idSchema,
-  frames: Schema.Array(idSchema).check(Schema.isMaxLength(MAX_FRAMES)),
+  helloId: handshakeIdSchema,
+  frames: Schema.Array(handshakeIdSchema).check(
+    Schema.isMaxLength(MAX_FRAMES),
+  ),
 });
 
 export type HelloMessage = typeof helloSchema.Type;
@@ -319,6 +366,74 @@ export const joinProofPayload = (
   helloId: string,
   frameId: string,
 ): string => `${token}:${helloId}:${frameId}`;
+
+// ---------------------------------------------------------------------------
+// The sealed envelope
+// ---------------------------------------------------------------------------
+
+/**
+ * Which way a sealed message travels.
+ *
+ * The receiver names the direction that it expects, and it never reads the
+ * direction from the wire. A message that is sent back to its sender therefore
+ * fails, because the sender opens it with the other direction.
+ */
+export const SealDirection = Schema.Literals([
+  /** Child to top. */
+  "up",
+  /** Top to child. */
+  "down",
+]);
+
+export type SealDirection = typeof SealDirection.Type;
+
+/**
+ * What travels on a port. It holds one encrypted message, and nothing else.
+ *
+ * The counter is in clear text, because the receiver needs it to build the
+ * initialisation vector and to refuse a message that it has already seen. The
+ * counter is also in the associated data, so a peer cannot change it.
+ */
+export const sealedSchema = Schema.Struct({
+  ...envelopeShape(),
+  kind: Schema.Literal("SEALED"),
+  seq: Schema.Int.check(
+    Schema.isBetween({ minimum: 0, maximum: MAX_SEAL_SEQUENCE }),
+  ),
+  /** The ciphertext and its tag, in base64 for a URL, with no padding. */
+  data: Schema.String.check(Schema.isMaxLength(MAX_SEALED_LENGTH)),
+});
+
+export type SealedMessage = typeof sealedSchema.Type;
+
+/**
+ * The text that a link key is derived from.
+ *
+ * The prefix separates this from `joinProofPayload`. The proof travels in
+ * clear text, so a derivation that used the same text would publish the key.
+ * The prefix holds letters that a handshake identifier cannot hold, and the
+ * schema accepts hexadecimal identifiers only, so the two texts can never be
+ * the same.
+ */
+export const linkKeyPayload = (
+  token: string,
+  helloId: string,
+  frameId: string,
+): string => `${PROTOCOL_MAGIC}/link/v1:${token}:${helloId}:${frameId}`;
+
+/**
+ * The associated data of one sealed message.
+ *
+ * It binds the protocol, the version, the link, the direction and the counter
+ * to the ciphertext. The receiver builds it from what it expects, so a message
+ * of another link, another direction or another position fails to open.
+ */
+export const sealedAad = (
+  link: string,
+  direction: SealDirection,
+  seq: number,
+): string =>
+  `${PROTOCOL_MAGIC}/${PROTOCOL_VERSION}/${link}/${direction}/${seq}`;
 
 // ---------------------------------------------------------------------------
 // The routed messages
@@ -568,6 +683,7 @@ const decodeWire = Schema.decodeUnknownOption(frameWireSchema);
 const decodeWindowToTop = Schema.decodeUnknownOption(windowToTopSchema);
 const decodeChallenge = Schema.decodeUnknownOption(challengeSchema);
 const decodeWelcome = Schema.decodeUnknownOption(welcomeSchema);
+const decodeSealed = Schema.decodeUnknownOption(sealedSchema);
 
 const readEnvelope = (
   data: unknown,
@@ -645,3 +761,12 @@ export const parseChallenge = (
 /** Parse a `WELCOME`. The caller must check the `helloId` of the attempt. */
 export const parseWelcome = (data: unknown): Option.Option<WelcomeMessage> =>
   Option.isNone(readEnvelope(data)) ? Option.none() : decodeWelcome(data);
+
+/**
+ * Parse the envelope of a sealed message.
+ *
+ * This says nothing about the payload. The payload is opened with the key of
+ * the link, and only then is it parsed.
+ */
+export const parseSealed = (data: unknown): Option.Option<SealedMessage> =>
+  Option.isNone(readEnvelope(data)) ? Option.none() : decodeSealed(data);

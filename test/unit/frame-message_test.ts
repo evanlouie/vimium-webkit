@@ -18,7 +18,10 @@ import {
   type HintDescriptor,
   hintModeSchema,
   joinProofPayload,
+  linkKeyPayload,
+  MAX_SEAL_SEQUENCE,
   NO_REQUEST_ID,
+  parseSealed,
   parseWelcome,
   parseWindowToTop,
   parseWire,
@@ -26,6 +29,7 @@ import {
   preauthorize,
   PROTOCOL_MAGIC,
   PROTOCOL_VERSION,
+  sealedAad,
   sortDescriptors,
   welcomeSchema,
   WIRE_TARGET_ALL,
@@ -211,11 +215,100 @@ describe("FrameMessage", () => {
       const join = {
         ...ENVELOPE,
         kind: "JOIN",
-        token: "token",
-        helloId: "hello",
+        token: "0123456789abcdef",
+        helloId: "fedcba9876543210",
         frameId: "1111111111111111",
       };
       assert.isTrue(Option.isNone(parseWindowToTop(join)));
+    }));
+
+  it.effect("refuses a handshake value that is not hexadecimal", () =>
+    Effect.sync(() => {
+      // The alphabet is a security control. `linkKeyPayload` joins the same
+      // three values with the same separator, so a value that could hold a
+      // separator or a letter would let one payload spell out the other.
+      const join = (token: string) => ({
+        ...ENVELOPE,
+        kind: "JOIN",
+        token,
+        helloId: "fedcba9876543210",
+        frameId: "1111111111111111",
+        proof: "cHJvb2Y",
+      });
+      assert.isTrue(Option.isSome(parseWindowToTop(join("0123456789abcdef"))));
+      for (
+        const token of [
+          "guessed",
+          "short",
+          "vimium-webkit/frames/link/v1:00000000",
+          "0123456789abcde:",
+          "0123456789ABCDEF",
+        ]
+      ) {
+        assert.isTrue(
+          Option.isNone(parseWindowToTop(join(token))),
+          `${token} was accepted`,
+        );
+      }
+
+      const challenge = {
+        ...ENVELOPE,
+        kind: "CHALLENGE",
+        token: "not hexadecimal",
+      };
+      assert.isTrue(Option.isNone(parseWindowToTop(challenge)));
+    }));
+
+  it.effect("keeps the join proof and the link key apart", () =>
+    Effect.sync(() => {
+      // The proof travels in clear text. A derivation that signed the same
+      // text would therefore publish the key of the link.
+      const token = "0123456789abcdef";
+      const helloId = "fedcba9876543210";
+      const frameId = "1111111111111111";
+      const proof = joinProofPayload(token, helloId, frameId);
+      const key = linkKeyPayload(token, helloId, frameId);
+      assert.notStrictEqual(proof, key);
+      // A hexadecimal token can never spell the prefix of the key payload, so
+      // no handshake that the schema accepts can make the two texts meet.
+      assert.isTrue(key.startsWith(`${PROTOCOL_MAGIC}/link/v1:`));
+      assert.isFalse(/^[0-9a-f]/.test(key));
+      assert.isTrue(/^[0-9a-f]/.test(proof));
+    }));
+
+  it.effect("binds a sealed message to its link, direction and counter", () =>
+    Effect.sync(() => {
+      const first = sealedAad("fedcba9876543210", "up", 3);
+      assert.notStrictEqual(first, sealedAad("fedcba9876543210", "down", 3));
+      assert.notStrictEqual(first, sealedAad("fedcba9876543210", "up", 4));
+      assert.notStrictEqual(first, sealedAad("0123456789abcdef", "up", 3));
+      assert.isTrue(first.startsWith(`${PROTOCOL_MAGIC}/${PROTOCOL_VERSION}/`));
+    }));
+
+  it.effect("parses a sealed envelope and refuses a broken one", () =>
+    Effect.sync(() => {
+      const sealed = { ...ENVELOPE, kind: "SEALED", seq: 0, data: "AAAA" };
+      const parsed = parseSealed(sealed);
+      assert.isTrue(Option.isSome(parsed));
+      if (Option.isNone(parsed)) return;
+      assert.strictEqual(parsed.value.seq, 0);
+
+      for (
+        const broken of [
+          { ...sealed, seq: -1 },
+          { ...sealed, seq: MAX_SEAL_SEQUENCE + 1 },
+          { ...sealed, seq: 1.5 },
+          { ...sealed, data: 42 },
+          { ...sealed, kind: "WELCOME" },
+          { ...ENVELOPE, kind: "SEALED", seq: 0 },
+          { magic: "somebody-else", v: PROTOCOL_VERSION, kind: "SEALED" },
+        ]
+      ) {
+        assert.isTrue(
+          Option.isNone(parseSealed(broken)),
+          `${JSON.stringify(broken)} was accepted`,
+        );
+      }
     }));
 
   it.effect("refuses a WELCOME that a routed message forged", () =>
@@ -227,7 +320,7 @@ describe("FrameMessage", () => {
         kind: "WELCOME",
         nonce: NONCE,
         frameId: "1111111111111111",
-        helloId: "hello",
+        helloId: "fedcba9876543210",
         frames: ["1111111111111111"],
       });
       assert.isTrue(Option.isSome(parseWelcome(welcome)));

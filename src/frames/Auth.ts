@@ -1,5 +1,6 @@
 /**
- * The manager-private credential that admits a frame to the session.
+ * The manager-private credential that admits a frame to the session, and the
+ * cipher that protects one port.
  *
  * A frame proves that it can read the private storage of the userscript
  * manager. Page code cannot read that storage, so the proof separates our own
@@ -17,6 +18,21 @@
  * id of the handshake attempt and the id of the frame. A page can read those
  * three values, and it still cannot produce the HMAC.
  *
+ * ## The cipher of one link
+ *
+ * A page reads every `message` event that a window of the page receives, so it
+ * takes a copy of the `MessagePort` that a `JOIN` transfers. The port alone is
+ * therefore not a capability. Both ends derive one AES-GCM key from the secret
+ * and from the three values of the handshake, and every message on the port is
+ * sealed with it. The direction and the counter of a message go into the
+ * associated data and into the initialisation vector, so a message cannot be
+ * sent back, moved to another link or played again.
+ *
+ * The key is derived with `linkKeyPayload`, and the join proof is made with
+ * `joinProofPayload`. The two texts can never be the same, and the service
+ * gives no way to sign a text of the caller's choice. A page that makes a child
+ * answer a false challenge therefore learns one proof, and never a key.
+ *
  * ## Where the credential may live
  *
  * The credential goes into the value store of the userscript manager, and
@@ -29,10 +45,18 @@
  * `crypto.subtle` is absent in a context that is not secure, which means a
  * plain `http:` page. There is no route around that, and there is no
  * unauthenticated join. A page without HTTPS keeps its frames apart, which is
- * the safe result.
+ * the safe result as well.
  */
 
 import { Context, Effect, Layer, Option, Ref, Schema } from "effect";
+import {
+  ENVELOPE,
+  joinProofPayload,
+  linkKeyPayload,
+  type SealDirection,
+  sealedAad,
+  type SealedMessage,
+} from "~/domain/FrameMessage.ts";
 import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 import { Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
@@ -61,7 +85,40 @@ const ALGORITHM = { name: "HMAC", hash: "SHA-256" } as const;
 /** 256 bits from the random source of the platform. */
 const SECRET_BYTES = 32;
 
+/** AES-GCM takes 96 bits, which is the size that every engine accelerates. */
+const IV_BYTES = 12;
+
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+/** The three values that name one handshake attempt, and one link. */
+export interface FrameHandshake {
+  readonly token: string;
+  readonly helloId: string;
+  readonly frameId: string;
+}
+
+/** The two ends of one port. Each one seals and opens with the same key. */
+export interface FrameCipher {
+  /** Seal one message. The counter must rise by one for each message. */
+  readonly seal: (
+    direction: SealDirection,
+    seq: number,
+    plaintext: string,
+  ) => Effect.Effect<SealedMessage, FrameAuthError>;
+
+  /**
+   * Open one message that arrived in the given direction.
+   *
+   * `None` means that the message is not ours: a wrong key, a wrong direction,
+   * a wrong counter or a changed byte all give the same answer. The error
+   * channel reports the failures of this frame only.
+   */
+  readonly open: (
+    direction: SealDirection,
+    sealed: SealedMessage,
+  ) => Effect.Effect<Option.Option<string>, FrameAuthError>;
+}
 
 const describe = (cause: unknown): string => {
   if (cause instanceof Error) return cause.message;
@@ -102,8 +159,8 @@ const readSubtle = (): Option.Option<SubtleCrypto> => {
   }
 };
 
-/** A signature that is not base64 is a rejection, and not a failure of ours. */
-const decodeSignature = (
+/** A value that is not base64 is a rejection, and not a failure of ours. */
+const decodeBase64Url = (
   value: string,
 ): Option.Option<Uint8Array<ArrayBuffer>> => {
   try {
@@ -111,6 +168,23 @@ const decodeSignature = (
   } catch {
     return Option.none();
   }
+};
+
+/**
+ * The initialisation vector of one message.
+ *
+ * It is derived, and it does not travel. A link key belongs to one attempt, and
+ * a counter rises by one for each message in one direction, so the pair of the
+ * direction and the counter is used once. That is exactly what AES-GCM needs.
+ */
+const ivFor = (
+  direction: SealDirection,
+  seq: number,
+): Uint8Array<ArrayBuffer> => {
+  const bytes = new Uint8Array(IV_BYTES);
+  bytes[0] = direction === "up" ? 1 : 2;
+  new DataView(bytes.buffer).setUint32(IV_BYTES - 4, seq, false);
+  return bytes;
 };
 
 interface CachedKey {
@@ -128,20 +202,27 @@ export class FrameAuth extends Context.Service<FrameAuth, {
    */
   readonly secret: Effect.Effect<string, FrameAuthError>;
 
-  /** Sign the payload of a handshake. */
-  readonly sign: (payload: string) => Effect.Effect<string, FrameAuthError>;
+  /** The proof that a `JOIN` must carry. */
+  readonly joinProof: (
+    handshake: FrameHandshake,
+  ) => Effect.Effect<string, FrameAuthError>;
 
   /**
-   * Check a signature.
+   * Check the proof of a `JOIN`.
    *
-   * A signature that is not readable gives `false`, because a bad signature is
-   * the fault of the peer and not of this frame. The error channel reports the
+   * A proof that is not readable gives `false`, because a bad proof is the
+   * fault of the peer and not of this frame. The error channel reports the
    * failures of this frame only.
    */
-  readonly verify: (
-    payload: string,
-    signature: string,
+  readonly verifyJoin: (
+    handshake: FrameHandshake,
+    proof: string,
   ) => Effect.Effect<boolean, FrameAuthError>;
+
+  /** The cipher of one port. Both ends derive the same one. */
+  readonly cipher: (
+    handshake: FrameHandshake,
+  ) => Effect.Effect<FrameCipher, FrameAuthError>;
 }>()("vimium/frames/FrameAuth") {
   static readonly layer: Layer.Layer<
     FrameAuth,
@@ -257,11 +338,18 @@ export class FrameAuth extends Context.Service<FrameAuth, {
           return key;
         });
 
-        const sign = Effect.fn("FrameAuth.sign")(function*(payload: string) {
+        /**
+         * The HMAC over one payload.
+         *
+         * It is private to this module. A service method that signed a text of
+         * the caller's choice would be an oracle: a page that makes a child
+         * answer a false challenge could ask for the key of a link.
+         */
+        const mac = Effect.fn("FrameAuth.mac")(function*(payload: string) {
           const value = yield* secret();
           const key = yield* keyFor(value);
           const api = yield* subtle;
-          const signature = yield* Effect.tryPromise({
+          return yield* Effect.tryPromise({
             try: () => api.sign(ALGORITHM, key, encoder.encode(payload)),
             catch: (cause) =>
               new FrameAuthError({
@@ -269,17 +357,29 @@ export class FrameAuth extends Context.Service<FrameAuth, {
                 detail: `could not sign: ${describe(cause)}`,
               }),
           });
+        });
+
+        const joinProof = Effect.fn("FrameAuth.joinProof")(function*(
+          handshake: FrameHandshake,
+        ) {
+          const signature = yield* mac(
+            joinProofPayload(
+              handshake.token,
+              handshake.helloId,
+              handshake.frameId,
+            ),
+          );
           return toBase64Url(new Uint8Array(signature));
         });
 
-        const verify = Effect.fn("FrameAuth.verify")(function*(
-          payload: string,
-          signature: string,
+        const verifyJoin = Effect.fn("FrameAuth.verifyJoin")(function*(
+          handshake: FrameHandshake,
+          proof: string,
         ) {
           const value = yield* secret();
           const key = yield* keyFor(value);
           const api = yield* subtle;
-          const bytes = decodeSignature(signature);
+          const bytes = decodeBase64Url(proof);
           if (Option.isNone(bytes)) return false;
 
           return yield* Effect.tryPromise({
@@ -288,7 +388,13 @@ export class FrameAuth extends Context.Service<FrameAuth, {
                 ALGORITHM,
                 key,
                 bytes.value,
-                encoder.encode(payload),
+                encoder.encode(
+                  joinProofPayload(
+                    handshake.token,
+                    handshake.helloId,
+                    handshake.frameId,
+                  ),
+                ),
               ),
             catch: (cause) =>
               new FrameAuthError({
@@ -298,12 +404,108 @@ export class FrameAuth extends Context.Service<FrameAuth, {
           });
         });
 
+        const cipher = Effect.fn("FrameAuth.cipher")(function*(
+          handshake: FrameHandshake,
+        ) {
+          const material = yield* mac(
+            linkKeyPayload(
+              handshake.token,
+              handshake.helloId,
+              handshake.frameId,
+            ),
+          );
+          const api = yield* subtle;
+          const key = yield* Effect.tryPromise({
+            try: () =>
+              api.importKey(
+                "raw",
+                material,
+                { name: "AES-GCM" },
+                false,
+                ["encrypt", "decrypt"],
+              ),
+            catch: (cause) =>
+              new FrameAuthError({
+                reason: "failed",
+                detail: `could not import the link key: ${describe(cause)}`,
+              }),
+          });
+
+          const seal = Effect.fn("FrameCipher.seal")(function*(
+            direction: SealDirection,
+            seq: number,
+            plaintext: string,
+          ) {
+            const sealed = yield* Effect.tryPromise({
+              try: () =>
+                api.encrypt(
+                  {
+                    name: "AES-GCM",
+                    iv: ivFor(direction, seq),
+                    additionalData: encoder.encode(
+                      sealedAad(handshake.helloId, direction, seq),
+                    ),
+                  },
+                  key,
+                  encoder.encode(plaintext),
+                ),
+              catch: (cause) =>
+                new FrameAuthError({
+                  reason: "failed",
+                  detail: `could not seal the message: ${describe(cause)}`,
+                }),
+            });
+            return {
+              ...ENVELOPE,
+              kind: "SEALED",
+              seq,
+              data: toBase64Url(new Uint8Array(sealed)),
+            } satisfies SealedMessage;
+          });
+
+          const open = Effect.fn("FrameCipher.open")(function*(
+            direction: SealDirection,
+            sealed: SealedMessage,
+          ) {
+            const bytes = decodeBase64Url(sealed.data);
+            if (Option.isNone(bytes)) return Option.none<string>();
+
+            // Every failure of `decrypt` is one answer: this message is not
+            // ours. The API gives the same error for a changed byte, a wrong
+            // key and a wrong counter, and it must, because a peer that could
+            // tell them apart would learn about the key.
+            const plain = yield* Effect.option(Effect.tryPromise({
+              try: () =>
+                api.decrypt(
+                  {
+                    name: "AES-GCM",
+                    iv: ivFor(direction, sealed.seq),
+                    additionalData: encoder.encode(
+                      sealedAad(handshake.helloId, direction, sealed.seq),
+                    ),
+                  },
+                  key,
+                  bytes.value,
+                ),
+              catch: () =>
+                new FrameAuthError({
+                  reason: "unauthenticated",
+                  detail: "the message did not open",
+                }),
+            }));
+            return Option.map(
+              plain,
+              (buffer) => decoder.decode(new Uint8Array(buffer)),
+            );
+          });
+
+          return { seal, open } satisfies FrameCipher;
+        });
+
         // The credential must exist before the first child asks to join. Only
         // the top frame can create it, and a child cannot wait for a value that
-        // nobody writes. The top frame used to create it while it verified the
-        // first join, and no child could make a join to verify. A clean
-        // installation therefore kept every frame outside the session for the
-        // life of the page.
+        // nobody writes. A clean installation would otherwise keep every frame
+        // outside the session for the life of the page.
         if (realm.isTop) {
           yield* Effect.catch(
             Effect.asVoid(secret()),
@@ -314,7 +516,12 @@ export class FrameAuth extends Context.Service<FrameAuth, {
           );
         }
 
-        return FrameAuth.of({ secret: secret(), sign, verify });
+        return FrameAuth.of({
+          secret: secret(),
+          joinProof,
+          verifyJoin,
+          cipher,
+        });
       }),
     );
 }

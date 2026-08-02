@@ -1,7 +1,7 @@
 /**
- * The credential of a frame.
+ * The credential of a frame, and the cipher of one port.
  *
- * Two properties are checked here, and each one is a defect that a review
+ * Three properties are checked here, and each one is a defect that a review
  * found:
  *
  * 1. The top frame creates the credential when its layer is built, and not
@@ -9,6 +9,8 @@
  *    installation would otherwise find nothing to sign with.
  * 2. A store that the page can read, or a store that one frame cannot share
  *    with another, gives no credential at all.
+ * 3. A message on a port is sealed. A holder of a copy of the port reads
+ *    nothing, forges nothing, and cannot send a message again or send it back.
  *
  * Every test builds its own store. Nothing here touches a global, and the two
  * frames of a test share one store, which is what the value store of a
@@ -17,8 +19,7 @@
 
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Layer, Option, Result, Stream } from "effect";
-import { joinProofPayload } from "~/domain/FrameMessage.ts";
-import { FrameAuth } from "~/frames/Auth.ts";
+import { FrameAuth, type FrameHandshake } from "~/frames/Auth.ts";
 import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
 import { type FrameId, Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
@@ -29,7 +30,7 @@ const TOP_FRAME = "1111111111111111";
 const CHILD_FRAME = "2222222222222222";
 
 /** The three values of one handshake attempt, as a `JOIN` carries them. */
-const HANDSHAKE = {
+const HANDSHAKE: FrameHandshake = {
   token: "0123456789abcdef",
   helloId: "fedcba9876543210",
   frameId: CHILD_FRAME,
@@ -136,22 +137,23 @@ describe("FrameAuth", () => {
 
         yield* Effect.gen(function*() {
           const child = yield* FrameAuth;
-          const payload = joinProofPayload(
-            HANDSHAKE.token,
-            HANDSHAKE.helloId,
-            HANDSHAKE.frameId,
-          );
-          const proof = yield* child.sign(payload);
-          assert.isTrue(yield* top.verify(payload, proof));
+          const proof = yield* child.joinProof(HANDSHAKE);
+          assert.isTrue(yield* top.verifyJoin(HANDSHAKE, proof));
 
           // The proof names one attempt and one identity, and nothing else.
           assert.isFalse(
-            yield* top.verify(
-              joinProofPayload(HANDSHAKE.token, HANDSHAKE.helloId, TOP_FRAME),
+            yield* top.verifyJoin(
+              { ...HANDSHAKE, frameId: TOP_FRAME },
               proof,
             ),
           );
-          assert.isFalse(yield* top.verify(payload, "bm90LWEtcHJvb2Y"));
+          assert.isFalse(
+            yield* top.verifyJoin(
+              { ...HANDSHAKE, token: "abcdefabcdefabcd" },
+              proof,
+            ),
+          );
+          assert.isFalse(yield* top.verifyJoin(HANDSHAKE, "bm90LWEtcHJvb2Y"));
         }).pipe(Effect.provide(frameLayer(store, false, CHILD_FRAME)));
       }).pipe(Effect.provide(frameLayer(store, true, TOP_FRAME)));
     }));
@@ -162,15 +164,7 @@ describe("FrameAuth", () => {
 
       yield* Effect.gen(function*() {
         const child = yield* FrameAuth;
-        const outcome = yield* Effect.result(
-          child.sign(
-            joinProofPayload(
-              HANDSHAKE.token,
-              HANDSHAKE.helloId,
-              HANDSHAKE.frameId,
-            ),
-          ),
-        );
+        const outcome = yield* Effect.result(child.joinProof(HANDSHAKE));
         assert.isTrue(Result.isFailure(outcome));
         if (Result.isSuccess(outcome)) return;
         assert.strictEqual(outcome.failure.reason, "unauthenticated");
@@ -197,16 +191,83 @@ describe("FrameAuth", () => {
 
       yield* Effect.gen(function*() {
         const child = yield* FrameAuth;
-        const outcome = yield* Effect.result(
-          child.sign(
-            joinProofPayload(
-              HANDSHAKE.token,
-              HANDSHAKE.helloId,
-              HANDSHAKE.frameId,
-            ),
-          ),
-        );
+        const outcome = yield* Effect.result(child.joinProof(HANDSHAKE));
         assert.isTrue(Result.isFailure(outcome));
       }).pipe(Effect.provide(frameLayer(store, false, CHILD_FRAME)));
+    }));
+
+  it.effect("seals a message that only the other end of the link opens", () =>
+    Effect.gen(function*() {
+      const store = makeStore(true);
+
+      yield* Effect.gen(function*() {
+        const top = yield* FrameAuth;
+        const topCipher = yield* top.cipher(HANDSHAKE);
+
+        yield* Effect.gen(function*() {
+          const child = yield* FrameAuth;
+          const childCipher = yield* child.cipher(HANDSHAKE);
+
+          const text = JSON.stringify({ kind: "HINTS", linkText: "Buy now" });
+          const sealed = yield* childCipher.seal("up", 0, text);
+
+          // The page reads the port. It must read nothing.
+          assert.notInclude(sealed.data, "HINTS");
+          assert.notInclude(sealed.data, "Buy now");
+
+          assert.deepEqual(
+            yield* topCipher.open("up", sealed),
+            Option.some(text),
+          );
+
+          // A message that is sent back to its sender.
+          assert.isTrue(Option.isNone(yield* topCipher.open("down", sealed)));
+          // A message that is played again with another counter.
+          assert.isTrue(
+            Option.isNone(yield* topCipher.open("up", { ...sealed, seq: 1 })),
+          );
+          // A message whose ciphertext was changed.
+          assert.isTrue(
+            Option.isNone(
+              yield* topCipher.open("up", {
+                ...sealed,
+                data: `${sealed.data.slice(0, -1)}A`,
+              }),
+            ),
+          );
+
+          // The key belongs to one attempt, so a message of one link never
+          // opens on another.
+          const other = yield* top.cipher({
+            ...HANDSHAKE,
+            helloId: "abcdefabcdefabcd",
+          });
+          assert.isTrue(Option.isNone(yield* other.open("up", sealed)));
+        }).pipe(Effect.provide(frameLayer(store, false, CHILD_FRAME)));
+      }).pipe(Effect.provide(frameLayer(store, true, TOP_FRAME)));
+    }));
+
+  it.effect("gives a page with the handshake values no way in", () =>
+    Effect.gen(function*() {
+      // The page reads the token, the hello id and the frame id out of the
+      // `JOIN` that it sees. It does not hold the credential, so it derives
+      // another key and it can neither read a message nor forge one.
+      const ours = makeStore(true);
+      const theirs = makeStore(true);
+
+      yield* Effect.gen(function*() {
+        const frame = yield* FrameAuth;
+        const cipher = yield* frame.cipher(HANDSHAKE);
+        const sealed = yield* cipher.seal("down", 0, "the session nonce");
+
+        yield* Effect.gen(function*() {
+          const page = yield* FrameAuth;
+          const forger = yield* page.cipher(HANDSHAKE);
+          assert.isTrue(Option.isNone(yield* forger.open("down", sealed)));
+
+          const forged = yield* forger.seal("down", 0, "a false welcome");
+          assert.isTrue(Option.isNone(yield* cipher.open("down", forged)));
+        }).pipe(Effect.provide(frameLayer(theirs, true, TOP_FRAME)));
+      }).pipe(Effect.provide(frameLayer(ours, true, TOP_FRAME)));
     }));
 });
