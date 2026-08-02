@@ -15,6 +15,7 @@
 import { Option } from "effect";
 import { exclusionRuleSchema } from "~/domain/Persisted.ts";
 import type { ExclusionRule } from "~/domain/Persisted.ts";
+import { isLinearRegex } from "~/domain/RegexSafety.ts";
 
 /**
  * The rule as it is stored, given again here.
@@ -41,9 +42,8 @@ const escapeRegExp = (input: string): string =>
  *
  * The page controls its URLs, and a URL can be some megabytes long. Examples
  * are a `data:` URL in an anchor, and a router that keeps its state in the
- * fragment. Nothing correct comes near this limit, and each matcher below is at
- * worst linear in the length of the input. This is the second lock on the same
- * door.
+ * fragment. Nothing correct comes near this limit, and each matcher below is
+ * linear in the length of the input. This is the second lock on the same door.
  */
 const MAX_URL_LENGTH = 4096;
 
@@ -97,8 +97,8 @@ const globMatcher = (pattern: string): UrlMatcher => {
  *
  * `*` is the only wildcard. A pattern between two `/` characters is a raw
  * regular expression, which is the escape of upstream. The result is
- * `Option.none()` for an empty or a bad pattern. A bad rule must cost the user
- * that rule, and no other rule.
+ * `Option.none()` for an empty, a bad or an unsafe pattern. A bad rule must
+ * cost the user that rule, and no other rule.
  */
 export const compilePattern = (pattern: string): Option.Option<UrlMatcher> => {
   const trimmed = pattern.trim();
@@ -106,16 +106,21 @@ export const compilePattern = (pattern: string): Option.Option<UrlMatcher> => {
   if (trimmed.length > MAX_PATTERN_LENGTH) return Option.none();
 
   if (trimmed.length > 1 && trimmed.startsWith("/") && trimmed.endsWith("/")) {
+    const source = `^${trimmed.slice(1, -1)}$`;
     let regexp: RegExp;
     try {
-      regexp = new RegExp(`^${trimmed.slice(1, -1)}$`);
+      regexp = new RegExp(source);
     } catch {
       // A bad regular expression must not disable every other rule.
       return Option.none();
     }
-    // The user wrote this expression, so there is no rewrite of a glob that
-    // makes it linear. A limit on the length of the input is the honest
-    // protection.
+    // The page chooses the URL, and the rules run on every navigation. An
+    // expression that backtracks turns one crafted URL into a frozen tab, and
+    // a limit on the length of the input does not stop it: `(a+)+$` against
+    // forty characters already takes minutes. Only the shapes that match in
+    // linear time are allowed. A glob has no such limit, and it stays the
+    // format that we ask users for.
+    if (!isLinearRegex(source, "")) return Option.none();
     return Option.some((url: string): boolean =>
       url.length <= MAX_URL_LENGTH && regexp.test(url)
     );
@@ -131,7 +136,8 @@ export const compilePattern = (pattern: string): Option.Option<UrlMatcher> => {
  * The regular expression that a glob is *equivalent* to.
  *
  * Kept for the tests, and for a view that shows the user what a pattern means.
- * It is not used to match. See `UrlMatcher`.
+ * It is not used to match. See `UrlMatcher`. It refuses the same patterns as
+ * `compilePattern`, so the two functions cannot disagree.
  */
 export const patternToRegExp = (pattern: string): Option.Option<RegExp> => {
   const trimmed = pattern.trim();
@@ -139,13 +145,16 @@ export const patternToRegExp = (pattern: string): Option.Option<RegExp> => {
     return Option.none();
   }
 
-  const source =
+  const body =
     trimmed.length > 1 && trimmed.startsWith("/") && trimmed.endsWith("/")
       ? trimmed.slice(1, -1)
       : trimmed.split("*").map(escapeRegExp).join(".*");
+  const source = `^${body}$`;
+
+  if (!isLinearRegex(source, "")) return Option.none();
 
   try {
-    return Option.some(new RegExp(`^${source}$`));
+    return Option.some(new RegExp(source));
   } catch {
     return Option.none();
   }
