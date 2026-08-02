@@ -477,6 +477,29 @@ export const deepestBinding = (
 };
 
 /**
+ * The binding that this key accepts for the sequence in progress.
+ *
+ * Element 0 of the cursor is the root. While a sequence is live, a node that
+ * the root opens only starts a new sequence. Such a node has accepted nothing.
+ * Its binding must therefore not replace the binding that an earlier key
+ * accepted.
+ *
+ * At the root the cursor holds the root alone. The key then starts the
+ * sequence, so the node that it opens gives the answer.
+ *
+ * With `map a`, `map abc` and `map b`, the key `b` after `a` opens two nodes.
+ * The node `ab` carries on the sequence, and the node `b` starts a new one.
+ * Only `ab` may accept a binding here, so the binding of `a` survives.
+ */
+export const acceptedBinding = (
+  cursor: TrieCursor,
+  key: string,
+): Option.Option<KeyBinding> =>
+  deepestBinding(
+    trieCandidates(cursor.length > 1 ? cursor.slice(1) : cursor, key),
+  );
+
+/**
  * Can the most specific node take another key?
  *
  * While it can, the sequence is not finished, and a binding on the node waits.

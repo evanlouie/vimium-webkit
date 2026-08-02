@@ -29,6 +29,7 @@ import { isPassKey } from "~/domain/Exclusion.ts";
 import { appendCountDigit, isCountDigit } from "~/domain/Key.ts";
 import { isComposing, isModifierKey, keyNotation } from "~/domain/Key.ts";
 import {
+  acceptedBinding,
   canExtend,
   continuesSequence,
   deepestBinding,
@@ -314,6 +315,12 @@ export class Keyboard extends Context.Service<Keyboard, {
             return yield* suppress(event);
           }
 
+          // Only a node that carries on the sequence may accept a binding. A
+          // node that the root opens starts a new sequence, and a new sequence
+          // has accepted nothing yet. Before this rule, `map b` took the place
+          // of `map a` while `map abc` was still live, and `a` was lost.
+          const accepted = acceptedBinding(current.nodes, notation);
+
           const nextPending = [...current.pending, notation];
           yield* Ref.set(state, {
             nodes: [
@@ -325,7 +332,7 @@ export class Keyboard extends Context.Service<Keyboard, {
             // A step that accepts no binding of its own keeps the earlier one.
             // With `map a` and `map abc` bound, `ab` must still run `a` when
             // the user stops there.
-            deferred: Option.isSome(terminal) ? terminal : current.deferred,
+            deferred: Option.isSome(accepted) ? accepted : current.deferred,
           });
           yield* showPending(nextPending);
           return yield* suppress(event);

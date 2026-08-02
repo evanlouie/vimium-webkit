@@ -10,6 +10,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { Effect, Option } from "effect";
 import { COMMANDS, DEFAULT_MAPPINGS } from "~/domain/Command.ts";
 import {
+  acceptedBinding,
   canExtend,
   compileMappings,
   continuesSequence,
@@ -341,4 +342,47 @@ describe("the trie walk", () => {
       assert.isFalse(canExtend([walkTrie, nodeAt(["g"]), nodeAt(["g", "g"])]));
       assert.isFalse(canExtend([]));
     }));
+
+  /**
+   * Which node may accept a binding.
+   *
+   * A node that the root opens starts a new sequence. It must not take the
+   * place of a binding that an earlier key accepted.
+   */
+  describe("the binding that a key accepts", () => {
+    const overlapping =
+      compile("map a scrollUp\nmap abc showHelp\nmap b scrollDown").trie;
+
+    const nodeOf = (keys: readonly string[]): TrieNode => {
+      const node = lookup(overlapping, keys);
+      if (node === null) throw new Error(`no node at ${keys.join("")}`);
+      return node;
+    };
+
+    const nameOf = (binding: Option.Option<{ command: string }>): string =>
+      Option.isSome(binding) ? binding.value.command : "none";
+
+    it.effect("takes the binding of a new sequence at the root", () =>
+      Effect.sync(() => {
+        assert.strictEqual(
+          nameOf(acceptedBinding([overlapping], "a")),
+          "scrollUp",
+        );
+      }));
+
+    it.effect("refuses the binding of a root restart", () =>
+      Effect.sync(() => {
+        // `b` opens `ab`, which carries no binding, and `b`, which carries
+        // `scrollDown`. The restart must accept nothing.
+        const cursor = [overlapping, nodeOf(["a"])];
+        assert.lengthOf(trieCandidates(cursor, "b"), 2);
+        assert.strictEqual(nameOf(acceptedBinding(cursor, "b")), "none");
+      }));
+
+    it.effect("takes the binding of a node that carries on the sequence", () =>
+      Effect.sync(() => {
+        const cursor = [overlapping, nodeOf(["a"]), nodeOf(["a", "b"])];
+        assert.strictEqual(nameOf(acceptedBinding(cursor, "c")), "showHelp");
+      }));
+  });
 });

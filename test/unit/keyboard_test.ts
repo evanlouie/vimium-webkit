@@ -374,6 +374,59 @@ describe("Keyboard", () => {
       }).pipe(Effect.provide(layerFor({
         mappings: "map a scrollUp\nmap abc scrollToTop",
       }))));
+
+    /**
+     * Three mappings that overlap: `a`, `abc` and `b`.
+     *
+     * The key `b` after `a` opens two nodes. The node `ab` carries on the
+     * sequence, and the node `b` starts a new one. The binding of `b` must not
+     * take the place of the binding that `a` accepted.
+     */
+    describe("a root restart under an accepted binding", () => {
+      const overlapping = [
+        "map a scrollUp",
+        "map abc scrollToTop",
+        "map b scrollDown",
+      ].join("\n");
+
+      const overlappingLayer = layerFor({ mappings: overlapping });
+      const names = ["scrollUp", "scrollToTop", "scrollDown"];
+
+      it.effect("runs the binding that the first key accepted", () =>
+        Effect.gen(function*() {
+          const stack = yield* HandlerStack;
+          const calls = yield* recorder(names);
+
+          yield* stack.bubble("keydown", asEvent(new Press("a")));
+          yield* stack.bubble("keydown", asEvent(new Press("b")));
+          yield* stack.bubble("keydown", asEvent(new Press("x")));
+
+          // `b` was part of the attempt at `abc`, so only `a` runs.
+          assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
+        }).pipe(Effect.provide(overlappingLayer)));
+
+      it.effect("still runs the longest sequence when the user finishes it", () =>
+        Effect.gen(function*() {
+          const stack = yield* HandlerStack;
+          const calls = yield* recorder(names);
+
+          yield* stack.bubble("keydown", asEvent(new Press("a")));
+          yield* stack.bubble("keydown", asEvent(new Press("b")));
+          yield* stack.bubble("keydown", asEvent(new Press("c")));
+
+          assert.deepEqual(yield* Ref.get(calls), ["scrollToTop:1"]);
+        }).pipe(Effect.provide(overlappingLayer)));
+
+      it.effect("still runs the new sequence when nothing is accepted", () =>
+        Effect.gen(function*() {
+          const stack = yield* HandlerStack;
+          const calls = yield* recorder(names);
+
+          yield* stack.bubble("keydown", asEvent(new Press("b")));
+
+          assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
+        }).pipe(Effect.provide(overlappingLayer)));
+    });
   });
 
   /**
