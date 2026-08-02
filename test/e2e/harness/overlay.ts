@@ -34,6 +34,53 @@ export interface OverlayNode {
   readonly box: OverlayBox;
 }
 
+/** A single attribute of the first match inside the overlay, or `null`. */
+export const overlayAttribute = (
+  page: Page,
+  selector: string,
+  name: string,
+): Promise<string | null> =>
+  page.evaluate(
+    ([query, attribute]: readonly [string, string]): string | null => {
+      const host = globalThis as unknown as ShadowHost;
+      const shadow = host.__vimiumHarness?.shadow ?? null;
+      const node = shadow?.querySelector(query) ?? null;
+      return node === null ? null : node.getAttribute(attribute);
+    },
+    [selector, name] as const,
+  );
+
+/**
+ * Is this node hidden from assistive technology?
+ *
+ * True when the node itself, or any element above it up to the overlay host,
+ * carries `aria-hidden="true"`. That is the rule that a screen reader follows,
+ * and asserting it on the node alone would miss a hidden host.
+ */
+export const overlayAriaHidden = (
+  page: Page,
+  selector: string,
+): Promise<boolean | null> =>
+  page.evaluate((query: string): boolean | null => {
+    const host = globalThis as unknown as ShadowHost;
+    const shadow = host.__vimiumHarness?.shadow ?? null;
+    const node = shadow?.querySelector(query) ?? null;
+    if (node === null) return null;
+    let current: Node | null = node;
+    while (current !== null) {
+      if (
+        current instanceof Element &&
+        current.getAttribute("aria-hidden") === "true"
+      ) {
+        return true;
+      }
+      current = current.parentNode instanceof ShadowRoot
+        ? current.parentNode.host
+        : current.parentNode;
+    }
+    return false;
+  }, selector);
+
 /** Trimmed `textContent` of the first match inside the overlay, or `null`. */
 export const overlayText = (
   page: Page,

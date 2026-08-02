@@ -11,7 +11,7 @@
  *   at this input, retargeted to the shadow host. Without an iframe of our own
  *   origin there is no way to prevent that, and we accept it.
  *
- * Three rules hold this service together:
+ * Four rules hold this service together:
  *
  * 1. **The indicator is derived.** There is no `setIndicator`. A fiber here
  *    watches `Modes.indicator` and `Keyboard.pending`, and draws whichever one
@@ -21,6 +21,9 @@
  *    a failure.
  * 3. **The auto-hide timer is a fiber, and not a timeout.** A new message
  *    interrupts the fiber that the message before it started.
+ * 4. **The line is a live region.** The HUD layer stays in the accessibility
+ *    tree, and the one line is a `role="status"` element. A live region must
+ *    exist before its text changes, or the change is never announced.
  */
 
 import {
@@ -53,6 +56,14 @@ export type HudTone = "info" | "error";
 export interface HudPromptOptions<R = never> {
   /** The text in front of the field, for example `/`. */
   readonly label: string;
+  /**
+   * What assistive technology calls the field.
+   *
+   * The visible label is one or two characters, because the HUD is one line.
+   * `/` is not a name that a screen reader can read out, so a prompt gives a
+   * name in words here. It falls back to the visible label.
+   */
+  readonly ariaLabel?: string;
   readonly initialValue?: string;
   readonly placeholder?: string;
   /** Run for every change of the text. A new run interrupts the one before. */
@@ -70,10 +81,22 @@ export interface HudPromptOptions<R = never> {
   ) => Effect.Effect<boolean, never, R>;
 }
 
-interface HudLine {
+export interface HudLine {
   readonly text: string;
   readonly tone: HudTone;
 }
+
+/**
+ * How urgently assistive technology reads the HUD line.
+ *
+ * An error asks the user to act, so it interrupts. Everything else waits for
+ * a pause in the speech, because the HUD also carries the mode indicator and
+ * the half-typed keys, and those change with every key press.
+ */
+export const liveUrgency = (
+  line: Option.Option<HudLine>,
+): "polite" | "assertive" =>
+  Option.isSome(line) && line.value.tone === "error" ? "assertive" : "polite";
 
 /** The live prompt, as the rest of the service sees it. */
 interface LivePrompt {
@@ -84,7 +107,7 @@ interface LivePrompt {
   readonly cancel: Effect.Effect<void>;
 }
 
-interface HudState {
+export interface HudState {
   /** A message from `show` or `error` that is still inside its timer. */
   readonly transient: Option.Option<HudLine>;
   /** The indicator of the innermost mode. */
@@ -109,7 +132,7 @@ const EMPTY_STATE: HudState = {
  * so an indicator that outranked the message would erase it before the user
  * could read it.
  */
-const visibleLine = (state: HudState): Option.Option<HudLine> => {
+export const visibleLine = (state: HudState): Option.Option<HudLine> => {
   if (Option.isSome(state.transient)) return state.transient;
   if (Option.isSome(state.pending)) {
     return Option.some({ text: state.pending.value, tone: "info" });
@@ -121,7 +144,7 @@ const visibleLine = (state: HudState): Option.Option<HudLine> => {
 };
 
 /** What the status span beside an open prompt says. */
-const statusText = (state: HudState): string => {
+export const statusText = (state: HudState): string => {
   if (Option.isSome(state.pending)) return state.pending.value;
   return Option.getOrElse(state.indicator, () => "");
 };
@@ -160,6 +183,13 @@ export class Hud extends Context.Service<Hud, {
       const doc = dom.document;
       const hudLayer = yield* ui.layer("hud");
 
+      // The HUD layer stays in the accessibility tree for the whole session.
+      // A live region must exist before its text changes, or the change is
+      // never announced. The region is empty while the HUD says nothing, and
+      // the other layers stay hidden, so this adds no noise for a user who
+      // reads the page.
+      yield* ui.expose(hudLayer);
+
       const element = yield* Effect.acquireRelease(
         Effect.sync(() => {
           const div = doc.createElement("div");
@@ -178,6 +208,13 @@ export class Hud extends Context.Service<Hud, {
       const textSpan = yield* Effect.acquireRelease(
         Effect.sync(() => {
           const span = doc.createElement("span");
+          // The one line of the HUD is a status message: a mode name, a
+          // pending key sequence, a count, or a failure. `role="status"` names
+          // it, and `aria-atomic` makes a reader speak the whole line instead
+          // of the characters that changed.
+          span.setAttribute("role", "status");
+          span.setAttribute("aria-live", "polite");
+          span.setAttribute("aria-atomic", "true");
           element.appendChild(span);
           return span;
         }),
@@ -193,11 +230,16 @@ export class Hud extends Context.Service<Hud, {
 
       const render: Effect.Effect<void> = Effect.gen(function*() {
         const current = yield* Ref.get(state);
+        // The host can be gone: a single-page application replaces the
+        // document element, and a hostile page removes what it can name. A
+        // message that nobody sees is worse than no message.
+        yield* ui.ensureAttached;
         yield* Effect.sync(() => {
           if (Option.isSome(current.prompt)) {
             // The message slot sits beside the field, so an error that
             // arrives during a search stays on screen instead of vanishing.
             const line = current.transient;
+            textSpan.setAttribute("aria-live", liveUrgency(line));
             textSpan.textContent = Option.isSome(line) ? line.value.text : "";
             element.dataset["tone"] = Option.isSome(line)
               ? line.value.tone
@@ -207,8 +249,13 @@ export class Hud extends Context.Service<Hud, {
             return;
           }
           const line = visibleLine(current);
+          textSpan.setAttribute("aria-live", liveUrgency(line));
           if (Option.isNone(line)) {
             element.dataset["visible"] = "false";
+            // The live region keeps its place in the tree, and loses its text.
+            // A region that still reads the last message would announce it
+            // again at the next change.
+            textSpan.textContent = "";
             return;
           }
           textSpan.textContent = line.value.text;
@@ -341,10 +388,17 @@ export class Hud extends Context.Service<Hud, {
           const parts = yield* Effect.acquireRelease(
             Effect.sync(() => {
               const container = doc.createElement("span");
+              // A group with a name, so that a reader says what the field
+              // belongs to before it reads the field itself.
+              container.setAttribute("role", "group");
 
               const label = doc.createElement("span");
               label.className = "vw-hud-label";
               label.textContent = options.label;
+              // The visible label is one character, and the field carries the
+              // same name in words. A reader that spoke both would say the
+              // punctuation twice.
+              label.setAttribute("aria-hidden", "true");
 
               const input = doc.createElement("input");
               input.className = "vw-hud-input";
@@ -360,6 +414,19 @@ export class Hud extends Context.Service<Hud, {
 
               const status = doc.createElement("span");
               status.className = "vw-hud-count";
+              // The status beside the field: the mode indicator, or the
+              // half-typed keys. The id is unique in this shadow root, and the
+              // description makes a reader say the status after the value of
+              // the field.
+              const statusId = `vw-hud-status-${id}`;
+              status.id = statusId;
+              status.setAttribute("aria-live", "polite");
+              status.setAttribute("aria-atomic", "true");
+
+              const name = options.ariaLabel ?? options.label;
+              container.setAttribute("aria-label", name);
+              input.setAttribute("aria-label", name);
+              input.setAttribute("aria-describedby", statusId);
 
               container.append(label, input, status);
               element.appendChild(container);
