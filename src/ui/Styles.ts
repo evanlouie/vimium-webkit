@@ -399,6 +399,19 @@ export const BASE_CSS: string = `
   flex: 1;
 }
 
+/*
+ * A field whose control is a text area. The label sits on its own line, and
+ * the text area follows it at the full width of the dialog.
+ */
+.vw-field--block {
+  display: block;
+  margin-top: 10px;
+}
+
+.vw-field--block label {
+  display: block;
+}
+
 .vw-field input[type="number"] {
   width: 90px;
   padding: 3px 6px;
@@ -407,6 +420,32 @@ export const BASE_CSS: string = `
   border: 1px solid var(--vw-border);
   border-radius: 4px;
   font: inherit;
+}
+
+.vw-field input[type="text"] {
+  width: min(360px, 55%);
+  padding: 3px 6px;
+  background: var(--vw-bg);
+  color: var(--vw-fg);
+  border: 1px solid var(--vw-border);
+  border-radius: 4px;
+  font: inherit;
+  font-family: var(--vw-mono);
+}
+
+/*
+ * The focus ring.
+ *
+ * .vw-button starts from "all: unset", which removes the ring of the user
+ * agent as well. A user who moves through the dialog with the keyboard could
+ * therefore not tell which button was about to act.
+ */
+.vw-dialog button:focus-visible,
+.vw-dialog input:focus-visible,
+.vw-dialog textarea:focus-visible,
+.vw-hud-input:focus-visible {
+  outline: 2px solid var(--vw-accent);
+  outline-offset: 2px;
 }
 
 .vw-button-row {
