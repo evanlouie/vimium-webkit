@@ -18,9 +18,11 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./harness/fixtures.ts";
 import {
+  overlayActiveElement,
   overlayAriaHidden,
   overlayAttribute,
   overlayCount,
+  overlayFocusWithin,
   overlayText,
 } from "./harness/overlay.ts";
 
@@ -145,6 +147,124 @@ test.describe("the accessibility tree", () => {
         "aria-hidden",
       ),
     ).toBe("true");
+  });
+
+  test("removes the dialog before it hides the layer", async ({ vw, page }) => {
+    await vw.open("/long-text.html");
+    await vw.press("?");
+    await waitForOverlay(page, ".vw-dialog");
+
+    // A layer that carries `aria-hidden="true"` while it still holds the
+    // focused element is the state that browsers warn about, because a screen
+    // reader loses the focused node. A scope releases in the reverse order of
+    // its acquisitions, so the layer is opened before the dialog is built.
+    await page.evaluate((): boolean => {
+      const host = globalThis as unknown as {
+        __vimiumHarness?: { shadow: ShadowRoot | null };
+        __vwCloseLog?: string[];
+      };
+      const shadow = host.__vimiumHarness?.shadow ?? null;
+      const layer = shadow?.querySelector('.vw-layer[data-layer="dialog"]') ??
+        null;
+      if (layer === null) return false;
+      const log: string[] = [];
+      host.__vwCloseLog = log;
+      new MutationObserver((records) => {
+        for (const record of records) {
+          if (record.type === "childList" && record.removedNodes.length > 0) {
+            log.push("the dialog left the layer");
+            continue;
+          }
+          if (record.type === "attributes") {
+            log.push(`aria-hidden=${layer.getAttribute("aria-hidden")}`);
+          }
+        }
+      }).observe(layer, {
+        attributes: true,
+        attributeFilter: ["aria-hidden"],
+        childList: true,
+      });
+      return true;
+    });
+
+    await vw.press("Escape");
+    await expect.poll(() => overlayCount(page, ".vw-dialog")).toBe(0);
+
+    const log = await page.evaluate((): readonly string[] => {
+      const host = globalThis as unknown as { __vwCloseLog?: string[] };
+      return host.__vwCloseLog ?? [];
+    });
+    expect(log).toContain("aria-hidden=true");
+    expect(log[0]).toBe("the dialog left the layer");
+  });
+
+  test("the help dialog keeps the focus inside itself", async ({ vw, page }) => {
+    await vw.open("/long-text.html");
+    await vw.press("?");
+    await waitForOverlay(page, ".vw-dialog");
+
+    // `aria-modal="true"` says that the rest of the page is unavailable. The
+    // keyboard must agree with that claim. Without the trap the first Tab put
+    // the focus on `document.body`, and every Tab after it stayed there.
+    for (let press = 0; press < 6; press++) {
+      // oxlint-disable-next-line no-await-in-loop
+      await vw.press("Tab");
+      // oxlint-disable-next-line no-await-in-loop
+      const inside = await overlayFocusWithin(page, ".vw-dialog");
+      // oxlint-disable-next-line no-await-in-loop
+      const active = await overlayActiveElement(page);
+      expect(inside, `press ${press + 1} left the dialog for ${active}`)
+        .toBe(true);
+    }
+
+    // Shift and Tab must stay inside as well.
+    await page.keyboard.press("Shift+Tab");
+    expect(await overlayFocusWithin(page, ".vw-dialog")).toBe(true);
+  });
+
+  test("the settings dialog keeps the focus inside itself", async ({ vw, page }) => {
+    await vw.open("/long-text.html");
+    await vw.press("?");
+    await waitForOverlay(page, ".vw-dialog");
+    expect(await clickOverlayButton(page, "Settings")).toBe(true);
+    await waitForOverlay(page, "#vw-set-keyMappings");
+
+    // Backwards from the dialog box, which is the far end of a long form.
+    // Forwards from there the trap must wrap to the first control.
+    await page.keyboard.press("Shift+Tab");
+    expect(await overlayFocusWithin(page, ".vw-dialog")).toBe(true);
+    expect(await overlayActiveElement(page)).toBe("button.vw-button");
+
+    await vw.press("Tab");
+    expect(await overlayFocusWithin(page, ".vw-dialog")).toBe(true);
+
+    for (let press = 0; press < 6; press++) {
+      // oxlint-disable-next-line no-await-in-loop
+      await vw.press("Tab");
+      // oxlint-disable-next-line no-await-in-loop
+      expect(await overlayFocusWithin(page, ".vw-dialog")).toBe(true);
+    }
+  });
+
+  test("the dialog gives the focus back when it closes", async ({ vw, page }) => {
+    await vw.open("/long-text.html");
+    await page.evaluate(() => {
+      const beacon = document.createElement("a");
+      beacon.id = "beacon";
+      beacon.href = "#beacon";
+      beacon.textContent = "beacon";
+      document.body.appendChild(beacon);
+      beacon.focus();
+    });
+    expect(await vw.focusedId()).toBe("beacon");
+
+    await vw.press("?");
+    await waitForOverlay(page, ".vw-dialog");
+    await vw.press("Escape");
+    await expect.poll(() => overlayCount(page, ".vw-dialog")).toBe(0);
+
+    // A modal that drops the focus leaves the user at the top of the document.
+    await expect.poll(() => vw.focusedId()).toBe("beacon");
   });
 
   test("every settings control has a label of its own", async ({ vw, page }) => {

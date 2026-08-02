@@ -12,7 +12,10 @@
  * The dialog owns the keyboard while it is open. It does that with a mode whose
  * key handler answers `SUPPRESS_PROPAGATION`: normal mode and the page see
  * nothing, and the default action stays, so the user can still type into the
- * text areas.
+ * text areas. Tab is the one exception. Both dialogs say `aria-modal="true"`,
+ * which promises that the rest of the page is unavailable, so the mode takes
+ * Tab and moves the focus by hand inside the dialog. The dialog also gives the
+ * focus back to the element that had it.
  *
  * The settings form is data. `SETTINGS_SECTIONS` names every documented
  * setting, and the build step below draws the controls from that list. The
@@ -31,7 +34,7 @@ import {
   Scope,
 } from "effect";
 import { Commands } from "~/core/Commands.ts";
-import { SUPPRESS_PROPAGATION } from "~/core/HandlerStack.ts";
+import { SUPPRESS_EVENT, SUPPRESS_PROPAGATION } from "~/core/HandlerStack.ts";
 import { Mappings } from "~/core/Mappings.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
@@ -49,6 +52,7 @@ import {
 } from "~/domain/Persisted.ts";
 import { Capabilities, formatCapabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
+import { deepActiveElement } from "~/platform/Elements.ts";
 import type { KeyValueKind } from "~/platform/KeyValueStore.ts";
 import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
 
@@ -574,6 +578,39 @@ export const adjustedFields = (
     .map((field) => field.label);
 
 // ---------------------------------------------------------------------------
+// The focus trap
+// ---------------------------------------------------------------------------
+
+/**
+ * Which control takes the focus for one Tab press.
+ *
+ * `current` is the position of the focused control, or -1 while the focus is
+ * on the dialog box itself. The answer wraps at both ends, because
+ * `aria-modal="true"` promises that nothing outside the dialog is available.
+ * -1 means that the dialog holds no control, so the box itself keeps the
+ * focus.
+ */
+export const nextFocusIndex = (
+  count: number,
+  current: number,
+  backwards: boolean,
+): number => {
+  if (count <= 0) return -1;
+  if (current < 0) return backwards ? count - 1 : 0;
+  return (current + (backwards ? -1 : 1) + count) % count;
+};
+
+/** The controls of one dialog, in tab order. */
+const FOCUSABLE_SELECTOR =
+  "a[href], button, input, select, textarea, [tabindex]";
+
+const focusableIn = (dialog: HTMLElement): readonly HTMLElement[] =>
+  [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)]
+    .filter((element) =>
+      !element.hasAttribute("disabled") && element.tabIndex >= 0
+    );
+
+// ---------------------------------------------------------------------------
 // The service
 // ---------------------------------------------------------------------------
 
@@ -639,6 +676,21 @@ export class Dialog extends Context.Service<Dialog, {
       });
 
       /**
+       * Move the focus to the next or the previous control of the dialog.
+       *
+       * The root is closed, so `document.activeElement` is the host from
+       * outside. `shadow.activeElement` gives the true node.
+       */
+      const moveFocus = (dialog: HTMLElement, backwards: boolean): void => {
+        const targets = focusableIn(dialog);
+        const active = ui.shadow.activeElement;
+        const current = targets.findIndex((element) => element === active);
+        const index = nextFocusIndex(targets.length, current, backwards);
+        const target = index < 0 ? dialog : targets[index];
+        if (target !== undefined) target.focus({ preventScroll: true });
+      };
+
+      /**
        * Put a dialog on screen, in a scope of its own.
        *
        * `build` gets the scope, so a listener that it registers goes away with
@@ -655,6 +707,17 @@ export class Dialog extends Context.Service<Dialog, {
           ): Effect.Effect<B> =>
             Effect.provideService(effect, Scope.Scope, scope);
 
+          // The layer is opened before the dialog is built, so that the
+          // release steps run in the other order: the dialog leaves the tree
+          // first, and `aria-hidden` arrives on an empty layer. A layer that
+          // became hidden while it still held the focused element is the state
+          // that browsers warn about, because a screen reader loses the
+          // focused node.
+          yield* inScope(acceptPointerEvents(dialogLayer));
+          // The dialog is a true control, so assistive technology must reach
+          // it. The release step hides the layer again.
+          yield* inScope(ui.expose(dialogLayer));
+
           const parts = yield* inScope(build);
 
           const backdrop = yield* inScope(Effect.acquireRelease(
@@ -670,11 +733,6 @@ export class Dialog extends Context.Service<Dialog, {
               }),
           ));
 
-          yield* inScope(acceptPointerEvents(dialogLayer));
-          // The dialog is a true control, so assistive technology must reach
-          // it. The release step hides the layer again.
-          yield* inScope(ui.expose(dialogLayer));
-
           yield* inScope(
             dom.listenOn(
               backdrop,
@@ -686,16 +744,46 @@ export class Dialog extends Context.Service<Dialog, {
           // The dialog owns the keyboard. `SUPPRESS_PROPAGATION` keeps the
           // event from normal mode and from the page, and keeps the default
           // action, so the user can still type into a text area.
+          //
+          // Tab is the exception. `SUPPRESS_PROPAGATION` calls
+          // `stopImmediatePropagation` only, so the default action of Tab took
+          // the focus out of the dialog and on to the page behind it. That
+          // breaks the promise of `aria-modal="true"`, which tells a screen
+          // reader that the rest of the page is unavailable. `SUPPRESS_EVENT`
+          // takes the key, and the trap moves the focus by hand.
           const mode = yield* inScope(modes.enter({
             name: "dialog",
             singleton: "dialog",
             exitOnEscape: true,
           }, {
-            keydown: () => Effect.succeed(SUPPRESS_PROPAGATION),
+            keydown: (event) =>
+              Effect.sync(() => {
+                if (event.key !== "Tab") return SUPPRESS_PROPAGATION;
+                moveFocus(parts.dialog, event.shiftKey);
+                return SUPPRESS_EVENT;
+              }),
           }));
           yield* mode.onExit(() => close);
 
           yield* Ref.set(openScope, Option.some(scope));
+
+          // Acquired last, so that its release step runs first: the focus
+          // leaves the dialog before the dialog leaves the tree. A modal that
+          // drops the focus leaves the user at the top of the document.
+          yield* inScope(Effect.acquireRelease(
+            dom.probeOr(
+              () => Option.fromNullishOr(deepActiveElement(doc)),
+              Option.none<Element>(),
+            ),
+            (previous) =>
+              Effect.ignore(dom.attempt("HTMLElement.focus", () => {
+                if (Option.isNone(previous)) return;
+                const element = previous.value;
+                if (element instanceof HTMLElement && element.isConnected) {
+                  element.focus({ preventScroll: true });
+                }
+              })),
+          ));
 
           yield* Effect.sync(() => {
             parts.dialog.tabIndex = -1;
