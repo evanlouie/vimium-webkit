@@ -6,23 +6,35 @@
  * a silent no-op (goal G3).
  */
 
-import { err, ok, type Result, ResultAsync } from "neverthrow";
-import { type GmSurface, liftResult, openInTab } from "./gm.ts";
+import { Effect, Schema } from "effect";
+import { type GmSurface, openInTab } from "./gm.ts";
 
-export type TabErrorKind = "unavailable" | "blocked" | "failed" | "unsafe-url";
+export const TabFailureReason = Schema.Literals([
+  "unavailable",
+  "blocked",
+  "failed",
+  "unsafe-url",
+]);
 
-export interface TabError {
-  readonly kind: TabErrorKind;
-  readonly message: string;
+export type TabFailureReason = typeof TabFailureReason.Type;
+
+export class TabError extends Schema.TaggedErrorClass<TabError>()("TabError", {
+  reason: TabFailureReason,
+  detail: Schema.String,
   /** Shown in the HUD when the failure is a permanent capability gap. */
-  readonly nativeAlternative?: string;
-}
+  nativeAlternative: Schema.optional(Schema.String),
+}) {}
 
 const tabError = (
-  kind: TabErrorKind,
-  message: string,
+  reason: TabFailureReason,
+  detail: string,
   nativeAlternative?: string,
-): TabError => ({ kind, message, nativeAlternative });
+): TabError =>
+  new TabError({
+    reason,
+    detail,
+    ...(nativeAlternative !== undefined ? { nativeAlternative } : {}),
+  });
 
 /**
  * Where a URL came from, which decides how much we trust it.
@@ -106,35 +118,37 @@ export const openTab = (
   surface: GmSurface,
   url: string,
   options: OpenTabOptions = {},
-): ResultAsync<OpenTabOutcome, TabError> => {
-  if (!isNavigableUrl(url, options.trust ?? "page")) {
-    return liftResult(
-      err(tabError("unsafe-url", `refusing to open ${url.slice(0, 60)}`)),
+): Effect.Effect<OpenTabOutcome, TabError> =>
+  Effect.suspend((): Effect.Effect<OpenTabOutcome, TabError> => {
+    if (!isNavigableUrl(url, options.trust ?? "page")) {
+      return Effect.fail(
+        tabError("unsafe-url", `refusing to open ${url.slice(0, 60)}`),
+      );
+    }
+
+    const absolute = new URL(url, document.baseURI).href;
+    const active = options.active ?? true;
+
+    return openInTab(surface, absolute, {
+      active,
+      insert: options.insert ?? true,
+      setParent: true,
+      // Tampermonkey's legacy spelling; harmlessly ignored elsewhere.
+      loadInBackground: !active,
+    }).pipe(
+      Effect.mapError((cause) =>
+        tabError(
+          cause.reason === "unavailable" ? "unavailable" : "blocked",
+          cause.detail,
+        )
+      ),
+      Effect.map((result) => ({
+        url: absolute,
+        viaManager: result.viaManager,
+        close: result.handle?.close ? () => result.handle?.close?.() : null,
+      })),
     );
-  }
-
-  const absolute = new URL(url, document.baseURI).href;
-  const active = options.active ?? true;
-
-  return openInTab(surface, absolute, {
-    active,
-    insert: options.insert ?? true,
-    setParent: true,
-    // Tampermonkey's legacy spelling; harmlessly ignored elsewhere.
-    loadInBackground: !active,
-  })
-    .mapErr((cause) =>
-      tabError(
-        cause.kind === "unavailable" ? "unavailable" : "blocked",
-        cause.message,
-      )
-    )
-    .map((result) => ({
-      url: absolute,
-      viaManager: result.viaManager,
-      close: result.handle?.close ? () => result.handle?.close?.() : null,
-    }));
-};
+  });
 
 /**
  * Close the current tab.
@@ -143,30 +157,30 @@ export const openTab = (
  * and quoid/Stay do not. When unavailable the caller must show the HUD message
  * carried on the error rather than doing nothing.
  */
-export const closeCurrentTab = (surface: GmSurface): Result<void, TabError> => {
-  const close = surface.windowClose;
-  if (!close) {
-    return err(
-      tabError(
-        "unavailable",
-        "closing tabs needs Tampermonkey or Violentmonkey",
-        "⌘W",
-      ),
-    );
-  }
-  try {
-    close();
-    return ok(undefined);
-  } catch (cause) {
-    return err(
-      tabError(
-        "failed",
-        cause instanceof Error ? cause.message : String(cause),
-        "⌘W",
-      ),
-    );
-  }
-};
+export const closeCurrentTab = (
+  surface: GmSurface,
+): Effect.Effect<void, TabError> =>
+  Effect.suspend(() => {
+    const close = surface.windowClose;
+    if (!close) {
+      return Effect.fail(
+        tabError(
+          "unavailable",
+          "closing tabs needs Tampermonkey or Violentmonkey",
+          "⌘W",
+        ),
+      );
+    }
+    return Effect.try({
+      try: () => close(),
+      catch: (cause) =>
+        tabError(
+          "failed",
+          cause instanceof Error ? cause.message : String(cause),
+          "⌘W",
+        ),
+    });
+  });
 
 /**
  * Navigate this tab. Used by every Tier-A navigation command so that a single
@@ -176,22 +190,22 @@ export const navigate = (
   url: string,
   replace = false,
   trust: UrlTrust = "page",
-): Result<void, TabError> => {
-  if (!isNavigableUrl(url, trust)) {
-    return err(
-      tabError("unsafe-url", `refusing to navigate to ${url.slice(0, 60)}`),
-    );
-  }
-  try {
-    if (replace) location.replace(url);
-    else location.assign(url);
-    return ok(undefined);
-  } catch (cause) {
-    return err(
-      tabError(
-        "failed",
-        cause instanceof Error ? cause.message : String(cause),
-      ),
-    );
-  }
-};
+): Effect.Effect<void, TabError> =>
+  Effect.suspend(() => {
+    if (!isNavigableUrl(url, trust)) {
+      return Effect.fail(
+        tabError("unsafe-url", `refusing to navigate to ${url.slice(0, 60)}`),
+      );
+    }
+    return Effect.try({
+      try: () => {
+        if (replace) location.replace(url);
+        else location.assign(url);
+      },
+      catch: (cause) =>
+        tabError(
+          "failed",
+          cause instanceof Error ? cause.message : String(cause),
+        ),
+    });
+  });

@@ -16,6 +16,8 @@ import {
   probeCapabilities,
 } from "~/platform/capabilities.ts";
 import { detectGmSurface, selectValueBackend } from "~/platform/gm.ts";
+import { Effect } from "effect";
+import { type AppRuntime, makeAppRuntime } from "./runtime.ts";
 import { STORAGE_PREFIX, ValueStore } from "~/platform/storage.ts";
 import {
   findHistoryGroup,
@@ -80,7 +82,7 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
   };
   store.onIssue((issue) => {
     reportIssue(
-      `Stored ${issue.group} could not be read (${issue.kind}); using defaults. ` +
+      `Stored ${issue.group} could not be read (${issue.reason}); using defaults. ` +
         "Open Settings to review.",
     );
   });
@@ -101,7 +103,12 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
   //
   // Driven off the store's own registry rather than a hand-written list, so
   // this class of bug is structurally impossible rather than caught by review.
-  await store.hydrateAll();
+  // One runtime per frame, built here rather than at module scope: a frame
+  // that never sees a keystroke must not pay for it.
+  const runtime: AppRuntime = makeAppRuntime();
+
+  // Every group, not a subset — see the note above.
+  await runtime.runPromise(store.hydrateAll());
 
   let settings: Settings = groups.settings.current();
   let mappings = compile(settings, caps);
@@ -205,7 +212,7 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
    * path.
    */
   const reloadSettings = async (): Promise<void> => {
-    await groups.settings.hydrate();
+    await runtime.runPromise(groups.settings.hydrate());
     settings = groups.settings.current();
     mappings = compile(settings, caps);
     normalMode.recompiled();
@@ -225,14 +232,16 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       mappings = compile(settings, caps);
       normalMode.recompiled();
       ui.syncColorScheme();
-      await groups.settings.write(next);
+      await runtime.runPromise(Effect.ignore(groups.settings.write(next)));
       frames.pushSettings();
     },
     saveMappings: async (source) => {
       settings = { ...settings, keyMappings: source };
       mappings = compile(settings, caps);
       normalMode.recompiled();
-      await groups.settings.write(settings);
+      await runtime.runPromise(
+        Effect.ignore(groups.settings.write(settings)),
+      );
     },
   });
 
@@ -252,6 +261,7 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
   });
 
   appRef = {
+    runtime,
     caps,
     gm,
     handlerStack,
@@ -388,7 +398,7 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
     // Marks debounce 100 ms, settings 250 ms and the history index 2 s; a
     // navigation inside any of those windows used to discard the write.
     onPersist: () => {
-      void store.flushAll();
+      runtime.runFork(store.flushAll());
       normalMode.forgetSuppressed();
     },
     onVisible: () => {
@@ -408,13 +418,16 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       for (const off of detach) off();
       teardownCommandObservers();
       // Anything still inside a debounce window would otherwise be discarded.
-      void store.flushAll();
+      runtime.runFork(store.flushAll());
       exitAllModes("navigation");
       frames.dispose();
       scroller.dispose();
       normalMode.forgetSuppressed();
       ui.destroy();
       handlerStack.reset();
+      // Last: closes the runtime's scope, releasing anything acquired through
+      // it. Nothing above may need the runtime after this point.
+      void runtime.dispose();
     },
   };
 };

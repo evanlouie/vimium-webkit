@@ -4,11 +4,12 @@
  * Nothing outside this module may reference a `GM`/`GM_*` identifier; the build
  * enforces that (IMPLEMENTATION_PLAN.md §9.4 item 6). Everything here is
  * feature-*probed*, never sniffed by manager name, and every fallible operation
- * returns a `Result` so callers are forced to have a user-visible story for
- * failure rather than an unhandled rejection.
+ * returns an `Effect` whose error channel names the failure, so callers are
+ * forced to have a user-visible story for failure rather than an unhandled
+ * rejection.
  */
 
-import { err, ok, Result, ResultAsync } from "neverthrow";
+import { Effect, Option, Schema } from "effect";
 import { probe } from "./ambient.ts";
 import type {
   GmNamespace,
@@ -26,34 +27,40 @@ export type { GmOpenInTabOptions, GmXhrDetails, GmXhrResponse };
 // Errors
 // ---------------------------------------------------------------------------
 
-export type GmErrorKind =
+/**
+ * Why a manager call did not produce a value.
+ *
+ * A `reason` field rather than three error classes: callers overwhelmingly
+ * treat all three the same way (tell the user the feature is off), and the two
+ * that do care use `Effect.catchReason` to pick one out. Three classes would
+ * have made the common case a three-arm match.
+ */
+export const GmFailureReason = Schema.Literals([
   /** The manager does not expose this API at all. */
-  | "unavailable"
+  "unavailable",
   /** The API exists but threw or rejected. */
-  | "failed"
+  "failed",
   /** The API returned something we could not make sense of. */
-  | "invalid";
+  "invalid",
+]);
 
-export interface GmError {
-  readonly kind: GmErrorKind;
-  readonly api: string;
-  readonly message: string;
-  readonly cause?: unknown;
-}
+export type GmFailureReason = typeof GmFailureReason.Type;
 
-export const gmError = (
-  kind: GmErrorKind,
-  api: string,
-  message: string,
-  cause?: unknown,
-): GmError => ({ kind, api, message, cause });
+export class GmError extends Schema.TaggedErrorClass<GmError>()("GmError", {
+  reason: GmFailureReason,
+  api: Schema.String,
+  detail: Schema.String,
+  // `Defect` rather than `Unknown`: this may be an arbitrary thrown value, and
+  // it has to survive being written to storage or crossing the frame wire.
+  cause: Schema.optional(Schema.Defect()),
+}) {}
 
 const unavailable = (api: string): GmError =>
-  gmError(
-    "unavailable",
+  new GmError({
+    reason: "unavailable",
     api,
-    `${api} is not provided by this userscript manager`,
-  );
+    detail: `${api} is not provided by this userscript manager`,
+  });
 
 const describe = (cause: unknown): string => {
   if (cause instanceof Error) return cause.message;
@@ -61,35 +68,27 @@ const describe = (cause: unknown): string => {
   return String(cause);
 };
 
-/** Run a synchronous manager call, converting a throw into a `GmError`. */
-export const attempt = <T>(api: string, fn: () => T): Result<T, GmError> =>
-  Result.fromThrowable(
-    fn,
-    (cause): GmError => gmError("failed", api, describe(cause), cause),
-  )();
+const failed = (api: string) => (cause: unknown): GmError =>
+  new GmError({ reason: "failed", api, detail: describe(cause), cause });
+
+/**
+ * Run a synchronous manager call, converting a throw into a `GmError`.
+ *
+ * Synchronous on purpose. `Effect.try` does not suspend, so a call made from
+ * inside a key handler still runs within the browser's transient activation
+ * window — which is the whole reason `setClipboard` works at all.
+ */
+export const attempt = <T>(
+  api: string,
+  fn: () => T,
+): Effect.Effect<T, GmError> => Effect.try({ try: fn, catch: failed(api) });
 
 /** Run an async manager call, converting a rejection into a `GmError`. */
 export const attemptAsync = <T>(
   api: string,
   fn: () => Promise<T>,
-): ResultAsync<T, GmError> =>
-  ResultAsync.fromPromise(
-    (async () => await fn())(),
-    (cause): GmError => gmError("failed", api, describe(cause), cause),
-  );
-
-/** Lift an already-computed `Result` into the async track. */
-export const liftResult = <T, E>(result: Result<T, E>): ResultAsync<T, E> =>
-  ResultAsync.fromSafePromise(Promise.resolve(0)).andThen(() => result);
-
-/** Defer a synchronous manager call onto the async track. */
-const attemptLater = <T>(
-  api: string,
-  fn: () => T,
-): ResultAsync<T, GmError> =>
-  ResultAsync.fromSafePromise(Promise.resolve(0)).andThen(() =>
-    attempt(api, fn)
-  );
+): Effect.Effect<T, GmError> =>
+  Effect.tryPromise({ try: async () => await fn(), catch: failed(api) });
 
 // ---------------------------------------------------------------------------
 // Surface detection
@@ -284,14 +283,19 @@ export type ValueBackendKind =
  * We deliberately store only JSON strings rather than relying on the managers'
  * own (inconsistent) structured-value support: quoid round-trips through JSON
  * anyway, Tampermonkey and Violentmonkey differ on what they will accept, and
- * owning the serialisation is what lets `storage.ts` Zod-validate every read.
+ * owning the serialisation is what lets `storage.ts` validate every read
+ * against a schema.
+ *
+ * `get` answers `Option` rather than `string | undefined`: "absent" is a normal
+ * outcome here, not a failure, and the two must not be confused with a stored
+ * empty string.
  */
 export interface ValueBackend {
   readonly kind: ValueBackendKind;
-  get(key: string): ResultAsync<string | undefined, GmError>;
-  set(key: string, value: string): ResultAsync<void, GmError>;
-  remove(key: string): ResultAsync<void, GmError>;
-  list(): ResultAsync<readonly string[], GmError>;
+  get(key: string): Effect.Effect<Option.Option<string>, GmError>;
+  set(key: string, value: string): Effect.Effect<void, GmError>;
+  remove(key: string): Effect.Effect<void, GmError>;
+  list(): Effect.Effect<readonly string[], GmError>;
   /** Cross-tab change notification; `null` when the manager has no primitive. */
   readonly watch:
     | ((key: string, onChange: (raw: string | undefined) => void) => () => void)
@@ -305,6 +309,9 @@ const asString = (value: GmValue | undefined): string | undefined =>
     ? undefined
     : String(value);
 
+const asOption = (value: GmValue | undefined): Option.Option<string> =>
+  Option.fromNullishOr(asString(value) ?? null);
+
 const syncBackend = (surface: GmSurface): ValueBackend | null => {
   const { getValueSync, setValueSync, deleteValueSync, listValuesSync } =
     surface;
@@ -314,22 +321,19 @@ const syncBackend = (surface: GmSurface): ValueBackend | null => {
 
   return {
     kind: "gm-sync",
-    get: (key) =>
-      attemptLater("GM_getValue", () => asString(getValueSync(key))),
+    get: (key) => attempt("GM_getValue", () => asOption(getValueSync(key))),
     set: (key, value) =>
-      attemptLater("GM_setValue", () => {
+      attempt("GM_setValue", () => {
         setValueSync(key, value);
       }),
     remove: (key) =>
-      attemptLater("GM_deleteValue", () => {
+      attempt("GM_deleteValue", () => {
         deleteValueSync(key);
       }),
     list: () =>
       listValuesSync
-        ? attemptLater("GM_listValues", () => [...listValuesSync()])
-        : liftResult(
-          err<readonly string[], GmError>(unavailable("GM_listValues")),
-        ),
+        ? attempt("GM_listValues", () => [...listValuesSync()])
+        : Effect.fail(unavailable("GM_listValues")),
     watch: watcher
       ? (key, onChange) => {
         const id = watcher(key, (_name, _old, newValue) => {
@@ -359,7 +363,7 @@ const asyncBackend = (surface: GmSurface): ValueBackend | null => {
   return {
     kind: "gm-async",
     get: (key) =>
-      attemptAsync("GM.getValue", async () => asString(await getValue(key))),
+      attemptAsync("GM.getValue", async () => asOption(await getValue(key))),
     set: (key, value) =>
       attemptAsync("GM.setValue", async () => {
         await setValue(key, value);
@@ -371,9 +375,7 @@ const asyncBackend = (surface: GmSurface): ValueBackend | null => {
     list: () =>
       listValues
         ? attemptAsync("GM.listValues", async () => [...(await listValues())])
-        : liftResult(
-          err<readonly string[], GmError>(unavailable("GM.listValues")),
-        ),
+        : Effect.fail(unavailable("GM.listValues")),
     watch: null,
   };
 };
@@ -388,9 +390,9 @@ const localStorageBackend = (prefix: string): ValueBackend | null => {
   let store: Storage;
   try {
     store = globalThis.localStorage;
-    const probe = `${prefix}__probe`;
-    store.setItem(probe, "1");
-    store.removeItem(probe);
+    const probeKey = `${prefix}__probe`;
+    store.setItem(probeKey, "1");
+    store.removeItem(probeKey);
   } catch {
     return null;
   }
@@ -400,20 +402,20 @@ const localStorageBackend = (prefix: string): ValueBackend | null => {
   return {
     kind: "localstorage-fallback",
     get: (key) =>
-      attemptLater(
+      attempt(
         "localStorage.getItem",
-        () => store.getItem(scoped(key)) ?? undefined,
+        () => Option.fromNullOr(store.getItem(scoped(key))),
       ),
     set: (key, value) =>
-      attemptLater("localStorage.setItem", () => {
+      attempt("localStorage.setItem", () => {
         store.setItem(scoped(key), value);
       }),
     remove: (key) =>
-      attemptLater("localStorage.removeItem", () => {
+      attempt("localStorage.removeItem", () => {
         store.removeItem(scoped(key));
       }),
     list: () =>
-      attemptLater("localStorage.key", () => {
+      attempt("localStorage.key", () => {
         const keys: string[] = [];
         for (let i = 0; i < store.length; i++) {
           const key = store.key(i);
@@ -438,16 +440,16 @@ const memoryBackend = (): ValueBackend => {
   const map = new Map<string, string>();
   return {
     kind: "memory",
-    get: (key) => liftResult(ok(map.get(key))),
+    get: (key) => Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
     set: (key, value) =>
-      liftResult(ok(undefined)).map(() => {
+      Effect.sync(() => {
         map.set(key, value);
       }),
     remove: (key) =>
-      liftResult(ok(undefined)).map(() => {
+      Effect.sync(() => {
         map.delete(key);
       }),
-    list: () => liftResult(ok<readonly string[], GmError>([...map.keys()])),
+    list: () => Effect.sync((): readonly string[] => [...map.keys()]),
     watch: null,
   };
 };
@@ -490,7 +492,7 @@ export const openInTab = (
   surface: GmSurface,
   url: string,
   options: GmOpenInTabOptions,
-): ResultAsync<OpenInTabResult, GmError> => {
+): Effect.Effect<OpenInTabResult, GmError> => {
   const ns = surface.namespace;
   if (ns?.openInTab) {
     const open = ns.openInTab;
@@ -502,13 +504,13 @@ export const openInTab = (
 
   if (surface.openInTabSync) {
     const open = surface.openInTabSync;
-    return attemptLater("GM_openInTab", () => ({
+    return attempt("GM_openInTab", () => ({
       handle: open(url, options) ?? null,
       viaManager: true,
     }));
   }
 
-  return attemptLater("window.open", () => {
+  return attempt("window.open", () => {
     const opened = globalThis.open(url, "_blank", "noopener,noreferrer");
     if (opened === null) {
       throw new Error("window.open was blocked (no transient activation?)");
@@ -520,13 +522,15 @@ export const openInTab = (
 /**
  * Write to the clipboard via the manager.
  *
- * Must be called synchronously inside the keydown task; awaiting anything first
- * consumes the transient activation the write depends on.
+ * Must run synchronously inside the keydown task; awaiting anything first
+ * consumes the transient activation the write depends on. Every effect on this
+ * path is `Effect.try` or `Effect.fail`, neither of which suspends, so the
+ * write still happens inside the activation window when run with `runSync`.
  */
 export const setClipboard = (
   surface: GmSurface,
   text: string,
-): Result<void, GmError> => {
+): Effect.Effect<void, GmError> => {
   const ns = surface.namespace;
   if (ns?.setClipboard) {
     const write = ns.setClipboard;
@@ -540,7 +544,7 @@ export const setClipboard = (
     const write = surface.setClipboardSync;
     return attempt("GM_setClipboard", () => write(text, "text/plain"));
   }
-  return err(unavailable("GM_setClipboard"));
+  return Effect.fail(unavailable("GM_setClipboard"));
 };
 
 export interface XhrRequest {
@@ -552,7 +556,7 @@ export interface XhrRequest {
 }
 
 export interface XhrHandle {
-  readonly response: ResultAsync<GmXhrResponse, GmError>;
+  readonly response: Effect.Effect<GmXhrResponse, GmError>;
   abort(): void;
 }
 
@@ -564,50 +568,48 @@ export interface XhrHandle {
 export const xmlHttpRequest = (
   surface: GmSurface,
   request: XhrRequest,
-): Result<XhrHandle, GmError> => {
+): Effect.Effect<XhrHandle, GmError> => {
   const ns = surface.namespace;
   const impl: ((details: GmXhrDetails) => unknown) | null = ns?.xmlHttpRequest
     ? (details) => ns.xmlHttpRequest?.(details)
     : surface.xhrSync;
-  if (!impl) return err(unavailable("GM_xmlhttpRequest"));
+  if (!impl) return Effect.fail(unavailable("GM_xmlhttpRequest"));
 
-  let handle: GmXhrHandle | undefined;
-  let aborted = false;
+  return Effect.sync(() => {
+    let handle: GmXhrHandle | undefined;
+    let aborted = false;
 
-  const promise = new Promise<GmXhrResponse>((resolve, reject) => {
-    const details: GmXhrDetails = {
-      method: request.method ?? "GET",
-      url: request.url,
-      headers: request.headers,
-      data: request.data,
-      timeout: request.timeoutMs,
-      responseType: "text",
-      onload: resolve,
-      onerror: () => reject(new Error(`network error for ${request.url}`)),
-      ontimeout: () => reject(new Error(`timeout for ${request.url}`)),
-      onabort: () => reject(new Error("aborted")),
+    const promise = new Promise<GmXhrResponse>((resolve, reject) => {
+      const details: GmXhrDetails = {
+        method: request.method ?? "GET",
+        url: request.url,
+        headers: request.headers,
+        data: request.data,
+        timeout: request.timeoutMs,
+        responseType: "text",
+        onload: resolve,
+        onerror: () => reject(new Error(`network error for ${request.url}`)),
+        ontimeout: () => reject(new Error(`timeout for ${request.url}`)),
+        onabort: () => reject(new Error("aborted")),
+      };
+      const returned: unknown = impl(details);
+      if (returned instanceof Promise) {
+        void returned.then((value: unknown) => {
+          handle = (value ?? undefined) as GmXhrHandle | undefined;
+          if (aborted) handle?.abort?.();
+        });
+      } else if (returned !== null && typeof returned === "object") {
+        handle = returned as GmXhrHandle;
+      }
+    });
+
+    return {
+      response: attemptAsync("GM_xmlhttpRequest", () => promise),
+      abort: () => {
+        aborted = true;
+        handle?.abort?.();
+      },
     };
-    const returned: unknown = impl(details);
-    if (returned instanceof Promise) {
-      void returned.then((value: unknown) => {
-        handle = (value ?? undefined) as GmXhrHandle | undefined;
-        if (aborted) handle?.abort?.();
-      });
-    } else if (returned !== null && typeof returned === "object") {
-      handle = returned as GmXhrHandle;
-    }
-  });
-
-  return ok({
-    response: ResultAsync.fromPromise(
-      promise,
-      (cause): GmError =>
-        gmError("failed", "GM_xmlhttpRequest", describe(cause), cause),
-    ),
-    abort: () => {
-      aborted = true;
-      handle?.abort?.();
-    },
   });
 };
 
@@ -616,7 +618,7 @@ export const registerMenuCommand = (
   surface: GmSurface,
   caption: string,
   onClick: () => void,
-): Result<void, GmError> => {
+): Effect.Effect<void, GmError> => {
   const register = surface.registerMenuCommand ??
     (surface.namespace?.registerMenuCommand
       ? (c: string, cb: () => void) => {
@@ -624,7 +626,7 @@ export const registerMenuCommand = (
         return 0;
       }
       : null);
-  if (!register) return err(unavailable("GM_registerMenuCommand"));
+  if (!register) return Effect.fail(unavailable("GM_registerMenuCommand"));
   return attempt("GM_registerMenuCommand", () => {
     register(caption, onClick);
   });

@@ -187,7 +187,7 @@ The baseline is the shipped `defaultSettings()`, read from
 `dist/default-settings.json` — emitted by the same build that produces the
 bundle, so it cannot drift from the code under test. It cannot be _imported_:
 this module runs under Playwright's own loader, which resolves neither the `~/`
-alias nor `npm:zod/mini`.
+alias nor the bundler's aliases.
 
 `DETERMINISTIC` in `harness/settings-seed.ts` is an opt-in patch, applied per
 describe block by the specs that need it:

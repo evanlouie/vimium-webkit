@@ -1,3 +1,4 @@
+import { Effect, Result } from "effect";
 import { test } from "vitest";
 import {
   clipboardReader,
@@ -72,9 +73,15 @@ test("writeClipboard falls back to the manager when navigator throws", () => {
   };
 
   try {
-    const result = writeClipboard(surface, "hello");
-    assert(result.isOk());
-    assertEquals(result.value.method, "gm-set-clipboard");
+    // `runSync`, deliberately. The clipboard write has to reach the manager
+    // inside the browser's transient-activation window, so nothing on this
+    // path may suspend — and `runSync` throws if anything does. This assertion
+    // is therefore also a guard on that property.
+    const result = Effect.runSync(
+      Effect.result(writeClipboard(surface, "hello")),
+    );
+    assert(Result.isSuccess(result));
+    assertEquals(result.success.method, "gm-set-clipboard");
     assertEquals(copied, ["hello"]);
   } finally {
     navigator.restore();

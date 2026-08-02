@@ -5,8 +5,8 @@
  * gated on `enableSearchSuggestions`, which is **off by default**. The gate has
  * to be a setting rather than a capability: `GM.xmlHttpRequest` exists on quoid
  * (Userscripts) too, so "off wherever the manager cannot do it" would have left
- * the feature silently on everywhere it mattered. A `kind: "unavailable"`
- * result still latches the feature off for the session — a manager that will
+ * the feature silently on everywhere it mattered. A `reason: "unavailable"`
+ * failure still latches the feature off for the session — a manager that will
  * never grow the capability is not worth nagging the user about — but that is a
  * fallback, not the control.
  *
@@ -19,6 +19,8 @@
  * frecency index in `history.ts` is never consulted and never transmitted.
  */
 
+import { Effect } from "effect";
+import type { AppRuntime } from "~/boot/runtime.ts";
 import type { GmSurface } from "~/platform/gm.ts";
 import { xmlHttpRequest } from "~/platform/gm.ts";
 
@@ -138,7 +140,10 @@ interface CacheEntry {
   readonly suggestions: readonly string[];
 }
 
-export const createSuggester = (surface: GmSurface): Suggester => {
+export const createSuggester = (
+  surface: GmSurface,
+  runtime: AppRuntime,
+): Suggester => {
   const cache = new Map<string, CacheEntry>();
   let available = true;
 
@@ -170,51 +175,63 @@ export const createSuggester = (surface: GmSurface): Suggester => {
     onResults: (query: string, suggestions: readonly string[]) => void,
   ): void => {
     const url = endpoint.replaceAll("%s", () => encodeURIComponent(query));
-    const started = xmlHttpRequest(surface, {
-      url,
-      method: "GET",
-      timeoutMs: SUGGEST_TIMEOUT_MS,
-    });
 
-    if (started.isErr()) {
-      // Latched, and silent by design: on a manager without `@connect` support
-      // this is a permanent condition, not an incident.
-      if (started.error.kind === "unavailable") available = false;
-      return;
-    }
+    // `runFork` starts the fiber immediately and only parks it at the first
+    // genuine suspension — the response — so the request leaves, `abortInFlight`
+    // is armed and the abort timer is set before this function returns, exactly
+    // as they did when the manager call was synchronous.
+    runtime.runFork(
+      Effect.gen(function*() {
+        const handle = yield* xmlHttpRequest(surface, {
+          url,
+          method: "GET",
+          timeoutMs: SUGGEST_TIMEOUT_MS,
+        });
 
-    const handle = started.value;
-    abortInFlight = () => handle.abort();
+        abortInFlight = () => handle.abort();
 
-    // A belt-and-braces abort alongside the manager's own `timeout`: not every
-    // manager honours it, and a hung request must not pin the handle forever.
-    abortTimer = setTimeout(() => {
-      abortTimer = null;
-      if (generation === token) handle.abort();
-    }, SUGGEST_TIMEOUT_MS);
-
-    void handle.response.match(
-      (response) => {
-        if (abortTimer !== null) {
-          clearTimeout(abortTimer);
+        // A belt-and-braces abort alongside the manager's own `timeout`: not
+        // every manager honours it, and a hung request must not pin the handle
+        // forever.
+        abortTimer = setTimeout(() => {
           abortTimer = null;
-        }
-        if (generation !== token) return;
-        abortInFlight = null;
+          if (generation === token) handle.abort();
+        }, SUGGEST_TIMEOUT_MS);
 
-        if (response.status !== 200) return;
-        const suggestions = parseSuggestResponse(response.responseText ?? "")
-          .slice(0, SUGGEST_LIMIT);
-        cache.set(key, { at: Date.now(), suggestions });
-        onResults(query, suggestions);
-      },
-      (error) => {
-        if (generation !== token) return;
-        abortInFlight = null;
-        if (error.kind === "unavailable") available = false;
-        // Every other failure — offline, timeout, CORS refusal — is a
-        // non-event: the omnibar simply shows the rows it already has.
-      },
+        return yield* Effect.match(handle.response, {
+          onSuccess: (response) => {
+            if (abortTimer !== null) {
+              clearTimeout(abortTimer);
+              abortTimer = null;
+            }
+            if (generation !== token) return;
+            abortInFlight = null;
+
+            if (response.status !== 200) return;
+            const suggestions = parseSuggestResponse(
+              response.responseText ?? "",
+            ).slice(0, SUGGEST_LIMIT);
+            cache.set(key, { at: Date.now(), suggestions });
+            onResults(query, suggestions);
+          },
+          onFailure: (error) => {
+            if (generation !== token) return;
+            abortInFlight = null;
+            if (error.reason === "unavailable") available = false;
+            // Every other failure — offline, timeout, CORS refusal — is a
+            // non-event: the omnibar simply shows the rows it already has.
+          },
+        });
+      }).pipe(
+        // Only the manager call itself can fail here; the response is folded
+        // above. Latched, and silent by design: on a manager without
+        // `@connect` support this is a permanent condition, not an incident.
+        Effect.catch((error) =>
+          Effect.sync(() => {
+            if (error.reason === "unavailable") available = false;
+          })
+        ),
+      ),
     );
   };
 

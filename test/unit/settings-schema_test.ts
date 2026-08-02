@@ -12,13 +12,17 @@
  *    to one search engine against the five shipped here.
  */
 
+import { Result } from "effect";
 import { test } from "vitest";
+import { decodeUnknownResult } from "~/platform/schema-io.ts";
+import type { GroupSpec } from "~/platform/storage.ts";
 import {
   defaultSettings,
   findHistoryGroup,
   historyGroup,
   LOCAL_MARK_TTL_MS,
   LOCAL_MARK_URL_LIMIT,
+  type LocalMark,
   type Marks,
   marksGroup,
   pruneMarks,
@@ -29,7 +33,10 @@ import {
 } from "~/settings/schema.ts";
 import { assert, assertEquals } from "./support/assert.ts";
 
-const GROUPS = [
+/** Decode untrusted input and keep the failure detail. Never throws. */
+const decodeSettings = decodeUnknownResult(settingsSchema);
+
+const GROUPS: readonly GroupSpec<unknown>[] = [
   settingsGroup,
   marksGroup,
   findHistoryGroup,
@@ -38,11 +45,14 @@ const GROUPS = [
 ];
 
 test("every group's defaults satisfy its own schema", () => {
-  // `defaultSettings()` is `settingsSchema.parse({})`, so a field added without
-  // a fallback would throw here rather than at a user's `document-start`.
+  // `defaultSettings()` decodes the literal `{}`, so a field added without a
+  // fallback would throw here rather than at a user's `document-start`.
   for (const group of GROUPS) {
-    const result = group.schema.safeParse(group.defaults());
-    assert(result.success, `${group.name} defaults failed its own schema`);
+    const result = decodeUnknownResult(group.schema)(group.defaults());
+    assert(
+      Result.isSuccess(result),
+      `${group.name} defaults failed its own schema`,
+    );
   }
 });
 
@@ -55,10 +65,13 @@ test("a payload missing a field keeps the other twenty-four", () => {
     const partial: Record<string, unknown> = { ...full };
     delete partial[missing];
 
-    const parsed = settingsSchema.safeParse(partial);
-    assert(parsed.success, `dropping ${missing} rejected the whole object`);
+    const parsed = decodeSettings(partial);
+    assert(
+      Result.isSuccess(parsed),
+      `dropping ${missing} rejected the whole object`,
+    );
     assertEquals(
-      parsed.data[missing],
+      parsed.success[missing],
       full[missing],
       `${missing} did not fall back to its default`,
     );
@@ -66,7 +79,7 @@ test("a payload missing a field keeps the other twenty-four", () => {
     for (const other of keys) {
       if (other === missing) continue;
       assertEquals(
-        parsed.data[other],
+        parsed.success[other],
         full[other],
         `dropping ${missing} disturbed ${other}`,
       );
@@ -75,48 +88,48 @@ test("a payload missing a field keeps the other twenty-four", () => {
 });
 
 test("one corrupt field costs exactly that field", () => {
-  const parsed = settingsSchema.safeParse({
+  const parsed = decodeSettings({
     ...defaultSettings(),
     scrollStepSize: "sixty",
     keyMappings: 42,
     exclusionRules: "not an array",
   });
 
-  assert(parsed.success);
-  assertEquals(parsed.data.scrollStepSize, 60);
-  assertEquals(parsed.data.keyMappings, "");
-  assertEquals(parsed.data.exclusionRules, []);
+  assert(Result.isSuccess(parsed));
+  assertEquals(parsed.success.scrollStepSize, 60);
+  assertEquals(parsed.success.keyMappings, "");
+  assertEquals(parsed.success.exclusionRules, []);
   // Untouched neighbours stay untouched.
-  assertEquals(parsed.data.smoothScroll, true);
-  assertEquals(parsed.data.searchUrl, "https://www.google.com/search?q=%s");
+  assertEquals(parsed.success.smoothScroll, true);
+  assertEquals(parsed.success.searchUrl, "https://www.google.com/search?q=%s");
 });
 
 test("unknown keys from a newer build are dropped, not fatal", () => {
-  const parsed = settingsSchema.safeParse({
+  const parsed = decodeSettings({
     ...defaultSettings(),
     somethingFromTheFuture: { nested: true },
   });
-  assert(parsed.success);
-  assertEquals("somethingFromTheFuture" in parsed.data, false);
+  assert(Result.isSuccess(parsed));
+  assertEquals("somethingFromTheFuture" in parsed.success, false);
 });
 
 test("hint characters must be distinct", () => {
   // Duplicates silently make two hints answer to the same string.
-  const parsed = settingsSchema.safeParse({
+  const parsed = decodeSettings({
     ...defaultSettings(),
     linkHintCharacters: "aabbcc",
   });
-  assert(parsed.success);
-  assertEquals(parsed.data.linkHintCharacters, "sadfjklewcmpgh");
+  assert(Result.isSuccess(parsed));
+  assertEquals(parsed.success.linkHintCharacters, "sadfjklewcmpgh");
 });
 
 test("a search URL without %s falls back rather than discarding the query", () => {
-  const parsed = settingsSchema.safeParse({
+  const parsed = decodeSettings({
     ...defaultSettings(),
     searchUrl: "https://example.com/search",
   });
-  assert(parsed.success);
-  assertEquals(parsed.data.searchUrl, "https://www.google.com/search?q=%s");
+  assert(Result.isSuccess(parsed));
+  assertEquals(parsed.success.searchUrl, "https://www.google.com/search?q=%s");
 });
 
 test("the shipped defaults are the ones documented", () => {
@@ -135,7 +148,7 @@ test("the shipped defaults are the ones documented", () => {
 // ---------------------------------------------------------------------------
 
 const markTable = (urls: number, at: (index: number) => number): Marks => {
-  const local: Marks["local"] = {};
+  const local: Record<string, Record<string, LocalMark>> = {};
   for (let index = 0; index < urls; index++) {
     local[`https://example.com/${index}`] = {
       a: { scrollX: 0, scrollY: index, savedAt: at(index) },

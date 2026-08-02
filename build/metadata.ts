@@ -112,11 +112,8 @@ export const BANNER_NOTICE = `/*
  * without them this artefact could not be published to Greasy Fork or anywhere
  * else.
  *
- *   Zod (https://github.com/colinhacks/zod)
- *     Copyright (c) 2020 Colin McDonnell
- *
- *   neverthrow (https://github.com/supermacro/neverthrow)
- *     Copyright (c) 2019 Giorgio Delgado
+ *   Effect (https://github.com/Effect-TS/effect)
+ *     Copyright (c) 2023 Effectful Technologies Inc
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal

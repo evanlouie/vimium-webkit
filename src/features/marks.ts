@@ -12,6 +12,7 @@
  * set (§7.4).
  */
 
+import { Effect } from "effect";
 import type { AppContext, MarksApi } from "~/core/context.ts";
 import type { Marks } from "~/settings/schema.ts";
 import { pruneMarks } from "~/settings/schema.ts";
@@ -45,7 +46,7 @@ class MarksFeature implements MarksApi {
     }
     const key = markKeyForUrl(location.href);
     const { x, y } = this.#app.scroller.position();
-    void this.#update((marks) => ({
+    this.#app.runtime.runFork(this.#update((marks) => ({
       ...marks,
       local: {
         ...marks.local,
@@ -54,7 +55,7 @@ class MarksFeature implements MarksApi {
           [letter]: { scrollX: x, scrollY: y, savedAt: Date.now() },
         },
       },
-    }));
+    })));
     this.#app.hud.show(`Mark "${letter}" set`);
   }
 
@@ -75,7 +76,7 @@ class MarksFeature implements MarksApi {
 
   setGlobal(letter: string): void {
     const { x, y } = this.#app.scroller.position();
-    void this.#update((marks) => ({
+    this.#app.runtime.runFork(this.#update((marks) => ({
       ...marks,
       global: {
         ...marks.global,
@@ -86,7 +87,7 @@ class MarksFeature implements MarksApi {
           savedAt: Date.now(),
         },
       },
-    }));
+    })));
     this.#app.hud.show(`Global mark "${letter}" set`);
   }
 
@@ -107,43 +108,55 @@ class MarksFeature implements MarksApi {
     const target = new URL(mark.url);
     target.hash = `${target.hash.replace(/^#/, "")}`;
 
-    void openTab(this.#app.gm, target.href, { active: true }).match(
-      () => {
-        this.#app.hud.show(
-          `Opened global mark "${letter}" in a new tab ` +
-            "(a userscript cannot focus an existing tab)",
-        );
-      },
-      (error) => {
+    // `runFork` rather than `runSync`: opening a tab goes through the
+    // manager's async API. The fork starts running immediately, so the call
+    // still leaves within the keystroke's transient-activation window.
+    this.#app.runtime.runFork(
+      openTab(this.#app.gm, target.href, { active: true }).pipe(
+        Effect.map(() => {
+          this.#app.hud.show(
+            `Opened global mark "${letter}" in a new tab ` +
+              "(a userscript cannot focus an existing tab)",
+          );
+        }),
         // The scheme allowlist used to *cause* the unsafe path: `openTab`
         // refused a `javascript:` or `data:` mark, the refusal was read as "the
         // manager could not do it", and the fallback then handed the very same
         // URL to `location.assign` — which is the sink the allowlist exists to
         // guard. Marks live in manager storage, which the manager's own UI can
         // edit, so a poisoned one is a realistic source.
-        if (error.kind === "unsafe-url") {
-          this.#app.hud.error(
-            `Global mark "${letter}" points somewhere unsafe; refusing to open it`,
-          );
-          return;
-        }
-        const result = navigate(target.href);
-        if (result.isErr()) this.#app.hud.error(result.error.message);
-      },
+        Effect.catch((error) =>
+          error.reason === "unsafe-url"
+            ? Effect.sync(() => {
+              this.#app.hud.error(
+                `Global mark "${letter}" points somewhere unsafe; refusing to open it`,
+              );
+            })
+            : navigate(target.href).pipe(
+              Effect.catch((failure) =>
+                Effect.sync(() => {
+                  this.#app.hud.error(failure.detail);
+                })
+              ),
+            )
+        ),
+      ),
     );
   }
 
-  #update(mutate: (marks: Marks) => Marks): Promise<void> {
+  #update(mutate: (marks: Marks) => Marks): Effect.Effect<void> {
     // Pruned on every write rather than on a timer: local marks are keyed by
     // URL and nothing else ever removes one, so the table only ever grew — and
     // the whole of it is rewritten on each mark.
     return this.#app.groups.marks.update((marks) =>
       pruneMarks(mutate(marks), Date.now())
-    ).match(
-      () => undefined,
-      (issue) => {
-        this.#app.hud.error(`Could not save mark: ${issue.message}`);
-      },
+    ).pipe(
+      Effect.asVoid,
+      Effect.catch((issue) =>
+        Effect.sync(() => {
+          this.#app.hud.error(`Could not save mark: ${issue.detail}`);
+        })
+      ),
     );
   }
 }

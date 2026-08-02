@@ -10,6 +10,7 @@
 
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
+import effectRules from "./eslint-rules/effect-must-be-run.js";
 
 export default tseslint.config(
   {
@@ -31,12 +32,20 @@ export default tseslint.config(
       parserOptions: {
         projectService: {
           // Config files sit outside both tsconfig projects.
-          allowDefaultProject: ["eslint.config.js", "*.js", "*.mjs", "*.cjs"],
+          allowDefaultProject: [
+            "eslint.config.js",
+            "eslint-rules/*.js",
+            "*.js",
+            "*.mjs",
+            "*.cjs",
+          ],
         },
         tsconfigRootDir: import.meta.dirname,
       },
     },
+    plugins: { effect: effectRules },
     rules: {
+      "effect/effect-must-be-run": "error",
       "@typescript-eslint/no-explicit-any": "error",
       "@typescript-eslint/explicit-module-boundary-types": "error",
       "no-await-in-loop": "error",
@@ -52,6 +61,13 @@ export default tseslint.config(
   {
     // Tests reach into globals and fakes on purpose.
     files: ["test/**/*.ts"],
+    rules: {
+      "@typescript-eslint/explicit-module-boundary-types": "off",
+    },
+  },
+  {
+    // Lint rules are plain JavaScript against ESLint's own untyped API.
+    files: ["eslint-rules/**/*.js"],
     rules: {
       "@typescript-eslint/explicit-module-boundary-types": "off",
     },

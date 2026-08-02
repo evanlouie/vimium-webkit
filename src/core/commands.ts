@@ -17,6 +17,7 @@ import type {
   CommandRegistry,
   HintMode,
 } from "./context.ts";
+import { Effect, Result } from "effect";
 import { type Handler, SUPPRESS_EVENT } from "./handler-stack.ts";
 import { Mode } from "./mode.ts";
 import { isComposing, isModifierKey, keyNotation } from "./key-notation.ts";
@@ -97,52 +98,72 @@ const copyToClipboard = (
   text: string,
   label: string,
 ): void => {
-  // Reached synchronously from the keydown task on purpose: awaiting anything
-  // first consumes WebKit's transient activation and the write is denied.
-  const outcome = writeClipboard(app.gm, text);
-  if (outcome.isErr()) {
-    app.hud.error(`Could not copy: ${outcome.error.message}`);
+  // `runSync`, not `runFork`, and reached synchronously from the keydown task:
+  // every effect on this path is non-suspending, so the write still happens
+  // inside WebKit's transient-activation window. Anything that suspended first
+  // would spend the activation and the write would be denied.
+  const outcome = app.runtime.runSync(
+    Effect.result(writeClipboard(app.gm, text)),
+  );
+  if (Result.isFailure(outcome)) {
+    app.hud.error(`Could not copy: ${outcome.failure.detail}`);
     return;
   }
   app.hud.show(`Copied ${label}`);
-  void outcome.value.settled.then((result) => {
-    if (result.isErr()) app.hud.error(`Copy failed: ${result.error.message}`);
-  });
+  // The outcome may arrive later; that part is allowed to suspend.
+  app.runtime.runFork(
+    Effect.catch(
+      outcome.success.settled,
+      (error) =>
+        Effect.sync(() => app.hud.error(`Copy failed: ${error.detail}`)),
+    ),
+  );
 };
 
 const openFromClipboard = (app: AppContext, newTab: boolean): void => {
   // WebKit either shows a native paste affordance or rejects outright unless
   // this origin wrote the clipboard, so the HUD input is the *primary* path and
-  // the read is only an attempt to pre-fill it (§6.4).
-  const attempt = readClipboard();
+  // the read is only an attempt to pre-fill it (§6.4). Started before the
+  // prompt so the read races the user, not the other way round.
+  const attempt = app.runtime.runFork(
+    readClipboard.pipe(
+      Effect.tap((text) =>
+        Effect.sync(() => {
+          if (text.trim().length > 0) {
+            app.hud.show(`Clipboard: ${text.slice(0, 80)}`);
+          }
+        })
+      ),
+      // A denied or absent clipboard is the expected case here, not an error.
+      Effect.ignore,
+    ),
+  );
+  void attempt;
+
   void app.hud.prompt({
     label: newTab ? "Open in new tab:" : "Open:",
     placeholder: "paste a URL (⌘V)",
   }).then((value) => {
     if (value === null || value.trim().length === 0) return;
-    void go(app, value.trim(), newTab);
-  });
-  void attempt.then((result) => {
-    if (result.isOk() && result.value.trim().length > 0) {
-      app.hud.show(`Clipboard: ${result.value.slice(0, 80)}`);
-    }
+    app.runtime.runFork(go(app, value.trim(), newTab));
   });
 };
 
-const go = async (
+const go = (
   app: AppContext,
   input: string,
   newTab: boolean,
-): Promise<void> => {
-  const url = toUrl(input, app.settings().searchUrl);
-  if (newTab) {
-    const result = await openTab(app.gm, url, { active: true });
-    if (result.isErr()) app.hud.error(result.error.message);
-    return;
-  }
-  const result = navigate(url);
-  if (result.isErr()) app.hud.error(result.error.message);
-};
+): Effect.Effect<void> =>
+  Effect.suspend(() => {
+    const url = toUrl(input, app.settings().searchUrl);
+    const attempt = newTab
+      ? Effect.asVoid(openTab(app.gm, url, { active: true }))
+      : navigate(url);
+    return Effect.catch(
+      attempt,
+      (error) => Effect.sync(() => app.hud.error(error.detail)),
+    );
+  });
 
 /** Bare words become a search; anything URL-shaped is navigated to. */
 export const toUrl = (input: string, searchUrl: string): string => {
@@ -228,10 +249,12 @@ const applyZoom = (app: AppContext, factor: number | null): void => {
   // URL bar, does not survive a manager change, and breaks `position: fixed` on
   // some sites. Off by default; §4.2.
   document.documentElement.style.zoom = next === 1 ? "" : String(next);
-  void app.groups.session.update((state) => ({
-    ...state,
-    zoomByOrigin: { ...state.zoomByOrigin, [origin]: next },
-  }));
+  app.runtime.runFork(Effect.ignore(
+    app.groups.session.update((state) => ({
+      ...state,
+      zoomByOrigin: { ...state.zoomByOrigin, [origin]: next },
+    })),
+  ));
   app.hud.show(`Zoom ${Math.round(next * 100)}%`);
 };
 
@@ -590,24 +613,28 @@ export const buildCommands = (): readonly CommandDef[] => [
   tierB("createTab", "tabs", "Open a new tab", ({ app }) => {
     // `internal`: `newTabUrl` is the user's own setting, not page content, and
     // `about:blank` — its default — is outside the page-content allowlist.
-    void openTab(app.gm, app.settings().newTabUrl, {
-      active: true,
-      trust: "internal",
-    }).mapErr(
-      (error) => app.hud.error(error.message),
+    app.runtime.runFork(
+      openTab(app.gm, app.settings().newTabUrl, {
+        active: true,
+        trust: "internal",
+      }).pipe(
+        Effect.catch((error) => Effect.sync(() => app.hud.error(error.detail))),
+      ),
     );
   }),
   tierB("removeTab", "tabs", "Close this tab", ({ app }) => {
-    const result = closeCurrentTab(app.gm);
-    if (result.isErr()) {
-      app.hud.error(
-        `${result.error.message}${
-          result.error.nativeAlternative
-            ? ` — use ${result.error.nativeAlternative}`
-            : ""
-        }`,
-      );
-    }
+    app.runtime.runSync(
+      Effect.catch(closeCurrentTab(app.gm), (error) =>
+        Effect.sync(() => {
+          app.hud.error(
+            `${error.detail}${
+              error.nativeAlternative
+                ? ` — use ${error.nativeAlternative}`
+                : ""
+            }`,
+          );
+        })),
+    );
   }),
   tierB(
     "toggleMuteTab",
@@ -645,16 +672,20 @@ export const buildCommands = (): readonly CommandDef[] => [
     ({ app }) => {
       // `internal`: we built this URL from `location.href`, and `view-source:`
       // is deliberately outside the set a page-supplied URL may use.
-      void openTab(app.gm, `view-source:${location.href}`, {
-        active: true,
-        trust: "internal",
-      })
-        .mapErr(
-          () =>
-            app.hud.error(
-              "Your userscript manager refused to open view-source:",
-            ),
-        );
+      app.runtime.runFork(
+        openTab(app.gm, `view-source:${location.href}`, {
+          active: true,
+          trust: "internal",
+        }).pipe(
+          Effect.catch(() =>
+            Effect.sync(() =>
+              app.hud.error(
+                "Your userscript manager refused to open view-source:",
+              )
+            )
+          ),
+        ),
+      );
     },
   ),
 

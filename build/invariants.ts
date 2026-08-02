@@ -53,8 +53,7 @@ export const BUNDLE_BUDGET_BYTES = 1_500 * 1024;
  * recorded.
  */
 const BUNDLED_COPYRIGHT_HOLDERS: readonly string[] = [
-  "Copyright (c) 2020 Colin McDonnell",
-  "Copyright (c) 2019 Giorgio Delgado",
+  "Copyright (c) 2023 Effectful Technologies Inc",
   "Copyright (c) 2010 Phil Crosby, Ilya Sukhar",
 ];
 

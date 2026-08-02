@@ -7,6 +7,7 @@
  * not because they are part of the runtime contract.
  */
 
+import { Effect } from "effect";
 import type { AppContext, FindApi } from "~/core/context.ts";
 import {
   CONTINUE_BUBBLING,
@@ -121,9 +122,11 @@ export const createFind = (app: AppContext): FindApi => {
       return;
     }
 
-    void app.groups.findHistory.update((current) => ({
-      queries: [...pushHistory(current.queries, trimmed)],
-    }));
+    app.runtime.runFork(Effect.ignore(
+      app.groups.findHistory.update((current) => ({
+        queries: [...pushHistory(current.queries, trimmed)],
+      })),
+    ));
 
     const outcome = runtime.search(trimmed, runtime.currentIndex);
     app.hud.setIndicator(null);

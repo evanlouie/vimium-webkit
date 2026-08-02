@@ -3,48 +3,49 @@
  *
  * Storage is shared across script versions, across frames, and is directly
  * editable in every manager's UI. It is therefore *untrusted input*: every read
- * is Zod-validated and every failure has a defined fallback. Nothing in this
- * module may throw during boot (IMPLEMENTATION_PLAN.md §6.11).
+ * is validated against its schema and every failure has a defined fallback.
+ * Nothing in this module may throw during boot (IMPLEMENTATION_PLAN.md §6.11).
  *
  * Values are grouped (`settings`, `mappings`, `marks`, ...) rather than stored
  * as one blob, so that a corrupt group can be reset independently and so that a
  * mark write does not rewrite the whole settings object.
  */
 
-import { ResultAsync } from "neverthrow";
-import { liftResult, type ValueBackend } from "./gm.ts";
-import { err, ok, type Result } from "neverthrow";
+import {
+  Deferred,
+  Duration,
+  Effect,
+  Fiber,
+  Option,
+  Result,
+  Schema,
+} from "effect";
+import type { ValueBackend } from "./gm.ts";
+import { decodeUnknownResult, describeDecodeError } from "./schema-io.ts";
 
 export const STORAGE_PREFIX = "vimium-webkit:";
 
-export type StorageIssueKind =
+export const StorageFailureReason = Schema.Literals([
   /** The backend itself failed (manager error, quota, revoked permission). */
-  | "backend"
+  "backend",
   /** Stored bytes were not JSON. */
-  | "malformed"
+  "malformed",
   /** Stored JSON did not match the schema, even after migration. */
-  | "invalid"
+  "invalid",
   /** A migration step threw. */
-  | "migration";
+  "migration",
+]);
 
-export interface StorageIssue {
-  readonly kind: StorageIssueKind;
-  readonly group: string;
-  readonly message: string;
-  readonly cause?: unknown;
-}
+export type StorageFailureReason = typeof StorageFailureReason.Type;
 
-/**
- * Structural subset of a Zod schema.
- *
- * Declared structurally rather than as `z.ZodMiniType` so that this module does
- * not pin a Zod major version, and so tests can supply hand-written validators.
- */
-export interface Validator<T> {
-  safeParse(
-    data: unknown,
-  ): { success: true; data: T } | { success: false; error: unknown };
-}
+export class StorageError
+  extends Schema.TaggedErrorClass<StorageError>()("StorageError", {
+    reason: StorageFailureReason,
+    group: Schema.String,
+    detail: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  })
+{}
 
 /** A single ordered, idempotent transformation of persisted data. */
 export interface Migration {
@@ -56,7 +57,7 @@ export interface Migration {
 
 export interface GroupSpec<T> {
   readonly name: string;
-  readonly schema: Validator<T>;
+  readonly schema: Schema.Codec<T, unknown>;
   readonly defaults: () => T;
   readonly schemaVersion: number;
   readonly migrations?: readonly Migration[];
@@ -69,6 +70,14 @@ interface Envelope {
   readonly data: unknown;
 }
 
+/**
+ * The stored wrapper, checked structurally rather than by schema.
+ *
+ * Deliberately not a `Schema.Struct`: `data` is the group's own payload and is
+ * validated separately after migration, so decoding it here would either
+ * duplicate that work or force `data` to be `unknown` in a schema that then
+ * asserts nothing useful.
+ */
 const isEnvelope = (value: unknown): value is Envelope =>
   typeof value === "object" && value !== null &&
   typeof (value as Record<string, unknown>)["schemaVersion"] === "number" &&
@@ -77,14 +86,14 @@ const isEnvelope = (value: unknown): value is Envelope =>
 const describeCause = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
 
-export type IssueListener = (issue: StorageIssue) => void;
+export type IssueListener = (issue: StorageError) => void;
 
 /**
  * The per-frame façade over a `ValueBackend`.
  *
  * Reads are cached in memory after the first hydration: on quoid every read is
  * a promise round-trip to the extension process, and the key-dispatch hot path
- * cannot await anything.
+ * cannot suspend.
  */
 export class ValueStore {
   readonly #backend: ValueBackend;
@@ -113,7 +122,7 @@ export class ValueStore {
     return () => this.#issueListeners.delete(listener);
   }
 
-  report(issue: StorageIssue): void {
+  report(issue: StorageError): void {
     for (const listener of this.#issueListeners) {
       try {
         listener(issue);
@@ -130,8 +139,10 @@ export class ValueStore {
   }
 
   /** Hydrate every registered group. The only correct way to boot. */
-  hydrateAll(): Promise<unknown[]> {
-    return Promise.all(this.#groups.map((group) => group.hydrate()));
+  hydrateAll(): Effect.Effect<readonly unknown[]> {
+    return Effect.forEach(this.#groups, (group) => group.hydrate(), {
+      concurrency: "unbounded",
+    });
   }
 
   /**
@@ -140,8 +151,15 @@ export class ValueStore {
    * Wired to `pagehide` and `visibilitychange`, where the alternative is losing
    * whatever is still inside a debounce window.
    */
-  flushAll(): Promise<unknown[]> {
-    return Promise.all(this.#groups.map((group) => group.flush()));
+  flushAll(): Effect.Effect<void> {
+    return Effect.forEach(
+      this.#groups,
+      (group) => Effect.ignore(group.flush()),
+      {
+        concurrency: "unbounded",
+        discard: true,
+      },
+    );
   }
 }
 
@@ -153,21 +171,36 @@ export class ValueGroup<T> {
   readonly #listeners = new Set<(value: T) => void>();
 
   #cached: T | undefined;
-  #hydration: Promise<T> | null = null;
+  /**
+   * The hydration currently in flight, if any.
+   *
+   * Concurrent callers share one read; a *later* call still re-reads, which is
+   * what `lifecycle.ts` depends on when it re-hydrates on `visibilitychange`.
+   * A permanent memo would answer that second call from the first read's cache
+   * and the tab would never see another tab's write.
+   */
+  #inFlight: Deferred.Deferred<T> | null = null;
   #pendingWrite: T | undefined;
-  #writeTimer: ReturnType<typeof setTimeout> | null = null;
   #unwatch: (() => void) | null = null;
+
+  /**
+   * The sleeping fiber that will close the current debounce window.
+   *
+   * A superseding write interrupts it and forks another, which is the same
+   * shape as the `clearTimeout`/`setTimeout` pair it replaces — except that
+   * interruption is now the runtime's job, so a fiber cannot be orphaned.
+   */
+  #writeFiber: Fiber.Fiber<void, never> | null = null;
 
   /**
    * The outcome every debounced `write()` since the last flush is waiting on.
    *
-   * One promise shared by all of them, because a superseded write must *settle*
-   * — adopting its successor's outcome — rather than being dropped.
-   * `clearTimeout` used to orphan the previous `resolve` outright, so an
-   * `await update()` that lost a race never returned at all.
+   * One `Deferred` shared by all of them, because a superseded write must
+   * *settle* — adopting its successor's outcome — rather than being dropped.
+   * Cancelling the timer used to orphan the previous `resolve` outright, so a
+   * `write()` that lost a race never completed at all.
    */
-  #settlement: Promise<Result<void, StorageIssue>> | null = null;
-  #settle: ((result: Result<void, StorageIssue>) => void) | null = null;
+  #settlement: Deferred.Deferred<void, StorageError> | null = null;
 
   constructor(store: ValueStore, backend: ValueBackend, spec: GroupSpec<T>) {
     this.#store = store;
@@ -182,7 +215,7 @@ export class ValueGroup<T> {
 
   /**
    * The last hydrated value, or `undefined` before the first read completes.
-   * Synchronous by design — the key-dispatch path must never await.
+   * Synchronous by design — the key-dispatch path must never suspend.
    */
   peek(): T | undefined {
     return this.#cached;
@@ -194,31 +227,50 @@ export class ValueGroup<T> {
   }
 
   /**
-   * Read, validate, and migrate. Never rejects: any problem is reported to the
+   * Read, validate, and migrate. Never fails: any problem is reported to the
    * store's issue listeners and the defaults are returned in its place.
    */
-  hydrate(): Promise<T> {
-    this.#hydration ??= this.#hydrateOnce().finally(() => {
-      this.#hydration = null;
+  hydrate(): Effect.Effect<T> {
+    return Effect.gen({ self: this }, function*() {
+      const existing = this.#inFlight;
+      if (existing !== null) return yield* Deferred.await(existing);
+
+      const deferred = yield* Deferred.make<T>();
+      this.#inFlight = deferred;
+      // `onExit` rather than a plain completion, so an interrupted hydration
+      // still releases anyone waiting on it instead of parking them for good.
+      return yield* Effect.onExit(
+        this.#hydrateOnce(),
+        (exit) =>
+          Effect.sync(() => {
+            this.#inFlight = null;
+          }).pipe(Effect.andThen(Deferred.done(deferred, exit))),
+      );
     });
-    return this.#hydration;
   }
 
-  async #hydrateOnce(): Promise<T> {
-    // A debounced write still sitting in its timer holds the newest value.
-    // Reading around it and adopting what is on disk would resurrect exactly
-    // the value the pending write is about to replace.
-    if (this.#pendingWrite !== undefined) await this.flush();
-    return this.#doHydrate();
+  #hydrateOnce(): Effect.Effect<T> {
+    return Effect.gen({ self: this }, function*() {
+      // A debounced write still sitting in its window holds the newest value.
+      // Reading around it and adopting what is on disk would resurrect exactly
+      // the value the pending write is about to replace.
+      if (this.#pendingWrite !== undefined) yield* Effect.ignore(this.flush());
+      return yield* this.#doHydrate();
+    });
   }
 
-  async #doHydrate(): Promise<T> {
-    const raw = await this.#backend.get(this.#key);
-    if (raw.isErr()) {
-      this.#issue("backend", raw.error.message, raw.error);
-      return this.#adopt(this.#spec.defaults());
-    }
-    return this.#adopt(this.#decode(raw.value));
+  #doHydrate(): Effect.Effect<T> {
+    return this.#backend.get(this.#key).pipe(
+      Effect.map((raw) =>
+        this.#adopt(this.#decode(Option.getOrUndefined(raw)))
+      ),
+      Effect.catch((cause) =>
+        Effect.sync(() => {
+          this.#issue("backend", cause.detail, cause);
+          return this.#adopt(this.#spec.defaults());
+        })
+      ),
+    );
   }
 
   #decode(raw: string | undefined): T {
@@ -253,16 +305,16 @@ export class ValueGroup<T> {
       return this.#spec.defaults();
     }
 
-    const result = this.#spec.schema.safeParse(data);
-    if (!result.success) {
+    const result = decodeUnknownResult(this.#spec.schema)(data);
+    if (Result.isFailure(result)) {
       this.#issue(
         "invalid",
         "stored value failed schema validation",
-        result.error,
+        describeDecodeError(result.failure),
       );
       return this.#spec.defaults();
     }
-    return result.data;
+    return result.success;
   }
 
   /**
@@ -309,34 +361,42 @@ export class ValueGroup<T> {
   }
 
   /**
-   * Replace the value. Resolves once the write actually reaches the backend.
+   * Replace the value. Completes once the write actually reaches the backend.
    *
-   * The debounced path used to resolve `Ok` when the *timer* fired, `void`-ing
-   * the flush that followed — so `ResultAsync<void, StorageIssue>` could never
-   * be `Err` in production, and error handling built on it was provably
-   * unreachable. Every group here debounces, so that was every group.
+   * The debounced path used to report success when the *timer* fired, discarding
+   * the flush that followed — so the error channel could never carry a failure
+   * in production, and error handling built on it was provably unreachable.
+   * Every group here debounces, so that was every group.
    */
-  write(value: T): ResultAsync<void, StorageIssue> {
-    this.#cached = value;
-    const debounce = this.#spec.writeDebounceMs ?? 0;
-    if (debounce <= 0) return this.#flushValue(value);
+  write(value: T): Effect.Effect<void, StorageError> {
+    return Effect.gen({ self: this }, function*() {
+      this.#cached = value;
+      const debounce = this.#spec.writeDebounceMs ?? 0;
+      if (debounce <= 0) return yield* this.#flushValue(value);
 
-    this.#pendingWrite = value;
-    if (this.#writeTimer !== null) clearTimeout(this.#writeTimer);
+      this.#pendingWrite = value;
+      if (this.#writeFiber !== null) yield* Fiber.interrupt(this.#writeFiber);
 
-    // Shared: everyone waiting on this debounce window gets the outcome of the
-    // flush that closes it, whether or not their own value is the one written.
-    this.#settlement ??= new Promise<Result<void, StorageIssue>>((resolve) => {
-      this.#settle = resolve;
+      // Shared: everyone waiting on this debounce window gets the outcome of
+      // the flush that closes it, whether or not their own value is written.
+      this.#settlement ??= yield* Deferred.make<void, StorageError>();
+      const settlement = this.#settlement;
+
+      this.#writeFiber = yield* Effect.forkDetach(
+        Effect.sleep(Duration.millis(debounce)).pipe(
+          // Drop the handle *before* flushing. `flush()` interrupts whatever
+          // `#writeFiber` names, and by this point that is this fiber — so
+          // leaving it set makes the flush interrupt itself and nobody ever
+          // completes the deferred.
+          Effect.andThen(Effect.sync(() => {
+            this.#writeFiber = null;
+          })),
+          Effect.andThen(Effect.ignore(this.flush())),
+        ),
+      );
+
+      return yield* Deferred.await(settlement);
     });
-    const settlement = this.#settlement;
-
-    this.#writeTimer = setTimeout(() => {
-      this.#writeTimer = null;
-      void this.flush();
-    }, debounce);
-
-    return ResultAsync.fromSafePromise(settlement).andThen((result) => result);
   }
 
   /**
@@ -346,79 +406,86 @@ export class ValueGroup<T> {
    * 250 ms and the history index 2 s, so without this every one of them is lost
    * on a navigation that happens inside its own window.
    */
-  flush(): ResultAsync<void, StorageIssue> {
-    if (this.#writeTimer !== null) {
-      clearTimeout(this.#writeTimer);
-      this.#writeTimer = null;
-    }
+  flush(): Effect.Effect<void, StorageError> {
+    return Effect.gen({ self: this }, function*() {
+      if (this.#writeFiber !== null) {
+        const fiber = this.#writeFiber;
+        this.#writeFiber = null;
+        yield* Fiber.interrupt(fiber);
+      }
 
-    const pending = this.#pendingWrite;
-    const settle = this.#settle;
-    this.#pendingWrite = undefined;
-    this.#settlement = null;
-    this.#settle = null;
+      const pending = this.#pendingWrite;
+      const settlement = this.#settlement;
+      this.#pendingWrite = undefined;
+      this.#settlement = null;
 
-    if (pending === undefined) {
-      settle?.(ok(undefined));
-      return liftResult(ok(undefined));
-    }
+      if (pending === undefined) {
+        if (settlement !== null) yield* Deferred.succeed(settlement, undefined);
+        return;
+      }
 
-    const flushed = this.#flushValue(pending);
-    if (settle !== null) {
-      void flushed.match(
-        () => settle(ok(undefined)),
-        (issue) => settle(err(issue)),
-      );
-    }
-    return flushed;
+      const outcome = yield* Effect.result(this.#flushValue(pending));
+      if (settlement !== null) {
+        yield* Result.isSuccess(outcome)
+          ? Deferred.succeed(settlement, undefined)
+          : Deferred.fail(settlement, outcome.failure);
+      }
+      if (Result.isFailure(outcome)) return yield* Effect.fail(outcome.failure);
+    });
   }
 
-  #flushValue(value: T): ResultAsync<void, StorageIssue> {
-    // Validated on the way out as well as on the way in, so a bad value is
-    // caught where it was produced rather than on the next load — where it
-    // would reset the group and take every other field with it.
-    const validated = this.#spec.schema.safeParse(value);
-    if (!validated.success) {
-      return liftResult(err(this.#issue(
-        "invalid",
-        "refusing to persist a value that fails its own schema",
-        validated.error,
-      )));
-    }
+  #flushValue(value: T): Effect.Effect<void, StorageError> {
+    return Effect.suspend(() => {
+      // Validated on the way out as well as on the way in, so a bad value is
+      // caught where it was produced rather than on the next load — where it
+      // would reset the group and take every other field with it.
+      const validated = decodeUnknownResult(this.#spec.schema)(value);
+      if (Result.isFailure(validated)) {
+        return Effect.fail(this.#issue(
+          "invalid",
+          "refusing to persist a value that fails its own schema",
+          describeDecodeError(validated.failure),
+        ));
+      }
 
-    let encoded: string;
-    try {
-      const envelope: Envelope = {
-        schemaVersion: this.#spec.schemaVersion,
-        data: validated.data,
-      };
-      encoded = JSON.stringify(envelope);
-    } catch (cause) {
-      const issue = this.#issue(
-        "malformed",
-        "value is not serialisable",
-        cause,
+      let encoded: string;
+      try {
+        const envelope: Envelope = {
+          schemaVersion: this.#spec.schemaVersion,
+          data: validated.success,
+        };
+        encoded = JSON.stringify(envelope);
+      } catch (cause) {
+        return Effect.fail(
+          this.#issue("malformed", "value is not serialisable", cause),
+        );
+      }
+
+      return Effect.mapError(
+        this.#backend.set(this.#key, encoded),
+        (cause) => this.#issue("backend", cause.detail, cause),
       );
-      return liftResult(err(issue));
-    }
-    return this.#backend.set(this.#key, encoded).mapErr((cause) =>
-      this.#issue("backend", cause.message, cause)
-    );
+    });
   }
 
   /** Read-modify-write against the cached value. */
-  update(mutate: (current: T) => T): ResultAsync<T, StorageIssue> {
-    const next = mutate(this.current());
-    return this.write(next).map(() => next);
+  update(mutate: (current: T) => T): Effect.Effect<T, StorageError> {
+    return Effect.suspend(() => {
+      const next = mutate(this.current());
+      return Effect.as(this.write(next), next);
+    });
   }
 
   /** Delete the persisted value and revert to defaults in memory. */
-  reset(): ResultAsync<T, StorageIssue> {
-    const defaults = this.#spec.defaults();
-    this.#adopt(defaults);
-    return this.#backend.remove(this.#key)
-      .mapErr((cause) => this.#issue("backend", cause.message, cause))
-      .map(() => defaults);
+  reset(): Effect.Effect<T, StorageError> {
+    return Effect.suspend(() => {
+      const defaults = this.#spec.defaults();
+      this.#adopt(defaults);
+      return this.#backend.remove(this.#key).pipe(
+        Effect.mapError((cause) => this.#issue("backend", cause.detail, cause)),
+        Effect.as(defaults),
+      );
+    });
   }
 
   /**
@@ -447,18 +514,18 @@ export class ValueGroup<T> {
   }
 
   #issue(
-    kind: StorageIssueKind,
-    message: string,
+    reason: StorageFailureReason,
+    detail: string,
     cause?: unknown,
-  ): StorageIssue {
-    const issue: StorageIssue = {
-      kind,
+  ): StorageError {
+    const issue = new StorageError({
+      reason,
       group: this.#spec.name,
-      message: cause === undefined
-        ? message
-        : `${message}: ${describeCause(cause)}`,
-      cause,
-    };
+      detail: cause === undefined
+        ? detail
+        : `${detail}: ${describeCause(cause)}`,
+      ...(cause === undefined ? {} : { cause }),
+    });
     this.#store.report(issue);
     return issue;
   }

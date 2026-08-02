@@ -24,7 +24,7 @@
  * happens exactly when it matters.
  */
 
-import { err, ok, type Result } from "neverthrow";
+import { Result, Schema } from "effect";
 import type { FrameId } from "~/core/context.ts";
 import { formatFrameId, type FrameMessage } from "./protocol.ts";
 
@@ -42,7 +42,19 @@ const MAX_TREE_NODES = 512;
 // Channels
 // ---------------------------------------------------------------------------
 
-export type PostResult = Result<void, unknown>;
+export class PostFailed extends Schema.TaggedErrorClass<PostFailed>()(
+  "PostFailed",
+  { detail: Schema.String, cause: Schema.optional(Schema.Defect()) },
+) {}
+
+/**
+ * Synchronous by design, so a `Result` rather than an `Effect`.
+ *
+ * `post` either hands the message to the port or does not, and every caller
+ * inspects the answer on the spot. An `Effect` would add a run at each of those
+ * sites to describe something that has already happened.
+ */
+export type PostResult = Result.Result<void, PostFailed>;
 
 /**
  * One duplex link to a frame.
@@ -61,14 +73,21 @@ export const messagePortChannel = (port: MessagePort): FrameChannel => {
   let closed = false;
   return {
     post: (message: FrameMessage): PostResult => {
-      if (closed) return err(new Error("channel closed"));
+      if (closed) {
+        return Result.fail(new PostFailed({ detail: "channel closed" }));
+      }
       try {
         port.postMessage(message);
-        return ok(undefined);
+        return Result.succeed(undefined);
       } catch (cause: unknown) {
         // Structured-clone failures land here. Our payloads are plain JSON, so
         // in practice this only fires on an already-neutered port.
-        return err(cause);
+        return Result.fail(
+          new PostFailed({
+            detail: cause instanceof Error ? cause.message : String(cause),
+            cause,
+          }),
+        );
       }
     },
     close: (): void => {
@@ -93,11 +112,13 @@ export const loopbackChannel = (
   let closed = false;
   return {
     post: (message: FrameMessage): PostResult => {
-      if (closed) return err(new Error("channel closed"));
+      if (closed) {
+        return Result.fail(new PostFailed({ detail: "channel closed" }));
+      }
       queueMicrotask(() => {
         if (!closed) deliver(message);
       });
-      return ok(undefined);
+      return Result.succeed(undefined);
     },
     close: (): void => {
       closed = true;
@@ -304,7 +325,7 @@ export class FrameRegistry {
   post(frameId: FrameId, message: FrameMessage): boolean {
     const record = this.#records.get(frameId);
     if (record === undefined) return false;
-    if (record.channel.post(message).isOk()) return true;
+    if (Result.isSuccess(record.channel.post(message))) return true;
     this.remove(frameId);
     return false;
   }

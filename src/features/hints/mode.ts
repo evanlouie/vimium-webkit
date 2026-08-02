@@ -17,6 +17,7 @@
  *   Safari's transient activation is already spent.
  */
 
+import { Effect, Result } from "effect";
 import type {
   AppContext,
   FrameId,
@@ -168,15 +169,23 @@ const openInNewTab = (
   url: string,
   active: boolean,
 ): void => {
-  void openTab(app.gm, url, { active }).match(
-    (outcome) => {
-      if (!outcome.viaManager && !active) {
-        // `window.open` cannot background a tab; say so rather than letting the
-        // user believe the setting was honoured.
-        app.hud.show("Opened in the foreground: no GM.openInTab available.");
-      }
-    },
-    (error) => app.hud.error(error.message),
+  // Not on the clipboard path: `GM.openInTab` may answer with a promise, so
+  // this effect can suspend and must be forked rather than run synchronously.
+  app.runtime.runFork(
+    openTab(app.gm, url, { active }).pipe(
+      Effect.match({
+        onSuccess: (outcome) => {
+          if (!outcome.viaManager && !active) {
+            // `window.open` cannot background a tab; say so rather than letting
+            // the user believe the setting was honoured.
+            app.hud.show(
+              "Opened in the foreground: no GM.openInTab available.",
+            );
+          }
+        },
+        onFailure: (error) => app.hud.error(error.detail),
+      }),
+    ),
   );
 };
 
@@ -196,16 +205,25 @@ const COPY_MODES: ReadonlySet<HintModeKind> = new Set<HintModeKind>([
 
 const copy = (app: AppContext, text: string, label: string): void => {
   // Called synchronously from the keydown task. Do not introduce an `await`
-  // above this line.
-  const started = writeClipboard(app.gm, text);
-  if (started.isErr()) {
-    app.hud.error(`Copy failed: ${started.error.message}`);
+  // above this line, and keep this `runSync`: every effect on the write path is
+  // non-suspending, so the write still happens inside WebKit's transient-
+  // activation window. `runFork` or `runPromise` would spend it first.
+  const started = app.runtime.runSync(
+    Effect.result(writeClipboard(app.gm, text)),
+  );
+  if (Result.isFailure(started)) {
+    app.hud.error(`Copy failed: ${started.failure.detail}`);
     return;
   }
   app.hud.show(`Copied ${label}`);
-  void started.value.settled.then((result) => {
-    if (result.isErr()) app.hud.error(`Copy failed: ${result.error.message}`);
-  });
+  // The outcome may arrive later; that part is allowed to suspend.
+  app.runtime.runFork(
+    Effect.catch(
+      started.success.settled,
+      (error) =>
+        Effect.sync(() => app.hud.error(`Copy failed: ${error.detail}`)),
+    ),
+  );
 };
 
 /**

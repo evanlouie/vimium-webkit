@@ -24,6 +24,7 @@
  * >    engine and never touches this index.
  */
 
+import { Effect } from "effect";
 import type { AppContext } from "~/core/context.ts";
 import { storageManager } from "~/platform/ambient.ts";
 import type { HistoryIndex, Visit } from "~/settings/schema.ts";
@@ -289,18 +290,26 @@ export const createHistoryIndex = (app: AppContext): HistoryIndexApi => {
       const at = Date.now();
       const title = document.title.trim().slice(0, 300);
 
-      void app.groups.history.update((current): HistoryIndex => ({
-        visits: [...mergeVisit(current.visits, { url, title, at }, limit)],
-      }));
+      // Fire-and-forget: a storage failure is already reported to the store's
+      // issue listeners, and a page visit is not worth a HUD message.
+      app.runtime.runFork(Effect.ignore(
+        app.groups.history.update((current): HistoryIndex => ({
+          visits: [...mergeVisit(current.visits, { url, title, at }, limit)],
+        })),
+      ));
     },
 
     visits: (): readonly Visit[] => app.groups.history.current().visits,
 
-    clear: async (): Promise<void> => {
+    clear: (): Promise<void> =>
       // `reset()` removes the stored key outright rather than writing an empty
       // array over it: "clear my history" should not leave a
       // vimium-webkit-shaped hole in the manager's storage list either.
-      await app.groups.history.reset();
-    },
+      //
+      // The failure propagates. This is a privacy control, and its caller
+      // already has a "Could not erase the history index" branch — which was
+      // unreachable while this swallowed the error, so the HUD promised the
+      // index was gone whether or not the key had actually been removed.
+      app.runtime.runPromise(Effect.asVoid(app.groups.history.reset())),
   };
 };

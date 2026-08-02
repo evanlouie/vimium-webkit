@@ -1,13 +1,21 @@
-import { errAsync, okAsync } from "neverthrow";
+import { Effect, Option, Result, Schema } from "effect";
 import { test } from "vitest";
-import * as z from "zod/mini";
-import type { ValueBackend } from "~/platform/gm.ts";
+import { GmError, type ValueBackend } from "~/platform/gm.ts";
 import {
   type Migration,
-  type StorageIssue,
+  type StorageError,
   ValueStore,
 } from "~/platform/storage.ts";
 import { assert, assertEquals } from "./support/assert.ts";
+
+/** Run an effect to a promise, so each test reads as it did before. */
+const run = <A, E>(effect: Effect.Effect<A, E>): Promise<A> =>
+  Effect.runPromise(effect);
+
+/** Run an effect and observe the typed failure instead of throwing. */
+const attempt = <A, E>(
+  effect: Effect.Effect<A, E>,
+): Promise<Result.Result<A, E>> => Effect.runPromise(Effect.result(effect));
 
 interface Fake {
   readonly backend: ValueBackend;
@@ -21,16 +29,16 @@ const fakeBackend = (withWatch: boolean): Fake => {
 
   const backend: ValueBackend = {
     kind: "gm-async",
-    get: (key) => okAsync(map.get(key)),
-    set: (key, value) => {
-      map.set(key, value);
-      return okAsync(undefined);
-    },
-    remove: (key) => {
-      map.delete(key);
-      return okAsync(undefined);
-    },
-    list: () => okAsync([...map.keys()]),
+    get: (key) => Effect.succeed(Option.fromNullishOr(map.get(key) ?? null)),
+    set: (key, value) =>
+      Effect.sync(() => {
+        map.set(key, value);
+      }),
+    remove: (key) =>
+      Effect.sync(() => {
+        map.delete(key);
+      }),
+    list: () => Effect.sync((): readonly string[] => [...map.keys()]),
     watch: withWatch
       ? (key, onChange) => {
         watchers.set(key, onChange);
@@ -46,8 +54,8 @@ const fakeBackend = (withWatch: boolean): Fake => {
   };
 };
 
-const schema = z.object({ count: z.number(), label: z.string() });
-type Shape = z.infer<typeof schema>;
+const schema = Schema.Struct({ count: Schema.Number, label: Schema.String });
+type Shape = typeof schema.Type;
 
 const defaults = (): Shape => ({ count: 0, label: "default" });
 
@@ -62,7 +70,7 @@ const spec = (migrations?: readonly Migration[]) => ({
 test("an absent value hydrates to the defaults", async () => {
   const fake = fakeBackend(false);
   const group = new ValueStore(fake.backend).group(spec());
-  assertEquals(await group.hydrate(), defaults());
+  assertEquals(await run(group.hydrate()), defaults());
 });
 
 test("a written value round-trips through the envelope", async () => {
@@ -70,7 +78,7 @@ test("a written value round-trips through the envelope", async () => {
   const store = new ValueStore(fake.backend);
   const group = store.group(spec());
 
-  await group.write({ count: 3, label: "three" });
+  await run(group.write({ count: 3, label: "three" }));
   const raw = fake.map.get("vimium-webkit:test");
   assert(raw !== undefined);
   assertEquals(JSON.parse(raw), {
@@ -79,18 +87,18 @@ test("a written value round-trips through the envelope", async () => {
   });
 
   const reread = new ValueStore(fake.backend).group(spec());
-  assertEquals(await reread.hydrate(), { count: 3, label: "three" });
+  assertEquals(await run(reread.hydrate()), { count: 3, label: "three" });
 });
 
 test("malformed JSON falls back to defaults and reports", async () => {
   const fake = fakeBackend(false);
   fake.map.set("vimium-webkit:test", "{not json");
   const store = new ValueStore(fake.backend);
-  const issues: StorageIssue[] = [];
+  const issues: StorageError[] = [];
   store.onIssue((issue) => issues.push(issue));
 
-  assertEquals(await store.group(spec()).hydrate(), defaults());
-  assertEquals(issues[0]?.kind, "malformed");
+  assertEquals(await run(store.group(spec()).hydrate()), defaults());
+  assertEquals(issues[0]?.reason, "malformed");
 });
 
 test("a schema mismatch falls back to defaults and reports", async () => {
@@ -100,11 +108,11 @@ test("a schema mismatch falls back to defaults and reports", async () => {
     JSON.stringify({ schemaVersion: 2, data: { count: "not a number" } }),
   );
   const store = new ValueStore(fake.backend);
-  const issues: StorageIssue[] = [];
+  const issues: StorageError[] = [];
   store.onIssue((issue) => issues.push(issue));
 
-  assertEquals(await store.group(spec()).hydrate(), defaults());
-  assertEquals(issues[0]?.kind, "invalid");
+  assertEquals(await run(store.group(spec()).hydrate()), defaults());
+  assertEquals(issues[0]?.reason, "invalid");
 });
 
 test("migrations run in order and only forward", async () => {
@@ -134,7 +142,7 @@ test("migrations run in order and only forward", async () => {
   ];
 
   const group = new ValueStore(fake.backend).group(spec(migrations));
-  assertEquals(await group.hydrate(), { count: 5, label: "migrated" });
+  assertEquals(await run(group.hydrate()), { count: 5, label: "migrated" });
 });
 
 test("a throwing migration falls back to defaults and reports", async () => {
@@ -144,7 +152,7 @@ test("a throwing migration falls back to defaults and reports", async () => {
     JSON.stringify({ schemaVersion: 1, data: {} }),
   );
   const store = new ValueStore(fake.backend);
-  const issues: StorageIssue[] = [];
+  const issues: StorageError[] = [];
   store.onIssue((issue) => issues.push(issue));
 
   const group = store.group(spec([{
@@ -155,8 +163,8 @@ test("a throwing migration falls back to defaults and reports", async () => {
     },
   }]));
 
-  assertEquals(await group.hydrate(), defaults());
-  assertEquals(issues[0]?.kind, "migration");
+  assertEquals(await run(group.hydrate()), defaults());
+  assertEquals(issues[0]?.reason, "migration");
 });
 
 test("data written by a newer build is left alone", async () => {
@@ -171,7 +179,7 @@ test("data written by a newer build is left alone", async () => {
 
   const store = new ValueStore(fake.backend);
   const group = store.group(spec());
-  assertEquals(await group.hydrate(), defaults());
+  assertEquals(await run(group.hydrate()), defaults());
   assertEquals(fake.map.get("vimium-webkit:test"), stored);
 });
 
@@ -182,7 +190,7 @@ test("pre-envelope data is treated as version 0", async () => {
     JSON.stringify({ count: 7, label: "old" }),
   );
   const group = new ValueStore(fake.backend).group(spec());
-  assertEquals(await group.hydrate(), { count: 7, label: "old" });
+  assertEquals(await run(group.hydrate()), { count: 7, label: "old" });
 });
 
 test("peek is synchronous and current() falls back to defaults", async () => {
@@ -190,24 +198,26 @@ test("peek is synchronous and current() falls back to defaults", async () => {
   const group = new ValueStore(fake.backend).group(spec());
   assertEquals(group.peek(), undefined);
   assertEquals(group.current(), defaults());
-  await group.hydrate();
+  await run(group.hydrate());
   assertEquals(group.peek(), defaults());
 });
 
 test("update applies against the cached value", async () => {
   const fake = fakeBackend(false);
   const group = new ValueStore(fake.backend).group(spec());
-  await group.hydrate();
-  const result = await group.update((current) => ({ ...current, count: 9 }));
-  assert(result.isOk());
+  await run(group.hydrate());
+  const result = await attempt(
+    group.update((current) => ({ ...current, count: 9 })),
+  );
+  assert(Result.isSuccess(result));
   assertEquals(group.current().count, 9);
 });
 
 test("reset clears storage and reverts in memory", async () => {
   const fake = fakeBackend(false);
   const group = new ValueStore(fake.backend).group(spec());
-  await group.write({ count: 4, label: "x" });
-  await group.reset();
+  await run(group.write({ count: 4, label: "x" }));
+  await run(group.reset());
   assertEquals(fake.map.has("vimium-webkit:test"), false);
   assertEquals(group.current(), defaults());
 });
@@ -218,7 +228,7 @@ test("subscribers see cross-tab changes when the backend supports it", async () 
   assertEquals(store.supportsWatch, true);
 
   const group = store.group(spec());
-  await group.hydrate();
+  await run(group.hydrate());
 
   const seen: Shape[] = [];
   group.subscribe((value) => seen.push(value));
@@ -269,11 +279,13 @@ const failableBackend = (): {
       ...base.backend,
       set: (key, value) => {
         if (state.fail) {
-          return errAsync({
-            kind: "failed" as const,
-            api: "setValue",
-            message: "disk full",
-          });
+          return Effect.fail(
+            new GmError({
+              reason: "failed",
+              api: "setValue",
+              detail: "disk full",
+            }),
+          );
         }
         writes.push(value);
         return base.backend.set(key, value);
@@ -287,14 +299,14 @@ test("a debounced write resolves from the flush, not the timer", async () => {
   const group = new ValueStore(fake.backend).group(debouncedSpec(5));
   fake.fail = true;
 
-  const result = await group.write({ count: 1, label: "a" });
+  const result = await attempt(group.write({ count: 1, label: "a" }));
 
   // The regression: the promise used to resolve `Ok` when the *timer* fired
   // while `void`-ing the flush, so `ResultAsync<void, StorageIssue>` could
   // never be `Err` in production and every error branch built on it was
   // unreachable.
-  assert(result.isErr(), "a failing backend must surface as Err");
-  assertEquals(result.error.kind, "backend");
+  assert(Result.isFailure(result), "a failing backend must surface as Err");
+  assertEquals(result.failure.reason, "backend");
 });
 
 test("a superseded write settles rather than hanging", async () => {
@@ -303,12 +315,12 @@ test("a superseded write settles rather than hanging", async () => {
 
   // The first write's timer is cleared by the second. Its promise used to be
   // orphaned by that `clearTimeout`, so `await update()` never returned.
-  const first = group.write({ count: 1, label: "a" });
-  const second = group.write({ count: 2, label: "b" });
+  const first = attempt(group.write({ count: 1, label: "a" }));
+  const second = attempt(group.write({ count: 2, label: "b" }));
 
   const [a, b] = await Promise.all([first, second]);
-  assert(a.isOk());
-  assert(b.isOk());
+  assert(Result.isSuccess(a));
+  assert(Result.isSuccess(b));
   // Coalesced: one write reaches the backend, carrying the newest value.
   assertEquals(fake.writes.length, 1);
   assertEquals(JSON.parse(fake.writes[0] ?? "{}").data, {
@@ -321,12 +333,15 @@ test("flush() commits a pending write immediately", async () => {
   const fake = failableBackend();
   const group = new ValueStore(fake.backend).group(debouncedSpec(10_000));
 
-  const pending = group.write({ count: 5, label: "e" });
+  const pending = attempt(group.write({ count: 5, label: "e" }));
   assertEquals(fake.writes.length, 0);
 
-  await group.flush();
+  await run(group.flush());
   assertEquals(fake.writes.length, 1);
-  assert((await pending).isOk(), "the pending write adopts the flush outcome");
+  assert(
+    Result.isSuccess(await pending),
+    "the pending write adopts the flush outcome",
+  );
 });
 
 test("flushAll commits every group", async () => {
@@ -335,9 +350,9 @@ test("flushAll commits every group", async () => {
   const one = store.group({ ...debouncedSpec(10_000), name: "one" });
   const two = store.group({ ...debouncedSpec(10_000), name: "two" });
 
-  void one.write({ count: 1, label: "a" });
-  void two.write({ count: 2, label: "b" });
-  await store.flushAll();
+  void attempt(one.write({ count: 1, label: "a" }));
+  void attempt(two.write({ count: 2, label: "b" }));
+  await run(store.flushAll());
 
   assertEquals(fake.writes.length, 2);
 });
@@ -347,13 +362,13 @@ test("hydrate does not resurrect a value a pending write is replacing", async ()
   const store = new ValueStore(fake.backend);
   const group = store.group(debouncedSpec(10_000));
 
-  const stored = group.write({ count: 1, label: "stored" });
-  await group.flush();
-  assert((await stored).isOk());
+  const stored = attempt(group.write({ count: 1, label: "stored" }));
+  await run(group.flush());
+  assert(Result.isSuccess(await stored));
 
   // Written but still inside its debounce window when a refresh comes in.
-  void group.write({ count: 2, label: "newer" });
-  assertEquals(await group.hydrate(), { count: 2, label: "newer" });
+  void attempt(group.write({ count: 2, label: "newer" }));
+  assertEquals(await run(group.hydrate()), { count: 2, label: "newer" });
 });
 
 test("a value that fails its own schema is never persisted", async () => {
@@ -362,11 +377,11 @@ test("a value that fails its own schema is never persisted", async () => {
 
   // Caught here rather than on the next load, where it would reset the whole
   // group and take every other field down with it.
-  const result = await group.write(
-    { count: "not a number", label: "x" } as unknown as Shape,
+  const result = await attempt(
+    group.write({ count: "not a number", label: "x" } as unknown as Shape),
   );
-  assert(result.isErr());
-  assertEquals(result.error.kind, "invalid");
+  assert(Result.isFailure(result));
+  assertEquals(result.failure.reason, "invalid");
   assertEquals(fake.writes.length, 0);
 });
 
@@ -377,7 +392,7 @@ test("hydrateAll covers every registered group", async () => {
   const two = store.group({ ...spec(), name: "two" });
 
   assertEquals(store.groups.length, 2);
-  await store.hydrateAll();
+  await run(store.hydrateAll());
 
   // The bug this makes impossible: three of five groups were hydrated by a
   // hand-written list, and `update()` on an unhydrated group replaces the

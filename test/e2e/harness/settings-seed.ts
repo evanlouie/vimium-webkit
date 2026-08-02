@@ -9,8 +9,8 @@
  *
  * The baseline is the shipped `defaultSettings()`, read from the build output
  * rather than copied. It cannot be *imported*: this module runs under
- * Playwright's own loader, which resolves neither the `~/` alias nor
- * `npm:zod/mini`. The copy that used to live here had drifted (one search
+ * Playwright's own loader, which resolves neither the `~/` alias nor the
+ * bundler's. The copy that used to live here had drifted (one search
  * engine against five) and, worse, forced `filterLinkHints: true` and
  * `smoothScroll: false` on every spec — so the *default* hint pipeline and the
  * *default* scroll path had no integration coverage at all, which is how

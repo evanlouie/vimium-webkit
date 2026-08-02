@@ -7,6 +7,7 @@
  * against a hand-written stub instead of a live DOM.
  */
 
+import type { AppRuntime } from "~/boot/runtime.ts";
 import type { Capabilities } from "~/platform/capabilities.ts";
 import type { GmSurface } from "~/platform/gm.ts";
 import type { ValueGroup, ValueStore } from "~/platform/storage.ts";
@@ -305,6 +306,15 @@ export interface StorageGroups {
 }
 
 export interface AppContext {
+  /**
+   * The frame's Effect runtime.
+   *
+   * Every effectful operation in the codebase returns an `Effect`; this is what
+   * runs one. Use `runSync` on a path the browser measures — a key handler that
+   * must still be able to call `preventDefault()` — and `runFork` for anything
+   * that may suspend.
+   */
+  readonly runtime: AppRuntime;
   readonly caps: Capabilities;
   readonly gm: GmSurface;
   readonly handlerStack: HandlerStack;

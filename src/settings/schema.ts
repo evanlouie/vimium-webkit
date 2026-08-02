@@ -8,7 +8,7 @@
  *
  * Two rules make that survivable across versions:
  *
- * 1. **Every settings field carries its own fallback.** `z.catch(schema, x)`
+ * 1. **Every settings field carries its own fallback.** `field(schema, x)`
  *    turns a bad or missing field into `x` instead of failing the object. This
  *    is what makes adding a field genuinely safe: a payload written by an older
  *    build is missing the new key, and the new key alone is defaulted.
@@ -22,24 +22,24 @@
  * the cautionary tale.
  */
 
-import * as z from "zod/mini";
+import { Effect, Option, Schema } from "effect";
 import type { GroupSpec } from "~/platform/storage.ts";
 
 // ---------------------------------------------------------------------------
 // Exclusion rules
 // ---------------------------------------------------------------------------
 
-export const exclusionRuleSchema = z.object({
+export const exclusionRuleSchema = Schema.Struct({
   /** A URL glob, e.g. `https://mail.google.com/*`. */
-  pattern: z.string(),
+  pattern: Schema.String,
   /**
    * Keys to pass through to the page. Empty string disables Vimium-WebKit
    * entirely on matching URLs; a non-empty string is a partial exclusion.
    */
-  passKeys: z.string(),
+  passKeys: Schema.String,
 });
 
-export type ExclusionRule = z.infer<typeof exclusionRuleSchema>;
+export type ExclusionRule = typeof exclusionRuleSchema.Type;
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -52,9 +52,22 @@ export type ExclusionRule = z.infer<typeof exclusionRuleSchema>;
  * costs the user that field. `#decode` returns the defaults for the *whole*
  * group on a validation failure, which without this would mean a single
  * hand-edited character in the manager's storage viewer erasing every setting.
+ *
+ * Two Effect combinators are needed, because a key that is *absent* and a key
+ * that is *present but invalid* fail in different places. `catchDecoding`
+ * recovers the second; the struct never reaches the field decoder for the
+ * first, so `withDecodingDefaultTypeKey` makes the key optional on the wire and
+ * supplies the same fallback there. Both take the already-decoded `Type`, so
+ * the fallback is never re-validated against its own checks.
  */
-const field = <T>(schema: z.ZodMiniType<T>, fallback: T): z.ZodMiniType<T> =>
-  z.catch(schema, fallback);
+const field = <S extends Schema.Top>(schema: S, fallback: S["Type"]) => {
+  const recovered = Schema.catchDecoding<S>(() =>
+    Effect.succeed(Option.some(fallback))
+  )(schema);
+  return Schema.withDecodingDefaultTypeKey<typeof recovered>(
+    Effect.succeed(fallback),
+  )(recovered);
+};
 
 /** Characters usable for hint labels must be distinct, or two hints collide. */
 const distinctCharacters = (value: string): boolean =>
@@ -63,60 +76,63 @@ const distinctCharacters = (value: string): boolean =>
 /** A search template without `%s` silently discards whatever the user typed. */
 const hasQueryPlaceholder = (value: string): boolean => value.includes("%s");
 
-export const settingsSchema = z.object({
+export const settingsSchema = Schema.Struct({
   // --- Scrolling ---
   scrollStepSize: field(
-    z.number().check(z.minimum(1), z.maximum(10_000)),
+    Schema.Number.check(
+      Schema.isGreaterThanOrEqualTo(1),
+      Schema.isLessThanOrEqualTo(10_000),
+    ),
     60,
   ),
-  smoothScroll: field(z.boolean(), true),
+  smoothScroll: field(Schema.Boolean, true),
 
   // --- Link hints ---
   linkHintCharacters: field(
-    z.string().check(
-      z.minLength(2),
-      z.refine(distinctCharacters, {
+    Schema.String.check(
+      Schema.isMinLength(2),
+      Schema.makeFilter(distinctCharacters, {
         message: "hint characters must all be different",
       }),
     ),
     "sadfjklewcmpgh",
   ),
   linkHintNumbers: field(
-    z.string().check(
-      z.minLength(2),
-      z.refine(distinctCharacters, {
+    Schema.String.check(
+      Schema.isMinLength(2),
+      Schema.makeFilter(distinctCharacters, {
         message: "hint number characters must all be different",
       }),
     ),
     "0123456789",
   ),
-  filterLinkHints: field(z.boolean(), false),
-  waitForEnterForFilteredHints: field(z.boolean(), true),
+  filterLinkHints: field(Schema.Boolean, false),
+  waitForEnterForFilteredHints: field(Schema.Boolean, true),
   /** Extra CSS applied inside our shadow root; never injected into the page. */
-  userDefinedLinkHintCss: field(z.string(), ""),
+  userDefinedLinkHintCss: field(Schema.String, ""),
 
   // --- Find ---
-  regexFindMode: field(z.boolean(), false),
-  ignoreKeyboardLayout: field(z.boolean(), false),
+  regexFindMode: field(Schema.Boolean, false),
+  ignoreKeyboardLayout: field(Schema.Boolean, false),
   /**
    * Shadow the browser's own ⌘F/Ctrl+F. Off by default: preventable on macOS
    * Safari, but possibly not on iOS (WebKit bug 191768), and stealing the
    * native binding when we cannot reliably deliver a replacement is worse than
    * not offering it.
    */
-  shadowNativeFind: field(z.boolean(), false),
+  shadowNativeFind: field(Schema.Boolean, false),
 
   // --- Navigation heuristics ---
   previousPatterns: field(
-    z.string(),
+    Schema.String,
     "prev,previous,back,older,<,‹,←,«,≪,<<",
   ),
-  nextPatterns: field(z.string(), "next,more,newer,>,›,→,»,≫,>>"),
+  nextPatterns: field(Schema.String, "next,more,newer,>,›,→,»,≫,>>"),
 
   // --- Search ---
   searchUrl: field(
-    z.string().check(
-      z.refine(hasQueryPlaceholder, {
+    Schema.String.check(
+      Schema.makeFilter(hasQueryPlaceholder, {
         message: "the search URL must contain %s",
       }),
     ),
@@ -124,7 +140,7 @@ export const settingsSchema = z.object({
   ),
   /** One `keyword: url %s Description` per line, Vimium-compatible. */
   searchEngines: field(
-    z.string(),
+    Schema.String,
     [
       "w: https://www.wikipedia.org/w/index.php?title=Special:Search&search=%s Wikipedia",
       "g: https://www.google.com/search?q=%s Google",
@@ -133,7 +149,7 @@ export const settingsSchema = z.object({
       "mdn: https://developer.mozilla.org/en-US/search?q=%s MDN",
     ].join("\n"),
   ),
-  newTabUrl: field(z.string(), "about:blank"),
+  newTabUrl: field(Schema.String, "about:blank"),
   /**
    * Ask the configured search engine for completions as the user types.
    *
@@ -142,15 +158,15 @@ export const settingsSchema = z.object({
    * party they did not choose in that moment. "Off unless a manager cannot do
    * it" is not a privacy control — it is the absence of one.
    */
-  enableSearchSuggestions: field(z.boolean(), false),
+  enableSearchSuggestions: field(Schema.Boolean, false),
 
   // --- UI ---
-  hideHud: field(z.boolean(), false),
+  hideHud: field(Schema.Boolean, false),
   /** Blend the overlay with the page's own colour scheme where detectable. */
-  followPageColorScheme: field(z.boolean(), true),
+  followPageColorScheme: field(Schema.Boolean, true),
 
   // --- Behaviour ---
-  grabBackFocus: field(z.boolean(), false),
+  grabBackFocus: field(Schema.Boolean, false),
   /**
    * Leave the arrow keys and space to a focused video or audio player.
    *
@@ -160,28 +176,31 @@ export const settingsSchema = z.object({
    * loses them the moment Vimium-WebKit is installed. Turn it off to scroll
    * with them everywhere, player or no player.
    */
-  passMediaKeys: field(z.boolean(), true),
+  passMediaKeys: field(Schema.Boolean, true),
   /** Per-origin CSS zoom. Not real browser zoom; see §4.2. Off by default. */
-  enableCssZoom: field(z.boolean(), false),
+  enableCssZoom: field(Schema.Boolean, false),
   /**
    * Record visited pages locally to power Omnibar-lite. Opt-in, and it must
    * stay that way: a userscript building a browsing-history index is a real
    * privacy surface and GM storage is readable from the manager's own UI.
    */
-  enableHistoryIndex: field(z.boolean(), false),
-  historyIndexDenylist: field(z.array(z.string()), []),
+  enableHistoryIndex: field(Schema.Boolean, false),
+  historyIndexDenylist: field(Schema.mutable(Schema.Array(Schema.String)), []),
   historyIndexLimit: field(
-    z.number().check(z.minimum(0), z.maximum(50_000)),
+    Schema.Number.check(
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(50_000),
+    ),
     5000,
   ),
 
   // --- Rules ---
-  exclusionRules: field(z.array(exclusionRuleSchema), []),
+  exclusionRules: field(Schema.mutable(Schema.Array(exclusionRuleSchema)), []),
   /** Raw `map`/`unmap`/`unmapAll`/`mapkey` source, parsed by `core/mappings.ts`. */
-  keyMappings: field(z.string(), ""),
+  keyMappings: field(Schema.String, ""),
 });
 
-export type Settings = z.infer<typeof settingsSchema>;
+export type Settings = typeof settingsSchema.Type;
 
 /**
  * The settings a fresh install starts from.
@@ -191,8 +210,14 @@ export type Settings = z.infer<typeof settingsSchema>;
  * hand-written literal would be a second source of truth, and the one in the
  * e2e harness had already drifted to a single search engine against the five
  * here.
+ *
+ * `decodeSync` throws, which is correct here and only here: the input is the
+ * literal `{}`, so the sole way to fail is a field added without a fallback.
+ * That is a build-time mistake, and this line is where the test suite catches
+ * it — rather than a user's `document-start`.
  */
-export const defaultSettings = (): Settings => settingsSchema.parse({});
+export const defaultSettings = (): Settings =>
+  Schema.decodeSync(settingsSchema)({});
 
 export const SETTINGS_SCHEMA_VERSION = 1;
 
@@ -209,29 +234,32 @@ export const settingsGroup: GroupSpec<Settings> = {
 // Marks
 // ---------------------------------------------------------------------------
 
-export const localMarkSchema = z.object({
-  scrollX: z.number(),
-  scrollY: z.number(),
-  savedAt: z.number(),
+export const localMarkSchema = Schema.Struct({
+  scrollX: Schema.Number,
+  scrollY: Schema.Number,
+  savedAt: Schema.Number,
 });
 
-export const globalMarkSchema = z.object({
-  url: z.string(),
-  scrollX: z.number(),
-  scrollY: z.number(),
-  savedAt: z.number(),
+export const globalMarkSchema = Schema.Struct({
+  url: Schema.String,
+  scrollX: Schema.Number,
+  scrollY: Schema.Number,
+  savedAt: Schema.Number,
 });
 
-export const marksSchema = z.object({
+export const marksSchema = Schema.Struct({
   /** `url -> mark letter -> position`. */
-  local: z.record(z.string(), z.record(z.string(), localMarkSchema)),
+  local: Schema.Record(
+    Schema.String,
+    Schema.Record(Schema.String, localMarkSchema),
+  ),
   /** `mark letter -> {url, position}`. */
-  global: z.record(z.string(), globalMarkSchema),
+  global: Schema.Record(Schema.String, globalMarkSchema),
 });
 
-export type Marks = z.infer<typeof marksSchema>;
-export type LocalMark = z.infer<typeof localMarkSchema>;
-export type GlobalMark = z.infer<typeof globalMarkSchema>;
+export type Marks = typeof marksSchema.Type;
+export type LocalMark = typeof localMarkSchema.Type;
+export type GlobalMark = typeof globalMarkSchema.Type;
 
 /**
  * How many distinct URLs may hold local marks.
@@ -297,11 +325,11 @@ export const marksGroup: GroupSpec<Marks> = {
 // Find history
 // ---------------------------------------------------------------------------
 
-export const findHistorySchema = z.object({
-  queries: z.array(z.string()),
+export const findHistorySchema = Schema.Struct({
+  queries: Schema.mutable(Schema.Array(Schema.String)),
 });
 
-export type FindHistory = z.infer<typeof findHistorySchema>;
+export type FindHistory = typeof findHistorySchema.Type;
 
 /** Upstream uses `chrome.storage.session`; we have no session tier, so it is capped. */
 export const FIND_HISTORY_LIMIT = 50;
@@ -319,19 +347,19 @@ export const findHistoryGroup: GroupSpec<FindHistory> = {
 // Frecency index (opt-in)
 // ---------------------------------------------------------------------------
 
-export const visitSchema = z.object({
-  url: z.string(),
-  title: z.string(),
-  visitCount: z.number(),
-  lastVisit: z.number(),
+export const visitSchema = Schema.Struct({
+  url: Schema.String,
+  title: Schema.String,
+  visitCount: Schema.Number,
+  lastVisit: Schema.Number,
 });
 
-export const historyIndexSchema = z.object({
-  visits: z.array(visitSchema),
+export const historyIndexSchema = Schema.Struct({
+  visits: Schema.mutable(Schema.Array(visitSchema)),
 });
 
-export type Visit = z.infer<typeof visitSchema>;
-export type HistoryIndex = z.infer<typeof historyIndexSchema>;
+export type Visit = typeof visitSchema.Type;
+export type HistoryIndex = typeof historyIndexSchema.Type;
 
 export const HISTORY_SCHEMA_VERSION = 1;
 
@@ -347,13 +375,17 @@ export const historyGroup: GroupSpec<HistoryIndex> = {
 // Session state (small, frequently written)
 // ---------------------------------------------------------------------------
 
-export const sessionSchema = z.object({
+export const sessionSchema = Schema.Struct({
   /** Tabs we opened via `GM_openInTab`, heartbeated so Omnibar-lite can list them. */
-  knownTabs: z.array(
-    z.object({ url: z.string(), title: z.string(), heartbeat: z.number() }),
-  ),
+  knownTabs: Schema.mutable(Schema.Array(
+    Schema.Struct({
+      url: Schema.String,
+      title: Schema.String,
+      heartbeat: Schema.Number,
+    }),
+  )),
   /** One-time warnings already shown, keyed by id. */
-  acknowledged: z.array(z.string()),
+  acknowledged: Schema.mutable(Schema.Array(Schema.String)),
   /**
    * CSS zoom factor per origin.
    *
@@ -361,10 +393,10 @@ export const sessionSchema = z.object({
    * written far more often and a corrupt entry should not cost the user their
    * key mappings.
    */
-  zoomByOrigin: z.record(z.string(), z.number()),
+  zoomByOrigin: Schema.Record(Schema.String, Schema.Number),
 });
 
-export type SessionState = z.infer<typeof sessionSchema>;
+export type SessionState = typeof sessionSchema.Type;
 
 export const SESSION_SCHEMA_VERSION = 1;
 

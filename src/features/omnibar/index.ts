@@ -14,6 +14,7 @@
  * index, tabs we opened ourselves) and says so on every row.
  */
 
+import { Effect } from "effect";
 import type {
   AppContext,
   CommandDef,
@@ -144,7 +145,7 @@ interface Session {
 
 export const createOmnibar = (app: AppContext): OmnibarLiteApi => {
   const history: HistoryIndexApi = createHistoryIndex(app);
-  const suggester: Suggester = createSuggester(app.gm);
+  const suggester: Suggester = createSuggester(app.gm, app.runtime);
 
   let session: Session | null = null;
   let stylesInstalled = false;
@@ -298,27 +299,35 @@ export const createOmnibar = (app: AppContext): OmnibarLiteApi => {
 
   const registerOpenedTab = (url: string, title: string): void => {
     const now = Date.now();
-    void app.groups.session.update((current): SessionState => ({
-      ...current,
-      // Pruned on every write: a list of tabs that are no longer alive is both
-      // misleading in the completion list and unbounded growth in storage.
-      knownTabs: [
-        { url, title, heartbeat: now },
-        ...liveTabs(current.knownTabs, now).filter((tab) => tab.url !== url),
-      ],
-    }));
+    app.runtime.runFork(Effect.ignore(
+      app.groups.session.update((current): SessionState => ({
+        ...current,
+        // Pruned on every write: a list of tabs that are no longer alive is
+        // both misleading in the completion list and unbounded growth in
+        // storage.
+        knownTabs: [
+          { url, title, heartbeat: now },
+          ...liveTabs(current.knownTabs, now).filter((tab) => tab.url !== url),
+        ],
+      })),
+    ));
   };
 
   const openInNewTab = (url: string): void => {
-    void openTab(app.gm, url, { active: true }).match(
-      (outcome) => registerOpenedTab(outcome.url, ""),
-      (error) => {
-        app.hud.error(
-          error.nativeAlternative === undefined
-            ? error.message
-            : `${error.message} (${error.nativeAlternative})`,
-        );
-      },
+    // `runFork` rather than `runSync`: the manager's open-tab API is async. The
+    // fork runs eagerly up to its first suspension, so the call still leaves
+    // inside the keystroke's transient-activation window.
+    app.runtime.runFork(
+      Effect.match(openTab(app.gm, url, { active: true }), {
+        onSuccess: (outcome) => registerOpenedTab(outcome.url, ""),
+        onFailure: (error) => {
+          app.hud.error(
+            error.nativeAlternative === undefined
+              ? error.detail
+              : `${error.detail} (${error.nativeAlternative})`,
+          );
+        },
+      }),
     );
   };
 
@@ -355,8 +364,15 @@ export const createOmnibar = (app: AppContext): OmnibarLiteApi => {
         close();
         if (newTab) openInNewTab(url);
         else {
-          const result = navigate(url);
-          if (result.isErr()) app.hud.error(result.error.message);
+          app.runtime.runFork(
+            Effect.catch(
+              navigate(url),
+              (error) =>
+                Effect.sync(() => {
+                  app.hud.error(error.detail);
+                }),
+            ),
+          );
         }
         return;
       }
@@ -480,12 +496,14 @@ export const createOmnibar = (app: AppContext): OmnibarLiteApi => {
 
     const now = Date.now();
     const title = document.title;
-    void app.groups.session.update((current): SessionState => ({
-      ...current,
-      knownTabs: liveTabs(current.knownTabs, now).map((tab) =>
-        tab.url === url ? { url, title, heartbeat: now } : tab
-      ),
-    }));
+    app.runtime.runFork(Effect.ignore(
+      app.groups.session.update((current): SessionState => ({
+        ...current,
+        knownTabs: liveTabs(current.knownTabs, now).map((tab) =>
+          tab.url === url ? { url, title, heartbeat: now } : tab
+        ),
+      })),
+    ));
   };
 
   return {

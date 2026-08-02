@@ -10,38 +10,45 @@
  * the `keydown` task.** Never `await` anything before calling into this module.
  */
 
-import { err, ok, type Result } from "neverthrow";
+import { Duration, Effect, Schema } from "effect";
 import { clipboardReader, clipboardWriter } from "./ambient.ts";
 import { type GmSurface, setClipboard } from "./gm.ts";
-import { withDeadline } from "./scheduler.ts";
 
 export type ClipboardWriteMethod =
   | "async-clipboard"
   | "gm-set-clipboard"
   | "exec-command";
 
-export type ClipboardErrorKind =
-  | "unavailable"
-  | "denied"
-  | "timeout"
-  | "empty"
-  | "failed";
+export const ClipboardFailureReason = Schema.Literals([
+  "unavailable",
+  "denied",
+  "timeout",
+  "empty",
+  "failed",
+]);
 
-export interface ClipboardError {
-  readonly kind: ClipboardErrorKind;
-  readonly message: string;
-}
+export type ClipboardFailureReason = typeof ClipboardFailureReason.Type;
+
+export class ClipboardError
+  extends Schema.TaggedErrorClass<ClipboardError>()("ClipboardError", {
+    reason: ClipboardFailureReason,
+    detail: Schema.String,
+  })
+{}
 
 const clipboardError = (
-  kind: ClipboardErrorKind,
-  message: string,
-): ClipboardError => ({ kind, message });
+  reason: ClipboardFailureReason,
+  detail: string,
+): ClipboardError => new ClipboardError({ reason, detail });
+
+const describe = (cause: unknown): string =>
+  cause instanceof Error ? cause.message : String(cause);
 
 export interface ClipboardWrite {
   /** Which path was taken, for the HUD confirmation message. */
   readonly method: ClipboardWriteMethod;
-  /** Resolves once the write is known to have succeeded or failed. */
-  readonly settled: Promise<Result<void, ClipboardError>>;
+  /** Completes once the write is known to have succeeded or failed. */
+  readonly settled: Effect.Effect<void, ClipboardError>;
 }
 
 /**
@@ -50,54 +57,57 @@ export interface ClipboardWrite {
  * Still required, not merely nostalgic: `navigator.clipboard` is `undefined` on
  * insecure origins, and plenty of intranet and localhost pages are `http://`.
  */
-const execCommandCopy = (text: string): Result<void, ClipboardError> => {
-  const previous = document.activeElement;
-  const area = document.createElement("textarea");
-  area.value = text;
-  area.setAttribute("readonly", "");
-  area.setAttribute("aria-hidden", "true");
-  // Off-screen rather than `display:none`: a non-rendered element cannot be
-  // selected, and `position:fixed` avoids scrolling the page on focus.
-  area.style.cssText =
-    "position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;" +
-    "opacity:0;pointer-events:none;";
-  document.body.appendChild(area);
+const execCommandCopy = (text: string): Effect.Effect<void, ClipboardError> =>
+  Effect.suspend(() => {
+    const previous = document.activeElement;
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.setAttribute("aria-hidden", "true");
+    // Off-screen rather than `display:none`: a non-rendered element cannot be
+    // selected, and `position:fixed` avoids scrolling the page on focus.
+    area.style.cssText =
+      "position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;" +
+      "opacity:0;pointer-events:none;";
+    document.body.appendChild(area);
 
-  try {
-    area.select();
-    area.setSelectionRange(0, text.length);
-    const succeeded = document.execCommand("copy");
-    return succeeded ? ok(undefined) : err(
-      clipboardError("failed", "document.execCommand('copy') returned false"),
-    );
-  } catch (cause) {
-    return err(
-      clipboardError(
-        "failed",
-        cause instanceof Error ? cause.message : String(cause),
-      ),
-    );
-  } finally {
-    area.remove();
-    if (previous instanceof HTMLElement) {
-      try {
-        previous.focus({ preventScroll: true });
-      } catch {
-        // The page may have removed it in the meantime.
+    try {
+      area.select();
+      area.setSelectionRange(0, text.length);
+      const succeeded = document.execCommand("copy");
+      return succeeded ? Effect.void : Effect.fail(
+        clipboardError("failed", "document.execCommand('copy') returned false"),
+      );
+    } catch (cause) {
+      return Effect.fail(
+        clipboardError(
+          "failed",
+          cause instanceof Error ? cause.message : String(cause),
+        ),
+      );
+    } finally {
+      area.remove();
+      if (previous instanceof HTMLElement) {
+        try {
+          previous.focus({ preventScroll: true });
+        } catch {
+          // The page may have removed it in the meantime.
+        }
       }
     }
-  }
-};
+  });
 
 const gmCopy = (
   surface: GmSurface,
   text: string,
-): Result<void, ClipboardError> =>
-  setClipboard(surface, text).mapErr((cause) =>
-    clipboardError(
-      cause.kind === "unavailable" ? "unavailable" : "failed",
-      cause.message,
-    )
+): Effect.Effect<void, ClipboardError> =>
+  Effect.mapError(
+    setClipboard(surface, text),
+    (cause) =>
+      clipboardError(
+        cause.reason === "unavailable" ? "unavailable" : "failed",
+        cause.detail,
+      ),
   );
 
 /**
@@ -111,51 +121,48 @@ const gmCopy = (
 export const writeClipboard = (
   surface: GmSurface,
   text: string,
-): Result<ClipboardWrite, ClipboardError> => {
-  if (text.length === 0) {
-    return err(clipboardError("empty", "nothing to copy"));
-  }
+): Effect.Effect<ClipboardWrite, ClipboardError> =>
+  Effect.suspend((): Effect.Effect<ClipboardWrite, ClipboardError> => {
+    if (text.length === 0) {
+      return Effect.fail(clipboardError("empty", "nothing to copy"));
+    }
 
-  const asyncWrite = clipboardWriter();
-  if (asyncWrite !== null) {
-    // Bound and invoked immediately — no `await` may intervene.
-    const promise = asyncWrite(text);
-    return ok({
-      method: "async-clipboard",
-      settled: promise
-        .then<Result<void, ClipboardError>>(() => ok(undefined))
-        .catch((cause: unknown) => {
+    const asyncWrite = clipboardWriter();
+    if (asyncWrite !== null) {
+      // Bound and invoked immediately. `Effect.suspend` does not yield, so the
+      // call still happens inside the activation window; anything that
+      // suspended before this point would have spent it.
+      const promise = asyncWrite(text);
+      return Effect.succeed<ClipboardWrite>({
+        method: "async-clipboard",
+        settled: Effect.tryPromise({
+          try: () => promise,
+          catch: (cause) => clipboardError("denied", describe(cause)),
+        }).pipe(
+          Effect.asVoid,
           // Activation was already spent by the time we get here, so the only
-          // viable retry is the manager's, which does not require it.
-          const viaGm = gmCopy(surface, text);
-          if (viaGm.isOk()) return ok(undefined);
-          return err(
-            clipboardError(
-              "denied",
-              cause instanceof Error ? cause.message : String(cause),
-            ),
-          );
-        }),
-    });
-  }
+          // viable retry is the manager's, which does not need it.
+          Effect.catch((denied) =>
+            Effect.catch(gmCopy(surface, text), () => Effect.fail(denied))
+          ),
+        ),
+      });
+    }
 
-  const viaGm = gmCopy(surface, text);
-  if (viaGm.isOk()) {
-    return ok({
+    const viaGm: ClipboardWrite = {
       method: "gm-set-clipboard",
-      settled: Promise.resolve(ok(undefined)),
-    });
-  }
-
-  const viaExec = execCommandCopy(text);
-  if (viaExec.isOk()) {
-    return ok({
+      settled: Effect.void,
+    };
+    const viaExec: ClipboardWrite = {
       method: "exec-command",
-      settled: Promise.resolve(ok(undefined)),
-    });
-  }
-  return err(viaExec.error);
-};
+      settled: Effect.void,
+    };
+
+    return gmCopy(surface, text).pipe(
+      Effect.as(viaGm),
+      Effect.catch(() => execCommandCopy(text).pipe(Effect.as(viaExec))),
+    );
+  });
 
 /** How long we wait for a clipboard read before falling back to the HUD input. */
 export const CLIPBOARD_READ_DEADLINE_MS = 250;
@@ -169,33 +176,27 @@ export const CLIPBOARD_READ_DEADLINE_MS = 250;
  * path for a keyboard-driven tool, so callers must treat a failure here as
  * routine: `p`/`P` open a pre-focused HUD input and merely *try* to pre-fill it.
  */
-export const readClipboard = async (): Promise<
-  Result<string, ClipboardError>
-> => {
-  const read = clipboardReader();
-  if (read === null) {
-    return err(
-      clipboardError(
-        "unavailable",
-        "navigator.clipboard.readText is unavailable",
+export const readClipboard: Effect.Effect<string, ClipboardError> = Effect
+  .suspend(() => {
+    const read = clipboardReader();
+    if (read === null) {
+      return Effect.fail(
+        clipboardError(
+          "unavailable",
+          "navigator.clipboard.readText is unavailable",
+        ),
+      );
+    }
+
+    return Effect.tryPromise({
+      try: () => read(),
+      catch: (cause) => clipboardError("denied", describe(cause)),
+    }).pipe(
+      Effect.timeout(Duration.millis(CLIPBOARD_READ_DEADLINE_MS)),
+      Effect.catchTag(
+        "TimeoutError",
+        () =>
+          Effect.fail(clipboardError("timeout", "clipboard read timed out")),
       ),
     );
-  }
-
-  const attempt = read()
-    .then<Result<string, ClipboardError>>((text) => ok(text))
-    .catch((cause: unknown) =>
-      err(
-        clipboardError(
-          "denied",
-          cause instanceof Error ? cause.message : String(cause),
-        ),
-      )
-    );
-
-  return await withDeadline(
-    attempt,
-    CLIPBOARD_READ_DEADLINE_MS,
-    err(clipboardError("timeout", "clipboard read timed out")),
-  );
-};
+  });

@@ -71,21 +71,15 @@ THE SOFTWARE.
 
 ## Bundled runtime dependencies
 
-Both are bundled into the shipping userscript.
+Bundled into the shipping userscript.
 
-### Zod
+### Effect
 
-<https://github.com/colinhacks/zod> — MIT © 2020 Colin McDonnell
+<https://github.com/Effect-TS/effect> — MIT © 2023 Effectful Technologies Inc
 
-Used for the settings schema, the cross-frame message protocol, and validating
-everything read out of `GM_getValue`.
-
-### neverthrow
-
-<https://github.com/supermacro/neverthrow> — MIT © 2019 Giorgio Delgado
-
-Used for the capability, storage, clipboard, and tab layers, where every
-operation can fail for manager-specific reasons.
+The application framework. `Effect` carries every fallible operation, `Schema`
+validates the settings and the cross-frame message protocol, and `Layer` and
+`ManagedRuntime` own the lifetime of everything the extension acquires.
 
 ---
 

@@ -15,6 +15,7 @@
  * both.
  */
 
+import { Effect, Result } from "effect";
 import type { AppContext } from "~/core/context.ts";
 import type { Handler, HandlerResult } from "~/core/handler-stack.ts";
 import { SUPPRESS_EVENT } from "~/core/handler-stack.ts";
@@ -289,9 +290,11 @@ export class VisualMode extends Mode {
    * `y`: copy the selection and leave.
    *
    * `writeClipboard` is reached **synchronously** from inside the keydown task.
-   * Nothing may be awaited before it: WebKit's transient activation window is
-   * short and is consumed by the first `await`, after which
-   * `navigator.clipboard.writeText` rejects.
+   * Nothing may be awaited before it, and the effect is run with `runSync`:
+   * WebKit's transient activation window is short and is consumed by the first
+   * suspension, after which `navigator.clipboard.writeText` rejects. Every
+   * effect on the write path is non-suspending, so `runSync` is safe here;
+   * `runFork` or `runPromise` would spend the activation.
    */
   #yank(): void {
     this.#count = 0;
@@ -304,9 +307,11 @@ export class VisualMode extends Mode {
       return;
     }
 
-    const started = writeClipboard(this.#app.gm, text);
-    if (started.isErr()) {
-      this.#app.hud.error(`Copy failed: ${started.error.message}`);
+    const started = this.#app.runtime.runSync(
+      Effect.result(writeClipboard(this.#app.gm, text)),
+    );
+    if (Result.isFailure(started)) {
+      this.#app.hud.error(`Copy failed: ${started.failure.detail}`);
       this.exit("explicit");
       return;
     }
@@ -314,11 +319,16 @@ export class VisualMode extends Mode {
     this.#app.hud.show(
       `Yanked ${text.length} character${text.length === 1 ? "" : "s"}`,
     );
-    void started.value.settled.then((result) => {
-      if (result.isErr()) {
-        this.#app.hud.error(`Copy failed: ${result.error.message}`);
-      }
-    });
+    // The outcome may arrive later; that part is allowed to suspend.
+    this.#app.runtime.runFork(
+      Effect.catch(
+        started.success.settled,
+        (error) =>
+          Effect.sync(() =>
+            this.#app.hud.error(`Copy failed: ${error.detail}`)
+          ),
+      ),
+    );
 
     this.exit("explicit");
   }
