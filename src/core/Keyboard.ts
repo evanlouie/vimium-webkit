@@ -72,7 +72,7 @@ export const MEDIA_KEYS: ReadonlySet<string> = new Set([
  * A page can call `dispatchEvent` with a `KeyboardEvent` that names any key.
  * The browser marks such an event `isTrusted === false`, and only the browser
  * can set the flag to `true`. A synthetic key must therefore never reach a
- * command: a command can open a tab, navigate, close a tab or write the
+ * command. A command can open a tab, navigate, close a tab or write the
  * clipboard, and the user pressed nothing.
  *
  * The test is strict on purpose. A page can also dispatch an object that is not
@@ -371,8 +371,8 @@ export class Keyboard extends Context.Service<Keyboard, {
           // Every pass-through rule reads the *raw* notation, and not the
           // remapped one. The user gives a physical key to the page, and
           // `mapkey` describes what the key does for us. A test against the
-          // remapped notation captured a key that the exclusion promised to the
-          // page, and gave away a key that the exclusion did not name.
+          // remapped notation captured a key that the exclusion promised to
+          // the page. It also gave away a key that no rule named.
 
           // A pass key applies to a new sequence only. Once the user has
           // committed to `g`, the next key is ours even if it is in the set.

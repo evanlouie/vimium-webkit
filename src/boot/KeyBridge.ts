@@ -23,9 +23,10 @@ import { Dom } from "~/platform/Dom.ts";
  * constantly on a busy page.
  *
  * A `keydown` or a `keyup` that the page made is dropped here. The page can
- * dispatch a `KeyboardEvent` that names any key, and a mapped key runs a
- * command that can open a tab, navigate or write the clipboard. `isTrusted`
- * separates the user from the page, and only the browser can set it.
+ * dispatch a `KeyboardEvent` that names any key. A mapped key then runs a
+ * command, and a command can open a tab, navigate or write the clipboard.
+ * `isTrusted` separates the user from the page, and only the browser can set
+ * it.
  *
  * `focus` and `blur` keep the composed path. A focus inside an open shadow root
  * is retargeted to the host before a window listener sees it, so a handler that

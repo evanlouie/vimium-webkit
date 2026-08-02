@@ -163,9 +163,9 @@ export const awaitActivation: Effect.Effect<
       // A key that the page made, and not the user. The check is inline,
       // because the guard imports nothing above the platform. A page can
       // dispatch a `KeyboardEvent` that names any key, and only the browser can
-      // set `isTrusted`. Such a key must not start the application, and it must
-      // not enter the buffer, because the application replays the buffer and
-      // would then run the command that the page chose.
+      // set `isTrusted`. Such a key must not start the application. It must
+      // also stay out of the buffer, because the application replays the
+      // buffer. The page would otherwise choose the command that runs.
       if (event.isTrusted !== true) return;
       if (isEditable(event.target)) yield* Ref.set(typed, true);
       if (Option.isSome(yield* Deferred.poll(started))) return;

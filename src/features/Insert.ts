@@ -91,8 +91,8 @@ const ownsFocus = (target: EventTarget | null): boolean =>
  *
  * A `focus` or a `blur` inside a shadow root is retargeted to the host before
  * any window listener sees it, so `event.target` names the host and not the
- * field. A page that puts its search box in a web component therefore looked
- * unfocused, and every key that the user typed into it ran a command.
+ * field. A page that keeps its search box in a web component therefore looked
+ * unfocused. Every key that the user typed into it ran a command.
  *
  * `composedPath()[0]` is the true node while the root is open. A closed root
  * gives the host, which is the correct answer there and is what our own
@@ -275,9 +275,10 @@ export class Insert extends Context.Service<Insert, {
       const onBlur = (event: FocusEvent): Effect.Effect<HandlerResult> =>
         Effect.gen(function*() {
           const current = yield* Ref.get(state);
-          // The same rule as the focus above: the blur of a field inside an
-          // open shadow root names the host, so a compare against `event.target`
-          // never matched and insert mode stayed on after the field went away.
+          // The same rule as the focus above. The blur of a field inside an
+          // open shadow root names the host, so a compare against
+          // `event.target` never matched. Insert mode then stayed on after the
+          // field went away.
           const target = yield* focusedNode(event);
           if (
             Option.isNone(current.element) ||
