@@ -433,6 +433,20 @@ export class Keyboard extends Context.Service<Keyboard, {
         });
 
       /**
+       * The focus moved, so a half-typed sequence is no longer live.
+       *
+       * A user presses `g`, clicks a search box, types a query and leaves it
+       * again. The prefix stayed behind. The binding that `g` accepted then ran
+       * on the next key, and the user typed that `g` minutes before.
+       *
+       * Every focus does this, and not a focus into a text field alone. A
+       * sequence that survives a focus change is a surprise in each case. The
+       * cost is small, because the user types the sequence again.
+       */
+      const onFocus = (): Effect.Effect<HandlerResult> =>
+        Effect.as(reset, CONTINUE_BUBBLING);
+
+      /**
        * Normal mode follows the exclusion verdict.
        *
        * The mode lives in its own child scope. Closing that scope removes the
@@ -456,6 +470,7 @@ export class Keyboard extends Context.Service<Keyboard, {
           modes.enter({ name: "normal" }, {
             keydown: onKeydown,
             keyup: onKeyup,
+            focus: onFocus,
           }),
           Scope.Scope,
           scope,

@@ -80,6 +80,9 @@ class Press {
 const asEvent = (press: Press): KeyboardEvent =>
   press as unknown as KeyboardEvent;
 
+/** A focus event. Normal mode reads nothing from it. */
+const asFocus = (): FocusEvent => ({}) as unknown as FocusEvent;
+
 // ---------------------------------------------------------------------------
 // The layers
 // ---------------------------------------------------------------------------
@@ -356,6 +359,24 @@ describe("Keyboard", () => {
           "scrollUp:1",
           "scrollDown:2",
         ]);
+      }).pipe(Effect.provide(prefixLayer)));
+
+    it.effect("drops the accepted binding when the focus moves", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder([
+          "scrollUp",
+          "scrollToTop",
+          "scrollDown",
+        ]);
+
+        yield* stack.bubble("keydown", asEvent(new Press("g")));
+        // The user clicks a text field. Insert mode takes the keys, and this
+        // half-typed sequence is over.
+        yield* stack.bubble("focus", asFocus());
+        yield* stack.bubble("keydown", asEvent(new Press("j")));
+
+        assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
       }).pipe(Effect.provide(prefixLayer)));
 
     it.effect("keeps a binding that a deeper step accepted none", () =>
