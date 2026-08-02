@@ -13,6 +13,11 @@
  * key handler answers `SUPPRESS_PROPAGATION`: normal mode and the page see
  * nothing, and the default action stays, so the user can still type into the
  * text areas.
+ *
+ * The settings form is data. `SETTINGS_SECTIONS` names every documented
+ * setting, and the build step below draws the controls from that list. The
+ * README promises that all of them are editable here, and only a list that a
+ * test can read against the schema keeps that promise true.
  */
 
 import {
@@ -104,122 +109,74 @@ const GROUP_ORDER: readonly CommandGroup[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// The toggles
+// The settings fields
 // ---------------------------------------------------------------------------
 
-/**
- * One checkbox in the settings dialog.
- *
- * The field is reached with a reader and a writer, and not with a key. A key of
- * a union type cannot be written back into a struct without a cast, and there
- * is no cast in this application.
- */
-interface Toggle {
+/** The name of one stored setting. */
+export type SettingsKey = keyof SettingsData;
+
+interface FieldBase {
+  /**
+   * The stored setting that this control edits.
+   *
+   * The key is data, and not a route to the value: a key of a union type
+   * cannot be written back into a struct without a cast, and there is no cast
+   * in this application. `read` and `write` do the work. The key exists so
+   * that a test can compare the form against the schema, which is how eight
+   * documented settings came to have no control at all.
+   */
+  readonly key: SettingsKey;
   readonly label: string;
   readonly note?: string;
+}
+
+/** One checkbox. */
+export interface ToggleField extends FieldBase {
+  readonly kind: "toggle";
   readonly read: (settings: SettingsData) => boolean;
   readonly write: (settings: SettingsData, value: boolean) => SettingsData;
 }
 
-const TOGGLES: readonly Toggle[] = [
-  {
-    label: "Smooth scrolling",
-    read: (settings) => settings.smoothScroll,
-    write: (settings, value) => ({ ...settings, smoothScroll: value }),
-  },
-  {
-    label: "Filter link hints by text instead of by letter",
-    read: (settings) => settings.filterLinkHints,
-    write: (settings, value) => ({ ...settings, filterLinkHints: value }),
-  },
-  {
-    label: "Require Enter to activate a filtered hint",
-    read: (settings) => settings.waitForEnterForFilteredHints,
-    write: (settings, value) => ({
-      ...settings,
-      waitForEnterForFilteredHints: value,
-    }),
-  },
-  {
-    label: "Treat find queries as regular expressions",
-    read: (settings) => settings.regexFindMode,
-    write: (settings, value) => ({ ...settings, regexFindMode: value }),
-  },
-  {
-    label: "Use physical key positions (ignore the keyboard layout)",
-    read: (settings) => settings.ignoreKeyboardLayout,
-    write: (settings, value) => ({ ...settings, ignoreKeyboardLayout: value }),
-  },
-  {
-    label: "Hide the HUD",
-    read: (settings) => settings.hideHud,
-    write: (settings, value) => ({ ...settings, hideHud: value }),
-  },
-  {
-    label: "Match the colour scheme of the page",
-    note: "When off, the overlay follows your system appearance instead.",
-    read: (settings) => settings.followPageColorScheme,
-    write: (settings, value) => ({ ...settings, followPageColorScheme: value }),
-  },
-  {
-    label: "Take focus back from a page that steals it on load",
-    read: (settings) => settings.grabBackFocus,
-    write: (settings, value) => ({ ...settings, grabBackFocus: value }),
-  },
-  {
-    label: "Leave the arrow keys and space to a focused video or audio player",
-    note:
-      "Turn off to scroll with them everywhere, even while a player has focus.",
-    read: (settings) => settings.passMediaKeys,
-    write: (settings, value) => ({ ...settings, passMediaKeys: value }),
-  },
-  {
-    label: "Enable CSS zoom",
-    note: "Not true browser zoom: it does not change the URL bar, and it " +
-      "breaks position:fixed on some sites.",
-    read: (settings) => settings.enableCssZoom,
-    write: (settings, value) => ({ ...settings, enableCssZoom: value }),
-  },
-  {
-    label: "Build a local history index for the omnibar",
-    note: "Recorded on this device only, and readable in the storage viewer " +
-      "of your userscript manager.",
-    read: (settings) => settings.enableHistoryIndex,
-    write: (settings, value) => ({ ...settings, enableHistoryIndex: value }),
-  },
-  {
-    label: "Ask the search engine for omnibar completions",
-    note: "Sends what you type in the omnibar to your search engine, with " +
-      "your cookies, as you type it.",
-    read: (settings) => settings.enableSearchSuggestions,
-    write: (settings, value) => ({
-      ...settings,
-      enableSearchSuggestions: value,
-    }),
-  },
-  {
-    label: "Shadow the Find shortcut of the browser",
-    note: "May not be preventable on iOS (WebKit bug 191768).",
-    read: (settings) => settings.shadowNativeFind,
-    write: (settings, value) => ({ ...settings, shadowNativeFind: value }),
-  },
-];
+/**
+ * One text control.
+ *
+ * `line` is a single-line input, `number` is a numeric input, and `block` is a
+ * text area. Each one reads and writes text, so a list and a number carry
+ * their own conversion in `read` and `write`.
+ */
+export interface ValueField extends FieldBase {
+  readonly kind: "line" | "number" | "block";
+  /** The smallest height of a text area, as a CSS length. */
+  readonly minHeight?: string;
+  readonly read: (settings: SettingsData) => string;
+  readonly write: (settings: SettingsData, value: string) => SettingsData;
+}
 
-// ---------------------------------------------------------------------------
-// Pure helpers
-// ---------------------------------------------------------------------------
+export type SettingsField = ToggleField | ValueField;
 
-const el = <K extends keyof HTMLElementTagNameMap>(
-  doc: Document,
-  tag: K,
-  className?: string,
-  text?: string,
-): HTMLElementTagNameMap[K] => {
-  const node = doc.createElement(tag);
-  if (className !== undefined) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
+/** One titled group of controls in the dialog. */
+export interface SettingsSection {
+  readonly title: string;
+  readonly description?: string;
+  readonly fields: readonly SettingsField[];
+}
+
+const clampNumber = (
+  value: number,
+  min: number,
+  max: number,
+  fallback: number,
+): number => {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(value)));
 };
+
+/** One entry for each line. An empty line is not an entry. */
+export const parseLines = (text: string): ReadonlyArray<string> =>
+  text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
 
 /** One rule for each line: `pattern [passKeys]`. `#` starts a comment. */
 export const parseExclusionText = (
@@ -245,14 +202,360 @@ export const formatExclusionRules = (
 ): string =>
   rules.map((rule) => `${rule.pattern} ${rule.passKeys}`.trimEnd()).join("\n");
 
-const clampNumber = (
-  value: number,
-  min: number,
-  max: number,
-  fallback: number,
-): number => {
-  if (!Number.isFinite(value)) return fallback;
-  return Math.min(max, Math.max(min, Math.trunc(value)));
+/**
+ * Every documented setting, in the order that the dialog draws it.
+ *
+ * The README says that all of these are editable here, and for eight of them
+ * that was not true. `settings-form_test.ts` compares this list against the
+ * schema, so a new setting must arrive with a control or the test fails.
+ */
+export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
+  {
+    title: "Key mappings",
+    fields: [
+      {
+        kind: "block",
+        key: "keyMappings",
+        label: "Your map, unmap, unmapAll and mapkey lines",
+        minHeight: "220px",
+        // The defaults are written out when there is nothing stored, so that
+        // the user can see what to change instead of an empty box.
+        read: (settings) =>
+          settings.keyMappings.length > 0
+            ? settings.keyMappings
+            : DEFAULT_MAPPINGS.trim(),
+        write: (settings, value) => ({ ...settings, keyMappings: value }),
+      },
+    ],
+  },
+  {
+    title: "Scrolling",
+    fields: [
+      {
+        kind: "number",
+        key: "scrollStepSize",
+        label: "Scroll step size (px)",
+        read: (settings) => String(settings.scrollStepSize),
+        write: (settings, value) => ({
+          ...settings,
+          scrollStepSize: clampNumber(
+            Number.parseInt(value, 10),
+            1,
+            10_000,
+            settings.scrollStepSize,
+          ),
+        }),
+      },
+      {
+        kind: "toggle",
+        key: "smoothScroll",
+        label: "Smooth scrolling",
+        read: (settings) => settings.smoothScroll,
+        write: (settings, value) => ({ ...settings, smoothScroll: value }),
+      },
+    ],
+  },
+  {
+    title: "Link hints",
+    fields: [
+      {
+        kind: "line",
+        key: "linkHintCharacters",
+        label: "Link hint characters",
+        note: "Two or more, and all different.",
+        read: (settings) => settings.linkHintCharacters,
+        write: (settings, value) => ({
+          ...settings,
+          linkHintCharacters: value.length >= 2
+            ? value
+            : settings.linkHintCharacters,
+        }),
+      },
+      {
+        kind: "line",
+        key: "linkHintNumbers",
+        label: "Digits that choose among filtered hints",
+        read: (settings) => settings.linkHintNumbers,
+        write: (settings, value) => ({
+          ...settings,
+          linkHintNumbers: value.length >= 2
+            ? value
+            : settings.linkHintNumbers,
+        }),
+      },
+      {
+        kind: "toggle",
+        key: "filterLinkHints",
+        label: "Filter link hints by text instead of by letter",
+        read: (settings) => settings.filterLinkHints,
+        write: (settings, value) => ({ ...settings, filterLinkHints: value }),
+      },
+      {
+        kind: "toggle",
+        key: "waitForEnterForFilteredHints",
+        label: "Require Enter to activate a filtered hint",
+        read: (settings) => settings.waitForEnterForFilteredHints,
+        write: (settings, value) => ({
+          ...settings,
+          waitForEnterForFilteredHints: value,
+        }),
+      },
+      {
+        kind: "block",
+        key: "userDefinedLinkHintCss",
+        label: "Extra CSS for the hint markers",
+        note: "Applied inside our shadow root only. No @import and no url().",
+        minHeight: "100px",
+        read: (settings) => settings.userDefinedLinkHintCss,
+        write: (settings, value) => ({
+          ...settings,
+          userDefinedLinkHintCss: value,
+        }),
+      },
+    ],
+  },
+  {
+    title: "Finding text",
+    fields: [
+      {
+        kind: "toggle",
+        key: "regexFindMode",
+        label: "Treat find queries as regular expressions",
+        read: (settings) => settings.regexFindMode,
+        write: (settings, value) => ({ ...settings, regexFindMode: value }),
+      },
+      {
+        kind: "toggle",
+        key: "shadowNativeFind",
+        label: "Shadow the Find shortcut of the browser",
+        note: "May not be preventable on iOS (WebKit bug 191768).",
+        read: (settings) => settings.shadowNativeFind,
+        write: (settings, value) => ({ ...settings, shadowNativeFind: value }),
+      },
+    ],
+  },
+  {
+    title: "Searching and new tabs",
+    fields: [
+      {
+        kind: "line",
+        key: "searchUrl",
+        label: "Default search URL",
+        note: "It must contain %s, which is where your words go.",
+        read: (settings) => settings.searchUrl,
+        write: (settings, value) => ({ ...settings, searchUrl: value }),
+      },
+      {
+        kind: "block",
+        key: "searchEngines",
+        label: "Search engines",
+        note: "One `keyword: url-with-%s Description` for each line.",
+        minHeight: "120px",
+        read: (settings) => settings.searchEngines,
+        write: (settings, value) => ({ ...settings, searchEngines: value }),
+      },
+      {
+        kind: "line",
+        key: "newTabUrl",
+        label: "Page that a new tab opens",
+        read: (settings) => settings.newTabUrl,
+        write: (settings, value) => ({ ...settings, newTabUrl: value }),
+      },
+      {
+        kind: "toggle",
+        key: "enableSearchSuggestions",
+        label: "Ask the search engine for omnibar completions",
+        note:
+          "Sends what you type in the omnibar to your search engine, with " +
+          "your cookies, as you type it.",
+        read: (settings) => settings.enableSearchSuggestions,
+        write: (settings, value) => ({
+          ...settings,
+          enableSearchSuggestions: value,
+        }),
+      },
+    ],
+  },
+  {
+    title: "Navigating the page",
+    description: "The link text that [ and ] look for. Separate the words " +
+      "with a comma.",
+    fields: [
+      {
+        kind: "line",
+        key: "previousPatterns",
+        label: "Words for the previous page",
+        read: (settings) => settings.previousPatterns,
+        write: (settings, value) => ({ ...settings, previousPatterns: value }),
+      },
+      {
+        kind: "line",
+        key: "nextPatterns",
+        label: "Words for the next page",
+        read: (settings) => settings.nextPatterns,
+        write: (settings, value) => ({ ...settings, nextPatterns: value }),
+      },
+    ],
+  },
+  {
+    title: "The overlay",
+    fields: [
+      {
+        kind: "toggle",
+        key: "hideHud",
+        label: "Hide the HUD",
+        read: (settings) => settings.hideHud,
+        write: (settings, value) => ({ ...settings, hideHud: value }),
+      },
+      {
+        kind: "toggle",
+        key: "followPageColorScheme",
+        label: "Match the colour scheme of the page",
+        note: "When off, the overlay follows your system appearance instead.",
+        read: (settings) => settings.followPageColorScheme,
+        write: (settings, value) => ({
+          ...settings,
+          followPageColorScheme: value,
+        }),
+      },
+    ],
+  },
+  {
+    title: "Behaviour",
+    fields: [
+      {
+        kind: "toggle",
+        key: "ignoreKeyboardLayout",
+        label: "Use physical key positions (ignore the keyboard layout)",
+        read: (settings) => settings.ignoreKeyboardLayout,
+        write: (settings, value) => ({
+          ...settings,
+          ignoreKeyboardLayout: value,
+        }),
+      },
+      {
+        kind: "toggle",
+        key: "grabBackFocus",
+        label: "Take focus back from a page that steals it on load",
+        read: (settings) => settings.grabBackFocus,
+        write: (settings, value) => ({ ...settings, grabBackFocus: value }),
+      },
+      {
+        kind: "toggle",
+        key: "passMediaKeys",
+        label:
+          "Leave the arrow keys and space to a focused video or audio player",
+        note:
+          "Turn off to scroll with them everywhere, even while a player has " +
+          "focus.",
+        read: (settings) => settings.passMediaKeys,
+        write: (settings, value) => ({ ...settings, passMediaKeys: value }),
+      },
+      {
+        kind: "toggle",
+        key: "enableCssZoom",
+        label: "Enable CSS zoom",
+        note: "Not true browser zoom: it does not change the URL bar, and it " +
+          "breaks position:fixed on some sites.",
+        read: (settings) => settings.enableCssZoom,
+        write: (settings, value) => ({ ...settings, enableCssZoom: value }),
+      },
+    ],
+  },
+  {
+    title: "Omnibar history",
+    fields: [
+      {
+        kind: "toggle",
+        key: "enableHistoryIndex",
+        label: "Build a local history index for the omnibar",
+        note: "Recorded on this device only, and readable in the storage " +
+          "viewer of your userscript manager.",
+        read: (settings) => settings.enableHistoryIndex,
+        write: (settings, value) => ({
+          ...settings,
+          enableHistoryIndex: value,
+        }),
+      },
+      {
+        kind: "block",
+        key: "historyIndexDenylist",
+        label: "URLs that the index never records",
+        note: "One URL pattern for each line, for example " +
+          "https://mail.example.com/*",
+        minHeight: "80px",
+        read: (settings) => settings.historyIndexDenylist.join("\n"),
+        write: (settings, value) => ({
+          ...settings,
+          historyIndexDenylist: [...parseLines(value)],
+        }),
+      },
+      {
+        kind: "number",
+        key: "historyIndexLimit",
+        label: "Entries kept in the index",
+        note: "0 stops the recording.",
+        read: (settings) => String(settings.historyIndexLimit),
+        write: (settings, value) => ({
+          ...settings,
+          historyIndexLimit: clampNumber(
+            Number.parseInt(value, 10),
+            0,
+            50_000,
+            settings.historyIndexLimit,
+          ),
+        }),
+      },
+    ],
+  },
+  {
+    title: "Excluded sites",
+    description: "One rule for each line: a URL pattern, and then the keys " +
+      "to pass to the page. An empty key list turns Vimium-WebKit off for " +
+      "that site.",
+    fields: [
+      {
+        kind: "block",
+        key: "exclusionRules",
+        label: "Excluded sites",
+        minHeight: "100px",
+        read: (settings) => formatExclusionRules(settings.exclusionRules),
+        write: (settings, value) => ({
+          ...settings,
+          exclusionRules: [...parseExclusionText(value)],
+        }),
+      },
+    ],
+  },
+];
+
+/** Every field of the dialog, in the order that the dialog draws it. */
+export const SETTINGS_FIELDS: readonly SettingsField[] = SETTINGS_SECTIONS
+  .flatMap((section) => section.fields);
+
+/** The text of one field, whatever its kind. */
+const fieldText = (
+  field: SettingsField,
+  settings: SettingsData,
+): string =>
+  field.kind === "toggle"
+    ? String(field.read(settings))
+    : field.read(settings);
+
+// ---------------------------------------------------------------------------
+// Pure helpers
+// ---------------------------------------------------------------------------
+
+const el = <K extends keyof HTMLElementTagNameMap>(
+  doc: Document,
+  tag: K,
+  className?: string,
+  text?: string,
+): HTMLElementTagNameMap[K] => {
+  const node = doc.createElement(tag);
+  if (className !== undefined) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
 };
 
 /**
@@ -265,45 +568,32 @@ const clampNumber = (
 export const adjustedFields = (
   offered: SettingsData,
   stored: SettingsData,
-): ReadonlyArray<string> => {
-  const changed: string[] = [];
-  if (offered.keyMappings !== stored.keyMappings) changed.push("key mappings");
-  if (offered.searchEngines !== stored.searchEngines) {
-    changed.push("search engines");
-  }
-  if (
-    formatExclusionRules(offered.exclusionRules) !==
-      formatExclusionRules(stored.exclusionRules)
-  ) {
-    changed.push("excluded sites");
-  }
-  if (offered.scrollStepSize !== stored.scrollStepSize) {
-    changed.push("scroll step size");
-  }
-  if (offered.linkHintCharacters !== stored.linkHintCharacters) {
-    changed.push("link hint characters");
-  }
-  for (const toggle of TOGGLES) {
-    if (toggle.read(offered) !== toggle.read(stored)) {
-      changed.push(toggle.label);
-    }
-  }
-  return changed;
-};
+): ReadonlyArray<string> =>
+  SETTINGS_FIELDS
+    .filter((field) => fieldText(field, offered) !== fieldText(field, stored))
+    .map((field) => field.label);
 
 // ---------------------------------------------------------------------------
 // The service
 // ---------------------------------------------------------------------------
 
+/** One control of the settings dialog, with the field that it edits. */
+type SettingsControl =
+  | {
+    readonly kind: "toggle";
+    readonly field: ToggleField;
+    readonly input: HTMLInputElement;
+  }
+  | {
+    readonly kind: "value";
+    readonly field: ValueField;
+    readonly input: HTMLInputElement | HTMLTextAreaElement;
+  };
+
 /** The parts of the settings dialog that the save step writes back to. */
 interface SettingsForm {
   readonly dialog: HTMLElement;
-  readonly mappings: HTMLTextAreaElement;
-  readonly engines: HTMLTextAreaElement;
-  readonly exclusions: HTMLTextAreaElement;
-  readonly step: HTMLInputElement;
-  readonly hintCharacters: HTMLInputElement;
-  readonly toggles: ReadonlyArray<readonly [Toggle, HTMLInputElement]>;
+  readonly controls: readonly SettingsControl[];
   readonly problems: HTMLElement;
   readonly reset: HTMLButtonElement;
   readonly cancel: HTMLButtonElement;
@@ -381,6 +671,9 @@ export class Dialog extends Context.Service<Dialog, {
           ));
 
           yield* inScope(acceptPointerEvents(dialogLayer));
+          // The dialog is a true control, so assistive technology must reach
+          // it. The release step hides the layer again.
+          yield* inScope(ui.expose(dialogLayer));
 
           yield* inScope(
             dom.listenOn(
@@ -468,6 +761,7 @@ export class Dialog extends Context.Service<Dialog, {
           Effect.sync(() => {
             const dialog = el(doc, "div", "vw-dialog");
             dialog.setAttribute("role", "dialog");
+            dialog.setAttribute("aria-modal", "true");
             dialog.setAttribute("aria-label", "Vimium-WebKit help");
 
             dialog.appendChild(el(doc, "h1", undefined, "Vimium-WebKit"));
@@ -542,15 +836,12 @@ export class Dialog extends Context.Service<Dialog, {
 
       /** Write the stored settings into the controls. */
       const fill = (form: SettingsForm, current: SettingsData): void => {
-        form.mappings.value = current.keyMappings.length > 0
-          ? current.keyMappings
-          : DEFAULT_MAPPINGS.trim();
-        form.engines.value = current.searchEngines;
-        form.exclusions.value = formatExclusionRules(current.exclusionRules);
-        form.step.value = String(current.scrollStepSize);
-        form.hintCharacters.value = current.linkHintCharacters;
-        for (const [toggle, input] of form.toggles) {
-          input.checked = toggle.read(current);
+        for (const control of form.controls) {
+          if (control.kind === "toggle") {
+            control.input.checked = control.field.read(current);
+            continue;
+          }
+          control.input.value = control.field.read(current);
         }
       };
 
@@ -558,23 +849,11 @@ export class Dialog extends Context.Service<Dialog, {
         form: SettingsForm,
         base: SettingsData,
       ): SettingsData => {
-        let next: SettingsData = {
-          ...base,
-          keyMappings: form.mappings.value,
-          searchEngines: form.engines.value,
-          exclusionRules: [...parseExclusionText(form.exclusions.value)],
-          scrollStepSize: clampNumber(
-            Number.parseInt(form.step.value, 10),
-            1,
-            10_000,
-            base.scrollStepSize,
-          ),
-          linkHintCharacters: form.hintCharacters.value.length >= 2
-            ? form.hintCharacters.value
-            : base.linkHintCharacters,
-        };
-        for (const [toggle, input] of form.toggles) {
-          next = toggle.write(next, input.checked);
+        let next: SettingsData = base;
+        for (const control of form.controls) {
+          next = control.kind === "toggle"
+            ? control.field.write(next, control.input.checked)
+            : control.field.write(next, control.input.value);
         }
         return next;
       };
@@ -645,6 +924,7 @@ export class Dialog extends Context.Service<Dialog, {
           Effect.sync(() => {
             const dialog = el(doc, "div", "vw-dialog");
             dialog.setAttribute("role", "dialog");
+            dialog.setAttribute("aria-modal", "true");
             dialog.setAttribute("aria-label", "Vimium-WebKit settings");
             dialog.appendChild(el(doc, "h1", undefined, "Settings"));
             dialog.appendChild(el(
@@ -654,69 +934,82 @@ export class Dialog extends Context.Service<Dialog, {
               storageExplanation(capabilities.value),
             ));
 
-            dialog.appendChild(el(doc, "h2", undefined, "Key mappings"));
-            const mappingsField = el(doc, "textarea", "vw-textarea");
-            mappingsField.spellcheck = false;
-            dialog.appendChild(mappingsField);
-            const problems = el(doc, "div", "vw-problem");
-            dialog.appendChild(problems);
+            const controls: SettingsControl[] = [];
 
-            dialog.appendChild(el(doc, "h2", undefined, "Search engines"));
-            const engines = el(doc, "textarea", "vw-textarea");
-            engines.spellcheck = false;
-            engines.style.minHeight = "120px";
-            dialog.appendChild(engines);
-
-            dialog.appendChild(el(doc, "h2", undefined, "Excluded sites"));
-            dialog.appendChild(el(
-              doc,
-              "p",
-              undefined,
-              "One rule for each line: a URL pattern, and then the keys to " +
-                "pass to the page. An empty key list turns Vimium-WebKit off " +
-                "for that site.",
-            ));
-            const exclusions = el(doc, "textarea", "vw-textarea");
-            exclusions.spellcheck = false;
-            exclusions.style.minHeight = "100px";
-            dialog.appendChild(exclusions);
-
-            dialog.appendChild(el(doc, "h2", undefined, "Behaviour"));
-            const toggles: Array<readonly [Toggle, HTMLInputElement]> = [];
-            for (const toggle of TOGGLES) {
-              const field = el(doc, "div", "vw-field");
-              const input = doc.createElement("input");
-              input.type = "checkbox";
+            /** The label of one control, with its note inside it. */
+            const labelFor = (
+              field: SettingsField,
+              id: string,
+            ): HTMLLabelElement => {
               const label = doc.createElement("label");
-              label.textContent = toggle.label;
-              if (toggle.note !== undefined) {
+              label.htmlFor = id;
+              label.textContent = field.label;
+              if (field.note !== undefined) {
                 label.appendChild(
-                  el(doc, "span", "vw-cmd-native", ` ${toggle.note}`),
+                  el(doc, "span", "vw-cmd-native", ` ${field.note}`),
                 );
               }
-              label.prepend(input);
-              field.appendChild(label);
-              dialog.appendChild(field);
-              toggles.push([toggle, input]);
+              return label;
+            };
+
+            for (const section of SETTINGS_SECTIONS) {
+              dialog.appendChild(el(doc, "h2", undefined, section.title));
+              if (section.description !== undefined) {
+                dialog.appendChild(
+                  el(doc, "p", undefined, section.description),
+                );
+              }
+
+              for (const field of section.fields) {
+                // The id joins the label to the control. It is unique inside
+                // our shadow root, which no page identifier can reach.
+                const id = `vw-set-${field.key}`;
+
+                if (field.kind === "toggle") {
+                  const row = el(doc, "div", "vw-field");
+                  const input = doc.createElement("input");
+                  input.type = "checkbox";
+                  input.id = id;
+                  const label = labelFor(field, id);
+                  row.append(input, label);
+                  dialog.appendChild(row);
+                  controls.push({ kind: "toggle", field, input });
+                  continue;
+                }
+
+                if (field.kind === "block") {
+                  const row = el(doc, "div", "vw-field vw-field--block");
+                  row.appendChild(labelFor(field, id));
+                  dialog.appendChild(row);
+                  const area = el(doc, "textarea", "vw-textarea");
+                  area.id = id;
+                  area.spellcheck = false;
+                  if (field.minHeight !== undefined) {
+                    area.style.minHeight = field.minHeight;
+                  }
+                  dialog.appendChild(area);
+                  controls.push({ kind: "value", field, input: area });
+                  continue;
+                }
+
+                const row = el(doc, "div", "vw-field");
+                const input = doc.createElement("input");
+                input.id = id;
+                input.type = field.kind === "number" ? "number" : "text";
+                input.spellcheck = false;
+                row.append(labelFor(field, id), input);
+                dialog.appendChild(row);
+                controls.push({ kind: "value", field, input });
+              }
             }
 
-            const stepField = el(doc, "div", "vw-field");
-            const stepLabel = doc.createElement("label");
-            stepLabel.textContent = "Scroll step size (px)";
-            const step = doc.createElement("input");
-            step.type = "number";
-            step.min = "1";
-            step.max = "10000";
-            stepField.append(stepLabel, step);
-            dialog.appendChild(stepField);
-
-            const hintField = el(doc, "div", "vw-field");
-            const hintLabel = doc.createElement("label");
-            hintLabel.textContent = "Link hint characters";
-            const hintCharacters = doc.createElement("input");
-            hintCharacters.type = "text";
-            hintField.append(hintLabel, hintCharacters);
-            dialog.appendChild(hintField);
+            // One place for every message about the save: a refusal from
+            // storage, a mapping error, and a field that the schema repaired.
+            // `role="alert"` makes a screen reader speak it, because the
+            // dialog stays open and nothing else says that it did.
+            const problems = el(doc, "div", "vw-problem");
+            problems.setAttribute("role", "alert");
+            dialog.appendChild(problems);
 
             const row = el(doc, "div", "vw-button-row");
             const reset = el(doc, "button", "vw-button", "Reset to defaults");
@@ -728,12 +1021,7 @@ export class Dialog extends Context.Service<Dialog, {
 
             const built: SettingsForm = {
               dialog,
-              mappings: mappingsField,
-              engines,
-              exclusions,
-              step,
-              hintCharacters,
-              toggles,
+              controls,
               problems,
               reset,
               cancel,
