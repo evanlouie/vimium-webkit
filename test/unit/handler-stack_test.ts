@@ -209,6 +209,40 @@ describe("HandlerStack", () => {
       );
     }).pipe(Effect.provide(HandlerStack.layer)));
 
+  it.effect("tells the owner of a handler that failed", () =>
+    Effect.gen(function*() {
+      // A frame is one part of something larger. Only the owner can release
+      // the rest of it, so the stack must not drop the frame in silence.
+      const stack = yield* HandlerStack;
+      const cleaned = yield* Ref.make<readonly string[]>([]);
+
+      const failing = yield* stack.push({
+        name: "owned",
+        scroll: () => Effect.die(new Error("boom")),
+        onDefect: () => Ref.update(cleaned, (current) => [...current, "owned"]),
+      });
+
+      assert.isTrue(yield* stack.bubble("scroll", event()));
+      assert.deepEqual(yield* Ref.get(cleaned), ["owned"]);
+      assert.isFalse(yield* stack.has(failing));
+    }).pipe(Effect.provide(HandlerStack.layer)));
+
+  it.effect("continues the walk when the cleanup itself fails", () =>
+    Effect.gen(function*() {
+      const stack = yield* HandlerStack;
+      const seen = yield* Ref.make<readonly string[]>([]);
+
+      yield* stack.push(record("below", seen));
+      yield* stack.push({
+        name: "owned",
+        scroll: () => Effect.die(new Error("boom")),
+        onDefect: () => Effect.die(new Error("cleanup boom")),
+      });
+
+      assert.isTrue(yield* stack.bubble("scroll", event()));
+      assert.deepEqual(yield* Ref.get(seen), ["below"]);
+    }).pipe(Effect.provide(HandlerStack.layer)));
+
   it.effect("lets a handler remove itself while it runs", () =>
     Effect.gen(function*() {
       const stack = yield* HandlerStack;

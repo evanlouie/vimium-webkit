@@ -17,6 +17,16 @@ import { type ExitReason, Modes } from "~/core/Modes.ts";
 /** Modes over its one dependency. Nothing here touches a global. */
 const layer = Layer.provideMerge(Modes.layer, HandlerStack.layer);
 
+/**
+ * A `keydown` event for the walk.
+ *
+ * Node has `Event` and has no `KeyboardEvent`. The mode handler reads a
+ * property of the event only when an exit condition asks for it, so a plain
+ * event is enough to make the walk run a body.
+ */
+const keyEvent = (): KeyboardEvent =>
+  new Event("keydown", { cancelable: true }) as unknown as KeyboardEvent;
+
 describe("Modes", () => {
   it.effect("enters a mode, exits it, and enters it again", () =>
     Effect.gen(function*() {
@@ -225,6 +235,68 @@ describe("Modes", () => {
       assert.isFalse(yield* first.isActive);
       assert.isFalse(yield* second.isActive);
       assert.isFalse(yield* third.isActive);
+    }).pipe(Effect.provide(layer)));
+
+  it.effect("exits the whole mode when its handler fails", () =>
+    Effect.gen(function*() {
+      // The stack drops a frame whose body failed. The mode holds an
+      // indicator, a singleton group and its exit bodies, and only the mode
+      // can release those. A frame that goes away in silence leaves them.
+      const modes = yield* Modes;
+      const stack = yield* HandlerStack;
+      const reasons = yield* Ref.make<readonly ExitReason[]>([]);
+
+      const mode = yield* modes.enter<never>(
+        { name: "defective", indicator: "DEFECTIVE", singleton: "group" },
+        { keydown: () => Effect.die(new Error("boom")) },
+      );
+      yield* mode.onExit((reason) =>
+        Ref.update(reasons, (current) => [...current, reason])
+      );
+      assert.strictEqual(
+        yield* SubscriptionRef.get(modes.indicator),
+        "DEFECTIVE",
+      );
+
+      // The event still reaches the page, because a failed frame decides
+      // nothing.
+      assert.isTrue(yield* stack.bubble("keydown", keyEvent()));
+
+      assert.isFalse(yield* mode.isActive);
+      assert.deepEqual(yield* modes.activeNames, []);
+      assert.strictEqual(yield* stack.depth, 0);
+      assert.isNull(yield* SubscriptionRef.get(modes.indicator));
+      assert.deepEqual(yield* Ref.get(reasons), ["defect"]);
+
+      // The singleton group is free again, so the feature can be used again.
+      const next = yield* modes.enter<never>({
+        name: "next",
+        singleton: "group",
+      });
+      assert.isTrue(yield* next.isActive);
+      assert.deepEqual(yield* modes.activeNames, ["next"]);
+      yield* next.exit();
+    }).pipe(Effect.provide(layer)));
+
+  it.effect("exits the mode when its handler fails again", () =>
+    Effect.gen(function*() {
+      // A second walk must not find the frame, and a second exit must not run
+      // the exit bodies twice.
+      const modes = yield* Modes;
+      const stack = yield* HandlerStack;
+      const fired = yield* Ref.make(0);
+
+      const mode = yield* modes.enter<never>(
+        { name: "defective" },
+        { keydown: () => Effect.die(new Error("boom")) },
+      );
+      yield* mode.onExit(() => Ref.update(fired, (count) => count + 1));
+
+      yield* stack.bubble("keydown", keyEvent());
+      yield* stack.bubble("keydown", keyEvent());
+
+      assert.strictEqual(yield* Ref.get(fired), 1);
+      assert.strictEqual(yield* stack.depth, 0);
     }).pipe(Effect.provide(layer)));
 
   it.effect("exits the mode when its scope closes", () =>

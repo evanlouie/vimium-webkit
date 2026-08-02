@@ -39,7 +39,9 @@ export type ExitReason =
   | "click"
   | "focus"
   | "singleton"
-  | "navigation";
+  | "navigation"
+  /** A body of the mode handler failed, so the stack dropped the frame. */
+  | "defect";
 
 export interface ModeOptions {
   readonly name: string;
@@ -100,7 +102,7 @@ export class Modes extends Context.Service<Modes, {
    */
   readonly enter: <R>(
     options: ModeOptions,
-    handlers?: Omit<Handler<R>, "name">,
+    handlers?: Omit<Handler<R>, "name" | "onDefect">,
   ) => Effect.Effect<ModeHandle, never, R | Scope.Scope>;
 
   /** Exit every live mode. For a navigation and for `pagehide`. */
@@ -137,7 +139,7 @@ export class Modes extends Context.Service<Modes, {
 
       const enter = <R>(
         options: ModeOptions,
-        handlers?: Omit<Handler<R>, "name">,
+        handlers?: Omit<Handler<R>, "name" | "onDefect">,
       ): Effect.Effect<ModeHandle, never, R | Scope.Scope> =>
         Effect.gen(function*() {
           const exited = yield* Ref.make(false);
@@ -237,6 +239,10 @@ export class Modes extends Context.Service<Modes, {
 
           const id = yield* stack.push<never>({
             name: options.name,
+            // The stack drops a frame whose body failed. Only the mode can
+            // release the rest: the singleton group, the indicator and the
+            // exit bodies that hold the overlay of a feature.
+            onDefect: () => exit("defect"),
             keydown: (event) =>
               Effect.gen(function*() {
                 if (options.exitOnEscape === true && isEscape(event)) {
