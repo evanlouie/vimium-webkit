@@ -152,6 +152,15 @@ export interface ValueField extends FieldBase {
   readonly kind: "line" | "number" | "block";
   /** The smallest height of a text area, as a CSS length. */
   readonly minHeight?: string;
+  /**
+   * Does the control refuse this text?
+   *
+   * `write` keeps the stored value when it cannot use the new text, and the
+   * user then saw the old value come back with no reason for it. The dialog
+   * asks this before it saves, so the message area can name the field. Only a
+   * control that can refuse declares it.
+   */
+  readonly refuses?: (text: string) => boolean;
   readonly read: (settings: SettingsData) => string;
   readonly write: (settings: SettingsData, value: string) => SettingsData;
 }
@@ -174,6 +183,15 @@ const clampNumber = (
   if (!Number.isFinite(value)) return fallback;
   return Math.min(max, Math.max(min, Math.trunc(value)));
 };
+
+/** Text that `clampNumber` cannot use, for a control with this range. */
+const outsideRange = (min: number, max: number) => (text: string): boolean => {
+  const value = Number.parseInt(text, 10);
+  return !Number.isFinite(value) || value < min || value > max;
+};
+
+/** A hint alphabet needs two characters, or it can label one hint only. */
+const shorterThanTwo = (text: string): boolean => text.length < 2;
 
 /** One entry for each line. An empty line is not an entry. */
 export const parseLines = (text: string): ReadonlyArray<string> =>
@@ -239,6 +257,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         kind: "number",
         key: "scrollStepSize",
         label: "Scroll step size (px)",
+        refuses: outsideRange(1, 10_000),
         read: (settings) => String(settings.scrollStepSize),
         write: (settings, value) => ({
           ...settings,
@@ -267,6 +286,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         key: "linkHintCharacters",
         label: "Link hint characters",
         note: "Two or more, and all different.",
+        refuses: shorterThanTwo,
         read: (settings) => settings.linkHintCharacters,
         write: (settings, value) => ({
           ...settings,
@@ -279,6 +299,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         kind: "line",
         key: "linkHintNumbers",
         label: "Digits that choose among filtered hints",
+        note: "Two or more.",
+        refuses: shorterThanTwo,
         read: (settings) => settings.linkHintNumbers,
         write: (settings, value) => ({
           ...settings,
@@ -499,6 +521,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         key: "historyIndexLimit",
         label: "Entries kept in the index",
         note: "0 stops the recording.",
+        refuses: outsideRange(0, 50_000),
         read: (settings) => String(settings.historyIndexLimit),
         write: (settings, value) => ({
           ...settings,
@@ -576,6 +599,32 @@ export const adjustedFields = (
   SETTINGS_FIELDS
     .filter((field) => fieldText(field, offered) !== fieldText(field, stored))
     .map((field) => field.label);
+
+/** One control, as the refusal check reads it. */
+export interface OfferedText {
+  readonly field: SettingsField;
+  readonly text: string;
+}
+
+/** Does this field refuse this text? A toggle never refuses. */
+const refusesText = (field: SettingsField, text: string): boolean =>
+  field.kind !== "toggle" && field.refuses !== undefined &&
+  field.refuses(text);
+
+/**
+ * The fields whose text the form refuses.
+ *
+ * `write` keeps the stored value for such a field, so the stored settings and
+ * the offered settings agree and `adjustedFields` finds nothing. The user
+ * typed one character, pressed Save, saw the old value again and got no
+ * reason. This names the field instead.
+ */
+export const refusedFields = (
+  offered: ReadonlyArray<OfferedText>,
+): ReadonlyArray<string> =>
+  offered
+    .filter((entry) => refusesText(entry.field, entry.text))
+    .map((entry) => entry.field.label);
 
 // ---------------------------------------------------------------------------
 // The focus trap
@@ -946,15 +995,29 @@ export class Dialog extends Context.Service<Dialog, {
         return next;
       };
 
+      /** What the user offered, as text, for the refusal check. */
+      const offeredText = (form: SettingsForm): ReadonlyArray<OfferedText> =>
+        form.controls.map((control) => ({
+          field: control.field,
+          text: control.kind === "toggle"
+            ? String(control.input.checked)
+            : control.input.value,
+        }));
+
       /**
        * Store the settings, and tell the truth about the result.
        *
-       * The dialog stays open when the mapping source still has an error, and
-       * when storage repaired a field. In both cases the dialog is the only
-       * place where the user can see what happened.
+       * The dialog stays open when the mapping source still has an error, when
+       * a control refused what the user typed, and when storage repaired a
+       * field. In all three cases the dialog is the only place where the user
+       * can see what happened.
        */
       const store = Effect.fn("Dialog.store")(
-        function*(form: SettingsForm, next: SettingsData) {
+        function*(
+          form: SettingsForm,
+          next: SettingsData,
+          refused: ReadonlyArray<string>,
+        ) {
           const outcome = yield* Effect.catch(
             Effect.asSome(settings.save(next)),
             (error) =>
@@ -986,11 +1049,20 @@ export class Dialog extends Context.Service<Dialog, {
           }
 
           const changed = adjustedFields(next, stored);
+          const notes: string[] = [];
+          if (refused.length > 0) {
+            notes.push(
+              `These fields keep their stored value, because the text was ` +
+                `refused: ${refused.join(", ")}.`,
+            );
+          }
           if (changed.length > 0) {
+            notes.push(`Stored with changes to: ${changed.join(", ")}.`);
+          }
+          if (notes.length > 0) {
+            notes.push("The values above are the stored ones.");
             yield* Effect.sync(() => {
-              form.problems.textContent =
-                `Stored with changes to: ${changed.join(", ")}. ` +
-                "The values above are the stored ones.";
+              form.problems.textContent = notes.join(" ");
             });
             return;
           }
@@ -1126,8 +1198,11 @@ export class Dialog extends Context.Service<Dialog, {
 
         // The store call reaches the backend, so it cannot run inside the
         // click dispatch. One fiber holds it, and a second click replaces it.
-        const submit = (next: SettingsData): Effect.Effect<void> =>
-          Effect.asVoid(FiberHandle.run(saves, store(form, next)));
+        const submit = (
+          next: SettingsData,
+          refused: ReadonlyArray<string>,
+        ): Effect.Effect<void> =>
+          Effect.asVoid(FiberHandle.run(saves, store(form, next, refused)));
 
         yield* dom.listenOn(
           form.save,
@@ -1135,12 +1210,18 @@ export class Dialog extends Context.Service<Dialog, {
           // The base is read again here, and not at build time. Another frame
           // can store a change while this dialog is open, and a field that
           // this dialog does not edit must keep that change.
-          () => submit(readForm(form, settings.currentUnsafe())),
+          () =>
+            submit(
+              readForm(form, settings.currentUnsafe()),
+              refusedFields(offeredText(form)),
+            ),
         );
         yield* dom.listenOn(
           form.reset,
           "click",
-          () => submit(defaultSettings()),
+          // The defaults replace every control, so nothing of the user is
+          // refused here.
+          () => submit(defaultSettings(), []),
         );
         yield* dom.listenOn(form.cancel, "click", () => close);
         return form;

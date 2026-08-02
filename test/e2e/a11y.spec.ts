@@ -337,6 +337,34 @@ test.describe("the accessibility tree", () => {
     }
   });
 
+  test("the settings dialog says which field it refused", async ({ vw, page }) => {
+    await vw.open("/long-text.html");
+    await vw.press("?");
+    await waitForOverlay(page, ".vw-dialog");
+    expect(await clickOverlayButton(page, "Settings")).toBe(true);
+    await waitForOverlay(page, "#vw-set-keyMappings");
+
+    // One digit is not a hint alphabet, so the write function keeps the
+    // stored value. The user typed, pressed Save, saw the old value again and
+    // got no reason for it. The message area is a `role="alert"` region, so a
+    // reader speaks the reason as well.
+    await page.evaluate((): boolean => {
+      const host = globalThis as unknown as {
+        __vimiumHarness?: { shadow: ShadowRoot | null };
+      };
+      const shadow = host.__vimiumHarness?.shadow ?? null;
+      const input = shadow?.getElementById("vw-set-linkHintNumbers") ?? null;
+      if (!(input instanceof HTMLInputElement)) return false;
+      input.value = "1";
+      return true;
+    });
+    expect(await clickOverlayButton(page, "Save")).toBe(true);
+
+    await expect.poll(() => overlayText(page, ".vw-problem"))
+      .toContain("Digits that choose among filtered hints");
+    expect(await overlayAttribute(page, ".vw-problem", "role")).toBe("alert");
+  });
+
   test("a hint marker stays out of the tree", async ({ vw, page }) => {
     await vw.open("/link-dense.html");
     await vw.startHints();
