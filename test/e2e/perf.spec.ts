@@ -2,14 +2,14 @@
  * Performance smoke tests.
  *
  * Two numbers matter for a userscript that runs in every frame of every page
- * (IMPLEMENTATION_PLAN.md §10, §5.2):
+ * :
  *
  * 1. **Hint generation on a link-dense page.** The budget here is a ceiling,
  *    not a target — enough to catch an accidental O(n²) or a lost chunking
  *    yield, loose enough not to fail on a cold headless build or a busy CI box.
  * 2. **Cost at `document-start`, per frame.** A userscript is one IIFE
  *    evaluated in every frame of every page, so this is the number that scales
- *    with a page's iframe count. It used to be guarded only by the 3 KB Stage 0
+ *    with a page's iframe count. It used to be guarded only by a byte budget
  *    budget, which measures a chunk that costs ~0 ms and says nothing about the
  *    rest of the graph — the real per-frame cost doubled during the Effect
  *    migration with that budget still reading green.
@@ -164,8 +164,8 @@ test.describe("performance", () => {
     expect(after.timeout - before.timeout).toBeLessThanOrEqual(2);
   });
 
-  test("Stage 0 alone does not schedule anything on a subframe", async ({ vw, page }) => {
-    // Subframes deliberately stay at Stage 0 until a key lands in them or the
+  test("the guard alone does not schedule anything on a subframe", async ({ vw, page }) => {
+    // A subframe deliberately holds only the guard until a key lands in it, or
     // coordinator wakes them; the top frame is the only one that warms up.
     await vw.open("/nested-frames.html");
     await page.waitForTimeout(2_000);

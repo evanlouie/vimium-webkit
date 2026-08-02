@@ -1,10 +1,10 @@
 /**
- * Build-time invariants (IMPLEMENTATION_PLAN.md §9.4).
+ * Build-time invariants.
  *
  * These are checks a reviewer would otherwise have to remember. Each one
  * corresponds to a way this project could quietly stop working on WebKit — a
  * `<style>` element sneaking back in, a `GM_*` call bypassing the capability
- * shim, Stage 0 growing until it costs real time in twenty frames.
+ * gate, or a key decision that suspends and therefore arrives too late.
  */
 
 import { readdir, readFile } from "node:fs/promises";
@@ -24,26 +24,10 @@ export interface InvariantInput {
   readonly bundle: string;
   /** The compiled code alone, without the metadata block or the banner. */
   readonly code: string;
-  readonly stage0Bytes: number;
   readonly declaredVersion: string;
   readonly metadataBlock: string;
 }
 
-/**
- * Stage 0's code cost, **minified**.
- *
- * Measured minified because the budget is about parse and execute work in
- * twenty frames, and an unminified measurement charges the file for its own
- * documentation — which is a budget that punishes exactly the wrong thing. The
- * shipped bundle is not minified, but nothing in it is charged per-frame
- * separately either: the whole ~890 KB IIFE is what an engine sees at
- * `document-start`, and that is the `bundle-budget` line's problem, not this
- * one's.
- *
- * 3 KB against a measured 2.5 KB: enough headroom for a real change, not enough
- * to absorb a rewrite unnoticed.
- */
-export const STAGE0_BUDGET_BYTES = 3 * 1024;
 /** Headroom under Greasy Fork's 2 MB unminified ceiling. */
 export const BUNDLE_BUDGET_BYTES = 1_500 * 1024;
 
@@ -75,38 +59,63 @@ const BUNDLED_DEPENDENCY_MARKERS: ReadonlyArray<
   { name: "effect", marker: "effect/Effect" },
 ];
 
-/** Files exempt from the "all GM access goes through the shim" rule. */
+/** Files exempt from the "all manager access goes through the gate" rule. */
 const GM_SHIM_FILES: ReadonlySet<string> = new Set([
-  "src/platform/gm.ts",
-  "src/platform/gm-api.ts",
+  "src/platform/Gm.ts",
+  "src/platform/GmApi.ts",
 ]);
 
-/** The one documented place a `<style>` element may be created. */
+/** The one documented place where a `<style>` element may be made. */
 const STYLE_ELEMENT_FILES: ReadonlySet<string> = new Set([
-  "src/ui/root.ts",
+  "src/ui/Ui.ts",
 ]);
 
 /**
- * Files allowed to name a global that someone else can replace.
+ * The files that may name a global that somebody else can replace.
  *
- * A page, an extension, or a sandboxing manager can swap `navigator` (or
- * `unsafeWindow`) for an accessor, and an accessor can *throw* where a missing
- * API would merely be `undefined` — which is how a Safari user lost the whole
- * of Stage 1 to a `userAgent` getter. `typeof` and `?.` both perform the read,
- * so neither helps; only a `try` does.
+ * A page, an extension or a sandboxing manager can exchange `navigator` or
+ * `unsafeWindow` for an accessor, and an accessor can *throw* where an absent
+ * API only gives `undefined`. One Safari user lost the whole application to a
+ * `userAgent` getter. A `typeof` guard does the read, and `?.` does the read, so
+ * neither helps. Only a `try` does.
  *
- * Everywhere else goes through `platform/ambient.ts`. The exemptions:
- * `ambient.ts` itself; `boot/stage0.ts`, which may not import anything (§5.2)
- * and so carries its own `try`; `platform/gm.ts`, the manager chokepoint, which
- * probes each binding individually; and `platform/gm-api.ts`, which only
- * `declare`s these names for the type checker and emits nothing.
+ * Every other file goes through `Dom.probe` or `Dom.probeOr`. The files below
+ * are the ones that implement those probes: `Dom.ts` itself, `Gm.ts`, which is
+ * the manager gate and probes each binding on its own, `GmApi.ts`, which only
+ * declares the names for the type checker, and the two services that must read
+ * `navigator` inside their own guard.
  */
 const AMBIENT_GLOBAL_FILES: ReadonlySet<string> = new Set([
-  "src/platform/ambient.ts",
-  "src/boot/stage0.ts",
-  "src/platform/gm.ts",
-  "src/platform/gm-api.ts",
+  "src/platform/Dom.ts",
+  "src/platform/Gm.ts",
+  "src/platform/GmApi.ts",
+  "src/platform/Capabilities.ts",
+  "src/platform/Clipboard.ts",
 ]);
+
+/**
+ * The modules that a `keydown` listener reaches, and that must not suspend.
+ *
+ * `preventDefault` works only during synchronous dispatch, and Safari has no
+ * `setImmediate`, so a fiber yield becomes a macrotask. The browser has already
+ * scrolled by the time a decision that yields arrives.
+ *
+ * A command body is not on this list. `core/Keyboard.ts` starts one with
+ * `Effect.forkDetach({ startImmediately: true })`, so it runs on this stack
+ * until it suspends, and then continues on its own.
+ *
+ * Read `ARCHITECTURE.md` section 3.
+ */
+const SYNCHRONOUS_KEY_PATH: ReadonlySet<string> = new Set([
+  "src/core/HandlerStack.ts",
+  "src/core/Keyboard.ts",
+  "src/core/Modes.ts",
+  "src/boot/KeyBridge.ts",
+]);
+
+/** The combinators that suspend. None of them may be on the key path. */
+const SUSPENDING_COMBINATORS =
+  /Effect\s*\.\s*(sleep|promise|tryPromise|async|callback|timeout)\b/g;
 
 const sourceFiles = async (root: string): Promise<string[]> => {
   const entries = await readdir(`${root}/src`, {
@@ -120,13 +129,29 @@ const sourceFiles = async (root: string): Promise<string[]> => {
 };
 
 /**
- * Blank out comments and string literals, preserving offsets and line breaks.
+ * Blank comments and string literals, and keep the offsets and the newlines.
  *
- * Without this every rule fires on its own documentation: the comment
- * explaining why `<style>` is banned contains the word `createElement("style")`.
- * Replacing rather than deleting keeps reported line numbers accurate.
+ * Without this every rule fires on its own documentation: the comment that
+ * explains why `<style>` is banned holds the word `createElement("style")`.
+ * A replacement, and not a deletion, keeps every reported line number correct.
  */
-export const stripNonCode = (source: string): string => {
+export const stripNonCode = (source: string): string => strip(source, true);
+
+/**
+ * Blank the comments, and keep the string literals.
+ *
+ * Three rules match on the *content* of a string literal:
+ * `createElement("style")`, `setAttribute("onclick", …)` and
+ * `setTimeout("…")`. `stripNonCode` blanks that content, so those rules could
+ * never fire. They read this instead.
+ *
+ * The walk still tracks a string, because the `//` inside `"https://x"` is not
+ * the start of a comment. A scanner that looks only for `//` hides the rest of
+ * the line.
+ */
+export const stripComments = (source: string): string => strip(source, false);
+
+const strip = (source: string, blankStrings: boolean): string => {
   const out = source.split("");
   const blank = (from: number, to: number): void => {
     for (let i = from; i < to && i < out.length; i++) {
@@ -169,7 +194,7 @@ export const stripNonCode = (source: string): string => {
         if (current === "\n" && quote !== "`") break;
         cursor++;
       }
-      blank(index, Math.min(cursor + 1, source.length));
+      if (blankStrings) blank(index, Math.min(cursor + 1, source.length));
       index = cursor + 1;
       continue;
     }
@@ -225,9 +250,12 @@ export const hasNodeSpecifier = (source: string): boolean => {
 const scan = (
   contents: string,
   pattern: RegExp,
+  options: { readonly keepStrings?: boolean } = {},
 ): ReadonlyArray<{ line: number; text: string }> => {
   const hits: Array<{ line: number; text: string }> = [];
-  const code = stripNonCode(contents).split("\n");
+  const code = (options.keepStrings === true
+    ? stripComments(contents)
+    : stripNonCode(contents)).split("\n");
   const original = contents.split("\n");
   for (let index = 0; index < code.length; index++) {
     pattern.lastIndex = 0;
@@ -258,6 +286,7 @@ export const checkInvariants = async (
       const hit of scan(
         contents,
         /\beval\s*\(|new\s+Function\s*\(|document\s*\.\s*write\s*\(|\bsetTimeout\s*\(\s*["'`]/g,
+        { keepStrings: true },
       )
     ) {
       violations.push({
@@ -273,7 +302,9 @@ export const checkInvariants = async (
     //    so a `<style>` here is silently dropped on CSP-hardened sites.
     if (!STYLE_ELEMENT_FILES.has(rel)) {
       for (
-        const hit of scan(contents, /createElement\s*\(\s*["'`]style["'`]/g)
+        const hit of scan(contents, /createElement\s*\(\s*["'`]style["'`]/g, {
+          keepStrings: true,
+        })
       ) {
         violations.push({
           rule: "no-style-element",
@@ -297,8 +328,8 @@ export const checkInvariants = async (
       }
     }
 
-    // 8. Globals a page or manager can replace are read through one guarded
-    //    accessor, never inline. See `AMBIENT_GLOBAL_FILES` for why.
+    // 8. A global that a page or a manager can replace is read through one
+    //    guarded probe, and never inline. See `AMBIENT_GLOBAL_FILES`.
     if (!AMBIENT_GLOBAL_FILES.has(rel)) {
       for (
         const hit of scan(contents, /(?<![\w$.])(navigator|unsafeWindow)\b/g)
@@ -307,7 +338,24 @@ export const checkInvariants = async (
           rule: "ambient-globals",
           file: rel,
           line: hit.line,
-          message: `read this through platform/ambient.ts: ${hit.text}`,
+          message: `read this through Dom.probe: ${hit.text}`,
+        });
+      }
+    }
+
+    // 12. The key path must not suspend.
+    //
+    //     `preventDefault` works only during synchronous dispatch, and a fiber
+    //     yield becomes a macrotask on Safari. A decision that arrives after
+    //     the browser has scrolled is not a decision.
+    if (SYNCHRONOUS_KEY_PATH.has(rel)) {
+      for (const hit of scan(contents, SUSPENDING_COMBINATORS)) {
+        violations.push({
+          rule: "synchronous-key-path",
+          file: rel,
+          line: hit.line,
+          message:
+            `this suspends, and a keydown listener reaches this file: ${hit.text}`,
         });
       }
     }
@@ -315,7 +363,9 @@ export const checkInvariants = async (
     // Inline event-handler strings would also be CSP-blocked, and are a common
     // accidental regression when porting DOM code.
     for (
-      const hit of scan(contents, /setAttribute\s*\(\s*["'`]on[a-z]+["'`]/g)
+      const hit of scan(contents, /setAttribute\s*\(\s*["'`]on[a-z]+["'`]/g, {
+        keepStrings: true,
+      })
     ) {
       violations.push({
         rule: "no-inline-handlers",
@@ -342,17 +392,6 @@ export const checkInvariants = async (
         message: `build nodes and set textContent instead: ${hit.text}`,
       });
     }
-  }
-
-  // 3. Stage 0 runs in every frame of every page; growth here is the classic
-  //    userscript CPU sink.
-  if (input.stage0Bytes > STAGE0_BUDGET_BYTES) {
-    violations.push({
-      rule: "stage0-budget",
-      file: "src/boot/stage0.ts",
-      message: `Stage 0 is ${input.stage0Bytes} bytes, over the ` +
-        `${STAGE0_BUDGET_BYTES}-byte budget`,
-    });
   }
 
   // 4. Greasy Fork rejects scripts over 2 MB unminified.
@@ -416,7 +455,7 @@ export const checkInvariants = async (
   //     `typeof process === "object"` probes for `hrtime` and a TTY, they
   //     walked straight in underneath it. This artefact is one IIFE evaluated
   //     at `document-start`, so a throw there takes the whole extension with
-  //     it, Stage 0 included, before a single key is pressed.
+  //     it, before a single key is pressed.
   //
   //     The *identifier* is banned, not the member access. An earlier version
   //     of this rule required `process` to be followed by `.` or `[`, which
@@ -472,56 +511,53 @@ export const checkInvariants = async (
 };
 
 /**
- * 7. Every command carries a tier, and every Tier C command explains itself.
+ * 7. Every command carries a tier, and every tier C command explains itself.
  *
- * Imported and executed rather than pattern-matched, so a command added through
- * any code path is covered.
+ * The catalogue is imported and read, and not matched with a pattern, so a
+ * command that arrives by any route is covered.
  */
 const checkCommandTiers = async (
   root: string,
 ): Promise<readonly Violation[]> => {
+  const file = "src/domain/Command.ts";
   const violations: Violation[] = [];
-  const module = await import(
-    pathToFileURL(`${root}/src/core/commands.ts`).href
-  );
-  const build: unknown = (module as Record<string, unknown>)["buildCommands"];
-  if (typeof build !== "function") {
+  const module = await import(pathToFileURL(`${root}/${file}`).href);
+  const catalogue: unknown = (module as Record<string, unknown>)["COMMANDS"];
+
+  if (typeof catalogue !== "object" || catalogue === null) {
     return [{
       rule: "command-tiers",
-      file: "src/core/commands.ts",
-      message: "buildCommands is not exported",
+      file,
+      message: "COMMANDS is not exported",
     }];
   }
 
-  const commands: unknown = (build as () => unknown)();
-  if (!Array.isArray(commands)) {
-    return [{
-      rule: "command-tiers",
-      file: "src/core/commands.ts",
-      message: "buildCommands must return an array",
-    }];
-  }
-
-  for (const entry of commands) {
+  for (const [key, entry] of Object.entries(catalogue)) {
     if (typeof entry !== "object" || entry === null) {
       violations.push({
         rule: "command-tiers",
-        file: "src/core/commands.ts",
-        message: "buildCommands returned a malformed command entry",
+        file,
+        message: `the catalogue entry for "${key}" is not an object`,
       });
       continue;
     }
     const record = entry as Record<string, unknown>;
-    const name = typeof record["name"] === "string"
-      ? record["name"]
-      : "<unnamed>";
-    const tier = record["tier"];
+    const name = typeof record["name"] === "string" ? record["name"] : key;
 
+    if (name !== key) {
+      violations.push({
+        rule: "command-tiers",
+        file,
+        message: `the entry for "${key}" carries the name "${name}"`,
+      });
+    }
+
+    const tier = record["tier"];
     if (tier !== "A" && tier !== "B" && tier !== "C") {
       violations.push({
         rule: "command-tiers",
-        file: "src/core/commands.ts",
-        message: `command "${name}" has no valid tier`,
+        file,
+        message: `the command "${name}" has no valid tier`,
       });
       continue;
     }
@@ -529,9 +565,8 @@ const checkCommandTiers = async (
     if (tier === "C" && typeof record["unavailableReason"] !== "string") {
       violations.push({
         rule: "command-tiers",
-        file: "src/core/commands.ts",
-        message:
-          `Tier C command "${name}" needs a user-facing unavailableReason`,
+        file,
+        message: `the tier C command "${name}" needs an unavailableReason`,
       });
     }
   }

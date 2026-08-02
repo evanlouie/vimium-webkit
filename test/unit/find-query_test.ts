@@ -1,15 +1,16 @@
 /**
  * Find-query parsing.
  *
- * The behaviours pinned here are the ones users notice being wrong: smartcase
- * (a lower-case query must match anything, an upper-case one must not), which
- * queries are regular expressions, and that a malformed pattern reports an
- * error instead of throwing while the user is still typing it.
+ * The behaviours here are the ones that a user sees when they are wrong:
+ * smartcase, which queries are regular expressions, and that a bad pattern
+ * reports an error while the user still types it.
  */
 
-import { test } from "vitest";
+import { assert, describe, it } from "@effect/vitest";
+import { Effect, Option } from "effect";
 import {
   escapeRegExp,
+  type FindQueryOptions,
   hasUpperCase,
   literalSource,
   parseFindQuery,
@@ -17,194 +18,231 @@ import {
   stripDirectives,
   toRegExp,
   wordQuery,
-} from "~/features/find/query.ts";
-import { assert, assertEquals, assertNotEquals } from "./support/assert.ts";
+} from "~/domain/FindQuery.ts";
 
-const literal = { regexFindMode: false };
-const regexMode = { regexFindMode: true };
+const literal: FindQueryOptions = { regexFindMode: false };
+const regexMode: FindQueryOptions = { regexFindMode: true };
 
-test("hasUpperCase is not limited to ASCII", () => {
-  assert(!hasUpperCase("hello"));
-  assert(hasUpperCase("Hello"));
-  assert(hasUpperCase("ПРИВЕТ"));
-  assert(!hasUpperCase("привет"));
-  // Digits and punctuation have no case and must not defeat smartcase.
-  assert(!hasUpperCase("1234-!?"));
-});
+describe("FindQuery", () => {
+  it.effect("does not limit the case test to ASCII", () =>
+    Effect.sync(() => {
+      assert.isFalse(hasUpperCase("hello"));
+      assert.isTrue(hasUpperCase("Hello"));
+      assert.isTrue(hasUpperCase("ПРИВЕТ"));
+      assert.isFalse(hasUpperCase("привет"));
+      // A digit and a punctuation mark have no case, so smartcase stays on.
+      assert.isFalse(hasUpperCase("1234-!?"));
+    }));
 
-test("smartcase: lower-case queries are case-insensitive", () => {
-  const query = parseFindQuery("hello", literal);
-  assert(query.ignoreCase);
-  assert(query.smartcase);
-  assert(query.flags.includes("i"));
-});
+  it.effect("makes a lower-case query case-insensitive", () =>
+    Effect.sync(() => {
+      const query = parseFindQuery("hello", literal);
+      assert.isTrue(query.ignoreCase);
+      assert.isTrue(query.smartcase);
+      assert.include(query.flags, "i");
+    }));
 
-test("smartcase: any upper-case character makes the query case-sensitive", () => {
-  const query = parseFindQuery("Hello", literal);
-  assert(!query.ignoreCase);
-  assert(query.smartcase);
-  assert(!query.flags.includes("i"));
-});
+  it.effect("makes any upper-case character case-sensitive", () =>
+    Effect.sync(() => {
+      const query = parseFindQuery("Hello", literal);
+      assert.isFalse(query.ignoreCase);
+      assert.isTrue(query.smartcase);
+      assert.notInclude(query.flags, "i");
+    }));
 
-test("smartcase is overridden by an explicit directive", () => {
-  const forced = parseFindQuery("Hello\\i", literal);
-  assert(forced.ignoreCase);
-  assert(!forced.smartcase);
-  assertEquals(forced.pattern, "Hello");
+  it.effect("lets an explicit directive beat smartcase", () =>
+    Effect.sync(() => {
+      const forced = parseFindQuery("Hello\\i", literal);
+      assert.isTrue(forced.ignoreCase);
+      assert.isFalse(forced.smartcase);
+      assert.strictEqual(forced.pattern, "Hello");
 
-  const pinned = parseFindQuery("hello\\I", literal);
-  assert(!pinned.ignoreCase);
-  assert(!pinned.smartcase);
-});
+      const pinned = parseFindQuery("hello\\I", literal);
+      assert.isFalse(pinned.ignoreCase);
+      assert.isFalse(pinned.smartcase);
+    }));
 
-test("stripDirectives removes single escapes and unescapes doubled ones", () => {
-  assertEquals(stripDirectives("foo\\r").isRegex, true);
-  assertEquals(stripDirectives("foo\\R").isRegex, false);
-  assertEquals(stripDirectives("foo\\r").text, "foo");
+  it.effect("removes a single escape and keeps a doubled one", () =>
+    Effect.sync(() => {
+      assert.deepEqual(stripDirectives("foo\\r").isRegex, Option.some(true));
+      assert.deepEqual(stripDirectives("foo\\R").isRegex, Option.some(false));
+      assert.strictEqual(stripDirectives("foo\\r").text, "foo");
 
-  // A doubled backslash means "I want a literal backslash", so it survives.
-  const doubled = stripDirectives("foo\\\\r");
-  assertEquals(doubled.text, "foo\\r");
-  assertEquals(doubled.isRegex, null);
-});
+      // A doubled backslash means "a literal backslash", so it survives.
+      const doubled = stripDirectives("foo\\\\r");
+      assert.strictEqual(doubled.text, "foo\\r");
+      assert.isTrue(Option.isNone(doubled.isRegex));
+    }));
 
-test("regexFindMode selects the default kind", () => {
-  assertEquals(parseFindQuery("a.c", literal).kind, "literal");
-  assertEquals(parseFindQuery("a.c", regexMode).kind, "regex");
-  // ...and the directive beats the setting, in both directions.
-  assertEquals(parseFindQuery("a.c\\r", literal).kind, "regex");
-  assertEquals(parseFindQuery("a.c\\R", regexMode).kind, "literal");
-});
+  it.effect("takes the default kind from regexFindMode", () =>
+    Effect.sync(() => {
+      assert.strictEqual(parseFindQuery("a.c", literal).kind, "literal");
+      assert.strictEqual(parseFindQuery("a.c", regexMode).kind, "regex");
+      // The directive beats the setting, in both directions.
+      assert.strictEqual(parseFindQuery("a.c\\r", literal).kind, "regex");
+      assert.strictEqual(parseFindQuery("a.c\\R", regexMode).kind, "literal");
+    }));
 
-test("splitRegexLiteral recognises /pattern/flags", () => {
-  assertEquals(splitRegexLiteral("/foo/"), { body: "foo", flags: "" });
-  assertEquals(splitRegexLiteral("/foo/i"), { body: "foo", flags: "i" });
-  assertEquals(splitRegexLiteral("/a\\/b/"), { body: "a\\/b", flags: "" });
+  it.effect("recognises /pattern/flags", () =>
+    Effect.sync(() => {
+      assert.deepEqual(
+        splitRegexLiteral("/foo/"),
+        Option.some({ body: "foo", flags: "" }),
+      );
+      assert.deepEqual(
+        splitRegexLiteral("/foo/i"),
+        Option.some({ body: "foo", flags: "i" }),
+      );
+      assert.deepEqual(
+        splitRegexLiteral("/a\\/b/"),
+        Option.some({ body: "a\\/b", flags: "" }),
+      );
 
-  // Not literals: no delimiters, an unknown flag, or a repeated flag.
-  assertEquals(splitRegexLiteral("foo"), null);
-  assertEquals(splitRegexLiteral("/foo/x"), null);
-  assertEquals(splitRegexLiteral("/foo/ii"), null);
-  // A plain search containing a slash stays a plain search.
-  assertEquals(splitRegexLiteral("and/or"), null);
-});
+      // Not literals: no delimiter, an unknown flag, or a repeated flag.
+      assert.isTrue(Option.isNone(splitRegexLiteral("foo")));
+      assert.isTrue(Option.isNone(splitRegexLiteral("/foo/x")));
+      assert.isTrue(Option.isNone(splitRegexLiteral("/foo/ii")));
+      // A plain search that holds a slash stays a plain search.
+      assert.isTrue(Option.isNone(splitRegexLiteral("and/or")));
+    }));
 
-test("/pattern/ is a regex even when regexFindMode is off", () => {
-  const query = parseFindQuery("/a.c/", literal);
-  assertEquals(query.kind, "regex");
-  assertEquals(query.source, "a.c");
+  it.effect("treats /pattern/ as a regex even with regexFindMode off", () =>
+    Effect.sync(() => {
+      const query = parseFindQuery("/a.c/", literal);
+      assert.strictEqual(query.kind, "regex");
+      assert.strictEqual(query.source, "a.c");
 
-  const compiled = toRegExp(query);
-  assert(compiled !== null);
-  assert(compiled.test("abc"));
-});
+      const compiled = toRegExp(query);
+      assert.isTrue(Option.isSome(compiled));
+      if (Option.isNone(compiled)) return;
+      assert.isTrue(compiled.value.test("abc"));
+    }));
 
-test("/pattern/i forces case-insensitivity over smartcase", () => {
-  const query = parseFindQuery("/Foo/i", literal);
-  assert(query.ignoreCase);
-  assert(!query.smartcase);
-  assertEquals(query.flags, "gi");
-});
+  it.effect("lets /pattern/i beat smartcase", () =>
+    Effect.sync(() => {
+      const query = parseFindQuery("/Foo/i", literal);
+      assert.isTrue(query.ignoreCase);
+      assert.isFalse(query.smartcase);
+      assert.strictEqual(query.flags, "gi");
+    }));
 
-test("escapeRegExp neutralises metacharacters", () => {
-  const escaped = escapeRegExp("a.c*[x]");
-  assertEquals(new RegExp(escaped).test("a.c*[x]"), true);
-  assertEquals(new RegExp(escaped).test("abc*[x]"), false);
-});
+  it.effect("neutralises a metacharacter", () =>
+    Effect.sync(() => {
+      const escaped = escapeRegExp("a.c*[x]");
+      assert.isTrue(new RegExp(escaped).test("a.c*[x]"));
+      assert.isFalse(new RegExp(escaped).test("abc*[x]"));
+    }));
 
-test("literal queries tolerate collapsed whitespace", () => {
-  // The engine folds every whitespace character to U+0020 without changing
-  // length, so runs of spaces survive and the pattern has to allow for them.
-  assertEquals(literalSource("sign in"), "sign +in");
-  const compiled = toRegExp(parseFindQuery("sign in", literal));
-  assert(compiled !== null);
-  assert(compiled.test("sign  in"));
-  assertNotEquals(literalSource("a.b c"), "a.b c");
-});
+  it.effect("accepts collapsed whitespace in a literal query", () =>
+    Effect.sync(() => {
+      // The engine folds every whitespace character to one space and keeps the
+      // length, so a run of spaces stays and the pattern must allow it.
+      assert.strictEqual(literalSource("sign in"), "sign +in");
+      const compiled = toRegExp(parseFindQuery("sign in", literal));
+      assert.isTrue(Option.isSome(compiled));
+      if (Option.isNone(compiled)) return;
+      assert.isTrue(compiled.value.test("sign  in"));
+      assert.notStrictEqual(literalSource("a.b c"), "a.b c");
+    }));
 
-test("an empty query is empty, not an error", () => {
-  const query = parseFindQuery("", literal);
-  assert(query.isEmpty);
-  assertEquals(query.error, null);
-  assertEquals(toRegExp(query), null);
+  it.effect("treats an empty query as empty and not as an error", () =>
+    Effect.sync(() => {
+      const query = parseFindQuery("", literal);
+      assert.isTrue(query.isEmpty);
+      assert.isTrue(Option.isNone(query.error));
+      assert.isTrue(Option.isNone(toRegExp(query)));
 
-  // A query that is nothing but directives is also empty.
-  assert(parseFindQuery("\\i", literal).isEmpty);
-});
+      // A query of directives alone is also empty.
+      assert.isTrue(parseFindQuery("\\i", literal).isEmpty);
+    }));
 
-test("a malformed regex reports an error instead of throwing", () => {
-  const query = parseFindQuery("/a(/", literal);
-  assert(query.error !== null);
-  assertEquals(toRegExp(query), null);
-});
+  it.effect("reports a malformed regex instead of throwing", () =>
+    Effect.sync(() => {
+      const query = parseFindQuery("/a(/", literal);
+      assert.isTrue(Option.isSome(query.error));
+      assert.isTrue(Option.isNone(toRegExp(query)));
+    }));
 
-test("a literal query is never malformed", () => {
-  const query = parseFindQuery("a(", literal);
-  assertEquals(query.error, null);
-  const compiled = toRegExp(query);
-  assert(compiled !== null);
-  assert(compiled.test("a("));
-});
+  it.effect("never treats a literal query as malformed", () =>
+    Effect.sync(() => {
+      const query = parseFindQuery("a(", literal);
+      assert.isTrue(Option.isNone(query.error));
+      const compiled = toRegExp(query);
+      assert.isTrue(Option.isSome(compiled));
+      if (Option.isNone(compiled)) return;
+      assert.isTrue(compiled.value.test("a("));
+    }));
 
-test("toRegExp returns a fresh regex each call", () => {
-  // `lastIndex` is mutable state on a `g` regex; sharing one across searches
-  // silently skips matches.
-  const query = parseFindQuery("a", literal);
-  const first = toRegExp(query);
-  const second = toRegExp(query);
-  assert(first !== null && second !== null);
-  assert(first !== second);
-  first.exec("aaa");
-  assertEquals(second.lastIndex, 0);
-});
+  it.effect("gives a new RegExp on every call", () =>
+    Effect.sync(() => {
+      // `lastIndex` is state on a `g` expression. Two searches that share one
+      // expression lose matches.
+      const query = parseFindQuery("a", literal);
+      const first = toRegExp(query);
+      const second = toRegExp(query);
+      assert.isTrue(Option.isSome(first) && Option.isSome(second));
+      if (Option.isNone(first) || Option.isNone(second)) return;
+      assert.notStrictEqual(first.value, second.value);
+      first.value.exec("aaa");
+      assert.strictEqual(second.value.lastIndex, 0);
+    }));
 
-test("wordQuery anchors on word boundaries", () => {
-  const query = wordQuery("find");
-  const compiled = toRegExp(query);
-  assert(compiled !== null);
-  assert(compiled.test("please find it"));
-  assertEquals(new RegExp(query.source, "i").test("refinance"), false);
-});
+  it.effect("anchors a word query on word boundaries", () =>
+    Effect.sync(() => {
+      const query = wordQuery("find");
+      const compiled = toRegExp(query);
+      assert.isTrue(Option.isSome(compiled));
+      if (Option.isNone(compiled)) return;
+      assert.isTrue(compiled.value.test("please find it"));
+      assert.isFalse(new RegExp(query.source, "i").test("refinance"));
+    }));
 
-test("wordQuery does not anchor a non-word token", () => {
-  const query = wordQuery("->");
-  assertEquals(query.source.includes("\\b"), false);
-  const compiled = toRegExp(query);
-  assert(compiled !== null);
-  assert(compiled.test("a -> b"));
-});
+  it.effect("does not anchor a token that is not a word", () =>
+    Effect.sync(() => {
+      const query = wordQuery("->");
+      assert.notInclude(query.source, "\\b");
+      const compiled = toRegExp(query);
+      assert.isTrue(Option.isSome(compiled));
+      if (Option.isNone(compiled)) return;
+      assert.isTrue(compiled.value.test("a -> b"));
+    }));
 
-test("wordQuery applies smartcase", () => {
-  assert(wordQuery("find").ignoreCase);
-  assert(!wordQuery("Find").ignoreCase);
-});
+  it.effect("applies smartcase to a word query", () =>
+    Effect.sync(() => {
+      assert.isTrue(wordQuery("find").ignoreCase);
+      assert.isFalse(wordQuery("Find").ignoreCase);
+    }));
 
-test("a catastrophically backtracking pattern is refused", () => {
-  // `(a+)+$` against a long line backtracks exponentially, and find mode owns
-  // the keyboard — so the tab is gone with no way to abort. The pattern is
-  // re-run on every keystroke, which turns one typed character into a freeze.
-  //
-  // Refused empirically rather than syntactically: every syntactic rule either
-  // rejects patterns users legitimately want or misses ones that hang.
-  for (const source of ["(a+)+$", "(a*)*b", "(\\d+)+$", "(a|a)*$"]) {
-    const query = parseFindQuery(source, { regexFindMode: true });
-    assert(
-      query.error !== null,
-      `${source} compiled without complaint`,
-    );
-    assertEquals(toRegExp(query), null);
-  }
-});
+  it.effect("refuses a pattern that backtracks catastrophically", () =>
+    Effect.sync(() => {
+      // `(a+)+$` against a long line backtracks exponentially, and find mode
+      // owns the keyboard, so the tab is lost. The pattern runs again on every
+      // keystroke, so one character becomes a freeze.
+      for (const source of ["(a+)+$", "(a*)*b", "(\\d+)+$", "(a|a)*$"]) {
+        const query = parseFindQuery(source, regexMode);
+        assert.isTrue(
+          Option.isSome(query.error),
+          `${source} compiled with no complaint`,
+        );
+        assert.isTrue(Option.isNone(toRegExp(query)));
+      }
+    }));
 
-test("ordinary quantifiers are still allowed", () => {
-  for (const source of ["a+", "\\d{2,4}", "(?:foo|bar)+", "[a-z]*x"]) {
-    const query = parseFindQuery(source, { regexFindMode: true });
-    assertEquals(query.error, null, `${source} was refused`);
-    assert(toRegExp(query) !== null);
-  }
-});
+  it.effect("still allows an ordinary quantifier", () =>
+    Effect.sync(() => {
+      for (const source of ["a+", "\\d{2,4}", "(?:foo|bar)+", "[a-z]*x"]) {
+        const query = parseFindQuery(source, regexMode);
+        assert.isTrue(
+          Option.isNone(query.error),
+          `${source} was refused`,
+        );
+        assert.isTrue(Option.isSome(toRegExp(query)));
+      }
+    }));
 
-test("an absurdly long pattern is refused", () => {
-  const query = parseFindQuery("a".repeat(600), { regexFindMode: true });
-  assert(query.error !== null);
+  it.effect("refuses an absurdly long pattern", () =>
+    Effect.sync(() => {
+      const query = parseFindQuery("a".repeat(600), regexMode);
+      assert.isTrue(Option.isSome(query.error));
+    }));
 });

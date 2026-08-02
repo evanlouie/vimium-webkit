@@ -1,7 +1,7 @@
 /**
  * The load-bearing spec: does the UI survive a strict Content Security Policy?
  *
- * `IMPLEMENTATION_PLAN.md` §6.3 stakes the entire UI layer on one claim — that
+ * `ARCHITECTURE.md` stakes the entire UI layer on one claim — that
  * a constructed `CSSStyleSheet` adopted into a shadow root is not a
  * `style-src` fetch, and therefore is not policed. Verification item **V1**.
  * If that claim is wrong, the overlay is unstyled on GitHub, Google, and every
@@ -114,7 +114,7 @@ test.describe("strict CSP", () => {
 });
 
 test.describe("strict CSP on the capability floor", () => {
-  // quoid's Userscripts exposes only the promise-flavoured `GM.*`, so Stage 1
+  // quoid's Userscripts exposes only the promise-flavoured `GM.*`, so the application
   // hydrates settings across an async hop before the UI exists (V12).
   test.use({ gmVariant: "async", scriptHandler: "Harness/Userscripts" });
 

@@ -119,7 +119,7 @@ test.describe("SPA navigation", () => {
 
 test.describe("pre-existing focus", () => {
   /**
-   * Stage 1 boots on a timer, long after the page autofocused its search box.
+   * The application starts on a timer, long after the page autofocused its search box.
    * Seeding insert mode from `deepActiveElement()` is the only way it can know
    * (OSU-02).
    */

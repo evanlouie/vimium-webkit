@@ -18,14 +18,14 @@
  */
 
 import { readFileSync } from "node:fs";
-import type { Settings } from "~/settings/schema.ts";
+import type { Settings } from "~/domain/Persisted.ts";
 import { joinPath } from "./paths.ts";
 import { repoRoot } from "./root.ts";
 
 /** Mirrors `STORAGE_PREFIX` in `src/platform/storage.ts`. */
 const STORAGE_PREFIX = "vimium-webkit:";
 
-/** Mirrors `SETTINGS_SCHEMA_VERSION` in `src/settings/schema.ts`. */
+/** Mirrors `SETTINGS_SCHEMA_VERSION` in `src/domain/Persisted.ts`. */
 const SETTINGS_SCHEMA_VERSION = 1;
 
 export const SETTINGS_KEY = `${STORAGE_PREFIX}settings`;

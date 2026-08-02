@@ -10,7 +10,7 @@ exists because Vimium is a browser extension and Safari's extension model — pl
 a handful of WebKit-specific behaviours — makes a straight port impossible.
 
 The full engineering rationale, including every WebKit limitation and how it is
-worked around, is in [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md).
+worked around, is in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ---
 
@@ -305,6 +305,9 @@ report. Note that `test/unit/module-graph_test.ts` imports every module, so a
 file reached only by that test is counted for its import-time statements; the
 headline is a little kinder than the tested-behaviour figure.
 
+Unit tests use `@effect/vitest` and provide a stub layer instead of patching a
+global. There is no `globalThis` patching in the unit suite.
+
 ### Build invariants
 
 `npm run build` fails the build on any of these, because each one is a way the
@@ -315,18 +318,21 @@ project could quietly stop working on WebKit:
 2. No `<style>` elements outside the documented Safari <16.4 fallback. Safari
    applies the **page's** `style-src` to nodes a content script injects; only
    CSSOM (`adoptedStyleSheets`) escapes it.
-3. Stage 0 ≤ 3 KB. It runs in every frame of every page whether or not you ever
-   press a key.
-4. Bundle ≤ 1.5 MB unminified (Greasy Fork's ceiling is 2 MB, measured
+3. Bundle ≤ 1.5 MB unminified (Greasy Fork's ceiling is 2 MB, measured
    unminified).
-5. `@version` matches `package.json`.
-6. Every `GM_*` / `GM.*` reference goes through `src/platform/gm.ts`.
-7. Every command carries a tier, and every Tier C command carries a user-facing
+4. `@version` matches `package.json`.
+5. Every `GM_*` / `GM.*` reference goes through `src/platform/Gm.ts`.
+6. Every command carries a tier, and every Tier C command carries a user-facing
    explanation.
-8. Every read of `navigator` or `unsafeWindow` goes through
-   `src/platform/ambient.ts`. A page, an extension, or a sandboxing manager can
-   replace a global with an accessor that _throws_, and neither a `typeof` guard
-   nor `?.` survives that — both perform the read.
+7. Every read of `navigator` or `unsafeWindow` goes through `Dom.probe`. A page,
+   an extension, or a sandboxing manager can replace a global with an accessor
+   that _throws_, and neither a `typeof` guard nor `?.` survives that — both
+   perform the read.
+8. Nothing that a `keydown` listener reaches may suspend. `preventDefault()`
+   works only during synchronous dispatch, and a fiber yield becomes a macrotask
+   on Safari.
+9. No HTML sinks. Link text, page titles and search suggestions are all
+   page-supplied and all end up inside our own overlay.
 
 ### Releasing
 
@@ -348,18 +354,37 @@ reports no newer version, so every existing install silently stays where it is.
 
 ### Architecture
 
+The whole extension is one [Effect](https://effect.website) application: every
+capability is a service, every service is provided by a layer, every failure is
+a typed value, and there is no `Promise` and no `any` in `src/`.
+[`ARCHITECTURE.md`](./ARCHITECTURE.md) is the reference; it is short, and you
+should read it before you add a file.
+
 ```
 src/
-  boot/       Staged, idempotent, late-safe boot (document-start is unreliable on WebKit)
-  platform/   Capability probe, GM shim, storage, clipboard, tabs, scheduler
-  core/       Handler stack, modes, key notation, mapping parser, command registry
-  features/   Hints, find, visual/caret, scroller, marks, insert, omnibar
+  main.ts     Claim the realm, wait to be wanted, build the application
+  App.ts      The one layer graph, and the runtime for one frame
+  domain/     Pure data and schemas. No services, no DOM
+  platform/   The browser and the userscript manager
+  core/       Settings, keys, modes, commands, exclusions
   ui/         One closed shadow root, styled through CSSOM
-  frames/     Top-frame coordinator over postMessage + transferred MessagePort
-  settings/   Effect Schema, defaults, migrations
+  frames/     The cross-frame bus and its protocol
+  features/   Hints, find, visual/caret, scroller, marks, insert, omnibar
+  boot/       The injection guard, the lifecycle and the key bridge
 ```
 
-Three decisions carry most of the weight:
+Five decisions carry most of the weight:
+
+- **The runtime owns a scope.** Every listener, observer, port, stylesheet and
+  fiber is acquired inside it, so teardown is the close of that scope. Nothing
+  keeps a list of things to undo.
+- **The frame bus breaks every cycle.** Hints needs remote frames and a remote
+  frame needs hints; exclusions needs the top frame and the top frame needs
+  exclusions. Neither depends on the other: each publishes on the bus and
+  subscribes to what it can answer, so the layer graph stays a tree.
+- **Features register commands; nothing imports a feature.** The catalogue is
+  pure data, the bodies live in a registry, and the key handler reads the
+  registry.
 
 - **Content world, not page world.** quoid's GM API only exists there, and the
   choice does not affect keyboard interception at all.
@@ -368,6 +393,9 @@ Three decisions carry most of the weight:
   the overlay survives on strict-CSP sites where a `<style>` element would not.
 - **The top frame elects itself coordinator.** There is no background page to
   broker cross-frame link hints, so frames hand it a transferred `MessagePort`.
+- **The keyboard path is synchronous.** `preventDefault()` works nowhere else. A
+  key decision runs through `runSyncExit`, and a command that must wait
+  continues on its own fiber afterwards.
 
 ---
 

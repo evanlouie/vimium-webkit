@@ -1,909 +1,463 @@
-import { Effect, Fiber, Option, Result, Schema } from "effect";
-import { test } from "vitest";
-import { GmError, type ValueBackend } from "~/platform/gm.ts";
+/**
+ * Persistence, as one serial actor per group.
+ *
+ * Storage is untrusted input. A user can edit it in the interface of the
+ * manager, an older build may have written it, and a newer build in another
+ * tab may have written it. Every read is decoded, and every failure gives the
+ * defaults and one message.
+ *
+ * Every test builds its own backend layer. Nothing here touches a global, and
+ * the debounce is driven by `TestClock`, so no test waits for real time.
+ */
+
+import { assert, describe, it } from "@effect/vitest";
 import {
-  type Migration,
-  type StorageError,
-  ValueStore,
-} from "~/platform/storage.ts";
-import { assert, assertEquals } from "./support/assert.ts";
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Option,
+  Queue,
+  Ref,
+  Result,
+  Stream,
+} from "effect";
+import { TestClock } from "effect/testing";
+import { defaultSettings } from "~/domain/Persisted.ts";
+import { GmError } from "~/platform/Gm.ts";
+import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
+import { Storage, type StorageError } from "~/platform/Storage.ts";
 
-/** Run an effect to a promise, so each test reads as it did before. */
-const run = <A, E>(effect: Effect.Effect<A, E>): Promise<A> =>
-  Effect.runPromise(effect);
+const SETTINGS_KEY = `${STORAGE_PREFIX}settings`;
+const SESSION_KEY = `${STORAGE_PREFIX}session`;
 
-/** Run an effect and observe the typed failure instead of throwing. */
-const attempt = <A, E>(
-  effect: Effect.Effect<A, E>,
-): Promise<Result.Result<A, E>> => Effect.runPromise(Effect.result(effect));
-
-interface Fake {
-  readonly backend: ValueBackend;
-  readonly map: Map<string, string>;
-  notify(key: string, raw: string | undefined): void;
+/** A backend that a test can seed, watch and make fail. */
+interface Backend {
+  readonly layer: Layer.Layer<KeyValueStore>;
+  /** Put a raw value in the store, as another build would have left it. */
+  readonly seed: (key: string, raw: string) => Effect.Effect<void>;
+  /** The raw value in the store, if there is one. */
+  readonly read: (key: string) => Effect.Effect<Option.Option<string>>;
+  /** Every value that reached the backend, in commit order. */
+  readonly writes: Effect.Effect<readonly string[]>;
+  /** Make every later read fail with a transport error. */
+  readonly breakReads: Effect.Effect<void>;
 }
 
-const fakeBackend = (withWatch: boolean): Fake => {
-  const map = new Map<string, string>();
-  const watchers = new Map<string, (raw: string | undefined) => void>();
+const makeBackend: Effect.Effect<Backend> = Effect.gen(function*() {
+  const map = yield* Ref.make<ReadonlyMap<string, string>>(new Map());
+  const writes = yield* Ref.make<readonly string[]>([]);
+  const broken = yield* Ref.make(false);
 
-  const backend: ValueBackend = {
-    kind: "gm-async",
-    get: (key) => Effect.succeed(Option.fromNullishOr(map.get(key) ?? null)),
-    set: (key, value) =>
-      Effect.sync(() => {
-        map.set(key, value);
-      }),
-    remove: (key) =>
-      Effect.sync(() => {
-        map.delete(key);
-      }),
-    watch: withWatch
-      ? (key, onChange) => {
-        watchers.set(key, onChange);
-        return () => watchers.delete(key);
-      }
-      : null,
-  };
+  const put = (key: string, value: string): Effect.Effect<void> =>
+    Ref.update(map, (current) => new Map(current).set(key, value));
 
-  return {
-    backend,
-    map,
-    notify: (key, raw) => watchers.get(`vimium-webkit:${key}`)?.(raw),
-  };
-};
-
-const schema = Schema.Struct({ count: Schema.Number, label: Schema.String });
-type Shape = typeof schema.Type;
-
-const defaults = (): Shape => ({ count: 0, label: "default" });
-
-const spec = (migrations?: readonly Migration[]) => ({
-  name: "test",
-  schema,
-  defaults,
-  schemaVersion: 2,
-  migrations,
-});
-
-test("an absent value hydrates to the defaults", async () => {
-  const fake = fakeBackend(false);
-  const group = new ValueStore(fake.backend).group(spec());
-  assertEquals(await run(group.hydrate()), defaults());
-});
-
-test("a written value round-trips through the envelope", async () => {
-  const fake = fakeBackend(false);
-  const store = new ValueStore(fake.backend);
-  const group = store.group(spec());
-
-  await run(group.write({ count: 3, label: "three" }));
-  const raw = fake.map.get("vimium-webkit:test");
-  assert(raw !== undefined);
-  assertEquals(JSON.parse(raw), {
-    schemaVersion: 2,
-    data: { count: 3, label: "three" },
-  });
-
-  const reread = new ValueStore(fake.backend).group(spec());
-  assertEquals(await run(reread.hydrate()), { count: 3, label: "three" });
-});
-
-test("malformed JSON falls back to defaults and reports", async () => {
-  const fake = fakeBackend(false);
-  fake.map.set("vimium-webkit:test", "{not json");
-  const store = new ValueStore(fake.backend);
-  const issues: StorageError[] = [];
-  store.onIssue((issue) => issues.push(issue));
-
-  assertEquals(await run(store.group(spec()).hydrate()), defaults());
-  assertEquals(issues[0]?.reason, "malformed");
-});
-
-test("a schema mismatch falls back to defaults and reports", async () => {
-  const fake = fakeBackend(false);
-  fake.map.set(
-    "vimium-webkit:test",
-    JSON.stringify({ schemaVersion: 2, data: { count: "not a number" } }),
-  );
-  const store = new ValueStore(fake.backend);
-  const issues: StorageError[] = [];
-  store.onIssue((issue) => issues.push(issue));
-
-  assertEquals(await run(store.group(spec()).hydrate()), defaults());
-  assertEquals(issues[0]?.reason, "invalid");
-});
-
-test("migrations run in order and only forward", async () => {
-  const fake = fakeBackend(false);
-  fake.map.set(
-    "vimium-webkit:test",
-    JSON.stringify({ schemaVersion: 0, data: { n: 5 } }),
-  );
-
-  const migrations: readonly Migration[] = [
-    {
-      to: 2,
-      describe: "rename label",
-      migrate: (data) => ({
-        ...(data as Record<string, unknown>),
-        label: "migrated",
-      }),
-    },
-    {
-      to: 1,
-      describe: "n -> count",
-      migrate: (data) => {
-        const record = data as Record<string, unknown>;
-        return { count: record["n"], label: "" };
-      },
-    },
-  ];
-
-  const group = new ValueStore(fake.backend).group(spec(migrations));
-  assertEquals(await run(group.hydrate()), { count: 5, label: "migrated" });
-});
-
-test("a throwing migration falls back to defaults and reports", async () => {
-  const fake = fakeBackend(false);
-  fake.map.set(
-    "vimium-webkit:test",
-    JSON.stringify({ schemaVersion: 1, data: {} }),
-  );
-  const store = new ValueStore(fake.backend);
-  const issues: StorageError[] = [];
-  store.onIssue((issue) => issues.push(issue));
-
-  const group = store.group(spec([{
-    to: 2,
-    describe: "explodes",
-    migrate: () => {
-      throw new Error("boom");
-    },
-  }]));
-
-  assertEquals(await run(group.hydrate()), defaults());
-  assertEquals(issues[0]?.reason, "migration");
-});
-
-test("data written by a newer build is left alone", async () => {
-  // Downgrading would destroy the newer tab's settings; using defaults for this
-  // session is the conservative choice.
-  const fake = fakeBackend(false);
-  const stored = JSON.stringify({
-    schemaVersion: 99,
-    data: { count: 1, label: "future" },
-  });
-  fake.map.set("vimium-webkit:test", stored);
-
-  const store = new ValueStore(fake.backend);
-  const group = store.group(spec());
-  assertEquals(await run(group.hydrate()), defaults());
-  assertEquals(fake.map.get("vimium-webkit:test"), stored);
-});
-
-test("pre-envelope data is treated as version 0", async () => {
-  const fake = fakeBackend(false);
-  fake.map.set(
-    "vimium-webkit:test",
-    JSON.stringify({ count: 7, label: "old" }),
-  );
-  const group = new ValueStore(fake.backend).group(spec());
-  assertEquals(await run(group.hydrate()), { count: 7, label: "old" });
-});
-
-test("peek is synchronous and current() falls back to defaults", async () => {
-  const fake = fakeBackend(false);
-  const group = new ValueStore(fake.backend).group(spec());
-  assertEquals(group.peek(), undefined);
-  assertEquals(group.current(), defaults());
-  await run(group.hydrate());
-  assertEquals(group.peek(), defaults());
-});
-
-test("update applies against the cached value", async () => {
-  const fake = fakeBackend(false);
-  const group = new ValueStore(fake.backend).group(spec());
-  await run(group.hydrate());
-  const result = await attempt(
-    group.update((current) => ({ ...current, count: 9 })),
-  );
-  assert(Result.isSuccess(result));
-  assertEquals(group.current().count, 9);
-});
-
-test("reset clears storage and reverts in memory", async () => {
-  const fake = fakeBackend(false);
-  const group = new ValueStore(fake.backend).group(spec());
-  await run(group.write({ count: 4, label: "x" }));
-  await run(group.reset());
-  assertEquals(fake.map.has("vimium-webkit:test"), false);
-  assertEquals(group.current(), defaults());
-});
-
-test("subscribers see cross-tab changes when the backend supports it", async () => {
-  const fake = fakeBackend(true);
-  const store = new ValueStore(fake.backend);
-  assertEquals(store.supportsWatch, true);
-
-  const group = store.group(spec());
-  await run(group.hydrate());
-
-  const seen: Shape[] = [];
-  group.subscribe((value) => seen.push(value));
-  fake.notify(
-    "test",
-    JSON.stringify({ schemaVersion: 2, data: { count: 42, label: "remote" } }),
-  );
-
-  assertEquals(seen.at(-1), { count: 42, label: "remote" });
-});
-
-test("a backend without a watch primitive reports it honestly", () => {
-  // quoid and Stay have no change-listener primitive at all; `lifecycle.ts`
-  // substitutes a re-read on `visibilitychange`, and it needs to know.
-  assertEquals(new ValueStore(fakeBackend(false).backend).supportsWatch, false);
-});
-
-// ---------------------------------------------------------------------------
-// Debounced writes
-//
-// Every group in `settings/schema.ts` sets `writeDebounceMs > 0`, so this is
-// the path production actually takes — and it had no coverage at all.
-// ---------------------------------------------------------------------------
-
-const debouncedSpec = (debounceMs: number) => ({
-  ...spec(),
-  writeDebounceMs: debounceMs,
-});
-
-/** A backend whose `set` can be made to fail, and which records every write. */
-const failableBackend = (): {
-  readonly backend: ValueBackend;
-  readonly writes: string[];
-  fail: boolean;
-} => {
-  const base = fakeBackend(false);
-  const writes: string[] = [];
-  const state = { fail: false };
-  return {
-    writes,
-    get fail(): boolean {
-      return state.fail;
-    },
-    set fail(value: boolean) {
-      state.fail = value;
-    },
-    backend: {
-      ...base.backend,
-      set: (key, value) => {
-        if (state.fail) {
-          return Effect.fail(
+  const service = KeyValueStore.of({
+    kind: "memory",
+    durable: false,
+    watchable: false,
+    get: (key) =>
+      Effect.flatMap(Ref.get(broken), (isBroken) =>
+        isBroken
+          ? Effect.fail(
             new GmError({
               reason: "failed",
-              api: "setValue",
-              detail: "disk full",
+              api: "test.get",
+              detail: "the backend is unavailable",
             }),
-          );
-        }
-        writes.push(value);
-        return base.backend.set(key, value);
-      },
-    },
-  };
-};
-
-test("a debounced write resolves from the flush, not the timer", async () => {
-  const fake = failableBackend();
-  const group = new ValueStore(fake.backend).group(debouncedSpec(5));
-  fake.fail = true;
-
-  const result = await attempt(group.write({ count: 1, label: "a" }));
-
-  // The regression: the promise used to resolve `Ok` when the *timer* fired
-  // while `void`-ing the flush, so `ResultAsync<void, StorageIssue>` could
-  // never be `Err` in production and every error branch built on it was
-  // unreachable.
-  assert(Result.isFailure(result), "a failing backend must surface as Err");
-  assertEquals(result.failure.reason, "backend");
-});
-
-test("a superseded write settles rather than hanging", async () => {
-  const fake = failableBackend();
-  const group = new ValueStore(fake.backend).group(debouncedSpec(5));
-
-  // The first write's timer is cleared by the second. Its promise used to be
-  // orphaned by that `clearTimeout`, so `await update()` never returned.
-  const first = attempt(group.write({ count: 1, label: "a" }));
-  const second = attempt(group.write({ count: 2, label: "b" }));
-
-  const [a, b] = await Promise.all([first, second]);
-  assert(Result.isSuccess(a));
-  assert(Result.isSuccess(b));
-  // Coalesced: one write reaches the backend, carrying the newest value.
-  assertEquals(fake.writes.length, 1);
-  assertEquals(JSON.parse(fake.writes[0] ?? "{}").data, {
-    count: 2,
-    label: "b",
-  });
-});
-
-test("flush() commits a pending write immediately", async () => {
-  const fake = failableBackend();
-  const group = new ValueStore(fake.backend).group(debouncedSpec(10_000));
-
-  const pending = attempt(group.write({ count: 5, label: "e" }));
-  assertEquals(fake.writes.length, 0);
-
-  await run(group.flush());
-  assertEquals(fake.writes.length, 1);
-  assert(
-    Result.isSuccess(await pending),
-    "the pending write adopts the flush outcome",
-  );
-});
-
-test("flushAll commits every group", async () => {
-  const fake = failableBackend();
-  const store = new ValueStore(fake.backend);
-  const one = store.group({ ...debouncedSpec(10_000), name: "one" });
-  const two = store.group({ ...debouncedSpec(10_000), name: "two" });
-
-  void attempt(one.write({ count: 1, label: "a" }));
-  void attempt(two.write({ count: 2, label: "b" }));
-  await run(store.flushAll());
-
-  assertEquals(fake.writes.length, 2);
-});
-
-test("hydrate does not resurrect a value a pending write is replacing", async () => {
-  const fake = failableBackend();
-  const store = new ValueStore(fake.backend);
-  const group = store.group(debouncedSpec(10_000));
-
-  const stored = attempt(group.write({ count: 1, label: "stored" }));
-  await run(group.flush());
-  assert(Result.isSuccess(await stored));
-
-  // Written but still inside its debounce window when a refresh comes in.
-  void attempt(group.write({ count: 2, label: "newer" }));
-  assertEquals(await run(group.hydrate()), { count: 2, label: "newer" });
-});
-
-test("a value that fails its own schema is never persisted", async () => {
-  const fake = failableBackend();
-  const group = new ValueStore(fake.backend).group(spec());
-
-  // Caught here rather than on the next load, where it would reset the whole
-  // group and take every other field down with it.
-  const result = await attempt(
-    group.write({ count: "not a number", label: "x" } as unknown as Shape),
-  );
-  assert(Result.isFailure(result));
-  assertEquals(result.failure.reason, "invalid");
-  assertEquals(fake.writes.length, 0);
-});
-
-test("hydrateAll covers every registered group", async () => {
-  const fake = fakeBackend(false);
-  const store = new ValueStore(fake.backend);
-  const one = store.group({ ...spec(), name: "one" });
-  const two = store.group({ ...spec(), name: "two" });
-
-  assertEquals(store.groups.length, 2);
-  await run(store.hydrateAll());
-
-  // The bug this makes impossible: three of five groups were hydrated by a
-  // hand-written list, and `update()` on an unhydrated group replaces the
-  // user's whole persisted value with the defaults plus one change.
-  assertEquals(one.peek(), defaults());
-  assertEquals(two.peek(), defaults());
-});
-
-test("reset cancels a pending write instead of letting it resurrect", async () => {
-  // The bug: `reset()` removed the key but left the debounce fiber sleeping,
-  // so the value reset had just erased was written straight back. Reachable
-  // from `:clear-history`, which debounces for two seconds — so the HUD said
-  // the index was erased and the visit reappeared on disk afterwards.
-  const fake = fakeBackend(false);
-  const group = new ValueStore(fake.backend).group(debouncedSpec(20));
-
-  const pending = attempt(group.write({ count: 7, label: "secret" }));
-  await run(group.reset());
-  assertEquals(fake.map.get("vimium-webkit:test"), undefined);
-
-  // Past the debounce window the write must not have come back.
-  await new Promise((resolve) => setTimeout(resolve, 60));
-  assertEquals(fake.map.get("vimium-webkit:test"), undefined);
-
-  // The caller must be released rather than parked, and told the truth: its
-  // value was discarded, so reporting success would be a lie.
-  const outcome = await pending;
-  assert(Result.isFailure(outcome));
-  assertEquals(outcome.failure.reason, "cancelled");
-  assertEquals(outcome.failure.direction, "write");
-});
-
-test("a hydrate joiner is unaffected when the first caller is interrupted", async () => {
-  // `Deferred.done(deferred, exit)` used to forward an *interrupt* to every
-  // joiner, so a healthy second caller died because the first was cancelled —
-  // and `hydrate()` declares that it cannot fail.
-  // The read must actually suspend, or the interrupt lands after it has
-  // finished and the test proves nothing: with a synchronous fake, mutating
-  // this branch either way still passed.
-  const fake = gatedBackend();
-  fake.map.set(
-    "vimium-webkit:test",
-    JSON.stringify({ schemaVersion: 2, data: { count: 1, label: "disk" } }),
-  );
-  const group = new ValueStore(fake.backend).group(spec());
-
-  const value = await Effect.runPromise(Effect.gen(function*() {
-    const first = yield* Effect.forkChild(group.hydrate());
-    const joiner = yield* Effect.forkChild(group.hydrate());
-    yield* Effect.sleep(5);
-    yield* Fiber.interrupt(first);
-    // Two releases: the leader's abandoned read, then the joiner's own.
-    yield* Effect.forkChild(
-      Effect.repeat(
-        Effect.sync(() => fake.gates.shift()?.()).pipe(Effect.delay(5)),
-        { times: 5 },
+          )
+          : Effect.map(
+            Ref.get(map),
+            (current) => Option.fromNullishOr(current.get(key) ?? null),
+          )),
+    set: (key, value) =>
+      Effect.andThen(
+        put(key, value),
+        Ref.update(writes, (current) => [...current, value]),
       ),
-    );
-    // Whatever happened to the first caller, the joiner still gets a value.
-    return yield* Fiber.join(joiner);
-  }));
-  // The value on disk, not the defaults: `hydrate()` declares it cannot fail,
-  // so a joiner must be served the read, not a fallback. `0 || 1` accepted
-  // both of the only two reachable answers and so asserted nothing.
-  assertEquals(value, { count: 1, label: "disk" });
-});
-
-test("reset waits for a flush that is already touching the backend", async () => {
-  // The first repair cancelled a *sleeping* debounce fiber, which left the
-  // window between the sleep ending and `backend.set` resolving unguarded: the
-  // group looked idle, `reset()` issued its `remove` alongside a live `set`,
-  // and the erased value came back. On `gm-async` managers `set` is a promise
-  // round-trip, so that window is real.
-  const map = new Map<string, string>();
-  const log: string[] = [];
-  let releaseSet: (() => void) | undefined;
-  const backend: ValueBackend = {
-    kind: "gm-async",
-    get: (key) => Effect.succeed(Option.fromNullishOr(map.get(key) ?? null)),
-    set: (key, value) =>
-      Effect.promise(async () => {
-        log.push("set:start");
-        await new Promise<void>((resolve) => {
-          releaseSet = resolve;
-        });
-        map.set(key, value);
-        log.push("set:done");
-      }),
     remove: (key) =>
-      Effect.sync(() => {
-        log.push("remove");
-        map.delete(key);
+      Ref.update(map, (current) => {
+        const next = new Map(current);
+        next.delete(key);
+        return next;
       }),
-    watch: null,
-  };
-
-  const group = new ValueStore(backend).group(debouncedSpec(5));
-  const pending = attempt(group.write({ count: 9, label: "secret" }));
-
-  // Let the debounce fire and enter `set`, then reset while it is in flight.
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  assertEquals(log, ["set:start"]);
-  const reset = attempt(group.reset());
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  releaseSet?.();
-  await reset;
-  await pending;
-
-  // The remove must come after the write it is undoing, and win.
-  assertEquals(log, ["set:start", "set:done", "remove"]);
-  assertEquals(map.get("vimium-webkit:test"), undefined);
-});
-
-test("two flushes cannot overlap, so writes reach storage in order", async () => {
-  // Round three's finding: an in-flight *handle* guarded a section that could
-  // be entered twice. Two flushes each published their own handle, the first
-  // to finish cleared it, and the group then looked idle to `reset()` — which
-  // is how erased data came back. Two `set` calls could also resolve out of
-  // order and leave the older value on disk under a newer cache.
-  const map = new Map<string, string>();
-  const log: string[] = [];
-  const gates: Array<() => void> = [];
-  const backend: ValueBackend = {
-    kind: "gm-async",
-    get: (key) => Effect.succeed(Option.fromNullishOr(map.get(key) ?? null)),
-    set: (key, value) =>
-      Effect.promise(async () => {
-        const n = JSON.parse(value).data.count as number;
-        log.push(`start:${n}`);
-        await new Promise<void>((resolve) => gates.push(resolve));
-        map.set(key, value);
-        log.push(`done:${n}`);
-      }),
-    remove: (key) =>
-      Effect.sync(() => {
-        log.push("remove");
-        map.delete(key);
-      }),
-    watch: null,
-  };
-
-  const group = new ValueStore(backend).group(debouncedSpec(5));
-  const first = attempt(group.write({ count: 1, label: "old" }));
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assertEquals(log, ["start:1"]);
-
-  // A second write and an explicit flush, while the first is still in the
-  // backend. Nothing may enter `set` until the first one leaves it.
-  const second = attempt(group.write({ count: 2, label: "new" }));
-  const flushed = attempt(group.flush());
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assertEquals(log, ["start:1"], "the second flush must wait for the first");
-
-  // Release them in the order they were admitted; the later value must win.
-  // Sequential by design: each release must be observed before the next.
-  while (gates.length > 0 || log.length < 4) {
-    gates.shift()?.();
-    // oxlint-disable-next-line no-await-in-loop
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  await Promise.all([first, second, flushed]);
-
-  assertEquals(log, ["start:1", "done:1", "start:2", "done:2"]);
-  assertEquals(JSON.parse(map.get("vimium-webkit:test") ?? "{}").data, {
-    count: 2,
-    label: "new",
+    changes: () => Stream.empty,
   });
-});
 
-/** A backend whose reads and writes can be released by hand. */
-const gatedBackend = (): {
-  readonly backend: ValueBackend;
-  readonly map: Map<string, string>;
-  readonly gates: Array<() => void>;
-} => {
-  const map = new Map<string, string>();
-  const gates: Array<() => void> = [];
-  const gate = (): Promise<void> =>
-    new Promise<void>((resolve) => gates.push(resolve));
   return {
-    map,
-    gates,
-    backend: {
-      kind: "gm-async",
-      get: (key) =>
-        Effect.promise(async () => {
-          await gate();
-          return Option.fromNullishOr(map.get(key) ?? null);
-        }),
-      set: (key, value) =>
-        Effect.promise(async () => {
-          await gate();
-          map.set(key, value);
-        }),
-      remove: (key) =>
-        Effect.sync(() => {
-          map.delete(key);
-        }),
-      watch: null,
-    },
+    layer: Layer.succeed(KeyValueStore, service),
+    seed: put,
+    read: (key) =>
+      Effect.map(
+        Ref.get(map),
+        (current) => Option.fromNullishOr(current.get(key) ?? null),
+      ),
+    writes: Ref.get(writes),
+    breakReads: Ref.set(broken, true),
   };
-};
-
-test("a reset during a hydration is not undone by the read it overtook", async () => {
-  // The read was decoded and adopted *after* the permit was released, so a
-  // `reset()` that ran during it reverted the cache and the read then
-  // republished the value the reset had erased — which the next write put back
-  // on disk. `:clear-history` resolved successfully with every visit intact.
-  const fake = gatedBackend();
-  fake.map.set(
-    "vimium-webkit:test",
-    JSON.stringify({ schemaVersion: 2, data: { count: 5, label: "secret" } }),
-  );
-  const group = new ValueStore(fake.backend).group(spec());
-
-  const hydrating = attempt(group.hydrate());
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  const reset = attempt(group.reset());
-  fake.gates.shift()?.();
-  await Promise.all([hydrating, reset]);
-
-  assertEquals(fake.map.get("vimium-webkit:test"), undefined);
-  assertEquals(
-    group.current(),
-    defaults(),
-    "the cache must not hold the erased value",
-  );
 });
 
-test("a write during a hydration is not reverted by the read it overtook", async () => {
-  // Same hole, other victim: `onVisible` re-hydrates while the user changes a
-  // setting, the read publishes the pre-change value, and because `update()`
-  // reads the cache the *next* change writes the stale value back over the
-  // good one. The user's change was lost after being reported as saved.
-  const fake = gatedBackend();
-  fake.map.set(
-    "vimium-webkit:test",
-    JSON.stringify({ schemaVersion: 2, data: { count: 1, label: "stored" } }),
-  );
-  const group = new ValueStore(fake.backend).group(spec());
-
-  const hydrating = attempt(group.hydrate());
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  const writing = attempt(group.write({ count: 2, label: "user" }));
-
-  // Release each gate as it appears: the write's `set` cannot even start until
-  // the read has released the permit, so its gate does not exist yet.
-  const settled = Promise.all([hydrating, writing]);
-  for (let i = 0; i < 10; i++) {
-    fake.gates.shift()?.();
-    // oxlint-disable-next-line no-await-in-loop
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  await settled;
-
-  assertEquals(group.current(), { count: 2, label: "user" });
-});
-
-test("a repaired value is cached as repaired, not as it was offered", async () => {
-  // The settings schema repairs a bad field rather than rejecting it, so the
-  // outbound check could not fail for that group. Memory kept the bad value
-  // while disk got the repaired one, and the setting silently reverted on the
-  // next page load — after the dialog had said "Settings saved".
-  const repairing = Schema.Struct({
-    count: Schema.Number.pipe(
-      Schema.catchDecoding(() => Effect.succeed(Option.some(0))),
-    ),
-    label: Schema.String,
-  });
-  const fake = fakeBackend(false);
-  const group = new ValueStore(fake.backend).group({
-    name: "test",
-    schema: repairing as unknown as typeof schema,
-    defaults,
-    schemaVersion: 2,
+/**
+ * Move the test clock forward until the fiber settles.
+ *
+ * A fiber of the group arms the debounce timer, so the arm can happen after
+ * the first step of the clock. The loop has a limit, so a write that never
+ * lands fails the test and does not hang it.
+ */
+const advanceUntilDone = <A, E>(
+  fiber: Fiber.Fiber<A, E>,
+  steps = 20,
+): Effect.Effect<Exit.Exit<A, E>> =>
+  Effect.suspend(() => {
+    const settled = fiber.pollUnsafe();
+    if (settled !== undefined) return Effect.succeed(settled);
+    if (steps <= 0) return Effect.die(new Error("the fiber never settled"));
+    return Effect.andThen(
+      TestClock.adjust("100 millis"),
+      advanceUntilDone(fiber, steps - 1),
+    );
   });
 
-  await run(
-    group.write({ count: "nonsense" as unknown as number, label: "x" }),
+/** The envelope that the store writes around a group value. */
+const envelope = (schemaVersion: number, data: unknown): string =>
+  JSON.stringify({ schemaVersion, data });
+
+/** The first issue that storage reports, without waiting for a second. */
+const firstIssue = (
+  storage: Storage["Service"],
+): Effect.Effect<Option.Option<StorageError>> =>
+  Effect.map(
+    Stream.runCollect(Stream.take(storage.issues, 1)),
+    (issues) => Option.fromNullishOr(issues[0] ?? null),
   );
 
-  const stored = JSON.parse(fake.map.get("vimium-webkit:test") ?? "{}").data;
-  assertEquals(stored, { count: 0, label: "x" });
-  assertEquals(group.current(), stored, "the cache must agree with the disk");
-});
+describe("Storage", () => {
+  it.effect("gives the defaults and one issue for a value that is not JSON", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
 
-test("an invalid value never reaches the cache", async () => {
-  // It was written to `#cached` before validation, so `current()` and
-  // `update()` served a value that had been refused by storage.
-  const fake = fakeBackend(false);
-  const group = new ValueStore(fake.backend).group(spec());
-  await run(group.hydrate());
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        yield* backend.seed(SETTINGS_KEY, "{not json");
 
-  const outcome = await attempt(
-    group.write({ count: "not a number" as unknown as number, label: "x" }),
-  );
-  assert(Result.isFailure(outcome));
-  assertEquals(group.current(), defaults());
-});
+        const value = yield* storage.settings.hydrate;
+        assert.deepEqual(value, defaultSettings());
 
-test("reset erases even when a later write never lands", async () => {
-  // `reset()` stood aside whenever a *later epoch existed* — but an epoch bump
-  // marks intent, not commitment. Order matters: the reset is issued first, a
-  // write is issued after it, and that write then fails. The reset saw a newer
-  // epoch, skipped its `remove` entirely, and reported success — on the
-  // privacy control, with the value still on disk.
-  const map = new Map<string, string>();
-  const gates: Array<() => void> = [];
-  let failWrites = false;
-  const backend: ValueBackend = {
-    kind: "gm-async",
-    get: (key) =>
-      Effect.promise(async () => {
-        await new Promise<void>((resolve) => gates.push(resolve));
-        return Option.fromNullishOr(map.get(key) ?? null);
-      }),
-    set: (key, value) =>
-      failWrites
-        ? Effect.fail(
-          new GmError({ reason: "failed", api: "setValue", detail: "nope" }),
-        )
-        : Effect.sync(() => {
-          map.set(key, value);
-        }),
-    remove: (key) =>
-      Effect.sync(() => {
-        map.delete(key);
-      }),
-    watch: null,
-  };
+        const issue = yield* firstIssue(storage);
+        assert.isTrue(Option.isSome(issue));
+        if (Option.isNone(issue)) return;
+        assert.strictEqual(issue.value.reason, "malformed");
+        assert.strictEqual(issue.value.direction, "read");
+        assert.strictEqual(issue.value.group, "settings");
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
 
-  const store = new ValueStore(backend);
-  const group = store.group(spec());
-  map.set(
-    "vimium-webkit:test",
-    JSON.stringify({ schemaVersion: 2, data: { count: 7, label: "secret" } }),
-  );
+  it.effect("gives the defaults for a value from a newer build", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
 
-  // A read holds the permit, so the reset and the write both queue behind it.
-  const reading = attempt(group.hydrate());
-  await new Promise((resolve) => setTimeout(resolve, 5));
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        // A newer build in another tab wrote this. Do not go backwards, and do
+        // not overwrite it.
+        yield* backend.seed(
+          SETTINGS_KEY,
+          envelope(99, { ...defaultSettings(), scrollStepSize: 120 }),
+        );
 
-  const reset = attempt(group.reset());
-  failWrites = true;
-  const doomed = attempt(group.write({ count: 8, label: "newer" }));
+        const value = yield* storage.settings.hydrate;
+        assert.deepEqual(value, defaultSettings());
 
-  gates.shift()?.();
-  await Promise.all([reading, reset, doomed]);
+        const issue = yield* firstIssue(storage);
+        assert.isTrue(Option.isSome(issue));
+        if (Option.isNone(issue)) return;
+        assert.strictEqual(issue.value.reason, "invalid");
+        assert.include(issue.value.detail, "99");
 
-  assert(Result.isSuccess(await reset));
-  assert(Result.isFailure(await doomed), "the write must have failed");
-  assertEquals(
-    map.get("vimium-webkit:test"),
-    undefined,
-    "a reset that reported success must have erased the key",
-  );
-});
+        // The stored value is left alone.
+        const raw = yield* backend.read(SETTINGS_KEY);
+        assert.isTrue(Option.isSome(raw));
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
 
-test("a transient read failure cannot turn defaults into an update", async () => {
-  const fake = fakeBackend(false);
-  fake.map.set(
-    "vimium-webkit:test",
-    JSON.stringify({ schemaVersion: 2, data: { count: 7, label: "secret" } }),
-  );
-  let failRead = true;
-  const backend: ValueBackend = {
-    ...fake.backend,
-    get: (key) =>
-      failRead
-        ? Effect.fail(
-          new GmError({ reason: "failed", api: "getValue", detail: "offline" }),
-        )
-        : fake.backend.get(key),
-  };
-  const group = new ValueStore(backend).group(spec());
+  it.effect("gives the defaults for a value that fails its schema", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
 
-  assertEquals(await run(group.hydrate()), defaults());
-  const rejected = await attempt(
-    group.update((value) => ({ ...value, count: value.count + 1 })),
-  );
-  assert(Result.isFailure(rejected));
-  assertEquals(
-    JSON.parse(fake.map.get("vimium-webkit:test") ?? "null").data,
-    { count: 7, label: "secret" },
-  );
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        // `marks` has no per-field fallback, so the whole group falls back.
+        yield* backend.seed(
+          `${STORAGE_PREFIX}marks`,
+          envelope(1, { local: "not a record", global: {} }),
+        );
 
-  failRead = false;
-  assertEquals(await run(group.hydrate()), { count: 7, label: "secret" });
-  await run(group.update((value) => ({ ...value, count: value.count + 1 })));
-  assertEquals(group.current(), { count: 8, label: "secret" });
-});
+        const value = yield* storage.marks.hydrate;
+        assert.deepEqual(value, { local: {}, global: {} });
 
-test("subscribers receive successful local writes", async () => {
-  const fake = fakeBackend(false);
-  const group = new ValueStore(fake.backend).group(spec());
-  const seen: Shape[] = [];
-  const unsubscribe = group.subscribe((value) => seen.push(value));
+        const issue = yield* firstIssue(storage);
+        assert.isTrue(Option.isSome(issue));
+        if (Option.isNone(issue)) return;
+        assert.strictEqual(issue.value.reason, "invalid");
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
 
-  await run(group.write({ count: 3, label: "local" }));
-  unsubscribe();
+  it.effect("completes a debounced write only when it reaches the backend", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
 
-  assertEquals(seen, [{ count: 3, label: "local" }]);
-});
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        const next = { ...defaultSettings(), scrollStepSize: 120 };
 
-test("an interrupted asynchronous set cannot undo a reset", async () => {
-  const map = new Map<string, string>();
-  let startSet: (() => void) | null = null;
-  let releaseSet: (() => void) | null = null;
-  let removes = 0;
-  const started = new Promise<void>((resolve) => {
-    startSet = resolve;
-  });
-  const backend: ValueBackend = {
-    kind: "gm-async",
-    get: (key) => Effect.succeed(Option.fromNullishOr(map.get(key) ?? null)),
-    set: (key, value) =>
-      Effect.promise(async () => {
-        startSet?.();
-        await new Promise<void>((resolve) => {
-          releaseSet = resolve;
+        const writing = yield* Effect.forkChild(
+          storage.settings.write(next),
+          { startImmediately: true },
+        );
+
+        // The settings group joins writes for 250 ms, so nothing has reached
+        // the backend and the caller is still waiting.
+        assert.isUndefined(writing.pollUnsafe());
+        assert.deepEqual(yield* backend.writes, []);
+        assert.isTrue(Option.isNone(yield* backend.read(SETTINGS_KEY)));
+
+        const outcome = yield* advanceUntilDone(writing);
+        assert.isTrue(Exit.isSuccess(outcome));
+        assert.strictEqual(
+          (yield* storage.settings.current).scrollStepSize,
+          120,
+        );
+
+        const raw = yield* backend.read(SETTINGS_KEY);
+        assert.isTrue(Option.isSome(raw));
+        if (Option.isNone(raw)) return;
+        assert.include(raw.value, '"scrollStepSize":120');
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("commits a waiting write at once on a flush", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        const writing = yield* Effect.forkChild(
+          storage.settings.write({ ...defaultSettings(), scrollStepSize: 90 }),
+          { startImmediately: true },
+        );
+
+        yield* storage.settings.flush;
+        yield* Fiber.join(writing);
+        assert.lengthOf(yield* backend.writes, 1);
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("fails a waiting write with `cancelled` when a reset arrives", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+
+        const writing = yield* Effect.forkChild(
+          storage.settings.write({ ...defaultSettings(), scrollStepSize: 120 }),
+          { startImmediately: true },
+        );
+        // The queue is first in, first out, so the reset runs after the write
+        // command, and before the debounce ends.
+        yield* storage.settings.reset;
+
+        const outcome = yield* Fiber.await(writing);
+        const error = Option.getOrNull(Exit.findErrorOption(outcome));
+        assert.isNotNull(error, "the waiting write must fail");
+        assert.strictEqual(error?.reason, "cancelled");
+        assert.strictEqual(error?.direction, "write");
+
+        // The write never reached the backend, and the defaults are in memory.
+        assert.deepEqual(yield* backend.writes, []);
+        assert.deepEqual(yield* storage.settings.current, defaultSettings());
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("refuses an update after a read failure of the backend", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        yield* backend.breakReads;
+
+        // The defaults are an answer for this caller, and not the state of the
+        // world. They must not be written over good data later.
+        yield* storage.settings.hydrate;
+
+        const outcome = yield* Effect.result(
+          storage.settings.update((current) => ({
+            ...current,
+            scrollStepSize: 120,
+          })),
+        );
+        assert.isTrue(Result.isFailure(outcome));
+        const error = Result.isFailure(outcome) ? outcome.failure : null;
+        assert.strictEqual(error?.reason, "backend");
+        assert.strictEqual(error?.direction, "read");
+        assert.deepEqual(yield* backend.writes, []);
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("writes in the order of the calls", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        // The session group writes at once, so each write is its own commit.
+        const base = yield* storage.session.current;
+
+        const first = yield* Effect.forkChild(
+          storage.session.write({ ...base, acknowledged: ["first"] }),
+          { startImmediately: true },
+        );
+        const second = yield* Effect.forkChild(
+          storage.session.write({ ...base, acknowledged: ["second"] }),
+          { startImmediately: true },
+        );
+
+        yield* Fiber.join(first);
+        yield* Fiber.join(second);
+
+        const writes = yield* backend.writes;
+        assert.lengthOf(writes, 2);
+        assert.include(writes[0] ?? "", "first");
+        assert.include(writes[1] ?? "", "second");
+
+        const raw = yield* backend.read(SESSION_KEY);
+        assert.isTrue(Option.isSome(raw));
+        if (Option.isNone(raw)) return;
+        assert.include(raw.value, "second");
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("reads back what it wrote", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        yield* storage.session.write({
+          frameSecret: "secret",
+          knownTabs: [],
+          acknowledged: ["one"],
+          zoomByOrigin: {},
         });
-        map.set(key, value);
-      }),
-    remove: (key) =>
-      Effect.sync(() => {
-        removes++;
-        map.delete(key);
-      }),
-    watch: null,
-  };
-  const group = new ValueStore(backend).group(spec());
-  const writeFiber = Effect.runFork(
-    group.write({ count: 9, label: "abandoned" }),
-  );
-  await started;
+        assert.strictEqual(
+          storage.session.currentUnsafe().frameSecret,
+          "secret",
+        );
 
-  const interrupted = Effect.runPromise(Fiber.interrupt(writeFiber));
-  const reset = attempt(group.reset());
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  assertEquals(
-    removes,
-    0,
-    "reset must wait for the continuing backend promise",
-  );
+        const reread = yield* storage.session.hydrate;
+        assert.strictEqual(reread.frameSecret, "secret");
+        assert.deepEqual(reread.acknowledged, ["one"]);
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
 
-  const unblockSet: unknown = releaseSet;
-  assert(typeof unblockSet === "function");
-  unblockSet();
-  await interrupted;
-  assert(Result.isSuccess(await reset));
-  assertEquals(map.get("vimium-webkit:test"), undefined);
-});
+  it.effect("erases the stored value and goes back to the defaults", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
 
-test("flush waits for an older commit queued behind a read", async () => {
-  const map = new Map<string, string>();
-  let releaseGet: (() => void) | null = null;
-  let releaseSet: (() => void) | null = null;
-  const backend: ValueBackend = {
-    kind: "gm-async",
-    get: (key) =>
-      Effect.promise(async () => {
-        await new Promise<void>((resolve) => {
-          releaseGet = resolve;
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        yield* storage.session.write({
+          frameSecret: "secret",
+          knownTabs: [],
+          acknowledged: [],
+          zoomByOrigin: {},
         });
-        return Option.fromNullishOr(map.get(key) ?? null);
-      }),
-    set: (key, value) =>
-      Effect.promise(async () => {
-        await new Promise<void>((resolve) => {
-          releaseSet = resolve;
-        });
-        map.set(key, value);
-      }),
-    remove: (key) =>
-      Effect.sync(() => {
-        map.delete(key);
-      }),
-    watch: null,
-  };
-  const group = new ValueStore(backend).group({
-    ...spec(),
-    writeDebounceMs: 1,
-  });
+        assert.isTrue(Option.isSome(yield* backend.read(SESSION_KEY)));
 
-  const hydration = run(group.hydrate());
-  while (releaseGet === null) {
-    // oxlint-disable-next-line no-await-in-loop
-    await new Promise((resolve) => setTimeout(resolve, 1));
-  }
-  const write = attempt(group.write({ count: 4, label: "queued" }));
-  await new Promise((resolve) => setTimeout(resolve, 10));
+        const defaults = yield* storage.session.reset;
+        assert.strictEqual(defaults.frameSecret, "");
+        assert.isTrue(Option.isNone(yield* backend.read(SESSION_KEY)));
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
 
-  let flushed = false;
-  const flush = run(group.flush()).then(() => {
-    flushed = true;
-  });
-  const unblockGet: unknown = releaseGet;
-  assert(typeof unblockGet === "function");
-  unblockGet();
-  while (releaseSet === null) {
-    // oxlint-disable-next-line no-await-in-loop
-    await new Promise((resolve) => setTimeout(resolve, 1));
-  }
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  assertEquals(flushed, false, "flush returned before the queued set settled");
+  it.effect("publishes the value that was stored, not the value offered", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
 
-  const unblockSet: unknown = releaseSet;
-  assert(typeof unblockSet === "function");
-  unblockSet();
-  await Promise.all([hydration, write, flush]);
-  assertEquals(
-    JSON.parse(map.get("vimium-webkit:test") ?? "null").data,
-    { count: 4, label: "queued" },
-  );
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        // The schema repairs a bad field, so the stored value differs from the
+        // value that was offered. Memory must hold what storage holds.
+        const updating = yield* Effect.forkChild(
+          storage.settings.update((current) => ({
+            ...current,
+            linkHintCharacters: "aabb",
+          })),
+          { startImmediately: true },
+        );
+        yield* storage.settings.flush;
+        const stored = yield* Fiber.join(updating);
+        assert.strictEqual(stored.linkHintCharacters, "aabb");
+
+        const inMemory = yield* storage.settings.current;
+        assert.strictEqual(inMemory.linkHintCharacters, "sadfjklewcmpgh");
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("gives the current value first on the change stream", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        const seen = yield* Queue.unbounded<number>();
+        yield* Effect.forkScoped(
+          Stream.runForEach(
+            storage.settings.changes,
+            (settings) => Queue.offer(seen, settings.scrollStepSize),
+          ),
+        );
+
+        assert.strictEqual(yield* Queue.take(seen), 60);
+
+        const writing = yield* Effect.forkChild(
+          storage.settings.write({
+            ...defaultSettings(),
+            scrollStepSize: 120,
+          }),
+          { startImmediately: true },
+        );
+        yield* storage.settings.flush;
+        yield* Fiber.join(writing);
+        assert.strictEqual(yield* Queue.take(seen), 120);
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("reads every group when the application starts", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        yield* backend.seed(
+          SETTINGS_KEY,
+          envelope(1, { ...defaultSettings(), scrollStepSize: 120 }),
+        );
+        yield* backend.seed(
+          `${STORAGE_PREFIX}find-history`,
+          envelope(1, { queries: ["needle"] }),
+        );
+
+        yield* storage.hydrateAll;
+        assert.strictEqual(
+          (yield* storage.settings.current).scrollStepSize,
+          120,
+        );
+        assert.deepEqual(
+          (yield* storage.findHistory.current).queries,
+          ["needle"],
+        );
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
 });

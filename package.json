@@ -38,6 +38,7 @@
     "@dprint/markdown": "^0.22.1",
     "@dprint/typescript": "^0.95.15",
     "@effect/tsgo": "^0.24.3",
+    "@effect/vitest": "^4.0.0-beta.102",
     "@playwright/test": "^1.56.0",
     "@types/node": "^22.20.0",
     "@vitest/coverage-v8": "^4.1.10",

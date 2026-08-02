@@ -3,10 +3,10 @@
  *
  * Generated rather than hand-maintained so that `@version` can be derived from
  * `package.json` (CI invariant 5) and so the `@grant` list cannot drift away from
- * what `platform/gm.ts` actually probes for.
+ * what `platform/Gm.ts` probes for.
  */
 
-import { SUGGEST_HOSTS } from "~/features/omnibar/suggest.ts";
+import { SUGGEST_HOSTS } from "~/domain/SearchSuggest.ts";
 
 export interface MetadataInput {
   readonly version: string;

@@ -28,9 +28,9 @@ const focus = (vw: Vimium, id: string): Promise<void> =>
 const STEP = 60;
 
 test.describe("scrolling", () => {
-  test("the activation key is suppressed before Stage 1 replays it", async ({ vw }) => {
-    // Do not call `vw.open`: it explicitly wakes and waits for Stage 1. This
-    // key must land while Stage 0 is still hydrating the application.
+  test("the activation key is suppressed before the application replays it", async ({ vw }) => {
+    // Do not call `vw.open`: it explicitly wakes and waits for the overlay. This
+    // key must land while the guard is still building the application.
     await vw.page.goto("/scrollables.html");
     await vw.page.evaluate(() => {
       (globalThis as typeof globalThis & { __pageKeys?: number }).__pageKeys =

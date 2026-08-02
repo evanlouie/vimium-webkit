@@ -5,7 +5,7 @@
  * bundle, in the page's own realm, at document start — the same position a
  * userscript manager injects from. It does three jobs:
  *
- * 1. **Stub the GM API**, so `platform/gm.ts`'s `typeof` probes find something.
+ * 1. **Stub the GM API**, so the `typeof` probes of `platform/Gm.ts` find something.
  *    Two variants: a Tampermonkey/Violentmonkey-shaped synchronous surface, and
  *    a quoid-shaped promise-only `GM.*` namespace (the capability floor).
  * 2. **Record side effects** a browser cannot show us — `GM_openInTab` targets,

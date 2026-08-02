@@ -39,18 +39,18 @@ It shares the rendering and JavaScript engines with Safari, and that is where
 the resemblance stops. It has:
 
 - **no Intelligent Tracking Prevention**, so nothing about the seven-day
-  `localStorage` eviction rule ([§7.4](../../IMPLEMENTATION_PLAN.md)) can be
-  observed here;
+  `localStorage` eviction rule (§7.4 of the architecture notes) can be observed
+  here;
 - **no reserved-shortcut list** — ⌘T, ⌘W, ⌃Tab and friends are delivered to the
   page in Playwright's build and swallowed by Safari's chrome, so a binding that
-  works here may be dead on arrival on a real Mac
-  ([§7.3](../../IMPLEMENTATION_PLAN.md));
+  works here may be dead on arrival on a real Mac (§7.3 of the architecture
+  notes);
 - **no extension host** and therefore no userscript manager at all: injection
   timing, `@run-at document-start` reliability, the `GM.*` surface, and every
   per-manager difference are _simulated_ by `harness/page-harness.ts`, not
-  exercised ([§7.1](../../IMPLEMENTATION_PLAN.md));
-- **no Safari-specific page blocklist**, PDF viewer, or Reader mode
-  ([§7.11](../../IMPLEMENTATION_PLAN.md)).
+  exercised (§7.1 of the architecture notes);
+- **no Safari-specific page blocklist**, PDF viewer, or Reader mode (§7.11 of
+  the architecture notes).
 
 It catches web-platform regressions, which is a great deal. It cannot tell you
 whether the product works on Safari. **Those answers require real devices**:
@@ -60,9 +60,8 @@ macOS Safari and iOS Safari, with each manager installed.
 
 ## What this suite can and cannot answer
 
-The verification checklist is
-[§12 of the implementation plan](../../IMPLEMENTATION_PLAN.md). Every item there
-is load-bearing and, until Phase 0 is done on real hardware, unverified.
+The verification checklist is the architecture notes. Every item there is
+load-bearing and, until Phase 0 is done on real hardware, unverified.
 
 ### Answered here (for these engines)
 
@@ -73,12 +72,12 @@ is load-bearing and, until Phase 0 is done on real hardware, unverified.
 
 ### Partially informative
 
-| Item    | Question                                              | What this suite shows                                                                                                                                                                                      |
-| ------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **V3**  | Injection into `srcdoc` / `about:blank` frames        | `frames.spec.ts` pins the _degradation_ contract — no hang, no exception — regardless of whether injection happens. Playwright injects into these frames; Tampermonkey Safari may not.                     |
-| **V5**  | Do synthesized modifier-clicks open tabs?             | `hints.spec.ts` asserts that new-tab hints go through `GM_openInTab` and never through a synthetic modifier-click, which is the behaviour the answer to V5 implies. It does not test the premise.          |
-| **V11** | Stage 0 cost per frame                                | `perf.spec.ts` asserts a subframe at Stage 0 schedules no rAF and no interval, and that idle scheduling churn is zero. That is a proxy for CPU, not a measurement of it, and it is not measured on Safari. |
-| **V12** | Does quoid's async `GM.getValue` delay the first key? | The `gmVariant: "async"` projects in `csp.spec.ts` prove the promise-only path _boots_. Latency is stubbed at zero here, so the perceptibility question is untouched.                                      |
+| Item    | Question                                              | What this suite shows                                                                                                                                                                                                     |
+| ------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **V3**  | Injection into `srcdoc` / `about:blank` frames        | `frames.spec.ts` pins the _degradation_ contract — no hang, no exception — regardless of whether injection happens. Playwright injects into these frames; Tampermonkey Safari may not.                                    |
+| **V5**  | Do synthesized modifier-clicks open tabs?             | `hints.spec.ts` asserts that new-tab hints go through `GM_openInTab` and never through a synthetic modifier-click, which is the behaviour the answer to V5 implies. It does not test the premise.                         |
+| **V11** | Guard cost per frame                                  | `perf.spec.ts` asserts a subframe that holds only the guard schedules no rAF and no interval, and that idle scheduling churn is zero. That is a proxy for CPU, not a measurement of it, and it is not measured on Safari. |
+| **V12** | Does quoid's async `GM.getValue` delay the first key? | The `gmVariant: "async"` projects in `csp.spec.ts` prove the promise-only path _boots_. Latency is stubbed at zero here, so the perceptibility question is untouched.                                                     |
 
 ### Not answerable here at all
 
@@ -172,14 +171,14 @@ proxy outside the root.
 
 ### Waking the extension
 
-Stage 0 stays asleep until a key arrives or 1200 ms elapse in the top frame.
-Specs use `vw.boot()`, which dispatches the structured wake message a top frame
-posts to its subframes, then waits for `<vimium-webkit-overlay>` to appear in
-the light DOM. Stage 0 honours a wake only from an ancestor, so `bootAllFrames`
-wakes subframes the way production does — the top frame posts into the frames
-tree — rather than synthesising an event inside each one. Firefox refuses a
-cross-origin `WindowProxy` as a `MessageEvent` source, which is what that
-synthetic path used to rely on.
+A frame stays asleep until a key arrives, until an ancestor wakes it, or until
+1200 ms elapse in the top frame. Specs use `vw.boot()`, which dispatches the
+structured wake message a top frame posts to its subframes, then waits for
+`<vimium-webkit-overlay>` to appear in the light DOM. The guard honours a wake
+only from an ancestor, so `bootAllFrames` wakes subframes the way production
+does — the top frame posts into the frames tree — rather than synthesising an
+event inside each one. Firefox refuses a cross-origin `WindowProxy` as a
+`MessageEvent` source, which is what that synthetic path used to rely on.
 
 ### Determinism
 

@@ -8,7 +8,7 @@
 
 import { expect, test as base } from "@playwright/test";
 import type { Frame, Page } from "@playwright/test";
-import type { Settings } from "~/settings/schema.ts";
+import type { Settings } from "~/domain/Persisted.ts";
 import { readBundle } from "./bundle.ts";
 import { hudText, visibleHintMarkers } from "./overlay.ts";
 import {
@@ -42,7 +42,7 @@ interface SnapshotHost {
   __vimiumHarness?: HarnessState;
 }
 
-/** How long to wait for Stage 1 to build the overlay after a wake. */
+/** How long to wait for the application to build the overlay after a wake. */
 const BOOT_TIMEOUT_MS = 15_000;
 
 /**
@@ -184,16 +184,16 @@ export class Vimium {
 
   // -- lifecycle ------------------------------------------------------------
 
-  /** Navigate to a fixture (relative to `baseURL`) and bring Stage 1 up. */
+  /** Navigate to a fixture (relative to `baseURL`) and start the application. */
   async open(path: string): Promise<void> {
     await this.page.goto(path);
     await this.boot();
   }
 
   /**
-   * Wake Stage 0 in this frame and wait for Stage 1.
+   * Wake the guard in this frame and wait for the overlay.
    *
-   * Stage 0 honours a wake only from an ancestor, so a synthetic event has to
+   * The guard honours a wake only from an ancestor, so a synthetic event has to
    * name one. In the top frame `parent` is the window itself, which is exactly
    * the shape a real self-wake has. Subframes cannot be woken this way —
    * Firefox refuses a cross-origin `WindowProxy` as a `MessageEvent` source —

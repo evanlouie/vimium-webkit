@@ -14,7 +14,7 @@ import { watch } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import type { OutputChunk, RollupOutput } from "rollup";
 import { build as viteBuild } from "vite";
-import { defaultSettings } from "~/settings/schema.ts";
+import { defaultSettings } from "~/domain/Persisted.ts";
 import { checkInvariants, formatViolations } from "./invariants.ts";
 import { BANNER_NOTICE, buildMetadata } from "./metadata.ts";
 import { verifyBundleBoots } from "./verify-bundle.ts";
@@ -51,27 +51,6 @@ const entryChunk = (result: unknown): OutputChunk => {
 
 const bundle = async (options: BundleOptions): Promise<OutputChunk> =>
   entryChunk(await viteBuild(bundleConfig(options)));
-
-/**
- * Stage 0's cost, measured on its own.
- *
- * The shipping artefact is a single IIFE, so "the Stage 0 chunk" is not a real
- * file. Bundling `boot/stage0.ts` in isolation is the honest proxy for what an
- * engine has to parse and execute before the user presses a key.
- *
- * Minified, deliberately. A bundler preserves JSDoc in an unminified bundle, so
- * measuring the readable output made the budget a tax on comments — a rule that
- * fires when someone explains a subtlety is a rule that gets the comment
- * deleted instead.
- */
-const measureStage0 = async (): Promise<number> => {
-  const chunk = await bundle({
-    entry: `${ROOT}/src/boot/stage0.ts`,
-    dev: false,
-    minify: true,
-  });
-  return byteLength(chunk.code);
-};
 
 interface ModuleSize {
   readonly module: string;
@@ -152,12 +131,10 @@ const main = async (): Promise<void> => {
       }\n`,
     );
 
-    const stage0Bytes = await measureStage0();
     const violations = (await checkInvariants({
       root: ROOT,
       bundle: output,
       code: chunk.code,
-      stage0Bytes,
       declaredVersion: version,
       metadataBlock: metadata,
     }))
@@ -168,11 +145,7 @@ const main = async (): Promise<void> => {
       .filter((violation) => !(dev && violation.rule === "bundle-budget"));
 
     const totalKb = (byteLength(output) / 1024).toFixed(1);
-    console.log(
-      `vimium-webkit ${version} — ${totalKb} KB, Stage 0 ${
-        (stage0Bytes / 1024).toFixed(1)
-      } KB`,
-    );
+    console.log(`vimium-webkit ${version} — ${totalKb} KB`);
 
     if (violations.length > 0) {
       console.error(`\n${violations.length} invariant violation(s):`);

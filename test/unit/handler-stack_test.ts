@@ -1,11 +1,15 @@
 /**
  * The handler stack.
  *
- * Pure, synchronous and DOM-free, and it was at 0% function coverage — despite
- * being the thing every keystroke in the extension passes through.
+ * Every keystroke passes through this service, so its walk is the most
+ * important loop in the application. The tests use the `scroll` handler and a
+ * plain `Event`, because Node has `Event` and has no `KeyboardEvent`. The
+ * behaviour of the walk does not depend on the type of the event. The keyboard
+ * path itself is covered by the Playwright suite in `test/e2e/`.
  */
 
-import { test } from "vitest";
+import { assert, describe, it } from "@effect/vitest";
+import { Effect, Ref } from "effect";
 import {
   CONTINUE_BUBBLING,
   type Handler,
@@ -14,257 +18,241 @@ import {
   RESTART_BUBBLING,
   SUPPRESS_EVENT,
   SUPPRESS_PROPAGATION,
-} from "~/core/handler-stack.ts";
-import { assert, assertEquals, assertFalse } from "./support/assert.ts";
+} from "~/core/HandlerStack.ts";
 
-interface FakeEvent {
-  prevented: boolean;
-  stopped: boolean;
-}
+const event = (): Event => new Event("scroll", { cancelable: true });
 
-/** A `KeyboardEvent` as far as the stack is concerned: two methods it may call. */
-const fakeEvent = (): FakeEvent & KeyboardEvent => {
-  const state = { prevented: false, stopped: false };
-  return {
-    ...state,
-    get prevented(): boolean {
-      return state.prevented;
-    },
-    get stopped(): boolean {
-      return state.stopped;
-    },
-    preventDefault: () => {
-      state.prevented = true;
-    },
-    stopImmediatePropagation: () => {
-      state.stopped = true;
-    },
-  } as unknown as FakeEvent & KeyboardEvent;
-};
-
-test("push and unshift decide who sees an event first", () => {
-  const stack = new HandlerStack();
-  const seen: string[] = [];
-  const record = (name: string): Handler => ({
-    name,
-    keydown: () => {
-      seen.push(name);
-      return CONTINUE_BUBBLING;
-    },
-  });
-
-  stack.push(record("first"));
-  stack.push(record("second"));
-  stack.unshift(record("bottom"));
-
-  assertEquals(stack.depth, 3);
-  assertEquals(stack.names, ["bottom", "first", "second"]);
-
-  stack.bubbleEvent("keydown", fakeEvent());
-  // Innermost first, bottom last.
-  assertEquals(seen, ["second", "first", "bottom"]);
+/** A handler that writes its name into `seen` and lets the walk continue. */
+const record = (
+  name: string,
+  seen: Ref.Ref<readonly string[]>,
+): Handler<never> => ({
+  name,
+  scroll: () =>
+    Effect.as(
+      Ref.update(seen, (current) => [...current, name]),
+      CONTINUE_BUBBLING,
+    ),
 });
 
-test("every handler below the top runs, exactly once", () => {
-  // The regression, in the shape it was reported: with the walk indexing into
-  // the live array, a handler that removes an entry *below* itself shifts
-  // everything under it up by one — so the already-visited top handler is
-  // visited a second time and the entry below it is never visited at all.
-  // Observed as `C,C,A` where `C,B,A` was correct.
-  const stack = new HandlerStack();
-  const seen: string[] = [];
+describe("HandlerStack", () => {
+  it.effect("lets push and unshift decide who sees an event first", () =>
+    Effect.gen(function*() {
+      const stack = yield* HandlerStack;
+      const seen = yield* Ref.make<readonly string[]>([]);
 
-  stack.push({
-    name: "A",
-    keydown: () => {
-      seen.push("A");
-      return CONTINUE_BUBBLING;
-    },
-  });
-  const middle = stack.push({
-    name: "B",
-    keydown: () => {
-      seen.push("B");
-      return CONTINUE_BUBBLING;
-    },
-  });
-  stack.push({
-    name: "C",
-    keydown: () => {
-      seen.push("C");
-      stack.remove(middle);
-      return CONTINUE_BUBBLING;
-    },
-  });
+      yield* stack.push(record("first", seen));
+      yield* stack.push(record("second", seen));
+      yield* stack.unshift(record("bottom", seen));
 
-  stack.bubbleEvent("keydown", fakeEvent());
+      assert.strictEqual(yield* stack.depth, 3);
+      assert.deepEqual(yield* stack.names, ["bottom", "first", "second"]);
 
-  assertEquals(seen, ["C", "A"]);
-});
+      yield* stack.bubble("scroll", event());
+      // The innermost handler first, and the bottom handler last.
+      assert.deepEqual(yield* Ref.get(seen), ["second", "first", "bottom"]);
+    }).pipe(Effect.provide(HandlerStack.layer)));
 
-test("a handler removed mid-walk does not still see the event", () => {
-  const stack = new HandlerStack();
-  const seen: string[] = [];
+  it.effect("runs every handler below the top exactly once", () =>
+    Effect.gen(function*() {
+      // The walk takes a snapshot. A handler that removes an entry below
+      // itself would otherwise move every lower entry up by one, so one entry
+      // is visited twice and one is not visited at all.
+      const stack = yield* HandlerStack;
+      const seen = yield* Ref.make<readonly string[]>([]);
 
-  let victim = 0;
-  stack.push({
-    name: "remover",
-    keydown: () => {
-      seen.push("remover");
-      stack.remove(victim);
-      return CONTINUE_BUBBLING;
-    },
-  });
-  victim = stack.unshift({
-    name: "victim",
-    keydown: () => {
-      seen.push("victim");
-      return CONTINUE_BUBBLING;
-    },
-  });
-
-  stack.bubbleEvent("keydown", fakeEvent());
-  assertEquals(seen, ["remover"]);
-});
-
-test("SUPPRESS_EVENT prevents the default and stops propagation", () => {
-  const stack = new HandlerStack();
-  let reachedBelow = false;
-  stack.push({
-    name: "below",
-    keydown: () => {
-      reachedBelow = true;
-      return CONTINUE_BUBBLING;
-    },
-  });
-  stack.push({ name: "top", keydown: () => SUPPRESS_EVENT });
-
-  const event = fakeEvent();
-  assertEquals(stack.bubbleEvent("keydown", event), false);
-  assertEquals(event.prevented, true);
-  assertEquals(event.stopped, true);
-  assertFalse(reachedBelow);
-});
-
-test("SUPPRESS_PROPAGATION leaves the default action alone", () => {
-  const stack = new HandlerStack();
-  stack.push({ name: "top", keydown: () => SUPPRESS_PROPAGATION });
-
-  const event = fakeEvent();
-  assertEquals(stack.bubbleEvent("keydown", event), false);
-  assertEquals(event.prevented, false);
-  assertEquals(event.stopped, true);
-});
-
-test("PASS_EVENT_TO_PAGE stops the walk without touching the event", () => {
-  const stack = new HandlerStack();
-  let reachedBelow = false;
-  stack.push({
-    name: "below",
-    keydown: () => {
-      reachedBelow = true;
-      return CONTINUE_BUBBLING;
-    },
-  });
-  stack.push({ name: "top", keydown: () => PASS_EVENT_TO_PAGE });
-
-  const event = fakeEvent();
-  assertEquals(stack.bubbleEvent("keydown", event), true);
-  assertEquals(event.prevented, false);
-  assertEquals(event.stopped, false);
-  assertFalse(reachedBelow);
-});
-
-test("RESTART_BUBBLING re-runs the stack, including what was just pushed", () => {
-  const stack = new HandlerStack();
-  const seen: string[] = [];
-  let pushed = false;
-
-  stack.push({
-    name: "opener",
-    keydown: () => {
-      seen.push("opener");
-      if (pushed) return CONTINUE_BUBBLING;
-      pushed = true;
-      stack.push({
-        name: "opened",
-        keydown: () => {
-          seen.push("opened");
-          return SUPPRESS_EVENT;
-        },
+      yield* stack.push(record("A", seen));
+      const middle = yield* stack.push(record("B", seen));
+      yield* stack.push({
+        name: "C",
+        scroll: () =>
+          Effect.gen(function*() {
+            yield* Ref.update(seen, (current) => [...current, "C"]);
+            yield* stack.remove(middle);
+            return CONTINUE_BUBBLING;
+          }),
       });
-      return RESTART_BUBBLING;
-    },
-  });
 
-  assertEquals(stack.bubbleEvent("keydown", fakeEvent()), false);
-  assertEquals(seen, ["opener", "opened"]);
-});
+      yield* stack.bubble("scroll", event());
+      assert.deepEqual(yield* Ref.get(seen), ["C", "A"]);
+    }).pipe(Effect.provide(HandlerStack.layer)));
 
-test("an event with no interested handler reaches the page", () => {
-  const stack = new HandlerStack();
-  stack.push({ name: "keys-only", keydown: () => SUPPRESS_EVENT });
-  assertEquals(
-    stack.bubbleEvent("click", fakeEvent() as unknown as MouseEvent),
-    true,
-  );
-});
+  it.effect("does not give the event to a handler that was removed", () =>
+    Effect.gen(function*() {
+      const stack = yield* HandlerStack;
+      const seen = yield* Ref.make<readonly string[]>([]);
 
-test("a throwing handler is dropped and the walk continues", () => {
-  const stack = new HandlerStack();
-  const errors: string[] = [];
-  stack.onHandlerError((message) => errors.push(message));
+      const victim = yield* stack.unshift(record("victim", seen));
+      yield* stack.push({
+        name: "remover",
+        scroll: () =>
+          Effect.gen(function*() {
+            yield* Ref.update(seen, (current) => [...current, "remover"]);
+            yield* stack.remove(victim);
+            return CONTINUE_BUBBLING;
+          }),
+      });
 
-  let reachedBelow = false;
-  stack.push({
-    name: "below",
-    keydown: () => {
-      reachedBelow = true;
-      return CONTINUE_BUBBLING;
-    },
-  });
-  const thrower = stack.push({
-    name: "thrower",
-    keydown: () => {
-      throw new Error("boom");
-    },
-  });
+      yield* stack.bubble("scroll", event());
+      assert.deepEqual(yield* Ref.get(seen), ["remover"]);
+      assert.isFalse(yield* stack.has(victim));
+    }).pipe(Effect.provide(HandlerStack.layer)));
 
-  assertEquals(stack.bubbleEvent("keydown", fakeEvent()), true);
-  assert(reachedBelow, "a throwing frame must not wedge the pipeline");
-  assertFalse(stack.has(thrower), "and must not stay on the stack");
-  assertEquals(errors.length, 1);
-  assert(errors[0]?.includes("thrower"));
-});
+  it.effect("suppresses the default action and the propagation", () =>
+    Effect.gen(function*() {
+      const stack = yield* HandlerStack;
+      const seen = yield* Ref.make<readonly string[]>([]);
 
-test("remove() defaults to the handler currently running", () => {
-  const stack = new HandlerStack();
-  let self = 0;
-  self = stack.push({
-    name: "self-removing",
-    keydown: () => {
-      stack.remove();
-      return CONTINUE_BUBBLING;
-    },
-  });
+      yield* stack.push(record("below", seen));
+      yield* stack.push({
+        name: "top",
+        scroll: () => Effect.succeed(SUPPRESS_EVENT),
+      });
 
-  stack.bubbleEvent("keydown", fakeEvent());
-  assertFalse(stack.has(self));
-  assertEquals(stack.depth, 0);
-});
+      const target = event();
+      assert.isFalse(yield* stack.bubble("scroll", target));
+      assert.isTrue(target.defaultPrevented);
+      assert.deepEqual(yield* Ref.get(seen), []);
+    }).pipe(Effect.provide(HandlerStack.layer)));
 
-test("remove() outside a walk removes nothing", () => {
-  const stack = new HandlerStack();
-  stack.push({ name: "kept", keydown: () => CONTINUE_BUBBLING });
-  stack.remove();
-  assertEquals(stack.depth, 1);
-});
+  it.effect("leaves the default action alone for a propagation stop", () =>
+    Effect.gen(function*() {
+      const stack = yield* HandlerStack;
+      yield* stack.push({
+        name: "top",
+        scroll: () => Effect.succeed(SUPPRESS_PROPAGATION),
+      });
 
-test("reset drops everything", () => {
-  const stack = new HandlerStack();
-  stack.push({ name: "a", keydown: () => CONTINUE_BUBBLING });
-  stack.push({ name: "b", keydown: () => CONTINUE_BUBBLING });
-  stack.reset();
-  assertEquals(stack.depth, 0);
-  assertEquals(stack.names, []);
+      const target = event();
+      assert.isFalse(yield* stack.bubble("scroll", target));
+      assert.isFalse(target.defaultPrevented);
+    }).pipe(Effect.provide(HandlerStack.layer)));
+
+  it.effect("stops the walk and leaves the event alone for the page", () =>
+    Effect.gen(function*() {
+      const stack = yield* HandlerStack;
+      const seen = yield* Ref.make<readonly string[]>([]);
+
+      yield* stack.push(record("below", seen));
+      yield* stack.push({
+        name: "top",
+        scroll: () => Effect.succeed(PASS_EVENT_TO_PAGE),
+      });
+
+      const target = event();
+      assert.isTrue(yield* stack.bubble("scroll", target));
+      assert.isFalse(target.defaultPrevented);
+      assert.deepEqual(yield* Ref.get(seen), []);
+    }).pipe(Effect.provide(HandlerStack.layer)));
+
+  it.effect("runs the whole stack again after a restart", () =>
+    Effect.gen(function*() {
+      const stack = yield* HandlerStack;
+      const seen = yield* Ref.make<readonly string[]>([]);
+      const opened = yield* Ref.make(false);
+
+      yield* stack.push({
+        name: "opener",
+        scroll: () =>
+          Effect.gen(function*() {
+            yield* Ref.update(seen, (current) => [...current, "opener"]);
+            if (yield* Ref.getAndSet(opened, true)) return CONTINUE_BUBBLING;
+            yield* stack.push({
+              name: "opened",
+              scroll: () =>
+                Effect.as(
+                  Ref.update(seen, (current) => [...current, "opened"]),
+                  SUPPRESS_EVENT,
+                ),
+            });
+            return RESTART_BUBBLING;
+          }),
+      });
+
+      assert.isFalse(yield* stack.bubble("scroll", event()));
+      assert.deepEqual(yield* Ref.get(seen), ["opener", "opened"]);
+    }).pipe(Effect.provide(HandlerStack.layer)));
+
+  it.effect("lets an event with no interested handler reach the page", () =>
+    Effect.gen(function*() {
+      const stack = yield* HandlerStack;
+      // The handler answers for `keydown` only, and the event is a `scroll`.
+      yield* stack.push({
+        name: "keys-only",
+        keydown: () => Effect.succeed(SUPPRESS_EVENT),
+      });
+      const target = event();
+      assert.isTrue(yield* stack.bubble("scroll", target));
+      assert.isFalse(target.defaultPrevented);
+    }).pipe(Effect.provide(HandlerStack.layer)));
+
+  it.effect("drops a handler that fails and continues the walk", () =>
+    Effect.gen(function*() {
+      const stack = yield* HandlerStack;
+      const seen = yield* Ref.make<readonly string[]>([]);
+
+      yield* stack.push(record("below", seen));
+      const failing = yield* stack.push({
+        name: "failing",
+        scroll: () => Effect.die(new Error("boom")),
+      });
+
+      assert.isTrue(yield* stack.bubble("scroll", event()));
+      assert.deepEqual(
+        yield* Ref.get(seen),
+        ["below"],
+        "a failing frame must not block the key path",
+      );
+      assert.isFalse(
+        yield* stack.has(failing),
+        "and it must not stay on the stack",
+      );
+    }).pipe(Effect.provide(HandlerStack.layer)));
+
+  it.effect("lets a handler remove itself while it runs", () =>
+    Effect.gen(function*() {
+      const stack = yield* HandlerStack;
+      const self = yield* Ref.make(0);
+
+      const id = yield* stack.push({
+        name: "self-removing",
+        scroll: () =>
+          Effect.gen(function*() {
+            yield* stack.remove(yield* Ref.get(self));
+            return CONTINUE_BUBBLING;
+          }),
+      });
+      yield* Ref.set(self, id);
+
+      yield* stack.bubble("scroll", event());
+      assert.isFalse(yield* stack.has(id));
+      assert.strictEqual(yield* stack.depth, 0);
+    }).pipe(Effect.provide(HandlerStack.layer)));
+
+  it.effect("drops everything on a reset", () =>
+    Effect.gen(function*() {
+      const stack = yield* HandlerStack;
+      const seen = yield* Ref.make<readonly string[]>([]);
+
+      yield* stack.push(record("a", seen));
+      yield* stack.push(record("b", seen));
+      yield* stack.reset;
+
+      assert.strictEqual(yield* stack.depth, 0);
+      assert.deepEqual(yield* stack.names, []);
+    }).pipe(Effect.provide(HandlerStack.layer)));
+
+  it.effect("gives each handler its own identity", () =>
+    Effect.gen(function*() {
+      const stack = yield* HandlerStack;
+      const seen = yield* Ref.make<readonly string[]>([]);
+
+      const first = yield* stack.push(record("same", seen));
+      const second = yield* stack.push(record("same", seen));
+      assert.notStrictEqual(first, second);
+
+      yield* stack.remove(first);
+      assert.isFalse(yield* stack.has(first));
+      assert.isTrue(yield* stack.has(second));
+    }).pipe(Effect.provide(HandlerStack.layer)));
 });

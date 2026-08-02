@@ -1,62 +1,97 @@
 /**
- * Entry point.
+ * The entry point.
  *
- * The whole extension is one IIFE — a userscript cannot code-split, because
- * dynamic `import()` of a `blob:` or `data:` URL is exactly what a page's CSP
- * blocks. "Lazy" therefore means *lazily invoked*, not lazily fetched: Stage 1
- * and every feature sit behind a function that is only called when needed, so
- * engines pay a cheap pre-parse rather than a full compile for code that never
- * runs (§5.5).
+ * The whole application is one immediately-invoked function. A userscript
+ * cannot split its code: a dynamic `import()` of a `blob:` or a `data:` URL is
+ * exactly what a page's content security policy stops. "Lazy" here therefore
+ * means lazily *run*, and not lazily fetched.
+ *
+ * This file runs in every frame of every page, and it does three things:
+ *
+ * 1. It claims the realm, so that a second injection does nothing.
+ * 2. It waits until something says that the user wants us.
+ * 3. It builds the application, and gives it the keyboard.
+ *
+ * Step 2 is what keeps a page with twenty frames cheap. A frame that never
+ * receives a key builds the guard, and nothing else.
  */
 
-import { bootStage0, type Stage0 } from "./boot/stage0.ts";
-import { type Stage1, startStage1 } from "./boot/stage1.ts";
+import {
+  Cause,
+  Effect,
+  Layer,
+  Logger,
+  ManagedRuntime,
+  References,
+  Schema,
+} from "effect";
+import { AppLayer } from "~/App.ts";
+import { Boot, BootstrapLayer } from "~/boot/Bootstrap.ts";
+import { awaitActivation, claimRealm } from "~/boot/Guard.ts";
+import { Dom } from "~/platform/Dom.ts";
+import { Realm } from "~/platform/Realm.ts";
 
-const main = (): void => {
-  let stage0: Stage0 | null = null;
-  let stage1: Stage1 | null = null;
-  let starting = false;
+/**
+ * The runtime that the guard uses.
+ *
+ * It holds two services and nothing else. Building the whole graph here would
+ * spend the cost in every frame, which is the one thing that this design
+ * refuses to do.
+ */
+const GuardLayer = Layer.mergeAll(
+  Realm.layer,
+  Logger.layer([Logger.consolePretty()]),
+  Layer.succeed(References.MinimumLogLevel, "Warn"),
+).pipe(Layer.provideMerge(Dom.layer));
 
-  // Safe to close over `stage0`: activation is only ever reached from a timer
-  // or an event listener, never synchronously from `bootStage0`.
-  const activate = (): void => {
-    if (starting || stage0 === null) return;
-    starting = true;
-    startStage1(stage0)
-      .then((started) => {
-        stage1 = started;
-      })
-      .catch((cause: unknown) => {
-        // Failing to boot must never break the page. Log once and stay out of
-        // the way; Stage 0's remaining listeners are harmless.
-        console.error("[vimium-webkit] failed to start", cause);
-      });
-  };
+/**
+ * The application could not be built.
+ *
+ * A failure to start must never break the page. This error exists so that the
+ * failure has a name in the error channel, and so that the one report below is
+ * the only thing that happens next.
+ */
+class StartupFailed extends Schema.TaggedErrorClass<StartupFailed>()(
+  "StartupFailed",
+  { detail: Schema.String, cause: Schema.optional(Schema.Defect()) },
+) {}
 
-  /**
-   * The page is going away for good.
-   *
-   * `Stage1.dispose()` had no production caller at all: roughly twenty
-   * listeners, a shadow root, a `MutationObserver`, an interval and the frame
-   * ports were structurally unreleasable. `persisted` is the whole reason this
-   * is not unconditional — a page entering the back/forward cache comes back
-   * with its scripts *not* re-run, so tearing down there would leave a dead
-   * extension in a live page.
-   *
-   * Stage 0 deliberately survives. It is five listeners and a boolean, it
-   * re-arms itself on `pageshow`, and disposing it leaves the realm's
-   * double-injection guard set with nothing behind it — so a frame that
-   * navigates from `about:blank` to its real document gets no Stage 0 at all.
-   */
-  const teardown = (persisted: boolean): void => {
-    if (persisted) return;
-    stage1?.dispose();
-    stage1 = null;
-  };
+const start = Effect.gen(function*() {
+  if (!(yield* claimRealm)) return;
 
-  // Returns `null` when this realm already has an instance — a manager
-  // double-injection, or two copies of the script installed.
-  stage0 = bootStage0({ onActivate: activate, onTeardown: teardown });
-};
+  // The guard scope stays open until the application has the keyboard. A key
+  // that the user presses during the start therefore still reaches the buffer,
+  // and `BootstrapLayer` plays it.
+  yield* Effect.scoped(Effect.gen(function*() {
+    const signal = yield* awaitActivation;
 
-main();
+    const runtime = ManagedRuntime.make(
+      BootstrapLayer.pipe(
+        Layer.provide(AppLayer),
+        Layer.provide(Boot.layerFrom(signal)),
+      ),
+    );
+
+    // A failure to start must never break the page. Report it once, and stay
+    // out of the way. The guard's own listeners are harmless.
+    yield* Effect.tryPromise({
+      try: () => runtime.runPromise(Effect.void),
+      catch: (cause) =>
+        new StartupFailed({
+          detail: cause instanceof Error ? cause.message : String(cause),
+          cause,
+        }),
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.sync(() => {
+          console.error(
+            "[vimium-webkit] failed to start",
+            Cause.pretty(cause),
+          );
+        })
+      ),
+    );
+  }));
+});
+
+Effect.runFork(Effect.provide(start, GuardLayer));

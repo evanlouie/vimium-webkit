@@ -29,7 +29,7 @@ const waitForRegion = async (vw: Vimium, region: string): Promise<void> => {
 /**
  * `FindPromptMode` owns the keyboard while the prompt is open.
  *
- * It has to: Stage 0 listens for `keydown` on `globalThis` in the **capture**
+ * It has to: The guard listens for `keydown` on `globalThis` in the **capture**
  * phase, so it sees every keystroke before the HUD input's own listener could
  * stop it. Without an explicit handler, typing `hemisphere` would run `h`, `m`,
  * `i` and `s` as commands. The mode passes keys through when

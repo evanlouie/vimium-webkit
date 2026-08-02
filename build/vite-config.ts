@@ -43,7 +43,7 @@ export interface BundleOptions {
  * Bun. That is harmless in Node and not harmless here: a page or a sandboxing
  * manager can make `process` an accessor that *throws*, and this artefact is
  * one IIFE evaluated at `document-start`, so a throw there takes the whole
- * extension with it — Stage 0 included, before a single key is pressed.
+ * extension with it, before a single key is pressed.
  *
  * `build/invariants.ts` already bans exactly this pattern for `navigator` and
  * `unsafeWindow`, with exactly this reasoning; it scans `src/` only, so a

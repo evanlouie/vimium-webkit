@@ -3,7 +3,9 @@
   "categories": {
     "correctness": "error"
   },
-  "plugins": ["typescript"],
+  "plugins": [
+    "typescript"
+  ],
   "env": {
     "browser": true,
     "builtin": true,
@@ -57,7 +59,9 @@
   },
   "overrides": [
     {
-      "files": ["test/**/*.ts"],
+      "files": [
+        "test/**/*.ts"
+      ],
       "rules": {
         "no-void": "off",
         "typescript/explicit-module-boundary-types": "off",

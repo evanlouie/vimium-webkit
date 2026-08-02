@@ -52,6 +52,6 @@ export const STRICT_CSP_FIXTURE = "/strict-csp.html";
  * `style-src 'self'` with no `'unsafe-inline'` is the whole point: it is what
  * blocks a `<style>` element injected by a content script on WebKit, and what
  * a constructed stylesheet adopted into a shadow root is expected to survive
- * (IMPLEMENTATION_PLAN.md §6.3, §7.2, verification item V1).
+ * .
  */
 export const STRICT_CSP_HEADER = "default-src 'self'; style-src 'self'";

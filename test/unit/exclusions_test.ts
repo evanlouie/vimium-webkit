@@ -1,137 +1,196 @@
-import { test } from "vitest";
+/**
+ * The exclusion verdict for this frame.
+ *
+ * The verdict comes from the URL of the *top* frame, and not from the URL of
+ * this frame. A child frame cannot read that URL across origins, so it takes
+ * the answer of the top frame with `adopt`.
+ *
+ * The layers below are the real ones. `Dom` and `Realm` are built once and
+ * then given a fixed URL and a fixed frame role, so no test touches a global.
+ */
+
+import { assert, describe, it } from "@effect/vitest";
+import { Effect, Layer, Option, Stream, SubscriptionRef } from "effect";
+import { Exclusions } from "~/core/Exclusions.ts";
+import { Settings } from "~/core/Settings.ts";
 import {
-  compilePattern,
-  ExclusionSet,
-  isPassKey,
-  patternToRegExp,
-} from "~/core/exclusions.ts";
-import { assertEquals } from "./support/assert.ts";
+  defaultSettings,
+  type ExclusionRule,
+  SETTINGS_SCHEMA_VERSION,
+} from "~/domain/Persisted.ts";
+import { Dom } from "~/platform/Dom.ts";
+import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
+import { Realm } from "~/platform/Realm.ts";
+import { Storage } from "~/platform/Storage.ts";
 
-test("compilePattern: `*` is the only wildcard and both ends are anchored", () => {
-  const matches = compilePattern("https://example.com/*");
-  assertEquals(matches?.("https://example.com/a/b"), true);
-  assertEquals(matches?.("https://example.com/"), true);
-  // Anchoring matters: without it this would match an attacker-chosen host.
-  assertEquals(matches?.("https://evil.example.com.co/"), false);
-  assertEquals(matches?.("http://example.com/"), false);
-});
+/** A backend that already holds the settings that a test needs. */
+const storedSettings = (
+  rules: readonly ExclusionRule[],
+): Layer.Layer<KeyValueStore> =>
+  Layer.sync(KeyValueStore, () => {
+    const map = new Map<string, string>([[
+      `${STORAGE_PREFIX}settings`,
+      JSON.stringify({
+        schemaVersion: SETTINGS_SCHEMA_VERSION,
+        data: { ...defaultSettings(), exclusionRules: rules },
+      }),
+    ]]);
+    return KeyValueStore.of({
+      kind: "memory",
+      durable: false,
+      watchable: false,
+      get: (key) =>
+        Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
+      set: (key, value) =>
+        Effect.sync(() => {
+          map.set(key, value);
+        }),
+      remove: (key) =>
+        Effect.sync(() => {
+          map.delete(key);
+        }),
+      changes: () => Stream.empty,
+    });
+  });
 
-test("compilePattern: interior wildcards match in order", () => {
-  const matches = compilePattern("https://*.example.com/*/edit");
-  assertEquals(matches?.("https://a.example.com/doc/edit"), true);
-  assertEquals(matches?.("https://a.example.com/edit/doc"), false);
-  assertEquals(matches?.("https://a.example.com/x/y/edit"), true);
-});
-
-test("compilePattern: a pattern with no wildcard is an exact match", () => {
-  const matches = compilePattern("https://example.com/only");
-  assertEquals(matches?.("https://example.com/only"), true);
-  assertEquals(matches?.("https://example.com/only/more"), false);
-});
-
-test("compilePattern: a wildcard glob cannot be made to backtrack", () => {
-  // The shape that used to compile to `^a.*a.*a.*…$` and be fed a
-  // page-controlled URL. Matched greedily this is linear; as a regex it is
-  // polynomial in the number of wildcards.
-  const matches = compilePattern(`https://${"a*".repeat(24)}end`);
-  const hostile = `https://${"a".repeat(3000)}`;
-
-  const started = performance.now();
-  assertEquals(matches?.(hostile), false);
-  const elapsed = performance.now() - started;
-
-  // Two orders of magnitude of slack; the point is "not seconds".
-  assertEquals(
-    elapsed < 200,
-    true,
-    `glob match took ${elapsed.toFixed(1)}ms`,
+/**
+ * The real `Dom`, with a fixed URL.
+ *
+ * The service is built once and then one field is replaced. That keeps the
+ * stub honest: every other field is the field that ships.
+ */
+const domAt = (url: string): Layer.Layer<Dom> =>
+  Layer.provide(
+    Layer.effect(
+      Dom,
+      Effect.map(Dom, (dom) => Dom.of({ ...dom, href: Effect.succeed(url) })),
+    ),
+    Dom.layer,
   );
-});
 
-test("compilePattern: regex-delimited patterns are honoured", () => {
-  const matches = compilePattern("/https://(mail|inbox)\\.google\\.com/.*/");
-  assertEquals(matches?.("https://mail.google.com/u/0"), true);
-  assertEquals(matches?.("https://drive.google.com/u/0"), false);
-});
+/** The real `Realm`, told whether this frame is the top frame. */
+const realmAs = (isTop: boolean): Layer.Layer<Realm, never, Dom> =>
+  Layer.provide(
+    Layer.effect(
+      Realm,
+      Effect.map(Realm, (realm) => Realm.of({ ...realm, isTop })),
+    ),
+    Realm.layer,
+  );
 
-test("compilePattern: regex metacharacters in a glob are literal", () => {
-  const matches = compilePattern("https://example.com/a+b");
-  assertEquals(matches?.("https://example.com/a+b"), true);
-  assertEquals(matches?.("https://example.com/aaab"), false);
-});
+const layerFor = (
+  options: {
+    readonly url: string;
+    readonly isTop: boolean;
+    readonly rules: readonly ExclusionRule[];
+  },
+): Layer.Layer<Exclusions | Settings | Storage> => {
+  const dom = domAt(options.url);
+  const storage = Layer.provide(Storage.layer, storedSettings(options.rules));
+  const settings = Layer.provide(Settings.layer, storage);
+  const base = Layer.mergeAll(
+    dom,
+    Layer.provide(realmAs(options.isTop), dom),
+    settings,
+    storage,
+  );
+  return Layer.provideMerge(Exclusions.layer, base);
+};
 
-test("compilePattern: a malformed pattern is dropped, not thrown", () => {
-  assertEquals(compilePattern("/[unclosed/"), null);
-  assertEquals(compilePattern("   "), null);
-  assertEquals(compilePattern(`/${"a".repeat(2000)}/`), null);
-});
+const EXCLUDED: readonly ExclusionRule[] = [
+  { pattern: "https://excluded.test/*", passKeys: "" },
+  { pattern: "https://partial.test/*", passKeys: "jk" },
+];
 
-test("compilePattern: an absurdly long URL is refused rather than scanned", () => {
-  const matches = compilePattern("/.*/");
-  assertEquals(matches?.("https://example.com/"), true);
-  assertEquals(matches?.("x".repeat(5000)), false);
-});
+describe("Exclusions", () => {
+  it.effect("resolves the verdict from the URL of the top frame", () =>
+    Effect.gen(function*() {
+      const settings = yield* Settings;
+      const exclusions = yield* Exclusions;
 
-test("patternToRegExp still describes what a glob means", () => {
-  const pattern = patternToRegExp("https://example.com/*");
-  assertEquals(pattern?.test("https://example.com/a"), true);
-  assertEquals(pattern?.test("https://evil.example.com.co/"), false);
-  assertEquals(patternToRegExp("/[unclosed/"), null);
-  assertEquals(patternToRegExp("   "), null);
-});
+      // The frame starts with the defaults, so the stored rules must be read
+      // before the verdict means anything.
+      yield* settings.reload;
 
-test("ExclusionSet: no matching rule leaves us fully enabled", () => {
-  const set = new ExclusionSet([
-    { pattern: "https://example.com/*", passKeys: "" },
-  ]);
-  assertEquals(set.match("https://other.test/"), {
-    enabled: true,
-    passKeys: "",
-  });
-});
+      const local = yield* exclusions.resolveLocal;
+      assert.deepEqual(local, { enabled: false, passKeys: "" });
 
-test("ExclusionSet: an empty passKeys disables us entirely", () => {
-  const set = new ExclusionSet([
-    { pattern: "https://mail.test/*", passKeys: "" },
-  ]);
-  assertEquals(set.match("https://mail.test/inbox"), {
-    enabled: false,
-    passKeys: "",
-  });
-});
+      // The top frame keeps its own verdict up to date from the settings.
+      const applied = yield* Stream.runHead(
+        Stream.filter(
+          SubscriptionRef.changes(exclusions.effective),
+          (rule) => !rule.enabled,
+        ),
+      );
+      assert.isTrue(Option.isSome(applied));
+      assert.isFalse(yield* exclusions.isEnabled);
+      assert.isFalse(exclusions.effectiveUnsafe().enabled);
+    }).pipe(Effect.provide(layerFor({
+      url: "https://excluded.test/inbox",
+      isTop: true,
+      rules: EXCLUDED,
+    }))));
 
-test("ExclusionSet: overlapping rules union their pass keys", () => {
-  const set = new ExclusionSet([
-    { pattern: "https://app.test/*", passKeys: "jk" },
-    { pattern: "https://app.test/editor*", passKeys: "kl" },
-  ]);
-  const rule = set.match("https://app.test/editor/1");
-  assertEquals(rule.enabled, true);
-  assertEquals([...rule.passKeys].sort().join(""), "jkl");
-});
+  it.effect("matches any URL against the current rules", () =>
+    Effect.gen(function*() {
+      const settings = yield* Settings;
+      const exclusions = yield* Exclusions;
+      yield* settings.reload;
 
-test("ExclusionSet: a full exclusion wins over a partial one", () => {
-  // This ordering is what makes "disable Vimium here" behave as users expect
-  // when a broader partial rule already matches.
-  const set = new ExclusionSet([
-    { pattern: "https://app.test/*", passKeys: "jk" },
-    { pattern: "https://app.test/editor*", passKeys: "" },
-  ]);
-  assertEquals(set.match("https://app.test/editor/1").enabled, false);
-});
+      assert.deepEqual(
+        yield* exclusions.match("https://partial.test/doc"),
+        { enabled: true, passKeys: "jk" },
+      );
+      assert.deepEqual(
+        yield* exclusions.match("https://other.test/"),
+        { enabled: true, passKeys: "" },
+      );
+    }).pipe(Effect.provide(layerFor({
+      url: "https://other.test/",
+      isTop: true,
+      rules: EXCLUDED,
+    }))));
 
-test("ExclusionSet: repeated lookups are cached and bounded", () => {
-  const set = new ExclusionSet([{ pattern: "*", passKeys: "j" }]);
-  for (let i = 0; i < 200; i++) set.match(`https://spa.test/#/route/${i}`);
-  // An SPA can generate unbounded distinct URLs; the point is that this does
-  // not grow without limit and still answers correctly.
-  assertEquals(set.match("https://spa.test/#/route/0").passKeys, "j");
-});
+  it.effect("stays fully enabled when no rule matches this frame", () =>
+    Effect.gen(function*() {
+      const settings = yield* Settings;
+      const exclusions = yield* Exclusions;
+      yield* settings.reload;
 
-test("isPassKey: only single characters can be pass keys", () => {
-  const rule = { enabled: true, passKeys: "jk" };
-  assertEquals(isPassKey(rule, "j"), true);
-  assertEquals(isPassKey(rule, "l"), false);
-  // A `passKeys` value is a *set of characters*, so `<c-j>` can never be in it.
-  assertEquals(isPassKey(rule, "<c-j>"), false);
+      assert.deepEqual(
+        yield* exclusions.resolveLocal,
+        { enabled: true, passKeys: "" },
+      );
+      assert.isTrue(yield* exclusions.isEnabled);
+    }).pipe(Effect.provide(layerFor({
+      url: "https://other.test/",
+      isTop: true,
+      rules: EXCLUDED,
+    }))));
+
+  it.effect("replaces the verdict with the answer of the top frame", () =>
+    Effect.gen(function*() {
+      const exclusions = yield* Exclusions;
+
+      // A child frame starts fully enabled. It must not read its own URL.
+      assert.isTrue(yield* exclusions.isEnabled);
+
+      yield* exclusions.adopt({ enabled: false, passKeys: "" });
+      assert.isFalse(yield* exclusions.isEnabled);
+      assert.deepEqual(
+        yield* SubscriptionRef.get(exclusions.effective),
+        { enabled: false, passKeys: "" },
+      );
+
+      yield* exclusions.adopt({ enabled: true, passKeys: "jk" });
+      assert.deepEqual(exclusions.effectiveUnsafe(), {
+        enabled: true,
+        passKeys: "jk",
+      });
+    }).pipe(Effect.provide(layerFor({
+      // The URL of the child frame is excluded, and it must be ignored.
+      url: "https://excluded.test/advert",
+      isTop: false,
+      rules: EXCLUDED,
+    }))));
 });
