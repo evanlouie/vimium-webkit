@@ -7,7 +7,13 @@
  * 1. **Hint generation on a link-dense page.** The budget here is a ceiling,
  *    not a target — enough to catch an accidental O(n²) or a lost chunking
  *    yield, loose enough not to fail on a cold headless build or a busy CI box.
- * 2. **Steady-state cost at idle, which must be ~0.** The honest measurement is
+ * 2. **Cost at `document-start`, per frame.** A userscript is one IIFE
+ *    evaluated in every frame of every page, so this is the number that scales
+ *    with a page's iframe count. It used to be guarded only by the 3 KB Stage 0
+ *    budget, which measures a chunk that costs ~0 ms and says nothing about the
+ *    rest of the graph — the real per-frame cost doubled during the Effect
+ *    migration with that budget still reading green.
+ * 3. **Steady-state cost at idle, which must be ~0.** The honest measurement is
  *    a CPU trace, which is per-engine and not portable across the three
  *    projects. The portable proxy is *scheduling* churn: the harness counts
  *    `requestAnimationFrame`, `setTimeout` and `setInterval` calls, and an idle
@@ -16,6 +22,7 @@
  */
 
 import { expect, test } from "./harness/fixtures.ts";
+import { readBundle } from "./harness/bundle.ts";
 
 /** Generous ceiling for 2400 links across three engines, headless, cold. */
 const HINT_BUDGET_MS = 6_000;
@@ -23,7 +30,52 @@ const HINT_BUDGET_MS = 6_000;
 /** Long enough for a rAF loop or a fast interval to be unmistakable. */
 const IDLE_WINDOW_MS = 1_500;
 
+/**
+ * Frames to evaluate the artefact in, and the ceiling for the total.
+ *
+ * A ceiling, not a target, and measured across frames rather than per frame so
+ * one slow frame on a busy CI box cannot fail it. Measured at ~86 ms on a warm
+ * developer machine and ~3× that headless and cold, so 600 ms leaves room for
+ * a real change while still catching a doubling.
+ */
+const EVAL_FRAMES = 20;
+const EVAL_BUDGET_MS = 600;
+
 test.describe("performance", () => {
+  test("the artefact stays affordable to evaluate in every frame", async ({ page }) => {
+    const source = readBundle();
+
+    await page.setContent(
+      `<!doctype html><html><body>${
+        Array.from(
+          { length: EVAL_FRAMES },
+          () => `<iframe src="about:blank"></iframe>`,
+        ).join("")
+      }</body></html>`,
+    );
+
+    // Every frame, because that is what a manager does at `document-start`.
+    let total = 0;
+    let measured = 0;
+    for (const frame of page.frames()) {
+      // Sequential on purpose: evaluating twenty frames at once would measure
+      // contention rather than the per-frame cost.
+      // eslint-disable-next-line no-await-in-loop
+      const ms = await frame.evaluate((code) => {
+        const started = performance.now();
+        (0, eval)(code);
+        return performance.now() - started;
+      }, source).catch(() => null);
+      if (typeof ms === "number") {
+        total += ms;
+        measured++;
+      }
+    }
+
+    expect(measured).toBeGreaterThan(EVAL_FRAMES);
+    expect(total).toBeLessThan(EVAL_BUDGET_MS);
+  });
+
   test("hint generation on a link-dense page stays under budget", async ({ vw }) => {
     await vw.open("/link-dense.html");
 

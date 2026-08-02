@@ -15,7 +15,7 @@
  */
 
 import { fileURLToPath } from "node:url";
-import type { InlineConfig } from "vite";
+import type { InlineConfig, Plugin } from "vite";
 
 export const ROOT = fileURLToPath(new URL("..", import.meta.url)).replace(
   /\/$/,
@@ -36,9 +36,39 @@ export interface BundleOptions {
   readonly minify?: boolean;
 }
 
+/**
+ * Remove every read of `process` from the output.
+ *
+ * Effect probes `typeof process === "object"` for `hrtime`, for a TTY and for
+ * Bun. That is harmless in Node and not harmless here: a page or a sandboxing
+ * manager can make `process` an accessor that *throws*, and this artefact is
+ * one IIFE evaluated at `document-start`, so a throw there takes the whole
+ * extension with it — Stage 0 included, before a single key is pressed.
+ *
+ * `build/invariants.ts` already bans exactly this pattern for `navigator` and
+ * `unsafeWindow`, with exactly this reasoning; it scans `src/` only, so a
+ * dependency walked in underneath the rule.
+ *
+ * A `define` cannot express this: its keys must be identifiers or dotted
+ * paths, and rewriting bare `process` would corrupt the `process.env.NODE_ENV`
+ * substitution. Rewriting the `typeof` test is narrower and leaves nothing to
+ * evaluate.
+ */
+const stripProcessProbes = (): Plugin => ({
+  name: "vimium:strip-process-probes",
+  renderChunk(code) {
+    const stripped = code.replaceAll(
+      /typeof process === "object"/g,
+      "false",
+    );
+    return stripped === code ? null : { code: stripped, map: null };
+  },
+});
+
 export const bundleConfig = (options: BundleOptions): InlineConfig => ({
   root: ROOT,
   logLevel: "warn",
+  plugins: [stripProcessProbes()],
   configFile: false,
   resolve: {
     alias: [{ find: /^~\//, replacement: `${ROOT}/src/` }],
@@ -48,6 +78,13 @@ export const bundleConfig = (options: BundleOptions): InlineConfig => ({
     "process.env.NODE_ENV": JSON.stringify(
       options.dev ? "development" : "production",
     ),
+    // The property reads the `typeof` rewrite below leaves behind in dead
+    // branches. Substituting them means the name `process` does not survive
+    // into the artefact at all, so the invariant can ban it outright rather
+    // than having to reason about which occurrences are reachable.
+    "process.hrtime": "undefined",
+    "process.stdout": "undefined",
+    "process.isBun": "undefined",
   },
   build: {
     write: false,

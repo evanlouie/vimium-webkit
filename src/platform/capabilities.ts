@@ -13,7 +13,13 @@
  *    capability.
  */
 
-import { detectGmSurface, type GmSurface, readManagerIdentity } from "./gm.ts";
+import {
+  detectGmSurface,
+  type GmSurface,
+  readManagerIdentity,
+  selectValueBackend,
+} from "./gm.ts";
+import { STORAGE_PREFIX } from "./storage.ts";
 import {
   clipboardReader,
   clipboardWriter,
@@ -159,17 +165,15 @@ export const probeCapabilities = (
   const identity = readManagerIdentity(surface.info);
   const manager = identifyManager(identity.handler);
 
-  const hasAsyncValue = Boolean(
-    surface.namespace?.getValue && surface.namespace.setValue,
-  );
-  const hasSyncValue = Boolean(surface.getValueSync && surface.setValueSync);
-  const value: ValueStoreKind = hasAsyncValue
-    ? "gm-async"
-    : hasSyncValue
-    ? "gm-sync"
-    : hasWorkingLocalStorage()
-    ? "localstorage-fallback"
-    : "memory";
+  // Asked of the selector rather than re-derived. The two predicates had
+  // drifted: this one needed two members where `selectValueBackend` needs
+  // three, so a manager with `GM.getValue`/`setValue` but no `GM.deleteValue`
+  // was reported as `gm-async` while its data actually went to `localStorage`
+  // — which WebKit erases after seven days without a visit — and
+  // `degradationWarnings` therefore told the user nothing. One source of truth
+  // removes the whole class.
+  const value: ValueStoreKind =
+    selectValueBackend(surface, STORAGE_PREFIX).kind;
 
   return {
     manager,
@@ -235,14 +239,6 @@ export const probeCapabilities = (
     webkitLike: detectWebKit(),
   };
 };
-
-const hasWorkingLocalStorage = (): boolean =>
-  probe(() => {
-    const key = "__vimium_webkit_probe__";
-    globalThis.localStorage.setItem(key, "1");
-    globalThis.localStorage.removeItem(key);
-    return true;
-  }, false);
 
 /**
  * Warnings the user needs to see once per session, in priority order.

@@ -81,8 +81,10 @@ export interface DialogHost {
   readonly root: ShadowUiRoot;
   readonly app: AppContext;
   mappings(): CompiledMappings;
-  saveSettings(next: Settings): Promise<void>;
-  saveMappings(source: string): Promise<void>;
+  /** Resolves `true` when the value reached storage. */
+  saveSettings(next: Settings): Promise<boolean>;
+  /** Resolves `true` when the value reached storage. */
+  saveMappings(source: string): Promise<boolean>;
 }
 
 const el = <K extends keyof HTMLElementTagNameMap>(
@@ -419,7 +421,7 @@ export class DialogController {
         ...booleansFrom(checkboxes),
       };
 
-      void this.#host.saveSettings(next).then(() => {
+      void this.#host.saveSettings(next).then((saved) => {
         const problems = this.#host.mappings().diagnostics.filter(
           (entry) => entry.severity === "error",
         );
@@ -432,7 +434,9 @@ export class DialogController {
           return;
         }
         this.close();
-        this.#host.app.hud.show("Settings saved");
+        // The store has already put its own "could not save" line in the HUD;
+        // `hud.show` would paint straight over it.
+        if (saved) this.#host.app.hud.show("Settings saved");
       });
     });
 

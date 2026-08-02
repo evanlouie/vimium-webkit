@@ -549,3 +549,93 @@ test("two flushes cannot overlap, so writes reach storage in order", async () =>
     label: "new",
   });
 });
+
+/** A backend whose reads and writes can be released by hand. */
+const gatedBackend = (): {
+  readonly backend: ValueBackend;
+  readonly map: Map<string, string>;
+  readonly gates: Array<() => void>;
+} => {
+  const map = new Map<string, string>();
+  const gates: Array<() => void> = [];
+  const gate = (): Promise<void> =>
+    new Promise<void>((resolve) => gates.push(resolve));
+  return {
+    map,
+    gates,
+    backend: {
+      kind: "gm-async",
+      get: (key) =>
+        Effect.promise(async () => {
+          await gate();
+          return Option.fromNullishOr(map.get(key) ?? null);
+        }),
+      set: (key, value) =>
+        Effect.promise(async () => {
+          await gate();
+          map.set(key, value);
+        }),
+      remove: (key) =>
+        Effect.sync(() => {
+          map.delete(key);
+        }),
+      list: () => Effect.sync((): readonly string[] => [...map.keys()]),
+      watch: null,
+    },
+  };
+};
+
+test("a reset during a hydration is not undone by the read it overtook", async () => {
+  // The read was decoded and adopted *after* the permit was released, so a
+  // `reset()` that ran during it reverted the cache and the read then
+  // republished the value the reset had erased — which the next write put back
+  // on disk. `:clear-history` resolved successfully with every visit intact.
+  const fake = gatedBackend();
+  fake.map.set(
+    "vimium-webkit:test",
+    JSON.stringify({ schemaVersion: 2, data: { count: 5, label: "secret" } }),
+  );
+  const group = new ValueStore(fake.backend).group(spec());
+
+  const hydrating = attempt(group.hydrate());
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const reset = attempt(group.reset());
+  fake.gates.shift()?.();
+  await Promise.all([hydrating, reset]);
+
+  assertEquals(fake.map.get("vimium-webkit:test"), undefined);
+  assertEquals(
+    group.current(),
+    defaults(),
+    "the cache must not hold the erased value",
+  );
+});
+
+test("a write during a hydration is not reverted by the read it overtook", async () => {
+  // Same hole, other victim: `onVisible` re-hydrates while the user changes a
+  // setting, the read publishes the pre-change value, and because `update()`
+  // reads the cache the *next* change writes the stale value back over the
+  // good one. The user's change was lost after being reported as saved.
+  const fake = gatedBackend();
+  fake.map.set(
+    "vimium-webkit:test",
+    JSON.stringify({ schemaVersion: 2, data: { count: 1, label: "stored" } }),
+  );
+  const group = new ValueStore(fake.backend).group(spec());
+
+  const hydrating = attempt(group.hydrate());
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const writing = attempt(group.write({ count: 2, label: "user" }));
+
+  // Release each gate as it appears: the write's `set` cannot even start until
+  // the read has released the permit, so its gate does not exist yet.
+  const settled = Promise.all([hydrating, writing]);
+  for (let i = 0; i < 10; i++) {
+    fake.gates.shift()?.();
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  await settled;
+
+  assertEquals(group.current(), { count: 2, label: "user" });
+});

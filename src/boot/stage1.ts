@@ -16,7 +16,7 @@ import {
   probeCapabilities,
 } from "~/platform/capabilities.ts";
 import { detectGmSurface, selectValueBackend } from "~/platform/gm.ts";
-import { Effect } from "effect";
+import { Effect, Result } from "effect";
 import { type AppRuntime, makeAppRuntime } from "./runtime.ts";
 import { STORAGE_PREFIX, ValueStore } from "~/platform/storage.ts";
 import {
@@ -234,21 +234,30 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       return app();
     },
     mappings: () => mappings,
+    // Both answer whether the value reached storage, rather than discarding
+    // the outcome. The dialog used to close and say "Settings saved" over the
+    // top of the store's own "could not save" message, which `hud.show`
+    // replaces — so the user saw the setting take effect, was told it was
+    // saved, and lost it on the next page load with no explanation.
     saveSettings: async (next) => {
       settings = next;
       mappings = compile(settings, caps);
       normalMode.recompiled();
       ui.syncColorScheme();
-      await runtime.runPromise(Effect.ignore(groups.settings.write(next)));
+      const outcome = await runtime.runPromise(
+        Effect.result(groups.settings.write(next)),
+      );
       frames.pushSettings();
+      return Result.isSuccess(outcome);
     },
     saveMappings: async (source) => {
       settings = { ...settings, keyMappings: source };
       mappings = compile(settings, caps);
       normalMode.recompiled();
-      await runtime.runPromise(
-        Effect.ignore(groups.settings.write(settings)),
+      const outcome = await runtime.runPromise(
+        Effect.result(groups.settings.write(settings)),
       );
+      return Result.isSuccess(outcome);
     },
   });
 

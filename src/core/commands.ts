@@ -24,6 +24,22 @@ import { isComposing, isModifierKey, keyNotation } from "./key-notation.ts";
 import { Tabs } from "~/platform/tabs.ts";
 import { Clipboard } from "~/platform/clipboard.ts";
 
+/**
+ * The human-readable half of an error, whatever shape it arrived in.
+ *
+ * Every error in this codebase is a `Schema.TaggedErrorClass`. Those extend
+ * `Error`, so `instanceof Error` is true and `.message` is empty; the text
+ * lives on `.detail`.
+ */
+const describeError = (cause: unknown): string => {
+  if (typeof cause === "object" && cause !== null && "detail" in cause) {
+    const detail: unknown = (cause as { readonly detail: unknown }).detail;
+    if (typeof detail === "string" && detail.length > 0) return detail;
+  }
+  if (cause instanceof Error && cause.message.length > 0) return cause.message;
+  return String(cause);
+};
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -819,10 +835,11 @@ export const buildCommands = (): readonly CommandDef[] => [
       void app.omnibar.clearHistory().then(
         () => app.hud.show("Local history index erased"),
         (cause: unknown) => {
+          // `.detail`, not `.message`: every error here is a
+          // `Schema.TaggedErrorClass`, which is an `Error` whose `message` is
+          // empty — so this printed a sentence ending in a bare colon.
           app.hud.error(
-            `Could not erase the history index: ${
-              cause instanceof Error ? cause.message : String(cause)
-            }`,
+            `Could not erase the history index: ${describeError(cause)}`,
           );
         },
       );

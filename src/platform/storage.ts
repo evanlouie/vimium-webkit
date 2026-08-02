@@ -101,8 +101,21 @@ const isEnvelope = (value: unknown): value is Envelope =>
   typeof (value as Record<string, unknown>)["schemaVersion"] === "number" &&
   "data" in value;
 
-const describeCause = (cause: unknown): string =>
-  cause instanceof Error ? cause.message : String(cause);
+/**
+ * `.detail` before `.message`.
+ *
+ * A `Schema.TaggedErrorClass` is an `Error` whose `message` is empty, so the
+ * obvious `cause.message` appended an empty string and left every nested
+ * reason as a dangling ": ".
+ */
+const describeCause = (cause: unknown): string => {
+  if (typeof cause === "object" && cause !== null && "detail" in cause) {
+    const detail: unknown = (cause as { readonly detail: unknown }).detail;
+    if (typeof detail === "string" && detail.length > 0) return detail;
+  }
+  if (cause instanceof Error && cause.message.length > 0) return cause.message;
+  return String(cause);
+};
 
 export type IssueListener = (issue: StorageError) => void;
 
@@ -237,6 +250,24 @@ export class ValueGroup<T> {
    */
   readonly #backendLock = Semaphore.makeUnsafe(1);
 
+  /**
+   * Bumped whenever the value is deliberately replaced or erased.
+   *
+   * The lock above buys mutual exclusion; it does not buy *invalidation*, and
+   * invalidation is what this needed all along. Three separate repairs failed
+   * because a write that had already left `#pendingWrite`, or a read that was
+   * already in the backend, had no way to learn that a `reset()` had happened
+   * meanwhile — so an erased value was written back, or a stale read was
+   * adopted over a newer local change.
+   *
+   * Each operation captures the epoch when it starts and re-checks it inside
+   * the permit, immediately before it commits. A moved epoch means someone
+   * else has since decided the outcome, and this operation is void. That also
+   * makes the semaphore's lack of FIFO fairness harmless: arrival order stops
+   * mattering once a late arrival can invalidate an early one.
+   */
+  #epoch = 0;
+
   constructor(store: ValueStore, backend: ValueBackend, spec: GroupSpec<T>) {
     this.#store = store;
     this.#backend = backend;
@@ -302,19 +333,39 @@ export class ValueGroup<T> {
   }
 
   #doHydrate(): Effect.Effect<T> {
-    // Under the lock too: a read that overtakes a live write caches the value
-    // that write is replacing, and nothing ever refreshes it.
-    return this.#backendLock.withPermits(1)(this.#backend.get(this.#key)).pipe(
-      Effect.map((raw) =>
-        this.#adopt(this.#decode(Option.getOrUndefined(raw)))
-      ),
-      Effect.catch((cause) =>
-        Effect.sync(() => {
-          this.#issue("backend", cause.detail, cause, "read");
-          return this.#adopt(this.#spec.defaults());
-        })
-      ),
-    );
+    return Effect.suspend(() => {
+      const epoch = this.#epoch;
+      // Decode *and* adopt inside the permit. Adopting outside it was the last
+      // hole: a `reset()` that ran during the read reverted the cache, and the
+      // read then published the value the reset had just erased — which the
+      // next write put back on disk.
+      return this.#backendLock.withPermits(1)(
+        this.#backend.get(this.#key).pipe(
+          Effect.map((raw) =>
+            this.#publish(epoch, this.#decode(Option.getOrUndefined(raw)))
+          ),
+          Effect.catch((cause) =>
+            Effect.sync(() => {
+              this.#issue("backend", cause.detail, cause, "read");
+              return this.#publish(epoch, this.#spec.defaults());
+            })
+          ),
+        ),
+      );
+    });
+  }
+
+  /**
+   * Adopt a value read from storage, unless it has been overtaken.
+   *
+   * A hydration that started before a `reset()` or a local `write()` is
+   * carrying a value that is now old news. Publishing it would revert the
+   * user's change in memory — and `update()` reads the cache, so the next
+   * write would put the reverted value back on disk.
+   */
+  #publish(epoch: number, value: T): T {
+    if (epoch !== this.#epoch) return this.current();
+    return this.#adopt(value);
   }
 
   #decode(raw: string | undefined): T {
@@ -418,6 +469,9 @@ export class ValueGroup<T> {
    */
   write(value: T): Effect.Effect<void, StorageError> {
     return Effect.gen({ self: this }, function*() {
+      // A read already in the backend is now carrying an older value than the
+      // one the user just produced; it must not publish over this.
+      this.#epoch++;
       this.#cached = value;
       const debounce = this.#spec.writeDebounceMs ?? 0;
       if (debounce <= 0) return yield* this.#flushValue(value);
@@ -545,6 +599,7 @@ export class ValueGroup<T> {
 
   #flushValue(value: T): Effect.Effect<void, StorageError> {
     return Effect.suspend(() => {
+      const epoch = this.#epoch;
       // Validated on the way out as well as on the way in, so a bad value is
       // caught where it was produced rather than on the next load — where it
       // would reset the group and take every other field with it.
@@ -572,10 +627,26 @@ export class ValueGroup<T> {
       }
 
       return this.#backendLock.withPermits(1)(
-        Effect.mapError(
-          this.#backend.set(this.#key, encoded),
-          (cause) => this.#issue("backend", cause.detail, cause, "write"),
-        ),
+        Effect.suspend(() => {
+          // Re-checked here, inside the permit and immediately before the
+          // backend call: by now a `reset()` may have erased the key, and
+          // writing this value would resurrect it.
+          if (epoch !== this.#epoch) {
+            return Effect.fail(
+              this.#issue(
+                "cancelled",
+                "the write was superseded before it reached storage",
+                undefined,
+                "write",
+                { report: false },
+              ),
+            );
+          }
+          return Effect.mapError(
+            this.#backend.set(this.#key, encoded),
+            (cause) => this.#issue("backend", cause.detail, cause, "write"),
+          );
+        }),
       );
     });
   }
@@ -597,6 +668,9 @@ export class ValueGroup<T> {
       // the visit still inside the debounce window reappeared on disk.
       yield* this.#cancelPendingWrite();
 
+      // Void every write issued before now, in flight or not. This is the
+      // invalidation the lock alone could not express.
+      this.#epoch++;
       const defaults = this.#spec.defaults();
       this.#adopt(defaults);
       return yield* this.#backendLock.withPermits(1)(

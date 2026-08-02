@@ -365,6 +365,32 @@ export const checkInvariants = async (
     });
   }
 
+  // 11. No Node globals in the artefact.
+  //
+  //     Rule 8 bans reading a replaceable global inline, because a page or a
+  //     sandboxing manager can make the read *throw* rather than answer
+  //     `undefined`. It scans `src/` — so when Effect arrived with
+  //     `typeof process === "object"` probes for `hrtime` and a TTY, they
+  //     walked straight in underneath it. This artefact is one IIFE evaluated
+  //     at `document-start`, so a throw there takes the whole extension with
+  //     it, Stage 0 included, before a single key is pressed.
+  //
+  //     Scanned in the code, with comments and strings blanked, so prose about
+  //     an "in-process channel" does not fire it.
+  for (
+    const hit of scan(
+      input.code,
+      /(?<![\w$.])(process|global|Buffer|__dirname|__filename)\s*[.[]|(?<![\w$.])require\s*\(|["'`]node:/g,
+    )
+  ) {
+    violations.push({
+      rule: "no-node-globals",
+      file: "dist/vimium-webkit.user.js",
+      line: hit.line,
+      message: `the bundle reads a Node global: ${hit.text.slice(0, 80)}`,
+    });
+  }
+
   // The other half: the notice is only an obligation if the code is there.
   // Checked against the code alone, which the banner is not part of.
   for (const { name, marker } of BUNDLED_DEPENDENCY_MARKERS) {
