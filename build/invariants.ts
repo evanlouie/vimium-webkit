@@ -125,7 +125,10 @@ const sourceFiles = async (root: string): Promise<string[]> => {
  * explaining why `<style>` is banned contains the word `createElement("style")`.
  * Replacing rather than deleting keeps reported line numbers accurate.
  */
-export const stripNonCode = (source: string): string => {
+export const stripNonCode = (
+  source: string,
+  stripStrings = true,
+): string => {
   const out = source.split("");
   const blank = (from: number, to: number): void => {
     for (let i = from; i < to && i < out.length; i++) {
@@ -168,7 +171,7 @@ export const stripNonCode = (source: string): string => {
         if (current === "\n" && quote !== "`") break;
         cursor++;
       }
-      blank(index, Math.min(cursor + 1, source.length));
+      if (stripStrings) blank(index, Math.min(cursor + 1, source.length));
       index = cursor + 1;
       continue;
     }
@@ -398,10 +401,11 @@ export const checkInvariants = async (
     });
   }
 
-  // `node:` specifiers are checked in the raw text, not the stripped code:
-  // `stripNonCode` blanks string literals, and an import specifier is always
-  // one — so the stripped form could never contain it.
-  if (/["'`]node:/.test(input.code)) {
+  // Preserve strings because a module specifier is one. Remove comments
+  // because Vite 8 preserves Effect's API examples, including documentation
+  // such as `import * as assert from "node:assert"`. Those examples are not
+  // executable imports.
+  if (/["'`]node:/.test(stripNonCode(input.code, false))) {
     violations.push({
       rule: "no-node-globals",
       file: "dist/vimium-webkit.user.js",
