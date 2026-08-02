@@ -6,8 +6,8 @@
  * a silent no-op (goal G3).
  */
 
-import { Effect, Schema } from "effect";
-import { type GmSurface, openInTab } from "./gm.ts";
+import { Context, Effect, Layer, Schema } from "effect";
+import { Gm, type GmSurface, openInTab } from "./gm.ts";
 
 export const TabFailureReason = Schema.Literals([
   "unavailable",
@@ -209,3 +209,38 @@ export const navigate = (
         ),
     });
   });
+
+// ---------------------------------------------------------------------------
+// The service
+// ---------------------------------------------------------------------------
+
+/** Tab operations, as a service. */
+export class Tabs extends Context.Service<Tabs, {
+  readonly open: (
+    url: string,
+    options?: OpenTabOptions,
+  ) => Effect.Effect<OpenTabOutcome, TabError>;
+  readonly closeCurrent: Effect.Effect<void, TabError>;
+  readonly navigate: (
+    url: string,
+    replace?: boolean,
+    trust?: UrlTrust,
+  ) => Effect.Effect<void, TabError>;
+}>()("vimium/platform/Tabs") {
+  static readonly layer = Layer.effect(
+    Tabs,
+    Effect.gen(function*() {
+      const { surface } = yield* Gm;
+      return Tabs.of({
+        open: Effect.fn("Tabs.open")(function*(
+          url: string,
+          options: OpenTabOptions = {},
+        ) {
+          return yield* openTab(surface, url, options);
+        }),
+        closeCurrent: closeCurrentTab(surface),
+        navigate: (url, replace, trust) => navigate(url, replace, trust),
+      });
+    }),
+  );
+}

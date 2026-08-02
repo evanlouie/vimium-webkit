@@ -30,8 +30,8 @@ import {
 } from "~/core/handler-stack.ts";
 import { keyNotation } from "~/core/key-notation.ts";
 import { Mode } from "~/core/mode.ts";
-import { writeClipboard } from "~/platform/clipboard.ts";
-import { openTab } from "~/platform/tabs.ts";
+import { Clipboard } from "~/platform/clipboard.ts";
+import { Tabs } from "~/platform/tabs.ts";
 import type { LocalHint } from "./detect.ts";
 import {
   type FilterCandidate,
@@ -172,7 +172,7 @@ const openInNewTab = (
   // Not on the clipboard path: `GM.openInTab` may answer with a promise, so
   // this effect can suspend and must be forked rather than run synchronously.
   app.runtime.runFork(
-    openTab(app.gm, url, { active }).pipe(
+    Tabs.use((tabs) => tabs.open(url, { active })).pipe(
       Effect.match({
         onSuccess: (outcome) => {
           if (!outcome.viaManager && !active) {
@@ -209,7 +209,7 @@ const copy = (app: AppContext, text: string, label: string): void => {
   // non-suspending, so the write still happens inside WebKit's transient-
   // activation window. `runFork` or `runPromise` would spend it first.
   const started = app.runtime.runSync(
-    Effect.result(writeClipboard(app.gm, text)),
+    Effect.result(Clipboard.use((clipboard) => clipboard.write(text))),
   );
   if (Result.isFailure(started)) {
     app.hud.error(`Copy failed: ${started.failure.detail}`);

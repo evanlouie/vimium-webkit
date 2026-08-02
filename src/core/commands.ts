@@ -21,9 +21,8 @@ import { Effect, Result } from "effect";
 import { type Handler, SUPPRESS_EVENT } from "./handler-stack.ts";
 import { Mode } from "./mode.ts";
 import { isComposing, isModifierKey, keyNotation } from "./key-notation.ts";
-import { closeCurrentTab, navigate, openTab } from "~/platform/tabs.ts";
-import { writeClipboard } from "~/platform/clipboard.ts";
-import { readClipboard } from "~/platform/clipboard.ts";
+import { Tabs } from "~/platform/tabs.ts";
+import { Clipboard } from "~/platform/clipboard.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -103,7 +102,7 @@ const copyToClipboard = (
   // inside WebKit's transient-activation window. Anything that suspended first
   // would spend the activation and the write would be denied.
   const outcome = app.runtime.runSync(
-    Effect.result(writeClipboard(app.gm, text)),
+    Effect.result(Clipboard.use((clipboard) => clipboard.write(text))),
   );
   if (Result.isFailure(outcome)) {
     app.hud.error(`Could not copy: ${outcome.failure.detail}`);
@@ -126,7 +125,7 @@ const openFromClipboard = (app: AppContext, newTab: boolean): void => {
   // the read is only an attempt to pre-fill it (§6.4). Started before the
   // prompt so the read races the user, not the other way round.
   const attempt = app.runtime.runFork(
-    readClipboard.pipe(
+    Clipboard.use((clipboard) => clipboard.read).pipe(
       Effect.tap((text) =>
         Effect.sync(() => {
           if (text.trim().length > 0) {
@@ -153,12 +152,12 @@ const go = (
   app: AppContext,
   input: string,
   newTab: boolean,
-): Effect.Effect<void> =>
+): Effect.Effect<void, never, Tabs> =>
   Effect.suspend(() => {
     const url = toUrl(input, app.settings().searchUrl);
     const attempt = newTab
-      ? Effect.asVoid(openTab(app.gm, url, { active: true }))
-      : navigate(url);
+      ? Effect.asVoid(Tabs.use((tabs) => tabs.open(url, { active: true })))
+      : Tabs.use((tabs) => tabs.navigate(url));
     return Effect.catch(
       attempt,
       (error) => Effect.sync(() => app.hud.error(error.detail)),
@@ -614,26 +613,31 @@ export const buildCommands = (): readonly CommandDef[] => [
     // `internal`: `newTabUrl` is the user's own setting, not page content, and
     // `about:blank` — its default — is outside the page-content allowlist.
     app.runtime.runFork(
-      openTab(app.gm, app.settings().newTabUrl, {
-        active: true,
-        trust: "internal",
-      }).pipe(
+      Tabs.use((tabs) =>
+        tabs.open(app.settings().newTabUrl, {
+          active: true,
+          trust: "internal",
+        })
+      ).pipe(
         Effect.catch((error) => Effect.sync(() => app.hud.error(error.detail))),
       ),
     );
   }),
   tierB("removeTab", "tabs", "Close this tab", ({ app }) => {
     app.runtime.runSync(
-      Effect.catch(closeCurrentTab(app.gm), (error) =>
-        Effect.sync(() => {
-          app.hud.error(
-            `${error.detail}${
-              error.nativeAlternative
-                ? ` — use ${error.nativeAlternative}`
-                : ""
-            }`,
-          );
-        })),
+      Effect.catch(
+        Tabs.use((tabs) => tabs.closeCurrent),
+        (error) =>
+          Effect.sync(() => {
+            app.hud.error(
+              `${error.detail}${
+                error.nativeAlternative
+                  ? ` — use ${error.nativeAlternative}`
+                  : ""
+              }`,
+            );
+          }),
+      ),
     );
   }),
   tierB(
@@ -673,10 +677,12 @@ export const buildCommands = (): readonly CommandDef[] => [
       // `internal`: we built this URL from `location.href`, and `view-source:`
       // is deliberately outside the set a page-supplied URL may use.
       app.runtime.runFork(
-        openTab(app.gm, `view-source:${location.href}`, {
-          active: true,
-          trust: "internal",
-        }).pipe(
+        Tabs.use((tabs) =>
+          tabs.open(`view-source:${location.href}`, {
+            active: true,
+            trust: "internal",
+          })
+        ).pipe(
           Effect.catch(() =>
             Effect.sync(() =>
               app.hud.error(

@@ -21,7 +21,7 @@ import type {
   OmnibarApi,
   OmnibarSource,
 } from "~/core/context.ts";
-import { navigate, openTab } from "~/platform/tabs.ts";
+import { Tabs } from "~/platform/tabs.ts";
 import type { SessionState } from "~/settings/schema.ts";
 import { type Completion, completionsFor, liveTabs } from "./completers.ts";
 import {
@@ -318,7 +318,7 @@ export const createOmnibar = (app: AppContext): OmnibarLiteApi => {
     // fork runs eagerly up to its first suspension, so the call still leaves
     // inside the keystroke's transient-activation window.
     app.runtime.runFork(
-      Effect.match(openTab(app.gm, url, { active: true }), {
+      Effect.match(Tabs.use((tabs) => tabs.open(url, { active: true })), {
         onSuccess: (outcome) => registerOpenedTab(outcome.url, ""),
         onFailure: (error) => {
           app.hud.error(
@@ -366,7 +366,7 @@ export const createOmnibar = (app: AppContext): OmnibarLiteApi => {
         else {
           app.runtime.runFork(
             Effect.catch(
-              navigate(url),
+              Tabs.use((tabs) => tabs.navigate(url)),
               (error) =>
                 Effect.sync(() => {
                   app.hud.error(error.detail);

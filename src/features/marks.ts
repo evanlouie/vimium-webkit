@@ -12,11 +12,11 @@
  * set (§7.4).
  */
 
-import { Effect } from "effect";
+import { Clock, Effect } from "effect";
 import type { AppContext, MarksApi } from "~/core/context.ts";
 import type { Marks } from "~/settings/schema.ts";
 import { pruneMarks } from "~/settings/schema.ts";
-import { navigate, openTab } from "~/platform/tabs.ts";
+import { Tabs } from "~/platform/tabs.ts";
 
 /** Marks are keyed by URL without the fragment, matching upstream. */
 export const markKeyForUrl = (href: string): string => {
@@ -46,13 +46,13 @@ class MarksFeature implements MarksApi {
     }
     const key = markKeyForUrl(location.href);
     const { x, y } = this.#app.scroller.position();
-    this.#app.runtime.runFork(this.#update((marks) => ({
+    this.#app.runtime.runFork(this.#update((marks, now) => ({
       ...marks,
       local: {
         ...marks.local,
         [key]: {
           ...marks.local[key],
-          [letter]: { scrollX: x, scrollY: y, savedAt: Date.now() },
+          [letter]: { scrollX: x, scrollY: y, savedAt: now },
         },
       },
     })));
@@ -76,7 +76,7 @@ class MarksFeature implements MarksApi {
 
   setGlobal(letter: string): void {
     const { x, y } = this.#app.scroller.position();
-    this.#app.runtime.runFork(this.#update((marks) => ({
+    this.#app.runtime.runFork(this.#update((marks, now) => ({
       ...marks,
       global: {
         ...marks.global,
@@ -84,7 +84,7 @@ class MarksFeature implements MarksApi {
           url: location.href,
           scrollX: x,
           scrollY: y,
-          savedAt: Date.now(),
+          savedAt: now,
         },
       },
     })));
@@ -112,7 +112,7 @@ class MarksFeature implements MarksApi {
     // manager's async API. The fork starts running immediately, so the call
     // still leaves within the keystroke's transient-activation window.
     this.#app.runtime.runFork(
-      openTab(this.#app.gm, target.href, { active: true }).pipe(
+      Tabs.use((tabs) => tabs.open(target.href, { active: true })).pipe(
         Effect.map(() => {
           this.#app.hud.show(
             `Opened global mark "${letter}" in a new tab ` +
@@ -132,7 +132,7 @@ class MarksFeature implements MarksApi {
                 `Global mark "${letter}" points somewhere unsafe; refusing to open it`,
               );
             })
-            : navigate(target.href).pipe(
+            : Tabs.use((tabs) => tabs.navigate(target.href)).pipe(
               Effect.catch((failure) =>
                 Effect.sync(() => {
                   this.#app.hud.error(failure.detail);
@@ -144,20 +144,34 @@ class MarksFeature implements MarksApi {
     );
   }
 
-  #update(mutate: (marks: Marks) => Marks): Effect.Effect<void> {
-    // Pruned on every write rather than on a timer: local marks are keyed by
-    // URL and nothing else ever removes one, so the table only ever grew — and
-    // the whole of it is rewritten on each mark.
-    return this.#app.groups.marks.update((marks) =>
-      pruneMarks(mutate(marks), Date.now())
-    ).pipe(
-      Effect.asVoid,
-      Effect.catch((issue) =>
-        Effect.sync(() => {
-          this.#app.hud.error(`Could not save mark: ${issue.detail}`);
-        })
-      ),
-    );
+  /**
+   * `now` comes from the `Clock`, not from `Date.now()`.
+   *
+   * Every timestamp here is persisted and later compared against another one,
+   * so the clock is an input to this feature rather than an ambient fact.
+   * Taking it from the service lets a test age a mark without waiting for real
+   * time to pass, and it gives the mark being written and the prune that
+   * accompanies it one shared reading — which two `Date.now()` calls did not.
+   */
+  #update(
+    mutate: (marks: Marks, now: number) => Marks,
+  ): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function*() {
+      const now = yield* Clock.currentTimeMillis;
+      // Pruned on every write rather than on a timer: local marks are keyed by
+      // URL and nothing else ever removes one, so the table only ever grew —
+      // and the whole of it is rewritten on each mark.
+      return yield* this.#app.groups.marks.update((marks) =>
+        pruneMarks(mutate(marks, now), now)
+      ).pipe(
+        Effect.asVoid,
+        Effect.catch((issue) =>
+          Effect.sync(() => {
+            this.#app.hud.error(`Could not save mark: ${issue.detail}`);
+          })
+        ),
+      );
+    });
   }
 }
 

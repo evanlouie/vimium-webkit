@@ -13,6 +13,9 @@
  */
 
 import { Effect, Layer, Logger, ManagedRuntime, References } from "effect";
+import { Clipboard } from "~/platform/clipboard.ts";
+import { Gm, type GmSurface } from "~/platform/gm.ts";
+import { Tabs } from "~/platform/tabs.ts";
 
 /**
  * Logging goes to the page console, at `Warn` and above.
@@ -34,11 +37,29 @@ const LoggingLayer = Layer.mergeAll(
  */
 const TracingLayer = Layer.succeed(References.TracerEnabled, false);
 
-export const AppLayer = Layer.mergeAll(LoggingLayer, TracingLayer);
+/**
+ * Everything the frame's effects can ask for.
+ *
+ * `Gm` is provided from the surface Stage 1 has already probed rather than
+ * detected again: probing reads ambient globals in a realm a page can tamper
+ * with, and doing it twice invites the two answers to disagree.
+ */
+export const appLayer = (surface: GmSurface): Layer.Layer<AppServices> =>
+  Layer.mergeAll(
+    Clipboard.layer,
+    Tabs.layer,
+    Gm.layerFrom(surface),
+  ).pipe(
+    Layer.provideMerge(Gm.layerFrom(surface)),
+    Layer.provideMerge(Layer.mergeAll(LoggingLayer, TracingLayer)),
+  );
 
-export type AppRuntime = ManagedRuntime.ManagedRuntime<never, never>;
+export type AppServices = Gm | Clipboard | Tabs;
 
-export const makeAppRuntime = (): AppRuntime => ManagedRuntime.make(AppLayer);
+export type AppRuntime = ManagedRuntime.ManagedRuntime<AppServices, never>;
+
+export const makeAppRuntime = (surface: GmSurface): AppRuntime =>
+  ManagedRuntime.make(appLayer(surface));
 
 /**
  * Run an effect that must not fail, reporting a defect rather than throwing.

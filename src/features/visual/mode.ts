@@ -22,7 +22,7 @@ import { SUPPRESS_EVENT } from "~/core/handler-stack.ts";
 import { isComposing, keyNotation } from "~/core/key-notation.ts";
 import { appendCountDigit, isCountDigit } from "~/core/count.ts";
 import { type ExitReason, Mode } from "~/core/mode.ts";
-import { writeClipboard } from "~/platform/clipboard.ts";
+import { Clipboard } from "~/platform/clipboard.ts";
 import {
   type AlterMethod,
   canModify,
@@ -308,7 +308,7 @@ export class VisualMode extends Mode {
     }
 
     const started = this.#app.runtime.runSync(
-      Effect.result(writeClipboard(this.#app.gm, text)),
+      Effect.result(Clipboard.use((clipboard) => clipboard.write(text))),
     );
     if (Result.isFailure(started)) {
       this.#app.hud.error(`Copy failed: ${started.failure.detail}`);

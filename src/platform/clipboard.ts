@@ -10,9 +10,9 @@
  * the `keydown` task.** Never `await` anything before calling into this module.
  */
 
-import { Duration, Effect, Schema } from "effect";
+import { Context, Duration, Effect, Layer, Schema } from "effect";
 import { clipboardReader, clipboardWriter } from "./ambient.ts";
-import { type GmSurface, setClipboard } from "./gm.ts";
+import { Gm, type GmSurface, setClipboard } from "./gm.ts";
 
 export type ClipboardWriteMethod =
   | "async-clipboard"
@@ -200,3 +200,34 @@ export const readClipboard: Effect.Effect<string, ClipboardError> = Effect
       ),
     );
   });
+
+// ---------------------------------------------------------------------------
+// The service
+// ---------------------------------------------------------------------------
+
+/**
+ * The clipboard, as a service.
+ *
+ * `write` keeps the property the free function has: nothing on its path
+ * suspends, so a caller inside a `keydown` task can run it with `runSync` and
+ * still be inside WebKit's transient-activation window.
+ */
+export class Clipboard extends Context.Service<Clipboard, {
+  readonly write: (
+    text: string,
+  ) => Effect.Effect<ClipboardWrite, ClipboardError>;
+  readonly read: Effect.Effect<string, ClipboardError>;
+}>()("vimium/platform/Clipboard") {
+  static readonly layer = Layer.effect(
+    Clipboard,
+    Effect.gen(function*() {
+      const { surface } = yield* Gm;
+      return Clipboard.of({
+        write: Effect.fn("Clipboard.write")(function*(text: string) {
+          return yield* writeClipboard(surface, text);
+        }),
+        read: readClipboard,
+      });
+    }),
+  );
+}

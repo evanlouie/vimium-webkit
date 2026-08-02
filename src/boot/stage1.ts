@@ -105,7 +105,7 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
   // this class of bug is structurally impossible rather than caught by review.
   // One runtime per frame, built here rather than at module scope: a frame
   // that never sees a keystroke must not pay for it.
-  const runtime: AppRuntime = makeAppRuntime();
+  const runtime: AppRuntime = makeAppRuntime(gm);
 
   // Every group, not a subset — see the note above.
   await runtime.runPromise(store.hydrateAll());

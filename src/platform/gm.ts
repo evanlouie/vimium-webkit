@@ -9,7 +9,7 @@
  * rejection.
  */
 
-import { Effect, Option, Schema } from "effect";
+import { Context, Effect, Layer, Option, Schema } from "effect";
 import { probe } from "./ambient.ts";
 import type {
   GmNamespace,
@@ -631,3 +631,29 @@ export const registerMenuCommand = (
     register(caption, onClick);
   });
 };
+
+// ---------------------------------------------------------------------------
+// The service
+// ---------------------------------------------------------------------------
+
+/**
+ * The manager surface, as a service.
+ *
+ * Detection reads ambient globals, which is real work in a realm we do not
+ * control, so it happens once when the layer is built rather than at each call
+ * site. Holding it as a service is also what lets a test swap the whole manager
+ * for a fake by providing a different layer, instead of reaching into globals.
+ */
+export class Gm extends Context.Service<Gm, {
+  /** The probed surface. Read-only; never branch on the manager's name. */
+  readonly surface: GmSurface;
+}>()("vimium/platform/Gm") {
+  static readonly layer = Layer.effect(
+    Gm,
+    Effect.sync(() => Gm.of({ surface: detectGmSurface() })),
+  );
+
+  /** A layer over an already-probed surface, for Stage 1 and for tests. */
+  static readonly layerFrom = (surface: GmSurface): Layer.Layer<Gm> =>
+    Layer.succeed(Gm, Gm.of({ surface }));
+}
