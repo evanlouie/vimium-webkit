@@ -50,6 +50,7 @@ flowchart TD
   Dom --> Bus["FrameBus<br/>PubSub over postMessage"]
   Realm --> Bus
   Storage --> Auth["FrameAuth"] --> Bus
+  Kv --> Auth
 
   Settings --> Ui
   Caps --> Ui

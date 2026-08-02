@@ -205,11 +205,11 @@ unmapAll            " start from nothing
 ```
 
 Settings are stored with your userscript manager wherever it offers a value
-store, which is durable. On a manager that offers none the script falls back to
-`localStorage` and tells you so, in the settings dialog and in a one-time
-warning — because Safari's Intelligent Tracking Prevention erases all
-script-writable storage after seven days without interaction with a site, which
-would silently destroy your mappings and marks.
+store, which is durable. A manager that offers none leaves your settings in
+memory for the life of the page, and the script tells you so, in the settings
+dialog and in a one-time warning. The script never writes your settings, marks
+or history to `localStorage`: the page owns that store, so every script on the
+site could read and change them.
 
 ### Every setting
 
@@ -398,6 +398,8 @@ Five decisions carry most of the weight:
   the overlay survives on strict-CSP sites where a `<style>` element would not.
 - **The top frame elects itself coordinator.** There is no background page to
   broker cross-frame link hints, so frames hand it a transferred `MessagePort`.
+  Page code sees that transfer, so every message on the port is sealed with a
+  key that both frames derive from a manager-private credential.
 - **The keyboard path is synchronous.** `preventDefault()` works nowhere else. A
   key decision runs through `runSyncExit`, and a command that must wait
   continues on its own fiber afterwards.
