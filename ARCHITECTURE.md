@@ -150,6 +150,38 @@ A caller waits on a `Deferred` that the fiber completes.
 This removes the epoch, the committed counter, the outstanding counter and the
 lock.
 
+### 5.1 A page-readable store gives no cross-frame session
+
+`frames/Auth.ts` keeps the credential of the session in the value store of the
+userscript manager, and nowhere else. A manager that gives no value store leaves
+the application on the in-memory backend. `KeyValueStore.managerPrivate` is then
+`false`, every operation of `FrameAuth` fails with `unavailable`, and no frame
+joins the session. Link hints across frames, frame focus and the exclusion
+verdict of a child frame all stop. `platform/Capabilities.ts` warns the user
+about each of those losses, because a loss of function with no message is worse
+than the loss itself.
+
+The top frame does **not** give a credential of its own to a child during the
+handshake. That would restore the session, and it would also give the session to
+the page. The reasons are these:
+
+- A userscript shares its realm with the page. The page reads every `message`
+  event that a window of the page receives, and it holds a copy of every
+  `MessagePort` that a `JOIN` transfers. A credential on either route is public
+  at the moment it travels.
+- A key agreement over the port does not repair that. The page is an active
+  party, and not a silent listener: it runs in the realm of the top frame, it
+  can answer as the other end of the port, and it can put a frame of its own in
+  the frames tree. An unauthenticated agreement gives it the key of a link.
+- A same-origin child cannot be reached around the page either. Page script
+  reads any value that we plant in such a child, and a cross-origin child cannot
+  be reached that way at all.
+
+Admission therefore needs one value that the page cannot read, and the manager
+is the only holder of such a value. With no manager store the frames of the page
+stay apart. That is the safe result, because a page that can join the session
+can drive a click inside a document of another origin.
+
 ## 6. Errors
 
 Every error is a `Schema.TaggedErrorClass`. A `reason` field is used when the
