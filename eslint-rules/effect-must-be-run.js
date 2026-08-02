@@ -51,6 +51,31 @@ export const effectMustBeRun = {
     const report = (node) => context.report({ node, messageId: "discarded" });
 
     return {
+      // `onPersist: () => someEffect` — a concise arrow body whose value is
+      // discarded because the callback returns `void`. This is the dominant
+      // callback shape in this codebase, and the one syntactic position the
+      // statement check below cannot see.
+      ArrowFunctionExpression(node) {
+        if (node.body.type === "BlockStatement") return;
+        const tsNode = services.esTreeNodeToTSNodeMap.get(node);
+        if (!tsNode) return;
+        const signature = checker.getSignatureFromDeclaration(tsNode);
+        const declared = signature === undefined
+          ? undefined
+          : checker.typeToString(checker.getReturnTypeOfSignature(signature));
+        // Only when the *contextual* return type is void: an arrow that
+        // genuinely returns an Effect is how every combinator is written.
+        const contextual = checker.getContextualType(tsNode);
+        if (contextual === undefined) return;
+        const call = checker.getSignaturesOfType(contextual, 0)[0];
+        if (call === undefined) return;
+        const expected = checker.typeToString(
+          checker.getReturnTypeOfSignature(call),
+        );
+        if (expected !== "void" && expected !== "undefined") return;
+        if (declared !== undefined && /^Effect</.test(declared)) report(node);
+      },
+
       ExpressionStatement(node) {
         let expression = node.expression;
         // `void e` and `await e` both leave the effect undone.

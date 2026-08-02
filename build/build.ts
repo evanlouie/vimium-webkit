@@ -118,7 +118,10 @@ const main = async (): Promise<void> => {
     const artefact = `${DIST}/vimium-webkit${dev ? ".dev" : ""}.user.js`;
 
     await writeFile(artefact, output);
-    await writeFile(`${DIST}/vimium-webkit.meta.js`, metadata);
+    // Production only. `meta.js` is what `@updateURL` points at, so writing a
+    // dev block there would tell every installed copy that the current release
+    // is called "Vimium-WebKit (dev)".
+    if (!dev) await writeFile(`${DIST}/vimium-webkit.meta.js`, metadata);
 
     // The shipped defaults, as data.
     //

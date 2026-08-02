@@ -63,6 +63,12 @@ export class Lifecycle {
 
   readonly #onPageShow = (event: PageTransitionEvent): void => {
     if (event.persisted) this.#options.onRestore?.();
+    // `#onPageHide` stopped the poll and nothing else restarted it, so a page
+    // restored from the back/forward cache lost the only URL-change detector
+    // that does not depend on `popstate`, `hashchange` or a click — which is
+    // exactly the router-driven navigation this poll exists to catch. It came
+    // back only if the tab later happened to be hidden and shown again.
+    if (document.visibilityState === "visible") this.#startPolling();
     this.#check();
   };
 

@@ -42,15 +42,15 @@ jobs:
       - run: npm run check
 
   unit:
-    # Across Node majors on purpose. `node:assert` changed its argument
-    # validation between 22 and 26, which broke the assertion helpers in a way
-    # that a single pinned version could not see.
+    # Across Node majors on purpose, and 26 specifically: `node:assert`
+    # tightened its argument validation there, which broke the assertion
+    # helpers in a way a single pinned version could not see.
     name: unit tests (node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node: ["22", "24"]
+        node: ["22", "26"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -112,7 +112,6 @@ jobs:
       # Playwright pins its browser revisions to the npm package version, so
       # keying the cache on the lockfile is exact rather than approximate.
       - name: Cache Playwright browsers
-        id: browser-cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
@@ -128,6 +127,13 @@ jobs:
         with:
           name: userscript
           path: dist/
+
+      # `ensureBundle` rebuilds when `dist/` is older than any source file, and
+      # a downloaded artefact's mtime is not guaranteed to beat the checkout's.
+      # A rebuild here would also need WebKit, which this leg does not install,
+      # so make the freshness explicit rather than relying on extraction order.
+      - name: Mark the downloaded bundle as fresh
+        run: touch dist/*
 
       - name: Install browsers
         run: npx playwright install --with-deps ${{ matrix.project }}

@@ -293,7 +293,7 @@ npm run test:e2e   # Playwright, against WebKit + Chromium + Firefox
 npm run coverage   # line coverage over every file in src/, not just the loaded ones
 npm run lint
 npm run build      # dist/vimium-webkit.user.js + invariant checks
-npm run verify     # everything above
+npm run verify     # everything above except coverage
 ```
 
 `npm run test:e2e:install` fetches the browser binaries the first time.

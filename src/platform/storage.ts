@@ -21,6 +21,7 @@ import {
   Option,
   Result,
   Schema,
+  Semaphore,
 } from "effect";
 import type { ValueBackend } from "./gm.ts";
 import { decodeUnknownResult, describeDecodeError } from "./schema-io.ts";
@@ -220,15 +221,21 @@ export class ValueGroup<T> {
   #settlement: Deferred.Deferred<void, StorageError> | null = null;
 
   /**
-   * Completes when the flush currently touching the backend has finished.
+   * One permit, held for the whole of every backend operation.
    *
-   * The debounce fiber drops `#writeFiber` before it flushes, so between the
-   * end of its sleep and the backend answering there was no handle on the
-   * operation at all. `reset()` read that as an idle group and issued its
-   * `remove` alongside a live `set` — which is how erased data came back — and
-   * `hydrate()` read around the same gap and cached the pre-write value.
+   * A *handle* on the in-flight flush was not enough, and it took two rounds
+   * of review to see why: it guarded a critical section that could be entered
+   * twice. Two flushes each published their own handle, the first to finish
+   * cleared it, and `reset()` then read an idle group and issued `remove`
+   * alongside a live `set` — so the erased data came back. Two `set` calls
+   * could also resolve out of order, leaving the older value on disk under a
+   * cache holding the newer one.
+   *
+   * A lock rather than a handle makes all of that unrepresentable: `set`,
+   * `remove` and the read behind `hydrate()` are serialised per group, so
+   * whoever arrives second sees the finished state of whoever was first.
    */
-  #flushInFlight: Deferred.Deferred<void> | null = null;
+  readonly #backendLock = Semaphore.makeUnsafe(1);
 
   constructor(store: ValueStore, backend: ValueBackend, spec: GroupSpec<T>) {
     this.#store = store;
@@ -290,16 +297,14 @@ export class ValueGroup<T> {
       // Reading around it and adopting what is on disk would resurrect exactly
       // the value the pending write is about to replace.
       if (this.#pendingWrite !== undefined) yield* Effect.ignore(this.flush());
-      // A value that has left `#pendingWrite` but not yet reached the backend
-      // is still newer than what is on disk; reading around it would cache the
-      // value it is about to replace.
-      yield* this.#awaitFlushInFlight();
       return yield* this.#doHydrate();
     });
   }
 
   #doHydrate(): Effect.Effect<T> {
-    return this.#backend.get(this.#key).pipe(
+    // Under the lock too: a read that overtakes a live write caches the value
+    // that write is replacing, and nothing ever refreshes it.
+    return this.#backendLock.withPermits(1)(this.#backend.get(this.#key)).pipe(
       Effect.map((raw) =>
         this.#adopt(this.#decode(Option.getOrUndefined(raw)))
       ),
@@ -471,47 +476,32 @@ export class ValueGroup<T> {
       // success. Doing it here also covers interruption, which would otherwise
       // leave the deferred unfulfilled and park its waiters for the life of
       // the frame.
-      const inFlight = yield* Deferred.make<void>();
-      this.#flushInFlight = inFlight;
-
       const outcome = yield* this.#flushValue(pending).pipe(
         Effect.onExit((exit) =>
-          Effect.sync(() => {
-            this.#flushInFlight = null;
-          }).pipe(
-            Effect.andThen(Deferred.succeed(inFlight, undefined)),
-            Effect.andThen(
-              settlement === null
-                ? Effect.void
-                // An interrupt is not this caller's failure. Forwarding it
-                // would kill a `write()` that was merely parked, and an
-                // interrupt slips past every `Effect.catch` the caller wrote —
-                // so they would neither succeed nor be told.
-                : Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)
-                ? Deferred.fail(
-                  settlement,
-                  this.#issue(
-                    "cancelled",
-                    "the write was cancelled before it reached storage",
-                    undefined,
-                    "write",
-                  ),
-                )
-                : Deferred.done(settlement, exit),
-            ),
-          )
+          settlement === null
+            ? Effect.void
+            // An interrupt is not this caller's failure. Forwarding it would
+            // kill a `write()` that was merely parked, and an interrupt slips
+            // past every `Effect.catch` the caller wrote — so they would
+            // neither succeed nor be told. The value may well have reached
+            // storage: `Effect.promise` cannot be interrupted once entered, so
+            // the wording claims only that we stopped waiting.
+            : Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)
+            ? Deferred.fail(
+              settlement,
+              this.#issue(
+                "cancelled",
+                "the write was interrupted, so it may not have been saved",
+                undefined,
+                "write",
+                { report: false },
+              ),
+            )
+            : Deferred.done(settlement, exit)
         ),
         Effect.result,
       );
       if (Result.isFailure(outcome)) return yield* Effect.fail(outcome.failure);
-    });
-  }
-
-  /** Wait for a flush that is already touching the backend, if there is one. */
-  #awaitFlushInFlight(): Effect.Effect<void> {
-    return Effect.suspend(() => {
-      const inFlight = this.#flushInFlight;
-      return inFlight === null ? Effect.void : Deferred.await(inFlight);
     });
   }
 
@@ -534,10 +524,6 @@ export class ValueGroup<T> {
   #cancelPendingWrite(): Effect.Effect<void> {
     return Effect.gen({ self: this }, function*() {
       yield* this.#interruptWriteFiber();
-      // A flush already in the backend cannot be interrupted usefully — the
-      // manager has the value. Wait for it, so the caller's own write lands
-      // after it rather than racing it.
-      yield* this.#awaitFlushInFlight();
       this.#pendingWrite = undefined;
       const settlement = this.#settlement;
       this.#settlement = null;
@@ -585,9 +571,11 @@ export class ValueGroup<T> {
         );
       }
 
-      return Effect.mapError(
-        this.#backend.set(this.#key, encoded),
-        (cause) => this.#issue("backend", cause.detail, cause, "write"),
+      return this.#backendLock.withPermits(1)(
+        Effect.mapError(
+          this.#backend.set(this.#key, encoded),
+          (cause) => this.#issue("backend", cause.detail, cause, "write"),
+        ),
       );
     });
   }
@@ -611,11 +599,13 @@ export class ValueGroup<T> {
 
       const defaults = this.#spec.defaults();
       this.#adopt(defaults);
-      return yield* this.#backend.remove(this.#key).pipe(
-        Effect.mapError((cause) =>
-          this.#issue("backend", cause.detail, cause, "write")
+      return yield* this.#backendLock.withPermits(1)(
+        this.#backend.remove(this.#key).pipe(
+          Effect.mapError((cause) =>
+            this.#issue("backend", cause.detail, cause, "write")
+          ),
+          Effect.as(defaults),
         ),
-        Effect.as(defaults),
       );
     });
   }
@@ -650,6 +640,10 @@ export class ValueGroup<T> {
     detail: string,
     cause: unknown,
     direction: StorageDirection,
+    // A discard the caller asked for is not an issue anybody needs to see. It
+    // still reaches the `write()` that was waiting; it just does not raise a
+    // HUD error beside the "erased" message that caused it.
+    options: { readonly report: boolean } = { report: true },
   ): StorageError {
     const issue = new StorageError({
       reason,
@@ -660,7 +654,7 @@ export class ValueGroup<T> {
         : `${detail}: ${describeCause(cause)}`,
       ...(cause === undefined ? {} : { cause }),
     });
-    this.#store.report(issue);
+    if (options.report) this.#store.report(issue);
     return issue;
   }
 }

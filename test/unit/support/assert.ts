@@ -2,7 +2,7 @@
  * The `@std/assert` surface this suite uses, on Node's assertion library.
  *
  * The suite moved from `deno test` to Vitest during the Effect migration. The
- * 296 tests here are the safety net for that migration, so rewriting 736
+ * tests here are the safety net for that migration, so rewriting 736
  * assertions into `expect(...)` form was the one change most likely to weaken
  * the net while appearing to be a tidy-up. Six functions is a smaller surface
  * to get right, and it leaves every call site — and therefore every reviewed
@@ -98,7 +98,9 @@ export const assertThrows = (
   message?: string,
 ): void => {
   if (ErrorClass === undefined) {
-    nodeThrows(fn, message);
+    // Same care as `assertEquals`: never hand Node an explicit `undefined`.
+    if (message === undefined) nodeThrows(fn);
+    else nodeThrows(fn, message);
     return;
   }
   nodeThrows(

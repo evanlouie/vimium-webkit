@@ -492,3 +492,60 @@ test("reset waits for a flush that is already touching the backend", async () =>
   assertEquals(log, ["set:start", "set:done", "remove"]);
   assertEquals(map.get("vimium-webkit:test"), undefined);
 });
+
+test("two flushes cannot overlap, so writes reach storage in order", async () => {
+  // Round three's finding: an in-flight *handle* guarded a section that could
+  // be entered twice. Two flushes each published their own handle, the first
+  // to finish cleared it, and the group then looked idle to `reset()` — which
+  // is how erased data came back. Two `set` calls could also resolve out of
+  // order and leave the older value on disk under a newer cache.
+  const map = new Map<string, string>();
+  const log: string[] = [];
+  const gates: Array<() => void> = [];
+  const backend: ValueBackend = {
+    kind: "gm-async",
+    get: (key) => Effect.succeed(Option.fromNullishOr(map.get(key) ?? null)),
+    set: (key, value) =>
+      Effect.promise(async () => {
+        const n = JSON.parse(value).data.count as number;
+        log.push(`start:${n}`);
+        await new Promise<void>((resolve) => gates.push(resolve));
+        map.set(key, value);
+        log.push(`done:${n}`);
+      }),
+    remove: (key) =>
+      Effect.sync(() => {
+        log.push("remove");
+        map.delete(key);
+      }),
+    list: () => Effect.sync((): readonly string[] => [...map.keys()]),
+    watch: null,
+  };
+
+  const group = new ValueStore(backend).group(debouncedSpec(5));
+  const first = attempt(group.write({ count: 1, label: "old" }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assertEquals(log, ["start:1"]);
+
+  // A second write and an explicit flush, while the first is still in the
+  // backend. Nothing may enter `set` until the first one leaves it.
+  const second = attempt(group.write({ count: 2, label: "new" }));
+  const flushed = attempt(group.flush());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assertEquals(log, ["start:1"], "the second flush must wait for the first");
+
+  // Release them in the order they were admitted; the later value must win.
+  // Sequential by design: each release must be observed before the next.
+  while (gates.length > 0 || log.length < 4) {
+    gates.shift()?.();
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  await Promise.all([first, second, flushed]);
+
+  assertEquals(log, ["start:1", "done:1", "start:2", "done:2"]);
+  assertEquals(JSON.parse(map.get("vimium-webkit:test") ?? "{}").data, {
+    count: 2,
+    label: "new",
+  });
+});
