@@ -21,6 +21,8 @@ export interface Violation {
 export interface InvariantInput {
   readonly root: string;
   readonly bundle: string;
+  /** The compiled code alone, without the metadata block or the banner. */
+  readonly code: string;
   readonly stage0Bytes: number;
   readonly declaredVersion: string;
   readonly metadataBlock: string;
@@ -55,6 +57,21 @@ export const BUNDLE_BUDGET_BYTES = 1_500 * 1024;
 const BUNDLED_COPYRIGHT_HOLDERS: readonly string[] = [
   "Copyright (c) 2023 Effectful Technologies Inc",
   "Copyright (c) 2010 Phil Crosby, Ilya Sukhar",
+];
+
+/**
+ * Proof that a bundled dependency is actually *in* the code.
+ *
+ * The notice check alone could not fail: it scanned the whole artefact, and
+ * the artefact is the banner the build had just written plus the code, so the
+ * banner satisfied its own check. It would have passed on an empty bundle, and
+ * would never have noticed Effect being dropped. These strings come from the
+ * dependency itself, so they only appear if it shipped.
+ */
+const BUNDLED_DEPENDENCY_MARKERS: ReadonlyArray<
+  { readonly name: string; readonly marker: string }
+> = [
+  { name: "effect", marker: "effect/Effect" },
 ];
 
 /** Files exempt from the "all GM access goes through the shim" rule. */
@@ -345,6 +362,19 @@ export const checkInvariants = async (
       rule: "third-party-notices",
       file: "dist/vimium-webkit.user.js",
       message: `the bundle carries no copyright notice for ${holder}`,
+    });
+  }
+
+  // The other half: the notice is only an obligation if the code is there.
+  // Checked against the code alone, which the banner is not part of.
+  for (const { name, marker } of BUNDLED_DEPENDENCY_MARKERS) {
+    if (input.code.includes(marker)) continue;
+    violations.push({
+      rule: "third-party-notices",
+      file: "dist/vimium-webkit.user.js",
+      message:
+        `the bundle does not appear to contain ${name} (no "${marker}"), so ` +
+        "either it was tree-shaken away or this list is out of date",
     });
   }
 

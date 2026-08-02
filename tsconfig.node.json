@@ -38,9 +38,7 @@
   "include": [
     "build/**/*.ts",
     "test/**/*.ts",
-    "playwright.config.ts",
-    "build/vite-config.ts",
-    "vitest.config.ts",
+    "*.ts",
     "eslint.config.js"
   ]
 }

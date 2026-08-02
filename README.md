@@ -298,9 +298,12 @@ npm run verify     # everything above
 
 `npm run test:e2e:install` fetches the browser binaries the first time.
 
-`npm run coverage` reports over **all** of `src/`. A test module imports every
-file so that an untested one appears in the denominator instead of vanishing
-from the report — the difference between the two framings was 59% and 38%.
+`npm run coverage` reports over **all** of `src/`, because `coverage.include`
+names the whole directory rather than only the files a run happened to load — so
+an untested file appears in the denominator instead of vanishing from the
+report. Note that `test/unit/module-graph_test.ts` imports every module, so a
+file reached only by that test is counted for its import-time statements; the
+headline is a little kinder than the tested-behaviour figure.
 
 ### Build invariants
 
@@ -312,7 +315,7 @@ project could quietly stop working on WebKit:
 2. No `<style>` elements outside the documented Safari <16.4 fallback. Safari
    applies the **page's** `style-src` to nodes a content script injects; only
    CSSOM (`adoptedStyleSheets`) escapes it.
-3. Stage 0 ≤ 5 KB. It runs in every frame of every page whether or not you ever
+3. Stage 0 ≤ 3 KB. It runs in every frame of every page whether or not you ever
    press a key.
 4. Bundle ≤ 1.5 MB unminified (Greasy Fork's ceiling is 2 MB, measured
    unminified).

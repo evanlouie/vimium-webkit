@@ -30,26 +30,30 @@ const SKIP = "VIMIUM_SKIP_BOOT_CHECK";
  * to throw. One that quietly removed everything would have shipped.
  *
  * A floor rather than an exact size: the ceiling is `BUNDLE_BUDGET_BYTES` in
- * `invariants.ts`, and between the two there is room to work.
+ * `invariants.ts`, and between the two there is room to work. It is a floor,
+ * not a proof — a large but dead bundle still passes, which is what the
+ * dependency-marker check in `invariants.ts` is for.
  */
 const BUNDLE_FLOOR_BYTES = 200 * 1024;
 
 export const verifyBundleBoots = async (
   artefactPath: string,
 ): Promise<BootResult> => {
-  if (process.env[SKIP] === "1") {
-    console.warn(`warning: ${SKIP}=1 — the bundle was not executed`);
-    return { ok: true };
-  }
-
   const source = await readFile(artefactPath, "utf8");
   const bytes = new TextEncoder().encode(source).length;
+  // Before the skip switch: this is a `stat`, not a browser, and the switch
+  // exists only for a machine with no browser installed.
   if (bytes < BUNDLE_FLOOR_BYTES) {
     return {
       ok: false,
       error: `the artefact is ${bytes} bytes, under the ` +
         `${BUNDLE_FLOOR_BYTES}-byte floor — it cannot contain the extension`,
     };
+  }
+
+  if (process.env[SKIP] === "1") {
+    console.warn(`warning: ${SKIP}=1 — the bundle was not executed`);
+    return { ok: true };
   }
 
   const { webkit } = await import("playwright");

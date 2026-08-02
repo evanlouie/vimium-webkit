@@ -424,17 +424,22 @@ export const startStage1 = async (stage0: Stage0): Promise<Stage1> => {
       lifecycle.dispose();
       for (const off of detach) off();
       teardownCommandObservers();
-      // Anything still inside a debounce window would otherwise be discarded.
-      runtime.runFork(store.flushAll());
       exitAllModes("navigation");
       frames.dispose();
       scroller.dispose();
       normalMode.forgetSuppressed();
       ui.destroy();
       handlerStack.reset();
-      // Last: closes the runtime's scope, releasing anything acquired through
-      // it. Nothing above may need the runtime after this point.
-      void runtime.dispose();
+      // Last, and *after* the flush completes. Every fiber forked from the
+      // runtime is registered in the scope `dispose()` closes, so disposing in
+      // the same turn interrupts the flush. It survives today only because
+      // nothing on that path suspends before reaching the backend — an
+      // invariant no test holds, and one retry or semaphore away from silent
+      // data loss.
+      void runtime.runPromise(Effect.ignore(store.flushAll()))
+        .finally(() => {
+          void runtime.dispose();
+        });
     },
   };
 };

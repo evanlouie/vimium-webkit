@@ -12,6 +12,7 @@
  */
 
 import {
+  Cause,
   Deferred,
   Duration,
   Effect,
@@ -27,6 +28,8 @@ import { decodeUnknownResult, describeDecodeError } from "./schema-io.ts";
 export const STORAGE_PREFIX = "vimium-webkit:";
 
 export const StorageFailureReason = Schema.Literals([
+  /** The write was abandoned before it reached the backend. */
+  "cancelled",
   /** The backend itself failed (manager error, quota, revoked permission). */
   "backend",
   /** Stored bytes were not JSON. */
@@ -216,6 +219,17 @@ export class ValueGroup<T> {
    */
   #settlement: Deferred.Deferred<void, StorageError> | null = null;
 
+  /**
+   * Completes when the flush currently touching the backend has finished.
+   *
+   * The debounce fiber drops `#writeFiber` before it flushes, so between the
+   * end of its sleep and the backend answering there was no handle on the
+   * operation at all. `reset()` read that as an idle group and issued its
+   * `remove` alongside a live `set` — which is how erased data came back — and
+   * `hydrate()` read around the same gap and cached the pre-write value.
+   */
+  #flushInFlight: Deferred.Deferred<void> | null = null;
+
   constructor(store: ValueStore, backend: ValueBackend, spec: GroupSpec<T>) {
     this.#store = store;
     this.#backend = backend;
@@ -276,6 +290,10 @@ export class ValueGroup<T> {
       // Reading around it and adopting what is on disk would resurrect exactly
       // the value the pending write is about to replace.
       if (this.#pendingWrite !== undefined) yield* Effect.ignore(this.flush());
+      // A value that has left `#pendingWrite` but not yet reached the backend
+      // is still newer than what is on disk; reading around it would cache the
+      // value it is about to replace.
+      yield* this.#awaitFlushInFlight();
       return yield* this.#doHydrate();
     });
   }
@@ -287,7 +305,7 @@ export class ValueGroup<T> {
       ),
       Effect.catch((cause) =>
         Effect.sync(() => {
-          this.#issue("backend", cause.detail, cause);
+          this.#issue("backend", cause.detail, cause, "read");
           return this.#adopt(this.#spec.defaults());
         })
       ),
@@ -301,7 +319,7 @@ export class ValueGroup<T> {
     try {
       parsed = JSON.parse(raw);
     } catch (cause) {
-      this.#issue("malformed", "stored value is not valid JSON", cause);
+      this.#issue("malformed", "stored value is not valid JSON", cause, "read");
       return this.#spec.defaults();
     }
 
@@ -322,6 +340,8 @@ export class ValueGroup<T> {
         "invalid",
         `stored schema version ${envelope.schemaVersion} is newer than ` +
           `this build's ${this.#spec.schemaVersion}`,
+        undefined,
+        "read",
       );
       return this.#spec.defaults();
     }
@@ -332,6 +352,7 @@ export class ValueGroup<T> {
         "invalid",
         "stored value failed schema validation",
         describeDecodeError(result.failure),
+        "read",
       );
       return this.#spec.defaults();
     }
@@ -362,6 +383,7 @@ export class ValueGroup<T> {
           "migration",
           `migration to v${step.to} (${step.describe}) failed`,
           cause,
+          "read",
         );
         return { ok: false };
       }
@@ -449,13 +471,47 @@ export class ValueGroup<T> {
       // success. Doing it here also covers interruption, which would otherwise
       // leave the deferred unfulfilled and park its waiters for the life of
       // the frame.
+      const inFlight = yield* Deferred.make<void>();
+      this.#flushInFlight = inFlight;
+
       const outcome = yield* this.#flushValue(pending).pipe(
         Effect.onExit((exit) =>
-          settlement === null ? Effect.void : Deferred.done(settlement, exit)
+          Effect.sync(() => {
+            this.#flushInFlight = null;
+          }).pipe(
+            Effect.andThen(Deferred.succeed(inFlight, undefined)),
+            Effect.andThen(
+              settlement === null
+                ? Effect.void
+                // An interrupt is not this caller's failure. Forwarding it
+                // would kill a `write()` that was merely parked, and an
+                // interrupt slips past every `Effect.catch` the caller wrote —
+                // so they would neither succeed nor be told.
+                : Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)
+                ? Deferred.fail(
+                  settlement,
+                  this.#issue(
+                    "cancelled",
+                    "the write was cancelled before it reached storage",
+                    undefined,
+                    "write",
+                  ),
+                )
+                : Deferred.done(settlement, exit),
+            ),
+          )
         ),
         Effect.result,
       );
       if (Result.isFailure(outcome)) return yield* Effect.fail(outcome.failure);
+    });
+  }
+
+  /** Wait for a flush that is already touching the backend, if there is one. */
+  #awaitFlushInFlight(): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      const inFlight = this.#flushInFlight;
+      return inFlight === null ? Effect.void : Deferred.await(inFlight);
     });
   }
 
@@ -478,10 +534,26 @@ export class ValueGroup<T> {
   #cancelPendingWrite(): Effect.Effect<void> {
     return Effect.gen({ self: this }, function*() {
       yield* this.#interruptWriteFiber();
+      // A flush already in the backend cannot be interrupted usefully — the
+      // manager has the value. Wait for it, so the caller's own write lands
+      // after it rather than racing it.
+      yield* this.#awaitFlushInFlight();
       this.#pendingWrite = undefined;
       const settlement = this.#settlement;
       this.#settlement = null;
-      if (settlement !== null) yield* Deferred.succeed(settlement, undefined);
+      // Failure, not success: the value was deliberately discarded and never
+      // reached storage. `write()` promises to complete when it does.
+      if (settlement !== null) {
+        yield* Deferred.fail(
+          settlement,
+          this.#issue(
+            "cancelled",
+            "the write was superseded by a reset",
+            undefined,
+            "write",
+          ),
+        );
+      }
     });
   }
 
@@ -576,8 +648,8 @@ export class ValueGroup<T> {
   #issue(
     reason: StorageFailureReason,
     detail: string,
-    cause?: unknown,
-    direction: StorageDirection = "read",
+    cause: unknown,
+    direction: StorageDirection,
   ): StorageError {
     const issue = new StorageError({
       reason,

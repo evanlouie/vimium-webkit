@@ -78,7 +78,14 @@ interface ModuleSize {
   readonly bytes: number;
 }
 
-/** Per-module contribution to the bundle, largest first. */
+/**
+ * Per-module contribution, largest first — *indicative, not a decomposition*.
+ *
+ * Rollup measures each module before Vite re-prints the chunk for `safari16`,
+ * and that re-print drops about a third of the bytes. The figures therefore
+ * sum to roughly 40% more than the artefact. They are useful for ranking what
+ * is large; they are not a budget.
+ */
 const sizeReport = (chunk: OutputChunk): readonly ModuleSize[] =>
   Object.entries(chunk.modules)
     .map(([module, meta]) => ({
@@ -141,13 +148,19 @@ const main = async (): Promise<void> => {
     );
 
     const stage0Bytes = await measureStage0();
-    const violations = await checkInvariants({
+    const violations = (await checkInvariants({
       root: ROOT,
       bundle: output,
+      code: chunk.code,
       stage0Bytes,
       declaredVersion: version,
       metadataBlock: metadata,
-    });
+    }))
+      // A dev bundle carries an inline sourcemap, which is several times the
+      // size of the code. Measuring it against the shipping ceiling made
+      // `build:dev` fail every time it was run — a documented entry point that
+      // could not succeed. Every other invariant still applies.
+      .filter((violation) => !(dev && violation.rule === "bundle-budget"));
 
     const totalKb = (byteLength(output) / 1024).toFixed(1);
     console.log(

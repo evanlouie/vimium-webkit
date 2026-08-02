@@ -416,8 +416,13 @@ test("reset cancels a pending write instead of letting it resurrect", async () =
   // Past the debounce window the write must not have come back.
   await new Promise((resolve) => setTimeout(resolve, 60));
   assertEquals(fake.map.get("vimium-webkit:test"), undefined);
-  // And the caller waiting on it must have been released, not parked.
-  assert(Result.isSuccess(await pending));
+
+  // The caller must be released rather than parked, and told the truth: its
+  // value was discarded, so reporting success would be a lie.
+  const outcome = await pending;
+  assert(Result.isFailure(outcome));
+  assertEquals(outcome.failure.reason, "cancelled");
+  assertEquals(outcome.failure.direction, "write");
 });
 
 test("a hydrate joiner is unaffected when the first caller is interrupted", async () => {
@@ -439,4 +444,51 @@ test("a hydrate joiner is unaffected when the first caller is interrupted", asyn
     return yield* Fiber.join(joiner);
   }));
   assert(value.count === 1 || value.count === 0);
+});
+
+test("reset waits for a flush that is already touching the backend", async () => {
+  // The first repair cancelled a *sleeping* debounce fiber, which left the
+  // window between the sleep ending and `backend.set` resolving unguarded: the
+  // group looked idle, `reset()` issued its `remove` alongside a live `set`,
+  // and the erased value came back. On `gm-async` managers `set` is a promise
+  // round-trip, so that window is real.
+  const map = new Map<string, string>();
+  const log: string[] = [];
+  let releaseSet: (() => void) | undefined;
+  const backend: ValueBackend = {
+    kind: "gm-async",
+    get: (key) => Effect.succeed(Option.fromNullishOr(map.get(key) ?? null)),
+    set: (key, value) =>
+      Effect.promise(async () => {
+        log.push("set:start");
+        await new Promise<void>((resolve) => {
+          releaseSet = resolve;
+        });
+        map.set(key, value);
+        log.push("set:done");
+      }),
+    remove: (key) =>
+      Effect.sync(() => {
+        log.push("remove");
+        map.delete(key);
+      }),
+    list: () => Effect.sync((): readonly string[] => [...map.keys()]),
+    watch: null,
+  };
+
+  const group = new ValueStore(backend).group(debouncedSpec(5));
+  const pending = attempt(group.write({ count: 9, label: "secret" }));
+
+  // Let the debounce fire and enter `set`, then reset while it is in flight.
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assertEquals(log, ["set:start"]);
+  const reset = attempt(group.reset());
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  releaseSet?.();
+  await reset;
+  await pending;
+
+  // The remove must come after the write it is undoing, and win.
+  assertEquals(log, ["set:start", "set:done", "remove"]);
+  assertEquals(map.get("vimium-webkit:test"), undefined);
 });
