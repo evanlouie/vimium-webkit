@@ -90,7 +90,12 @@ above the platform, so the graph stays a tree.
 
 A feature registers its commands in `CommandRegistry` when its layer is built.
 `Keyboard` reads the registry. A feature therefore never imports another
-feature, and `Keyboard` never imports a feature.
+feature, and `Keyboard` never imports a feature. A feature that needs what
+another feature does asks the registry by name, with `Commands.run`.
+
+The split has one cost: a command can exist in the catalogue with no body, and
+answer "unavailable" to the user. The `command-bodies` invariant in
+`build/invariants.ts` refuses that, for every tier A and tier B command.
 
 ## 3. The keyboard path is synchronous
 
@@ -206,7 +211,8 @@ src/
   core/               settings, keys, modes, commands, exclusions
   ui/                 the shadow root, the HUD and the dialogs
   frames/             the cross-frame bus and its protocol
-  features/           hints, find, visual, marks, insert, omnibar, scroller
+  features/           hints, find, visual, marks, insert, omnibar, scroller,
+                      navigation, tabs, clipboard
   boot/               the injection guard, the lifecycle and the key bridge
 ```
 

@@ -333,6 +333,10 @@ project could quietly stop working on WebKit:
    on Safari.
 9. No HTML sinks. Link text, page titles and search suggestions are all
    page-supplied and all end up inside our own overlay.
+10. Every Tier A and Tier B command has a body somewhere in `src/`. The
+    catalogue is pure data and the bodies live in feature layers, so a command
+    can otherwise be carried over with nothing to run it, and answer
+    "unavailable" to the user.
 
 ### Releasing
 
@@ -369,7 +373,8 @@ src/
   core/       Settings, keys, modes, commands, exclusions
   ui/         One closed shadow root, styled through CSSOM
   frames/     The cross-frame bus and its protocol
-  features/   Hints, find, visual/caret, scroller, marks, insert, omnibar
+  features/   Hints, find, visual/caret, scroller, marks, insert, omnibar,
+              navigation, tab control, URL clipboard
   boot/       The injection guard, the lifecycle and the key bridge
 ```
 

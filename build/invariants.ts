@@ -507,6 +507,73 @@ export const checkInvariants = async (
   }
 
   violations.push(...(await checkCommandTiers(input.root)));
+  violations.push(...(await checkCommandBodies(input.root, sources)));
+  return violations;
+};
+
+/**
+ * 13. Every tier A and tier B command has somewhere that can run it.
+ *
+ * The catalogue and the bodies are deliberately apart: the catalogue is pure
+ * data, and a feature layer writes the bodies into the registry. That split is
+ * what keeps the layer graph a tree, and it is also what lets a command be
+ * carried over with no body at all. Twenty-one of them were, and each one
+ * answered "unavailable" to the user instead of working.
+ *
+ * A tier C command has no body on purpose. `Commands.run` answers with its
+ * `unavailableReason`.
+ */
+const checkCommandBodies = async (
+  root: string,
+  sources: ReadonlyArray<{ readonly rel: string; readonly contents: string }>,
+): Promise<readonly Violation[]> => {
+  const file = "src/domain/Command.ts";
+  const module = await import(pathToFileURL(`${root}/${file}`).href);
+  const catalogue: unknown = (module as Record<string, unknown>)["COMMANDS"];
+  if (typeof catalogue !== "object" || catalogue === null) return [];
+
+  // A body is registered either by name, `register("goBack", …)`, or as a key
+  // of the record that `registerAll({ goBack: … })` takes.
+  const registered = new Set<string>();
+  for (const { rel, contents } of sources) {
+    if (rel === file) continue;
+    // Comments go, and string literals stay. A quoted key is the only way to
+    // write a command name that has a dot in it, and `stripNonCode` blanks the
+    // content of a string literal, so it would erase exactly those names.
+    const code = stripComments(contents);
+    for (const match of code.matchAll(/register\(\s*"([^"]+)"/g)) {
+      const name = match[1];
+      if (name !== undefined) registered.add(name);
+    }
+    for (
+      const match of code.matchAll(
+        /(?:^|[\s{,])"?([A-Za-z][\w.-]*)"?\s*:\s*(?:\(|function|Effect|[A-Za-z_$][\w$]*\s*\()/g,
+      )
+    ) {
+      const name = match[1];
+      if (name !== undefined) registered.add(name);
+    }
+  }
+
+  const violations: Violation[] = [];
+  for (const [name, entry] of Object.entries(catalogue)) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as Record<string, unknown>;
+    const tier = record["tier"];
+    // A malformed entry is the business of `command-tiers`. Two rules that
+    // report the same fault make the output harder to read, and neither of
+    // them more true.
+    if (tier !== "A" && tier !== "B") continue;
+    if (record["name"] !== name) continue;
+    if (registered.has(name)) continue;
+    violations.push({
+      rule: "command-bodies",
+      file,
+      message:
+        `no file under src/ registers a body for the tier ${String(tier)} ` +
+        `command "${name}", so it answers "unavailable" to the user`,
+    });
+  }
   return violations;
 };
 

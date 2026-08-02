@@ -31,8 +31,11 @@ import { Find } from "~/features/find/Find.ts";
 import { Hints } from "~/features/hints/Hints.ts";
 import { Insert } from "~/features/Insert.ts";
 import { Marks } from "~/features/Marks.ts";
+import { Navigation } from "~/features/Navigation.ts";
 import { Omnibar } from "~/features/omnibar/Omnibar.ts";
 import { Scroller } from "~/features/Scroller.ts";
+import { TabControl } from "~/features/TabControl.ts";
+import { UrlClipboard } from "~/features/UrlClipboard.ts";
 import { Visual } from "~/features/visual/Visual.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
@@ -137,6 +140,12 @@ const FeatureLayer = Layer.mergeAll(
   Find.layer,
   Visual.layer,
   Omnibar.layer,
+  TabControl.layer,
+  // `UrlClipboard` opens a URL that the user pasted, which is the same step
+  // that `Navigation` takes for a typed URL. It asks for that service rather
+  // than repeating the rule about what a bare word means.
+  UrlClipboard.layer.pipe(Layer.provide(Navigation.layer)),
+  Navigation.layer,
 ).pipe(Layer.provideMerge(FramesLayer));
 
 /**

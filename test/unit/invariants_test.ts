@@ -44,6 +44,19 @@ export const COMMANDS = {
 } as const;
 `;
 
+/**
+ * A feature that gives `demo` a body.
+ *
+ * The catalogue and the bodies are apart on purpose, so a clean project needs
+ * both. `gone` is tier C and needs no body.
+ */
+const CLEAN_FEATURE = `
+export const install = (commands) =>
+  commands.registerAll({
+    demo: () => undefined,
+  });
+`;
+
 const METADATA = [
   "// ==UserScript==",
   "// @name Vimium-WebKit",
@@ -86,6 +99,7 @@ const check = (
   Effect.gen(function*() {
     const root = yield* project({
       "src/domain/Command.ts": CLEAN_CATALOGUE,
+      "src/features/Demo.ts": CLEAN_FEATURE,
       ...files,
     });
     const code = overrides.code ?? CLEAN_CODE;
@@ -323,6 +337,43 @@ export const COMMANDS = {
         "command-tiers",
         "command-tiers",
       ]);
+    }));
+
+  it.effect("demands a body for every tier A and tier B command", () =>
+    Effect.gen(function*() {
+      const violations = yield* check({
+        "src/features/Demo.ts": "export const install = () => undefined;\n",
+      });
+      assert.deepEqual(rulesOf(violations), ["command-bodies"]);
+      assert.include(violations[0]?.message ?? "", '"demo"');
+    }));
+
+  it.effect("accepts a body that is registered by name", () =>
+    Effect.gen(function*() {
+      const violations = yield* check({
+        "src/features/Demo.ts":
+          'export const install = (c) => c.register("demo", run);\n',
+      });
+      assert.deepEqual(rulesOf(violations), []);
+    }));
+
+  it.effect("asks for no body for a tier C command", () =>
+    Effect.gen(function*() {
+      const violations = yield* check({
+        "src/domain/Command.ts": `
+export const COMMANDS = {
+  gone: {
+    name: "gone",
+    description: "Not possible here",
+    tier: "C",
+    group: "tabs",
+    unavailableReason: "a userscript has no tab-management API",
+  },
+} as const;
+`,
+        "src/features/Demo.ts": "export const install = () => undefined;\n",
+      });
+      assert.deepEqual(rulesOf(violations), []);
     }));
 
   it.effect("formats a violation with its file and its line", () =>
