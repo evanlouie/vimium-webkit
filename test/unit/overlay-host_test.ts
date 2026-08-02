@@ -4,11 +4,20 @@
  * These are the pure parts of `ui/Ui.ts`. A unit test runs in Node with no
  * DOM, so the guard takes a reader as an argument instead of an element. The
  * behaviour that needs a browser is in `test/e2e/overlay.spec.ts`.
+ *
+ * The reads below imitate `CSSStyleDeclaration`: a property that nobody wrote
+ * gives an empty value and an empty priority, which is exactly what
+ * `style.removeProperty` leaves behind.
  */
 
 import { assert, describe, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { HOST_STYLE, outOfDateHostProperties } from "~/ui/Ui.ts";
+import {
+  comparableHostProperties,
+  HOST_STYLE,
+  hostDeclarations,
+  outOfDateHostProperties,
+} from "~/ui/Ui.ts";
 
 /** A style that holds exactly what the overlay wrote. */
 const intact = (
@@ -18,24 +27,66 @@ const intact = (
   "important",
 ];
 
-describe("the overlay host style", () => {
-  it.effect("writes every critical property", () =>
+/** Nothing is owned by the viewport sync until that sync runs. */
+const NO_OWNED: ReadonlyMap<string, string> = new Map();
+
+/**
+ * A style whose shorthands serialise back in another form, as a browser does.
+ *
+ * `all` reads back empty as soon as a later declaration changes one of its
+ * longhands, and `margin: 0` reads back as `0px`.
+ */
+const asBrowser = (property: string): readonly [string, string] => {
+  if (property === "all") return ["", ""];
+  if (property === "margin" || property === "padding") {
+    return ["0px", "important"];
+  }
+  if (property === "border") return ["0px none currentcolor", "important"];
+  return intact(property);
+};
+
+/** The properties that this engine can compare, read from the style itself. */
+const guardedIntact = (): ReadonlySet<string> =>
+  comparableHostProperties(asBrowser);
+
+describe("the guarded set", () => {
+  it.effect("drops a shorthand that the engine gives back in another form", () =>
     Effect.sync(() => {
-      const written = HOST_STYLE.map(([property]) => property);
+      const guarded = comparableHostProperties(asBrowser);
+      for (const shorthand of ["all", "margin", "padding", "border"]) {
+        assert.isFalse(
+          guarded.has(shorthand),
+          `${shorthand} cannot be compared`,
+        );
+      }
+    }));
+
+  it.effect("drops a property that this engine does not know", () =>
+    Effect.sync(() => {
+      // An engine that refuses `clip-path` keeps nothing, so the property
+      // reads back empty. Guarding it would make the guard write for ever.
+      const guarded = comparableHostProperties((property) =>
+        property === "clip-path" ? ["", ""] : asBrowser(property)
+      );
+      assert.isFalse(guarded.has("clip-path"));
+      assert.isTrue(guarded.has("filter"));
+    }));
+
+  it.effect("guards every property that hides the overlay on its own", () =>
+    Effect.sync(() => {
+      const guarded = comparableHostProperties(asBrowser);
       for (
         const property of [
-          "all",
           "position",
           "top",
           "right",
           "bottom",
           "left",
+          "width",
+          "height",
           "pointer-events",
           "z-index",
           "display",
-          // `all` does not cover these in every engine. WebKit leaves
-          // `transform` out of the expansion, and a page rule of
-          // `transform: scale(0) !important` then collapses the overlay.
           "transform",
           "visibility",
           "opacity",
@@ -43,7 +94,7 @@ describe("the overlay host style", () => {
           "filter",
         ]
       ) {
-        assert.include(written, property);
+        assert.isTrue(guarded.has(property), `${property} is not guarded`);
       }
     }));
 
@@ -55,16 +106,24 @@ describe("the overlay host style", () => {
       const written = HOST_STYLE.map(([property]) => property);
       assert.notInclude(written, "inset");
     }));
+});
 
+describe("the overlay host style", () => {
   it.effect("finds nothing to do while the style is intact", () =>
     Effect.sync(() => {
-      assert.deepEqual(outOfDateHostProperties(intact), []);
+      assert.deepEqual(
+        outOfDateHostProperties(guardedIntact(), asBrowser, NO_OWNED),
+        [],
+      );
     }));
 
   it.effect("finds a property that the page overwrote", () =>
     Effect.sync(() => {
-      const stale = outOfDateHostProperties((property) =>
-        property === "display" ? ["none", "important"] : intact(property)
+      const stale = outOfDateHostProperties(
+        guardedIntact(),
+        (property) =>
+          property === "display" ? ["none", "important"] : asBrowser(property),
+        NO_OWNED,
       );
       assert.deepEqual(stale, ["display"]);
     }));
@@ -73,15 +132,89 @@ describe("the overlay host style", () => {
     Effect.sync(() => {
       // A declaration without the priority loses to `vimium-webkit-overlay {
       // position: static !important }` in the stylesheet of the page.
-      const stale = outOfDateHostProperties((property) =>
-        property === "position" ? ["fixed", ""] : intact(property)
+      const stale = outOfDateHostProperties(
+        guardedIntact(),
+        (property) =>
+          property === "position" ? ["fixed", ""] : asBrowser(property),
+        NO_OWNED,
       );
       assert.deepEqual(stale, ["position"]);
     }));
 
+  it.effect("finds each property that page script removed", () =>
+    Effect.sync(() => {
+      // One line of page script is enough:
+      // `host.style.removeProperty("clip-path")`. The page rule then wins for
+      // ever, and a guard that watched ten properties only reported nothing.
+      for (
+        const property of [
+          "clip-path",
+          "filter",
+          "transform",
+          "width",
+          "height",
+        ]
+      ) {
+        const stale = outOfDateHostProperties(
+          guardedIntact(),
+          (name) => name === property ? ["", ""] : asBrowser(name),
+          NO_OWNED,
+        );
+        assert.deepEqual(stale, [property]);
+      }
+    }));
+
   it.effect("finds every property when the style attribute is gone", () =>
     Effect.sync(() => {
-      const stale = outOfDateHostProperties(() => ["", ""]);
+      const stale = outOfDateHostProperties(
+        guardedIntact(),
+        () => ["", ""],
+        NO_OWNED,
+      );
       assert.isAbove(stale.length, 4);
+    }));
+});
+
+describe("the properties that the viewport sync owns", () => {
+  const OWNED: ReadonlyMap<string, string> = new Map([
+    ["transform", "translate(0px, 84px)"],
+    ["width", "390px"],
+    ["height", "580px"],
+  ]);
+
+  /** The style that the viewport sync left behind. */
+  const synced = (property: string): readonly [string, string] => {
+    const owned = OWNED.get(property);
+    return owned === undefined ? asBrowser(property) : [owned, "important"];
+  };
+
+  it.effect("accepts the value that the sync wrote", () =>
+    Effect.sync(() => {
+      assert.deepEqual(
+        outOfDateHostProperties(guardedIntact(), synced, OWNED),
+        [],
+      );
+    }));
+
+  it.effect("repairs with the viewport value, and not with the constant", () =>
+    Effect.sync(() => {
+      // A repair that wrote `transform: none` would put the overlay out of
+      // line with the visual viewport under the toolbar of iOS, and during a
+      // pinch zoom, until the next resize or scroll event.
+      const written = new Map(hostDeclarations(OWNED));
+      assert.strictEqual(written.get("transform"), "translate(0px, 84px)");
+      assert.strictEqual(written.get("width"), "390px");
+      assert.strictEqual(written.get("height"), "580px");
+      assert.strictEqual(written.get("display"), "block");
+    }));
+
+  it.effect("still finds the sync value when the page removed it", () =>
+    Effect.sync(() => {
+      const stale = outOfDateHostProperties(
+        guardedIntact(),
+        (property) => property === "transform" ? ["", ""] : synced(property),
+        OWNED,
+      );
+      assert.deepEqual(stale, ["transform"]);
     }));
 });

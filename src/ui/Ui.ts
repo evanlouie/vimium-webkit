@@ -20,11 +20,15 @@
  * and a mutation observer puts the host back when the page takes it away. See
  * `HOST_STYLE` and the removal guard below.
  *
- * The overlay is hidden from assistive technology while nothing is active, and
- * `expose` opens one layer at a time. A hint marker decorates a link that the
- * page already offers, so a screen reader must not read it twice; a dialog, a
- * prompt and the omnibar are true controls, and a screen reader must reach
- * them.
+ * The host cannot escape its own ancestors. Read the limit at
+ * `outOfDateHostProperties`, and read `SECURITY.md`.
+ *
+ * Each layer of the overlay is hidden from assistive technology while it is
+ * inactive, and `expose` opens one layer at a time. A hint marker decorates a
+ * link that the page already offers, so a screen reader must not read it
+ * twice; a dialog, a prompt and the omnibar are true controls, and a screen
+ * reader must reach them. The HUD layer holds the host open for the whole
+ * session, because its one line is a live region.
  *
  * There is no iframe here, on purpose. Upstream Vimium puts its HUD, its
  * omnibar and its help dialog in a `web_accessible_resources` iframe. A
@@ -141,14 +145,22 @@ export const HOST_STYLE: ReadonlyArray<readonly [string, string]> = [
   ["right", "0px"],
   ["bottom", "0px"],
   ["left", "0px"],
+  // The insets alone do not hold the size. A page rule of `width: 0
+  // !important` wins over them, because a width beats the opposite inset. The
+  // visual-viewport sync writes a pixel size over these two values, and it
+  // runs only where `window.visualViewport` exists.
+  ["width", "100%"],
+  ["height", "100%"],
   ["pointer-events", "none"],
   ["z-index", "2147483647"],
   ["display", "block"],
-  // `all` does not cover every property in every engine. WebKit leaves
-  // `transform` out of the expansion, so a page rule of `transform: scale(0)
-  // !important` collapsed the whole overlay. The rest are written for the same
-  // reason: each one alone can make the interface invisible, and none of them
-  // may depend on what `all` happens to include.
+  // `all: initial !important` already covers each property below, and a
+  // measurement in WebKit confirms it. The true defect was the absent
+  // important priority: `master` wrote each declaration with no priority, so
+  // any important page rule won. Each property is still written one by one,
+  // for two reasons. It is a defence against an engine whose `all` expansion
+  // is incomplete, and it gives the guard below a longhand that it can
+  // compare, because a shorthand does not serialise back.
   ["transform", "none"],
   ["visibility", "visible"],
   ["opacity", "1"],
@@ -160,46 +172,78 @@ export const HOST_STYLE: ReadonlyArray<readonly [string, string]> = [
 ];
 
 /**
- * The declarations that the guard compares against the live style.
+ * What the host style must hold now.
  *
- * Each one is a longhand with a stable serialisation, so a comparison gives
- * the same answer in every engine. Three kinds of declaration are written but
- * never compared:
+ * `owned` carries the properties that the visual-viewport sync writes:
+ * `transform`, `width` and `height`. The guard compares against these values,
+ * and the repair writes them, so a repair cannot undo the last sync.
+ */
+export const hostDeclarations = (
+  owned: ReadonlyMap<string, string>,
+): ReadonlyArray<readonly [string, string]> =>
+  HOST_STYLE.map(([property, value]) =>
+    [property, owned.get(property) ?? value] as const
+  );
+
+/**
+ * The properties that the engine gave back exactly as we wrote them.
+ *
+ * The guard compares a value, so it can only watch a property whose
+ * serialisation is stable. Two kinds of declaration are not:
  *
  * - A shorthand such as `all`, `margin` or `border`. An engine gives back an
- *   empty string for a shorthand whose longhands disagree, so the comparison
- *   would always fail and the guard would write for ever.
- * - `transform`, `width` and `height`, because the visual-viewport sync owns
- *   them and writes a value of its own.
- * - A property that an older engine may not know at all, for the same reason
- *   as the first.
+ *   empty string, or a different form, so a comparison would always fail and
+ *   the guard would write for ever.
+ * - A property that this engine does not know. It keeps nothing, so it reads
+ *   back empty.
+ *
+ * Call this once, on the host, in the same task that wrote the style. The
+ * answer is therefore derived from `HOST_STYLE` itself. A second list written
+ * by hand is what let `transform`, `clip-path` and `filter` go unwatched.
  */
-const GUARDED_HOST_STYLE: ReadonlyArray<readonly [string, string]> = HOST_STYLE
-  .filter(([property]) =>
-    property === "position" || property === "top" || property === "right" ||
-    property === "bottom" || property === "left" ||
-    property === "pointer-events" || property === "z-index" ||
-    property === "display" || property === "visibility" ||
-    property === "opacity"
+export const comparableHostProperties = (
+  read: (property: string) => readonly [value: string, priority: string],
+): ReadonlySet<string> =>
+  new Set(
+    HOST_STYLE
+      .filter(([property, value]) => {
+        const [current, priority] = read(property);
+        return current === value && priority === "important";
+      })
+      .map(([property]) => property),
   );
 
 /**
  * The host properties that no longer hold the value that we wrote.
  *
- * Page script can write over the whole `style` attribute of the host, and page
- * CSS can win a property that we wrote without the important priority. The
- * guard therefore compares first and writes only when something changed. A
- * write for each check would make a page that watches the attribute fight us
- * in a loop.
+ * Page script owns the host, because the host is in the light DOM. It can
+ * write over the whole `style` attribute, and one call of
+ * `style.removeProperty("clip-path")` is enough to let an important page rule
+ * win for ever. A property with no important priority is therefore stale as
+ * well, because a removed declaration reads back with an empty priority.
  *
- * `read` gives the current value and the current priority of one property. It
- * is a parameter, so this function stays pure and a test needs no DOM.
+ * The guard compares first and writes only when something changed. A write for
+ * each check would make a page that watches the attribute fight us in a loop.
+ *
+ * **Limit.** This defends the host, and the host only. A page that hides an
+ * *ancestor* of the host still wins, because a descendant cannot escape
+ * `html { opacity: 0 }`, `html { transform: scale(0) }` or
+ * `html { content-visibility: hidden }`. Such a page hides itself as well, so
+ * the user sees a blank page and not a hidden interface. `SECURITY.md` names
+ * this limit.
+ *
+ * `read` gives the current value and the current priority of one property, and
+ * `guarded` names the properties that this engine can compare. Both are
+ * parameters, so this function stays pure and a test needs no DOM.
  */
 export const outOfDateHostProperties = (
+  guarded: ReadonlySet<string>,
   read: (property: string) => readonly [value: string, priority: string],
+  owned: ReadonlyMap<string, string>,
 ): readonly string[] =>
-  GUARDED_HOST_STYLE
+  hostDeclarations(owned)
     .filter(([property, value]) => {
+      if (!guarded.has(property)) return false;
       const [current, priority] = read(property);
       return current !== value || priority !== "important";
     })
@@ -277,10 +321,11 @@ export class Ui extends Context.Service<Ui, {
   /**
    * Show one layer to assistive technology while the scope is open.
    *
-   * The host is hidden from the accessibility tree while every layer is
-   * inactive, because an empty positioning box helps nobody. A layer that
-   * holds a dialog, a prompt or the omnibar must ask for attention with this,
-   * and the release step hides it again.
+   * Every layer starts hidden from the accessibility tree, because a hint
+   * marker and a find highlight decorate what the page already offers. A layer
+   * that holds a dialog, a prompt or the omnibar must ask for attention with
+   * this, and the release step hides it again. The host itself stays in the
+   * tree while any layer holds it, and the HUD holds it for the whole session.
    */
   readonly expose: (
     layer: HTMLElement,
@@ -326,8 +371,9 @@ export class Ui extends Context.Service<Ui, {
               // priority. The priority is what stops page CSS from hiding us.
               element.style.setProperty(property, value, "important");
             }
-            // Assistive technology must not see an empty positioning box. A
-            // layer asks for attention with `expose` when it draws something.
+            // The HUD layer opens the host with `expose` as soon as it is
+            // built. Until then the overlay is an empty positioning box, and
+            // assistive technology must not see it.
             element.setAttribute("aria-hidden", "true");
             return element;
           }),
@@ -335,6 +381,29 @@ export class Ui extends Context.Service<Ui, {
             Effect.sync(() => {
               element.remove();
             }),
+        );
+
+        /** How the guard reads one property of the host. */
+        const readHostProperty = (
+          property: string,
+        ): readonly [value: string, priority: string] => [
+          host.style.getPropertyValue(property),
+          host.style.getPropertyPriority(property),
+        ];
+
+        // Which properties this engine can compare, asked once and asked of
+        // the engine itself. Page script cannot have run between the write
+        // above and this read, because both are in the same task.
+        const guardedProperties = yield* dom.probeOr(
+          () => comparableHostProperties(readHostProperty),
+          new Set<string>(),
+        );
+
+        // The values that the visual-viewport sync last wrote. The guard
+        // compares against these, and the repair writes them again, so a
+        // repair cannot put the overlay out of line with the visual viewport.
+        const viewportOwned = yield* Ref.make<ReadonlyMap<string, string>>(
+          new Map(),
         );
 
         // A realm that refuses a shadow root cannot hold the overlay at all.
@@ -506,13 +575,14 @@ export class Ui extends Context.Service<Ui, {
          * a page that watches the `style` attribute from fighting us in a
          * loop: an intact style produces no write at all.
          */
-        const restoreHostStyle = (): void => {
-          const stale = outOfDateHostProperties((property) => [
-            host.style.getPropertyValue(property),
-            host.style.getPropertyPriority(property),
-          ]);
+        const restoreHostStyle = (owned: ReadonlyMap<string, string>): void => {
+          const stale = outOfDateHostProperties(
+            guardedProperties,
+            readHostProperty,
+            owned,
+          );
           if (stale.length === 0) return;
-          for (const [property, value] of HOST_STYLE) {
+          for (const [property, value] of hostDeclarations(owned)) {
             host.style.setProperty(property, value, "important");
           }
         };
@@ -528,17 +598,20 @@ export class Ui extends Context.Service<Ui, {
          * than the failure that they prevent: an interface that keeps the
          * keyboard while the user sees nothing.
          */
-        const ensureAttached = Effect.asVoid(dom.probeOr(() => {
-          restoreHostStyle();
-          if (host.isConnected) return false;
-          // At `document-start` there may be no `documentElement` yet. Doing
-          // nothing is correct, because the next `layer` call tries again.
-          const parent: Element | null = doc.documentElement ?? doc.body ??
-            null;
-          if (parent === null) return false;
-          parent.appendChild(host);
-          return true;
-        }, false));
+        const ensureAttached: Effect.Effect<void> = Effect.gen(function*() {
+          const owned = yield* Ref.get(viewportOwned);
+          yield* dom.probeOr(() => {
+            restoreHostStyle(owned);
+            if (host.isConnected) return false;
+            // At `document-start` there may be no `documentElement` yet. Doing
+            // nothing is correct, because the next `layer` call tries again.
+            const parent: Element | null = doc.documentElement ?? doc.body ??
+              null;
+            if (parent === null) return false;
+            parent.appendChild(host);
+            return true;
+          }, false);
+        });
 
         // Attached once here, so that the overlay exists before any feature
         // asks for a layer.
@@ -624,7 +697,9 @@ export class Ui extends Context.Service<Ui, {
          *
          * The host loses `aria-hidden` as well, because the attribute hides a
          * whole subtree. A dialog under a hidden host is a dialog that a
-         * screen reader cannot reach.
+         * screen reader cannot reach. The HUD holds the host open for the
+         * whole session, so in practice the host keeps the attribute off, and
+         * each inactive layer stays hidden on its own.
          */
         const applyHolds = Effect.gen(function*() {
           const current = yield* Ref.get(holds);
@@ -763,27 +838,46 @@ export class Ui extends Context.Service<Ui, {
          * pinch zoom.
          */
         const syncViewport = (visual: VisualViewport): Effect.Effect<void> =>
-          Effect.asVoid(dom.probeOr(() => {
-            const { offsetLeft, offsetTop, scale } = visual;
-            // The important priority again, and for two reasons. Page CSS must
-            // not move the overlay, and `all: initial !important` above wins
-            // over a normal declaration in the same block whatever the order.
-            //
-            // `none`, and not a removal: a removal would leave the page rule
-            // as the only declaration for `transform`, and a page that writes
-            // `transform: scale(0) !important` would then win.
-            host.style.setProperty(
-              "transform",
-              offsetLeft === 0 && offsetTop === 0
-                ? "none"
-                : `translate(${offsetLeft}px, ${offsetTop}px)`,
-              "important",
-            );
-            host.style.setProperty("width", `${visual.width}px`, "important");
-            host.style.setProperty("height", `${visual.height}px`, "important");
-            host.style.setProperty("--vw-scale", String(scale));
-            return true;
-          }, false));
+          Effect.gen(function*() {
+            const read = yield* dom.probeOr<
+              Option.Option<ReadonlyMap<string, string>>
+            >(() => {
+              const { offsetLeft, offsetTop } = visual;
+              return Option.some(
+                new Map<string, string>([
+                  // `none`, and not a removal: a removal would leave the page
+                  // rule as the only declaration for `transform`, and a page
+                  // that writes `transform: scale(0) !important` would then
+                  // win.
+                  [
+                    "transform",
+                    offsetLeft === 0 && offsetTop === 0
+                      ? "none"
+                      : `translate(${offsetLeft}px, ${offsetTop}px)`,
+                  ],
+                  ["width", `${visual.width}px`],
+                  ["height", `${visual.height}px`],
+                ]),
+              );
+            }, Option.none<ReadonlyMap<string, string>>());
+            if (Option.isNone(read)) return;
+            const owned = read.value;
+            // The guard reads this, so it must agree with the style before the
+            // next check. A repair then writes the viewport values again
+            // instead of the constant `none` of `HOST_STYLE`.
+            yield* Ref.set(viewportOwned, owned);
+            yield* dom.probeOr(() => {
+              // The important priority again, and for two reasons. Page CSS
+              // must not move the overlay, and `all: initial !important` above
+              // wins over a normal declaration in the same block whatever the
+              // order.
+              for (const [property, value] of owned) {
+                host.style.setProperty(property, value, "important");
+              }
+              host.style.setProperty("--vw-scale", String(visual.scale));
+              return true;
+            }, false);
+          });
 
         if (Option.isSome(visualViewport)) {
           const visual = visualViewport.value;
