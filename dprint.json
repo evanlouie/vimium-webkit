@@ -22,6 +22,7 @@
   },
   "excludes": [
     "**/node_modules",
+    "repos/**",
     "**/dist",
     "**/test-results",
     "**/playwright-report",
