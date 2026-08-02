@@ -18,6 +18,10 @@
  * id of the handshake attempt and the id of the frame. A page can read those
  * three values, and it still cannot produce the HMAC.
  *
+ * The service holds the credential in a closure, and it gives no method that
+ * returns it. A caller can ask for a proof, for a check of a proof and for the
+ * cipher of one link, and each of those builds its own payload.
+ *
  * ## The cipher of one link
  *
  * A page reads every `message` event that a window of the page receives, so it
@@ -33,6 +37,11 @@
  * gives no way to sign a text of the caller's choice. A page that makes a child
  * answer a false challenge therefore learns one proof, and never a key.
  *
+ * One HMAC-SHA256 over a labelled text is the whole key schedule. That is
+ * HKDF-Expand with one block, and the extract step is not necessary here: the
+ * credential is 256 uniform bits from `crypto.getRandomValues`. Read it as a
+ * pseudo-random function with domain separation, and not as an ad-hoc hash.
+ *
  * ## Where the credential may live
  *
  * The credential goes into the value store of the userscript manager, and
@@ -41,6 +50,17 @@
  * then fails with `unavailable`, and the frames of the page stay apart. That is
  * the safe result, because a page that can read the credential can join the
  * session and drive a click inside a document of another origin.
+ *
+ * A manager with no value store therefore has no cross-frame session, and the
+ * top frame does not give a credential of its own to a child. There is no safe
+ * route for that gift. A userscript shares its realm with the page, so the page
+ * reads every `message` event of a window and it holds a copy of every port
+ * that a `JOIN` transfers. A credential that travelled on either one would be
+ * public. A key agreement over the port does not help either: the page is not a
+ * silent listener. It runs in the realm of the top frame, it can answer as the
+ * other end, and it can put a frame of its own in the tree. Admission needs one
+ * value that the page cannot read, and only the manager has such a store.
+ * `ARCHITECTURE.md` section 5.1 gives the same reason at more length.
  *
  * `crypto.subtle` is absent in a context that is not secure, which means a
  * plain `http:` page. There is no route around that, and there is no
@@ -193,15 +213,6 @@ interface CachedKey {
 }
 
 export class FrameAuth extends Context.Service<FrameAuth, {
-  /**
-   * The shared credential.
-   *
-   * The top frame creates one when storage holds none. A child frame reads
-   * storage again on each call, because the top frame may have written the
-   * value after this frame started.
-   */
-  readonly secret: Effect.Effect<string, FrameAuthError>;
-
   /** The proof that a `JOIN` must carry. */
   readonly joinProof: (
     handshake: FrameHandshake,
@@ -281,11 +292,17 @@ export class FrameAuth extends Context.Service<FrameAuth, {
             }),
         });
 
+        /**
+         * The shared credential, as storage holds it.
+         *
+         * It is private to this module. The top frame creates one when storage
+         * holds none. Every call reads storage again, and does not trust the
+         * value in memory: the top frame can write the credential after a child
+         * frame has started.
+         */
         const secret = Effect.fn("FrameAuth.secret")(function*() {
           yield* privateStore;
 
-          // Read storage again, and do not trust the value in memory. The top
-          // frame can write the credential after a child frame has started.
           const stored = yield* storage.session.hydrate;
           if (stored.frameSecret.length > 0) return stored.frameSecret;
 
@@ -297,18 +314,36 @@ export class FrameAuth extends Context.Service<FrameAuth, {
           }
 
           const created = yield* createSecret;
+
+          // Read storage once more, immediately before the write. The top frame
+          // of another tab shares this store, and it can create the credential
+          // while this frame collects its random bytes. A credential that is
+          // already in use must not be replaced: the two ends of a live link
+          // derived their key from it, and a new value would break them.
+          const again = yield* storage.session.hydrate;
+          if (again.frameSecret.length > 0) return again.frameSecret;
+
           yield* Effect.mapError(
-            storage.session.update((current) => ({
-              ...current,
-              frameSecret: created,
-            })),
+            storage.session.update((current) =>
+              // The same test again, against the value that the group holds.
+              // Another tab can reach this group through the change stream of
+              // the manager between the read and the write.
+              current.frameSecret.length > 0 ? current : {
+                ...current,
+                frameSecret: created,
+              }
+            ),
             (cause) =>
               new FrameAuthError({
                 reason: "unavailable",
                 detail: `could not store the credential: ${cause.detail}`,
               }),
           );
-          return created;
+
+          // Keep the value that storage holds, and not the value that this
+          // frame made. The two differ when another tab wrote last.
+          const settled = yield* storage.session.hydrate;
+          return settled.frameSecret.length > 0 ? settled.frameSecret : created;
         });
 
         const keyFor = Effect.fn("FrameAuth.key")(function*(value: string) {
@@ -517,7 +552,6 @@ export class FrameAuth extends Context.Service<FrameAuth, {
         }
 
         return FrameAuth.of({
-          secret: secret(),
           joinProof,
           verifyJoin,
           cipher,

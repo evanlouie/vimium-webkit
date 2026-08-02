@@ -8,9 +8,13 @@
  *    when it verifies the first join. A child that starts on a clean
  *    installation would otherwise find nothing to sign with.
  * 2. A store that the page can read, or a store that one frame cannot share
- *    with another, gives no credential at all.
+ *    with another, gives no credential at all. The service also gives no way
+ *    to read the credential, so no caller can carry it out of the module.
  * 3. A message on a port is sealed. A holder of a copy of the port reads
  *    nothing, forges nothing, and cannot send a message again or send it back.
+ * 4. A frame keeps the credential that storage holds. Two top frames of one
+ *    site can create one at the same moment, and the frame that wrote last
+ *    would otherwise break the links of the other.
  *
  * Every test builds its own store. Nothing here touches a global, and the two
  * frames of a test share one store, which is what the value store of a
@@ -19,6 +23,7 @@
 
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Layer, Option, Result, Stream } from "effect";
+import { sessionGroup } from "~/domain/Persisted.ts";
 import { FrameAuth, type FrameHandshake } from "~/frames/Auth.ts";
 import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
 import { type FrameId, Realm } from "~/platform/Realm.ts";
@@ -113,6 +118,56 @@ const storedSecret = (store: Store): string => {
   return typeof data?.frameSecret === "string" ? data.frameSecret : "";
 };
 
+/** The raw value of the session group, as the store holds it. */
+const sessionValue = (frameSecret: string): string =>
+  JSON.stringify({
+    schemaVersion: sessionGroup.schemaVersion,
+    data: { ...sessionGroup.defaults(), frameSecret },
+  });
+
+/**
+ * A store in which another tab writes the credential first.
+ *
+ * The first read of the session key gives nothing, and the value of the other
+ * tab lands in the map at that moment. That is the race that two top frames of
+ * one site run: both read an empty store, and both create a credential. A
+ * frame must keep the credential that storage holds, because a live link of
+ * the other tab already derived its key from it.
+ */
+const makeRacingStore = (rival: string): Store => {
+  const map = new Map<string, string>();
+  let firstRead = true;
+  return {
+    map,
+    service: KeyValueStore.of({
+      kind: "gm-sync",
+      durable: true,
+      watchable: false,
+      managerPrivate: true,
+      get: (key) =>
+        Effect.sync(() => {
+          if (key === SESSION_KEY && firstRead) {
+            firstRead = false;
+            // The other tab writes here: after this read, and before our own
+            // write.
+            map.set(key, sessionValue(rival));
+            return Option.none<string>();
+          }
+          return Option.fromNullishOr(map.get(key) ?? null);
+        }),
+      set: (key, value) =>
+        Effect.sync(() => {
+          map.set(key, value);
+        }),
+      remove: (key) =>
+        Effect.sync(() => {
+          map.delete(key);
+        }),
+      changes: () => Stream.empty,
+    }),
+  };
+};
+
 describe("FrameAuth", () => {
   it.effect("creates the credential when the top layer is built", () =>
     Effect.gen(function*() {
@@ -179,7 +234,14 @@ describe("FrameAuth", () => {
 
       yield* Effect.gen(function*() {
         const top = yield* FrameAuth;
-        const outcome = yield* Effect.result(top.secret);
+        // Every route to the credential must fail. The service also gives no
+        // way to read the credential itself: a caller can ask for a proof, for
+        // a check of a proof and for a cipher, and for nothing else.
+        assert.isFalse(
+          Object.hasOwn(top, "secret"),
+          "the service publishes the credential",
+        );
+        const outcome = yield* Effect.result(top.joinProof(HANDSHAKE));
         assert.isTrue(Result.isFailure(outcome));
         if (Result.isSuccess(outcome)) return;
         assert.strictEqual(outcome.failure.reason, "unavailable");
@@ -194,6 +256,31 @@ describe("FrameAuth", () => {
         const outcome = yield* Effect.result(child.joinProof(HANDSHAKE));
         assert.isTrue(Result.isFailure(outcome));
       }).pipe(Effect.provide(frameLayer(store, false, CHILD_FRAME)));
+    }));
+
+  it.effect("keeps the credential that another frame wrote first", () =>
+    Effect.gen(function*() {
+      const rival = "cml2YWwtY3JlZGVudGlhbA";
+      const store = makeRacingStore(rival);
+
+      yield* Effect.gen(function*() {
+        yield* FrameAuth;
+      }).pipe(Effect.provide(frameLayer(store, true, TOP_FRAME)));
+
+      // The credential of the other frame is still there. To replace it would
+      // break every link that already derived a key from it.
+      assert.strictEqual(storedSecret(store), rival);
+
+      // The frames of this tab use the credential that storage holds.
+      yield* Effect.gen(function*() {
+        const top = yield* FrameAuth;
+
+        yield* Effect.gen(function*() {
+          const child = yield* FrameAuth;
+          const proof = yield* child.joinProof(HANDSHAKE);
+          assert.isTrue(yield* top.verifyJoin(HANDSHAKE, proof));
+        }).pipe(Effect.provide(frameLayer(store, false, CHILD_FRAME)));
+      }).pipe(Effect.provide(frameLayer(store, true, TOP_FRAME)));
     }));
 
   it.effect("seals a message that only the other end of the link opens", () =>
