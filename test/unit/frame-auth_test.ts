@@ -1,9 +1,14 @@
 /**
  * The credential of a frame.
  *
- * The top frame creates the credential when its layer is built, and not when it
- * verifies the first join. A child that starts on a clean installation would
- * otherwise find nothing to sign with, and it would never join.
+ * Two properties are checked here, and each one is a defect that a review
+ * found:
+ *
+ * 1. The top frame creates the credential when its layer is built, and not
+ *    when it verifies the first join. A child that starts on a clean
+ *    installation would otherwise find nothing to sign with.
+ * 2. A store that the page can read, or a store that one frame cannot share
+ *    with another, gives no credential at all.
  *
  * Every test builds its own store. Nothing here touches a global, and the two
  * frames of a test share one store, which is what the value store of a
@@ -35,15 +40,21 @@ interface Store {
   readonly map: Map<string, string>;
 }
 
-/** One store for every frame of the page, as a manager gives it. */
-const makeStore = (): Store => {
+/**
+ * One store for every frame of the page.
+ *
+ * `managerPrivate` is the property that decides everything here: the value
+ * store of the manager has it, and no other store does.
+ */
+const makeStore = (managerPrivate: boolean): Store => {
   const map = new Map<string, string>();
   return {
     map,
     service: KeyValueStore.of({
-      kind: "gm-sync",
-      durable: true,
+      kind: managerPrivate ? "gm-sync" : "memory",
+      durable: managerPrivate,
       watchable: false,
+      managerPrivate,
       get: (key) =>
         Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
       set: (key, value) =>
@@ -104,7 +115,7 @@ const storedSecret = (store: Store): string => {
 describe("FrameAuth", () => {
   it.effect("creates the credential when the top layer is built", () =>
     Effect.gen(function*() {
-      const store = makeStore();
+      const store = makeStore(true);
 
       yield* Effect.gen(function*() {
         // Nothing is asked of the service. The layer alone must be enough,
@@ -118,7 +129,7 @@ describe("FrameAuth", () => {
 
   it.effect("admits a child that starts with an empty store", () =>
     Effect.gen(function*() {
-      const store = makeStore();
+      const store = makeStore(true);
 
       yield* Effect.gen(function*() {
         const top = yield* FrameAuth;
@@ -147,7 +158,7 @@ describe("FrameAuth", () => {
 
   it.effect("refuses a child that has no credential", () =>
     Effect.gen(function*() {
-      const store = makeStore();
+      const store = makeStore(true);
 
       yield* Effect.gen(function*() {
         const child = yield* FrameAuth;
@@ -166,5 +177,36 @@ describe("FrameAuth", () => {
       }).pipe(Effect.provide(frameLayer(store, false, CHILD_FRAME)));
 
       assert.strictEqual(storedSecret(store), "");
+    }));
+
+  it.effect("keeps no credential in a store that the page can read", () =>
+    Effect.gen(function*() {
+      const store = makeStore(false);
+
+      yield* Effect.gen(function*() {
+        const top = yield* FrameAuth;
+        const outcome = yield* Effect.result(top.secret);
+        assert.isTrue(Result.isFailure(outcome));
+        if (Result.isSuccess(outcome)) return;
+        assert.strictEqual(outcome.failure.reason, "unavailable");
+      }).pipe(Effect.provide(frameLayer(store, true, TOP_FRAME)));
+
+      // Nothing was written, so a same-origin child of a hostile page has
+      // nothing to read and cannot calculate a proof.
+      assert.strictEqual(storedSecret(store), "");
+
+      yield* Effect.gen(function*() {
+        const child = yield* FrameAuth;
+        const outcome = yield* Effect.result(
+          child.sign(
+            joinProofPayload(
+              HANDSHAKE.token,
+              HANDSHAKE.helloId,
+              HANDSHAKE.frameId,
+            ),
+          ),
+        );
+        assert.isTrue(Result.isFailure(outcome));
+      }).pipe(Effect.provide(frameLayer(store, false, CHILD_FRAME)));
     }));
 });
