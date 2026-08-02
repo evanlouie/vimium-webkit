@@ -329,6 +329,11 @@ const opposite = (direction: SealDirection): SealDirection =>
  * the counter, and it is also what keeps the key path synchronous: a hint
  * activation and a relayed keystroke leave from inside a `keydown` listener,
  * and Web Crypto is asynchronous.
+ *
+ * A caller therefore learns nothing at the moment of the send. A port that is
+ * closed, a seal that fails and a link that reached its counter ceiling all
+ * look the same: the message goes, and no answer comes back. The deadline of
+ * `request` is the only failure signal that a caller now gets.
  */
 export interface Link {
   readonly send: (message: FrameWire | WelcomeMessage) => Effect.Effect<void>;
@@ -401,10 +406,10 @@ export interface PortHost {
  * never opens. A message of another link, or one that a holder of the port kept
  * and sent again, does not open either.
  *
- * Two fibers and two queues, and no lock. One fiber seals what the outbox
- * holds, and one fiber opens what the mailbox holds. Each queue keeps its
- * order, so the counters and the wire always agree, and neither the caller nor
- * the listener ever waits for Web Crypto.
+ * The link uses two fibers and two queues. It uses no lock. One fiber seals
+ * what the outbox holds, and one fiber opens what the mailbox holds. Each queue
+ * keeps its order, so the counters and the wire always agree, and neither the
+ * caller nor the listener ever waits for Web Crypto.
  *
  * The port, its listener and the two fibers belong to the enclosing scope. To
  * close that scope is to close the link.
@@ -431,6 +436,10 @@ export const makeSealedLink = Effect.fn("FrameBus.link")(function*(
         nextSeq,
         (current) => [current, current + 1],
       );
+      // The link goes quiet here, and it stays quiet. It is not closed: the
+      // frame keeps its record and its port, and every later request of a
+      // caller fails at its deadline. The state is safe, because no
+      // initialisation vector repeats.
       if (seq > MAX_SEAL_SEQUENCE) {
         yield* Effect.logDebug("this link has sent as many messages as it may");
         return;
@@ -1334,14 +1343,12 @@ export class FrameBus extends Context.Service<FrameBus, {
       if (realm.isTop) {
         // The coordinator owns the session nonce. It never travels except in a
         // `WELCOME`, which is the first sealed message of a link. A page that
-        // holds a copy of the port cannot open it.
+        // holds a copy of the port cannot open it. The credential of the
+        // session already exists here: `FrameAuth` creates or loads it when its
+        // layer is built, which is before this layer, so the first child that
+        // answers a challenge finds a frame that can verify its proof.
         const created = yield* randomId;
         yield* Ref.set(nonceRef, created);
-
-        // The credential of the session already exists here. `FrameAuth`
-        // creates or loads it when its layer is built, which is before this
-        // layer, so the first child that answers a challenge finds a frame
-        // that can verify its proof.
 
         // Registration is accepted at any time and for ever. `document-start`
         // is not reliable on WebKit, a page inserts frames after load, and a
@@ -1366,9 +1373,12 @@ export class FrameBus extends Context.Service<FrameBus, {
           // would leave the restored page outside the session.
           //
           // The message is put in the outbox here, and the fiber of the link
-          // seals it. The document may go before that happens. This message was
-          // always best effort, which is why the coordinator sweeps the frames
-          // tree as well.
+          // seals it. The document usually goes before that happens, so treat
+          // `GOODBYE` as a message that does not arrive. The record of this
+          // frame then lives in the coordinator until the sweep sees the window
+          // leave the frames tree, or until the same window joins again. A
+          // frame that navigates in place keeps its window, so its record
+          // survives until the new document joins.
           event.persisted
             ? Effect.void
             : Effect.ignore(send(toTop, { kind: "GOODBYE" })));
