@@ -14,6 +14,18 @@
  * - **Detection.** Page script cannot walk into a closed root, restyle it, or
  *   remove it with a selector.
  *
+ * The host itself is still a node with a known name in the light DOM. Page CSS
+ * can therefore name it, and page script can remove it. Two measures answer
+ * that: every inline declaration on the host carries the important priority,
+ * and a mutation observer puts the host back when the page takes it away. See
+ * `HOST_STYLE` and the removal guard below.
+ *
+ * The overlay is hidden from assistive technology while nothing is active, and
+ * `expose` opens one layer at a time. A hint marker decorates a link that the
+ * page already offers, so a screen reader must not read it twice; a dialog, a
+ * prompt and the omnibar are true controls, and a screen reader must reach
+ * them.
+ *
  * There is no iframe here, on purpose. Upstream Vimium puts its HUD, its
  * omnibar and its help dialog in a `web_accessible_resources` iframe. A
  * userscript has no such origin, and `frame-src` would block a `blob:` frame.
@@ -110,18 +122,127 @@ export const acceptPointerEvents = (
  * a violation. CSP does not police CSSOM. Writing the same properties through
  * `element.style` is the only way to keep `all: initial`, the stacking context
  * and the visual-viewport transform on exactly the sites that need them most.
+ *
+ * Every declaration carries the important priority. The host has a known name
+ * in the light DOM, so a page can address it with `vimium-webkit-overlay {
+ * display: none !important }`. An important inline declaration beats an
+ * important rule of the page, and `all: initial` extends that protection to
+ * `visibility`, `opacity`, `transform` and every other property that could
+ * hide us.
+ *
+ * The list holds longhands, and not the `inset` shorthand, because the guard
+ * below compares what it wrote. A shorthand does not serialise back when a
+ * later declaration changes one of its longhands.
  */
-const HOST_STYLE: ReadonlyArray<readonly [string, string]> = [
+export const HOST_STYLE: ReadonlyArray<readonly [string, string]> = [
   ["all", "initial"],
   ["position", "fixed"],
-  ["inset", "0"],
+  ["top", "0px"],
+  ["right", "0px"],
+  ["bottom", "0px"],
+  ["left", "0px"],
   ["pointer-events", "none"],
   ["z-index", "2147483647"],
   ["display", "block"],
+  // `all` does not cover every property in every engine. WebKit leaves
+  // `transform` out of the expansion, so a page rule of `transform: scale(0)
+  // !important` collapsed the whole overlay. The rest are written for the same
+  // reason: each one alone can make the interface invisible, and none of them
+  // may depend on what `all` happens to include.
+  ["transform", "none"],
+  ["visibility", "visible"],
+  ["opacity", "1"],
+  ["clip-path", "none"],
+  ["filter", "none"],
   ["margin", "0"],
   ["padding", "0"],
   ["border", "0"],
 ];
+
+/**
+ * The declarations that the guard compares against the live style.
+ *
+ * Each one is a longhand with a stable serialisation, so a comparison gives
+ * the same answer in every engine. Three kinds of declaration are written but
+ * never compared:
+ *
+ * - A shorthand such as `all`, `margin` or `border`. An engine gives back an
+ *   empty string for a shorthand whose longhands disagree, so the comparison
+ *   would always fail and the guard would write for ever.
+ * - `transform`, `width` and `height`, because the visual-viewport sync owns
+ *   them and writes a value of its own.
+ * - A property that an older engine may not know at all, for the same reason
+ *   as the first.
+ */
+const GUARDED_HOST_STYLE: ReadonlyArray<readonly [string, string]> = HOST_STYLE
+  .filter(([property]) =>
+    property === "position" || property === "top" || property === "right" ||
+    property === "bottom" || property === "left" ||
+    property === "pointer-events" || property === "z-index" ||
+    property === "display" || property === "visibility" ||
+    property === "opacity"
+  );
+
+/**
+ * The host properties that no longer hold the value that we wrote.
+ *
+ * Page script can write over the whole `style` attribute of the host, and page
+ * CSS can win a property that we wrote without the important priority. The
+ * guard therefore compares first and writes only when something changed. A
+ * write for each check would make a page that watches the attribute fight us
+ * in a loop.
+ *
+ * `read` gives the current value and the current priority of one property. It
+ * is a parameter, so this function stays pure and a test needs no DOM.
+ */
+export const outOfDateHostProperties = (
+  read: (property: string) => readonly [value: string, priority: string],
+): readonly string[] =>
+  GUARDED_HOST_STYLE
+    .filter(([property, value]) => {
+      const [current, priority] = read(property);
+      return current !== value || priority !== "important";
+    })
+    .map(([property]) => property);
+
+/**
+ * How many times the guard puts the host back after a removal.
+ *
+ * A page that removes the host inside its own mutation observer would fight us
+ * in a loop of microtasks, and that loop would starve the page. The observer
+ * stops after the cap. The overlay still comes back, because every visible
+ * action attaches the host again.
+ */
+const REATTACH_LIMIT = 32;
+
+// ---------------------------------------------------------------------------
+// Exposure to assistive technology
+// ---------------------------------------------------------------------------
+
+/**
+ * Add `delta` to the number of holds on one layer.
+ *
+ * A hold is one open modal. Two nested holds on the same layer are normal: the
+ * settings dialog opens over the help dialog, and the help dialog closes
+ * afterwards. The layer stays exposed until the last hold goes.
+ */
+export const shiftHold = <K>(
+  holds: ReadonlyMap<K, number>,
+  key: K,
+  delta: number,
+): ReadonlyMap<K, number> => {
+  const next = new Map(holds);
+  next.set(key, Math.max(0, (holds.get(key) ?? 0) + delta));
+  return next;
+};
+
+/** Does any layer hold the accessibility tree open? */
+export const anyHeld = <K>(holds: ReadonlyMap<K, number>): boolean => {
+  for (const count of holds.values()) {
+    if (count > 0) return true;
+  }
+  return false;
+};
 
 // ---------------------------------------------------------------------------
 // Stylesheets
@@ -146,6 +267,24 @@ type StyleTarget =
 export class Ui extends Context.Service<Ui, {
   readonly shadow: ShadowRoot;
   readonly layer: (name: UiLayerName) => Effect.Effect<HTMLElement>;
+  /**
+   * Put the host back in the document, with the style that we gave it.
+   *
+   * Call this before an action that makes something visible. It is two cheap
+   * reads, and it never suspends, so the key path may reach it.
+   */
+  readonly ensureAttached: Effect.Effect<void>;
+  /**
+   * Show one layer to assistive technology while the scope is open.
+   *
+   * The host is hidden from the accessibility tree while every layer is
+   * inactive, because an empty positioning box helps nobody. A layer that
+   * holds a dialog, a prompt or the omnibar must ask for attention with this,
+   * and the release step hides it again.
+   */
+  readonly expose: (
+    layer: HTMLElement,
+  ) => Effect.Effect<void, never, Scope.Scope>;
   /** Append a stylesheet. */
   readonly addStyle: (css: string) => Effect.Effect<void>;
   /** Install or replace a stylesheet under a key, for anything derived from a live setting. */
@@ -181,13 +320,14 @@ export class Ui extends Context.Service<Ui, {
           Effect.sync(() => {
             const element = doc.createElement("vimium-webkit-overlay");
             for (const [property, value] of HOST_STYLE) {
-              // `setProperty`, and not the camel-case accessors: `all` and
-              // `inset` are shorthands that some engines do not give as IDL
-              // attributes.
-              element.style.setProperty(property, value);
+              // `setProperty`, and not the camel-case accessors: `all` is a
+              // shorthand that some engines do not give as an IDL attribute,
+              // and only `setProperty` can give a declaration the important
+              // priority. The priority is what stops page CSS from hiding us.
+              element.style.setProperty(property, value, "important");
             }
             // Assistive technology must not see an empty positioning box. A
-            // layer asks for attention again when it draws something.
+            // layer asks for attention with `expose` when it draws something.
             element.setAttribute("aria-hidden", "true");
             return element;
           }),
@@ -343,6 +483,11 @@ export class Ui extends Context.Service<Ui, {
               if (INTERACTIVE_LAYERS.has(name)) {
                 div.dataset["interactive"] = "false";
               }
+              // Every layer starts outside the accessibility tree. A hint
+              // marker and a find highlight are decorations of something that
+              // the page already shows, and a screen reader must not read them
+              // twice. `expose` opens the layers that hold true controls.
+              div.setAttribute("aria-hidden", "true");
               shadow.appendChild(div);
               return div;
             }),
@@ -355,15 +500,36 @@ export class Ui extends Context.Service<Ui, {
         }
 
         /**
-         * Put the host back in the document.
+         * Write the host style again, but only where the page changed it.
          *
-         * This runs at start, and again on every `layer` call. A single-page
-         * application replaces `document.body` often, and some replace
-         * `documentElement`, which detaches us without a sign. An
-         * `isConnected` read is one bit, so paying it for each access costs
-         * less than any observer would.
+         * The comparison is what makes this safe to call often, and what stops
+         * a page that watches the `style` attribute from fighting us in a
+         * loop: an intact style produces no write at all.
          */
-        const attach = Effect.asVoid(dom.probeOr(() => {
+        const restoreHostStyle = (): void => {
+          const stale = outOfDateHostProperties((property) => [
+            host.style.getPropertyValue(property),
+            host.style.getPropertyPriority(property),
+          ]);
+          if (stale.length === 0) return;
+          for (const [property, value] of HOST_STYLE) {
+            host.style.setProperty(property, value, "important");
+          }
+        };
+
+        /**
+         * Put the host back in the document, with the style that we gave it.
+         *
+         * This runs at start, on every `layer` call, and before every action
+         * that makes something visible. A single-page application replaces
+         * `document.body` often, and some replace `documentElement`, which
+         * detaches us without a sign. Page script can also delete our style.
+         * Both reads are cheap, so paying for them at each access costs less
+         * than the failure that they prevent: an interface that keeps the
+         * keyboard while the user sees nothing.
+         */
+        const ensureAttached = Effect.asVoid(dom.probeOr(() => {
+          restoreHostStyle();
           if (host.isConnected) return false;
           // At `document-start` there may be no `documentElement` yet. Doing
           // nothing is correct, because the next `layer` call tries again.
@@ -376,10 +542,124 @@ export class Ui extends Context.Service<Ui, {
 
         // Attached once here, so that the overlay exists before any feature
         // asks for a layer.
-        yield* attach;
+        yield* ensureAttached;
+
+        // ---------------------------------------------------------------
+        // The removal guard
+        // ---------------------------------------------------------------
+
+        const reattachments = yield* Ref.make(0);
+
+        /**
+         * Watch the two places from which the host can disappear.
+         *
+         * The host is a child of `documentElement`, so a removal is a
+         * child-list change there. A replacement of `documentElement` itself
+         * is a child-list change on the document. Neither target uses
+         * `subtree`, because a subtree observer on a busy page reports every
+         * insertion that the page makes.
+         */
+        const watch = (observer: MutationObserver): void => {
+          observer.observe(doc, { childList: true });
+          const root: Element | null = doc.documentElement;
+          if (root !== null) observer.observe(root, { childList: true });
+        };
+
+        /**
+         * Put the host back as soon as the page takes it away.
+         *
+         * The check above answers when we act. This answers while we wait: a
+         * page that removes the host between two actions would leave a mode
+         * stack that holds the keyboard over an interface that nobody sees.
+         */
+        yield* Effect.acquireRelease(
+          dom.probeOr(() => {
+            const observer = new MutationObserver(() => {
+              Effect.runSyncExit(Effect.gen(function*() {
+                // A new `documentElement` is a different node, so the
+                // registration is renewed on each report.
+                yield* dom.probeOr(() => {
+                  watch(observer);
+                  return true;
+                }, false);
+                if (yield* dom.probeOr(() => host.isConnected, true)) return;
+                const count = yield* Ref.updateAndGet(
+                  reattachments,
+                  (current) => current + 1,
+                );
+                if (count > REATTACH_LIMIT) {
+                  yield* dom.probeOr(() => {
+                    observer.disconnect();
+                    return true;
+                  }, false);
+                  return;
+                }
+                yield* ensureAttached;
+              }));
+            });
+            watch(observer);
+            return Option.some(observer);
+          }, Option.none<MutationObserver>()),
+          (observer) =>
+            Effect.sync(() => {
+              if (Option.isSome(observer)) observer.value.disconnect();
+            }),
+        );
+
+        // ---------------------------------------------------------------
+        // Exposure to assistive technology
+        // ---------------------------------------------------------------
+
+        const holds = yield* Ref.make<ReadonlyMap<HTMLElement, number>>(
+          new Map(),
+        );
+
+        const setHidden = (element: HTMLElement, hidden: boolean): void => {
+          if (hidden) element.setAttribute("aria-hidden", "true");
+          else element.removeAttribute("aria-hidden");
+        };
+
+        /**
+         * Publish the exposure state on the host and on every held layer.
+         *
+         * The host loses `aria-hidden` as well, because the attribute hides a
+         * whole subtree. A dialog under a hidden host is a dialog that a
+         * screen reader cannot reach.
+         */
+        const applyHolds = Effect.gen(function*() {
+          const current = yield* Ref.get(holds);
+          yield* dom.probeOr(() => {
+            for (const [element, count] of current) {
+              setHidden(element, count === 0);
+            }
+            setHidden(host, !anyHeld(current));
+            return true;
+          }, false);
+        });
+
+        const expose = Effect.fn("Ui.expose")(function*(layer: HTMLElement) {
+          yield* Effect.acquireRelease(
+            Effect.gen(function*() {
+              yield* Ref.update(
+                holds,
+                (current) => shiftHold(current, layer, 1),
+              );
+              yield* applyHolds;
+              yield* ensureAttached;
+            }),
+            () =>
+              Effect.gen(function*() {
+                yield* Ref.update(
+                  holds,
+                  (current) => shiftHold(current, layer, -1),
+                );
+                yield* applyHolds;
+              }),
+          );
+        });
 
         const layerOf = Effect.fn("Ui.layer")(function*(name: UiLayerName) {
-          yield* attach;
+          yield* ensureAttached;
           const element = layers.get(name);
           if (element !== undefined) return element;
           // `LAYER_ORDER` covers every name, so this cannot happen. A detached
@@ -485,11 +765,22 @@ export class Ui extends Context.Service<Ui, {
         const syncViewport = (visual: VisualViewport): Effect.Effect<void> =>
           Effect.asVoid(dom.probeOr(() => {
             const { offsetLeft, offsetTop, scale } = visual;
-            host.style.transform = offsetLeft === 0 && offsetTop === 0
-              ? ""
-              : `translate(${offsetLeft}px, ${offsetTop}px)`;
-            host.style.width = `${visual.width}px`;
-            host.style.height = `${visual.height}px`;
+            // The important priority again, and for two reasons. Page CSS must
+            // not move the overlay, and `all: initial !important` above wins
+            // over a normal declaration in the same block whatever the order.
+            //
+            // `none`, and not a removal: a removal would leave the page rule
+            // as the only declaration for `transform`, and a page that writes
+            // `transform: scale(0) !important` would then win.
+            host.style.setProperty(
+              "transform",
+              offsetLeft === 0 && offsetTop === 0
+                ? "none"
+                : `translate(${offsetLeft}px, ${offsetTop}px)`,
+              "important",
+            );
+            host.style.setProperty("width", `${visual.width}px`, "important");
+            host.style.setProperty("height", `${visual.height}px`, "important");
             host.style.setProperty("--vw-scale", String(scale));
             return true;
           }, false));
@@ -553,6 +844,8 @@ export class Ui extends Context.Service<Ui, {
         return Ui.of({
           shadow,
           layer: layerOf,
+          ensureAttached,
+          expose,
           addStyle,
           setStyle,
           syncColorScheme,
