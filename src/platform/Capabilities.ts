@@ -65,6 +65,7 @@ export interface CapabilityReport {
   readonly visualViewport: boolean;
   readonly secureContext: boolean;
   readonly webkitLike: boolean;
+  readonly applePlatform: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +109,26 @@ const detectWorld = (
   if (hasValueApi) return "content";
   return "unknown";
 };
+
+/**
+ * Is this macOS, iOS or iPadOS?
+ *
+ * `domain/Key.ts` reads it for one rule: on an Apple platform, Option changes
+ * the character that a key makes, and the key notation must undo that. On
+ * every other platform Alt leaves the character alone.
+ *
+ * There is no feature test for a keyboard modifier, so the user agent is read.
+ * A wrong `false` costs the Option chords, and a wrong `true` costs an Alt
+ * chord that makes a character. Both are one class of binding, and not the
+ * start of the application.
+ *
+ * iPadOS reports a Macintosh user agent, which is correct for this question:
+ * a hardware keyboard on an iPad has the Option key of macOS.
+ */
+export const isApplePlatform = (
+  userAgent: string,
+  platform: string,
+): boolean => /Mac|iPhone|iPad|iPod/.test(`${userAgent} ${platform}`);
 
 // ---------------------------------------------------------------------------
 // The probes
@@ -177,6 +198,23 @@ export const probeCapabilities: Effect.Effect<
   const constructableStyleSheets = yield* flag(
     () => typeof CSSStyleSheet === "function",
   );
+
+  /**
+   * Is this macOS, iOS or iPadOS?
+   *
+   * The answer decides how an Option chord is read. See `isApplePlatform`.
+   */
+  const applePlatform = yield* flag(() => {
+    const nav: unknown = win.navigator;
+    if (!Predicate.isObjectKeyword(nav)) return false;
+    const ua: unknown = Reflect.get(nav, "userAgent");
+    const platform: unknown = Reflect.get(nav, "platform");
+    return isApplePlatform(
+      Predicate.isString(ua) ? ua : "",
+      Predicate.isString(platform) ? platform : "",
+    );
+  });
+
   const checkVisibility = yield* flag(
     () => isCallable(Element.prototype, "checkVisibility"),
   );
@@ -242,6 +280,7 @@ export const probeCapabilities: Effect.Effect<
     visualViewport,
     secureContext,
     webkitLike,
+    applePlatform,
   };
 });
 

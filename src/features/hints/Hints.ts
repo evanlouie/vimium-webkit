@@ -82,7 +82,7 @@ import {
   matchByPrefix,
   normaliseHintCharacters,
 } from "~/domain/HintString.ts";
-import { isComposing, keyNotation } from "~/domain/Key.ts";
+import { isComposing, type KeyContext, keyNotation } from "~/domain/Key.ts";
 import {
   FrameBus,
   type InboundMessage,
@@ -706,6 +706,10 @@ export class Hints extends Context.Service<Hints, {
           const filtering = current.filterLinkHints;
           const waitForEnter = current.waitForEnterForFilteredHints;
           const ignoreLayout = current.ignoreKeyboardLayout;
+          const keyContext: KeyContext = {
+            ignoreKeyboardLayout: ignoreLayout,
+            applePlatform: capabilities.applePlatform,
+          };
           const alphabet = normaliseHintCharacters(
             current.linkHintCharacters,
             DEFAULT_HINT_CHARACTERS,
@@ -1076,7 +1080,7 @@ export class Hints extends Context.Service<Hints, {
               // A keystroke in the middle of a composition belongs to the input
               // method, and not to us.
               if (isComposing(event)) return SUPPRESS_EVENT;
-              const notation = keyNotation(event, ignoreLayout);
+              const notation = keyNotation(event, keyContext);
               if (Option.isNone(notation)) {
                 return SUPPRESS_EVENT;
               }
@@ -1189,6 +1193,10 @@ export class Hints extends Context.Service<Hints, {
       ): Effect.Effect<void, never, Scope.Scope> =>
         Effect.gen(function*() {
           const ignoreLayout = (yield* settings.current).ignoreKeyboardLayout;
+          const keyContext: KeyContext = {
+            ignoreKeyboardLayout: ignoreLayout,
+            applePlatform: capabilities.applePlatform,
+          };
           const handle = yield* modes.enter({
             name: "hints/buffer",
             exitOnEscape: true,
@@ -1197,7 +1205,7 @@ export class Hints extends Context.Service<Hints, {
           }, {
             keydown: (event) =>
               Effect.gen(function*() {
-                const notation = keyNotation(event, ignoreLayout);
+                const notation = keyNotation(event, keyContext);
                 if (Option.isSome(notation) && notation.value !== "<esc>") {
                   yield* Ref.update(keys, (current) => [
                     ...current,

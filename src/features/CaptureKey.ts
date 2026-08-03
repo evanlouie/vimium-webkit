@@ -14,7 +14,12 @@
 import { Deferred, Effect, Option } from "effect";
 import { SUPPRESS_EVENT } from "~/core/HandlerStack.ts";
 import { Modes } from "~/core/Modes.ts";
-import { isComposing, isModifierKey, keyNotation } from "~/domain/Key.ts";
+import {
+  isComposing,
+  isModifierKey,
+  type KeyContext,
+  keyNotation,
+} from "~/domain/Key.ts";
 
 export interface CaptureKeyOptions {
   /** The text that the HUD shows while the mode waits, for example `Set mark:`. */
@@ -26,6 +31,13 @@ export interface CaptureKeyOptions {
    * must still be able to ask for one key.
    */
   readonly ignoreKeyboardLayout?: boolean;
+  /**
+   * Is this macOS, iOS or iPadOS?
+   *
+   * The caller supplies it for the same reason as `ignoreKeyboardLayout`. An
+   * Option chord reports a glyph there, and the notation must undo that.
+   */
+  readonly applePlatform?: boolean;
 }
 
 /**
@@ -55,10 +67,11 @@ export const captureNextKey = (
           if (isComposing(event) || isModifierKey(event)) {
             return SUPPRESS_EVENT;
           }
-          const notation = keyNotation(
-            event,
-            options.ignoreKeyboardLayout ?? false,
-          );
+          const context: KeyContext = {
+            ignoreKeyboardLayout: options.ignoreKeyboardLayout ?? false,
+            applePlatform: options.applePlatform ?? false,
+          };
+          const notation = keyNotation(event, context);
           if (Option.isNone(notation)) return SUPPRESS_EVENT;
           yield* Deferred.succeed(answer, notation);
           return SUPPRESS_EVENT;

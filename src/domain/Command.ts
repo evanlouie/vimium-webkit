@@ -658,7 +658,8 @@ map gF mainFrame
 
 # Link hints
 # An Option chord on macOS makes a glyph: Option+F reports "ƒ". The key path
-# reads the physical key for such a chord, so <a-f> stays the F key.
+# reads the character that the key makes with no modifier, so <a-f> is the F
+# key of your own layout, and not the F position of a US keyboard.
 map f LinkHints.activateMode
 map F LinkHints.activateModeToOpenInNewTab
 map <a-f> LinkHints.activateModeToOpenInNewForegroundTab
