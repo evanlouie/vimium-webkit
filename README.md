@@ -223,7 +223,7 @@ configuration and no config file.
 | ------------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `scrollStepSize`               | `60`                   | Pixels one `j`/`k` moves. 1–10000.                                                                                                               |
 | `smoothScroll`                 | `true`                 | Animate scrolling. Ignored when `prefers-reduced-motion` is set.                                                                                 |
-| `linkHintCharacters`           | `sadfjklewcmpgh`       | Alphabet for hint labels. Characters must be distinct.                                                                                           |
+| `linkHintCharacters`           | `sadfjklewcmpgh`       | Alphabet for hint labels. Characters must be distinct and visible.                                                                               |
 | `linkHintNumbers`              | `0123456789`           | Digits used to select among filtered hints.                                                                                                      |
 | `filterLinkHints`              | `false`                | Match hints by link text instead of by hint string.                                                                                              |
 | `waitForEnterForFilteredHints` | `true`                 | In filter mode, require Enter rather than activating on a pause.                                                                                 |
@@ -250,6 +250,55 @@ configuration and no config file.
 
 A value the script cannot make sense of falls back to its own default — that one
 setting, not the whole configuration.
+
+### An Option chord on macOS names your own key
+
+macOS applies Option to the character: `Option+F` reports the character `ƒ`, and
+`Option+E` reports `Dead`. No mapping file can name those. On macOS, iOS and
+iPadOS a chord with Option is therefore read as **the character that the key
+makes with no modifier**, so `<a-f>` is the F key of _your_ layout — the Y
+position on Dvorak, and the A position of an AZERTY keyboard for `<a-a>`.
+
+Three limits:
+
+- The rule applies on Apple platforms only. On Windows and on Linux, Alt leaves
+  the character alone, so `Alt+ф` stays `<a-ф>`.
+- On a macOS layout that is not Latin, WebKit cannot name the letter in any
+  field of the event. `Option+ф` on a Russian layout gives `<a-a>`, which is the
+  letter of the position.
+- With Shift, only a letter is translated. `Option+Shift+1` keeps the character
+  that it makes, because a fold to `<a-1>` would take the binding of `Option+1`.
+
+---
+
+### What can be a hint character
+
+`linkHintCharacters` and `linkHintNumbers` hold characters, and each character
+is one label of one link. A character is accepted when it is a letter, a number,
+a punctuation mark or a symbol. The set is composed with NFC first, so `é` is
+one character however it was pasted.
+
+A character is refused when it is one of these:
+
+| Refused                            | Example              | Why                                         |
+| ---------------------------------- | -------------------- | ------------------------------------------- |
+| a variation selector               | the U+FE0F in `❤️`    | it draws nothing, so the label is invisible |
+| a zero width joiner                | the joiner in `👨‍👩` | the same                                    |
+| a combining mark                   | a combining acute    | it draws on the character before it         |
+| a control or format character      | a soft hyphen        | it has no shape                             |
+| white space                        | a no-break space     | the label looks empty                       |
+| half of a surrogate pair           | a cut emoji          | it is half of a character                   |
+| a character that a case fold grows | `ß`, `İ`, `ﬁ`        | the label would need two keystrokes         |
+| a repeat of an earlier character   | `a` and `A`          | two links would show one label              |
+
+A refused character is dropped, and the rest of your set stays in use. The HUD
+tells you which character went, and why. If fewer than two characters are left,
+the shipped set is used instead.
+
+One consequence: a Turkish user cannot use the whole Turkish alphabet for hints.
+`İ` grows to two characters in the fold, and `ı` has the fold of `i`. The case
+fold is the invariant one, and not the one of your locale, so one setting gives
+the same labels on every machine.
 
 #### An expression that a user writes
 
