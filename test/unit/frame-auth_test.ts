@@ -313,12 +313,17 @@ describe("FrameAuth", () => {
           assert.isTrue(
             Option.isNone(yield* topCipher.open("up", { ...sealed, seq: 1 })),
           );
-          // A message whose ciphertext was changed.
+          // A message whose ciphertext was changed. The first character of
+          // base64 carries six bits of the first byte, so a change there is
+          // always a change of the bytes. The last character can carry two
+          // bits only, and a change there can decode to the same bytes.
           assert.isTrue(
             Option.isNone(
               yield* topCipher.open("up", {
                 ...sealed,
-                data: `${sealed.data.slice(0, -1)}A`,
+                data: `${sealed.data.startsWith("A") ? "B" : "A"}${
+                  sealed.data.slice(1)
+                }`,
               }),
             ),
           );
