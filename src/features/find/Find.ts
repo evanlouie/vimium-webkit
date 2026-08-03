@@ -496,11 +496,11 @@ export class Find extends Context.Service<Find, {
 
       /** Move to the match nearest to the selection, without stepping. */
       const anchorToSelection = Effect.fn("Find.anchorToSelection")(
-        function*() {
+        function*(direction: 1 | -1) {
           const target = yield* selection;
           if (Option.isNone(target)) return;
           const found = yield* Ref.get(matches);
-          const index = indexAtSelection(target.value, found);
+          const index = indexAtSelection(target.value, found, direction);
           if (Option.isSome(index)) yield* Ref.set(current, index.value);
         },
       );
@@ -920,8 +920,10 @@ export class Find extends Context.Service<Find, {
             return;
           }
 
-          // Land on the match *after* the caret, and not on the one under it.
-          yield* anchorToSelection();
+          // The anchor is the match that the step must leave, and not the one
+          // that it lands on. `*` therefore goes to the occurrence after the
+          // caret, and `#` to the one before it. Upstream does the same.
+          yield* anchorToSelection(direction);
           const stepped = yield* stepBy(direction);
           yield* selectCurrent();
           yield* hud.show(`${word}  ${statusText(stepped)}`);

@@ -768,32 +768,79 @@ export const firstMatchInView = (
   return 0;
 };
 
+/** Just the part of a `Range` that the anchor needs. */
+export interface PointComparable {
+  readonly comparePoint: (node: Node, offset: number) => number;
+}
+
+/** Just the part of a `Selection` that the anchor needs. */
+export interface CaretPoint {
+  readonly focusNode: Node | null;
+  readonly focusOffset: number;
+}
+
 /**
- * The index of the match that holds the caret, or of the one just after it.
+ * Where `*` and `#` start, for a step of `direction`.
+ *
+ * The caller steps by one from this index, so the answer is the match that the
+ * step must leave, and not the match that the user must land on. Three rules,
+ * and the first one that holds gives the answer:
+ *
+ * 1. **The caret is inside a match.** That match is the answer, so a step
+ *    forward goes to the next occurrence and a step back goes to the one
+ *    before. A caret on either edge of a match counts as inside it, because
+ *    `comparePoint` answers 0 there, and because a click at the end of a word
+ *    means that word.
+ * 2. **The caret is between two matches.** A step forward starts from the last
+ *    match that ends before the caret, so it lands on the first match after it.
+ *    A step back starts from the first match that begins after the caret, so it
+ *    lands on the last match before it.
+ * 3. **There is no match on that side.** A step forward starts from the last
+ *    match of the page, and a step back from the first, so the wrap of the
+ *    caller lands on the nearest match in the direction that the user asked
+ *    for.
  *
  * `comparePoint` throws when the point is in another tree, which is usual once
- * a shadow root is involved. A failure therefore means "no opinion".
+ * a shadow root is involved. Such a match holds no opinion, and a call in which
+ * no match holds an opinion gives `None`.
+ *
+ * The parameters are typed by shape, and not against `Selection` and
+ * `FindMatch`, so that the rules can be exercised without a live DOM.
  */
 export const indexAtSelection = (
-  selection: Selection,
-  matches: ReadonlyArray<FindMatch>,
+  selection: CaretPoint,
+  matches: ReadonlyArray<{ readonly range: PointComparable }>,
+  direction: 1 | -1 = 1,
 ): Option.Option<number> => {
   const node = selection.focusNode;
   if (node === null) return Option.none();
   const offset = selection.focusOffset;
 
+  let compared = 0;
+  let lastBefore = -1;
+  let firstAfter = -1;
+
   for (let index = 0; index < matches.length; index++) {
     const match = matches[index];
     if (match === undefined) continue;
+    let side: number;
     try {
-      if (match.range.comparePoint(node, offset) >= 0) {
-        return Option.some(index);
-      }
+      side = match.range.comparePoint(node, offset);
     } catch {
       continue;
     }
+    compared++;
+    if (side === 0) return Option.some(index);
+    // `1` says that the caret is after this match, so the match is before it.
+    if (side > 0) lastBefore = index;
+    else if (firstAfter === -1) firstAfter = index;
   }
-  return Option.none();
+
+  if (compared === 0 || matches.length === 0) return Option.none();
+  if (direction > 0) {
+    return Option.some(lastBefore === -1 ? matches.length - 1 : lastBefore);
+  }
+  return Option.some(firstAfter === -1 ? 0 : firstAfter);
 };
 
 /** The word under the caret, or the selected text. This backs `*` and `#`. */
