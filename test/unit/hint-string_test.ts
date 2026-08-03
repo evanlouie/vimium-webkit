@@ -9,12 +9,16 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect } from "effect";
 import {
+  describeHintRefusal,
+  hintCharacterCount,
   hintCharacterKey,
   hintStrings,
   isUsableHintCharacter,
   matchByPrefix,
   normaliseHintCharacters,
   numberToHintString,
+  readHintCharacters,
+  refuseHintCharacter,
   reverseString,
 } from "~/domain/HintString.ts";
 
@@ -258,6 +262,135 @@ describe("HintString", () => {
         normaliseHintCharacters("ab\u{1f600}", "xy"),
         "ab\u{1f600}",
       );
+    }));
+
+  /**
+   * Characters that have no shape of their own.
+   *
+   * A hint character must be a letter, a number, a punctuation mark or a
+   * symbol. Each row gives a set from the user and the alphabet that the hints
+   * use. A character that draws nothing gives a label that the user cannot
+   * read, and two labels that look the same.
+   */
+  const INVISIBLE_CASES: readonly {
+    readonly name: string;
+    readonly input: string;
+    readonly expected: string;
+  }[] = [
+    {
+      name: "a variation selector after a heart",
+      input: "\u2764\ufe0f\u{1f600}",
+      expected: "\u2764\u{1f600}",
+    },
+    {
+      name: "a zero width joiner inside a family emoji",
+      input: "\u{1f468}\u200d\u{1f469}",
+      expected: "\u{1f468}\u{1f469}",
+    },
+    {
+      name: "a combining acute after a letter",
+      input: "a\u0301bc",
+      // NFC joins the pair into one letter, which is one hint character.
+      expected: "\u00e1bc",
+    },
+    {
+      name: "a combining acute that follows nothing",
+      input: "\u0301abc",
+      expected: "abc",
+    },
+    {
+      name: "a zero width space",
+      input: "a\u200bbc",
+      expected: "abc",
+    },
+    {
+      name: "a control character",
+      input: "a\u0007bc",
+      expected: "abc",
+    },
+    {
+      name: "a no-break space",
+      input: "a\u00a0bc",
+      expected: "abc",
+    },
+    {
+      name: "a soft hyphen",
+      input: "a\u00adbc",
+      expected: "abc",
+    },
+    {
+      name: "a private use character",
+      input: "a\ue000bc",
+      expected: "abc",
+    },
+  ];
+
+  for (const row of INVISIBLE_CASES) {
+    it.effect(`drops a character with no shape: ${row.name}`, () =>
+      Effect.sync(() => {
+        assert.strictEqual(
+          normaliseHintCharacters(row.input, "xy"),
+          row.expected,
+        );
+      }));
+  }
+
+  it.effect("gives visible and distinct labels for a heart and a face", () =>
+    Effect.sync(() => {
+      // The reviewer's case. The set holds three code points, and the middle
+      // one draws nothing. Without the filter the labels were
+      // ["\u2764\u2764", "\u{1f600}", "\ufe0f", "\u2764\ufe0f"]: one label was
+      // invisible, and two looked the same.
+      const alphabet = normaliseHintCharacters("\u2764\ufe0f\u{1f600}", "xy");
+      assert.strictEqual(alphabet, "\u2764\u{1f600}");
+      const labels = hintStrings(4, alphabet);
+      assert.strictEqual(new Set(labels).size, labels.length);
+      for (const label of labels) {
+        for (const char of label) {
+          assert.isTrue(
+            isUsableHintCharacter(char),
+            `"${label}" holds a character with no shape`,
+          );
+        }
+      }
+    }));
+
+  it.effect("names the reason for each refusal", () =>
+    Effect.sync(() => {
+      assert.strictEqual(refuseHintCharacter("a"), null);
+      assert.strictEqual(refuseHintCharacter("\ufe0f"), "invisible");
+      assert.strictEqual(refuseHintCharacter("\u200d"), "invisible");
+      assert.strictEqual(refuseHintCharacter("\u0301"), "invisible");
+      assert.strictEqual(refuseHintCharacter(" "), "invisible");
+      assert.strictEqual(refuseHintCharacter("\u00df"), "case-fold");
+      assert.strictEqual(refuseHintCharacter("\ud83d"), "half-character");
+      assert.strictEqual(
+        readHintCharacters("aab").dropped[0]?.refusal,
+        "duplicate",
+      );
+      // Every reason has a sentence, and no sentence is empty.
+      for (
+        const refusal of [
+          "half-character",
+          "invisible",
+          "case-fold",
+          "duplicate",
+        ] as const
+      ) {
+        assert.isAbove(describeHintRefusal(refusal).length, 0);
+      }
+    }));
+
+  it.effect("composes the set with NFC before it reads a character", () =>
+    Effect.sync(() => {
+      // The same letter, from two sources: one code point, and a letter plus a
+      // combining acute. One setting must give one alphabet.
+      assert.strictEqual(
+        normaliseHintCharacters("\u00e9x", "xy"),
+        normaliseHintCharacters("e\u0301x", "xy"),
+      );
+      assert.strictEqual(hintCharacterCount("e\u0301x"), 2);
+      assert.strictEqual(hintCharacterCount("\u{1f600}"), 1);
     }));
 
   it.effect("is decimal for the default digit set", () =>

@@ -98,6 +98,13 @@ export const BootstrapLayer: Layer.Layer<
     ),
   );
 
+  // A repair is not a failure, and the user must still learn about it. A
+  // stored value that this build cannot use is dropped in silence without
+  // this line.
+  yield* Effect.forkScoped(
+    Stream.runForEach(storage.notices, (notice) => report.error(notice)),
+  );
+
   // Every group, and never a subset. A group that was never read holds only the
   // defaults, and the first write to it would replace the user's whole stored
   // value with the defaults plus one change.
