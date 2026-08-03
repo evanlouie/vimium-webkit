@@ -242,6 +242,35 @@ const descriptorsFor = (
     secondary: hint.secondary,
   }));
 
+/** The button fields of one mouse event or one pointer event. */
+export interface ButtonState {
+  /** Which button changed. It is `-1` when no button changed. */
+  readonly button: number;
+  /** Which buttons are down. It is a bit field, and `1` is the primary button. */
+  readonly buttons: number;
+}
+
+/**
+ * The button fields that a true mouse gives to one event of a click.
+ *
+ * The primary button is down for `pointerdown` and for `mousedown` only. It is
+ * up again before `pointerup`, `mouseup` and `click`, so those three carry
+ * `buttons: 0`. A control that reads `buttons` to find out whether a drag is in
+ * progress refuses a click that says that the button is still down. A control
+ * that tracks the press stays in the pressed state after such a click.
+ *
+ * A pointer event that reports no change of a button carries `button: -1`. The
+ * specification gives that value to `pointerover`, `pointerout` and
+ * `pointermove`. The mouse events of the same names carry `button: 0`.
+ */
+export const buttonStateFor = (type: string): ButtonState => {
+  const down = type === "pointerdown" || type === "mousedown";
+  const changed = down || type === "pointerup" || type === "mouseup" ||
+    type === "click";
+  const pointer = type.startsWith("pointer");
+  return { button: pointer && !changed ? -1 : 0, buttons: down ? 1 : 0 };
+};
+
 /** Where an activation came from. A remote one has no gesture of the user. */
 export type ActivationOrigin = "local" | "remote";
 
@@ -384,23 +413,28 @@ export class Hints extends Context.Service<Hints, {
         clientY: y,
         screenX: x,
         screenY: y,
-        button: 0,
-        buttons: 1,
       });
 
+      /**
+       * Send one event, with the button fields that its type must carry.
+       *
+       * The button state belongs to the type, and not to the sequence, so it is
+       * applied here. A caller cannot forget it.
+       */
       const dispatchPointerish = (
         element: Element,
         type: string,
         init: MouseEventInit,
       ): void => {
+        const full: MouseEventInit = { ...init, ...buttonStateFor(type) };
         const isPointer = type.startsWith("pointer");
         const event = isPointer && typeof PointerEvent === "function"
           ? new PointerEvent(type, {
-            ...init,
+            ...full,
             pointerType: "mouse",
             isPrimary: true,
           })
-          : new MouseEvent(type, init);
+          : new MouseEvent(type, full);
         element.dispatchEvent(event);
       };
 
@@ -478,7 +512,7 @@ export class Hints extends Context.Service<Hints, {
           () => centreOf(element),
           { x: 0, y: 0 },
         );
-        const init = { ...eventInit(x, y), buttons: 0 };
+        const init = eventInit(x, y);
         yield* Effect.ignore(dom.attempt("Element.dispatchEvent", () => {
           dispatchPointerish(element, "pointerout", init);
           dispatchPointerish(element, "mouseout", init);
