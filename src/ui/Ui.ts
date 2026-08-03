@@ -441,6 +441,13 @@ export class Ui extends Context.Service<Ui, {
           new Map(),
         );
 
+        // The node inside the overlay that last had the focus. A removal and a
+        // move both take the focus away before the guard runs, so the guard
+        // cannot read it at that moment. `focusin` remembers it.
+        const lastFocused = yield* Ref.make<Option.Option<HTMLElement>>(
+          Option.none(),
+        );
+
         // A realm that refuses a shadow root cannot hold the overlay at all.
         // There is no smaller unit to lose, so this is a defect and not a
         // failure that a caller could handle.
@@ -623,6 +630,40 @@ export class Ui extends Context.Service<Ui, {
         };
 
         /**
+         * Remember the node inside the overlay that has the focus.
+         *
+         * A removal takes the focus away at once, so the guard finds
+         * `shadow.activeElement` empty when it runs. `focusin` is composed and
+         * it bubbles, so one listener on the root sees every control.
+         */
+        yield* dom.listenOn(shadow, "focusin", (event) =>
+          Ref.set(
+            lastFocused,
+            event.target instanceof HTMLElement
+              ? Option.some(event.target)
+              : Option.none(),
+          ));
+
+        /**
+         * Give the focus back to the node that held it before a move.
+         *
+         * Only when nothing else holds the focus. A user who moved the focus
+         * to the page in the meantime keeps it, because the root is closed and
+         * `doc.activeElement` is then a node of the page.
+         */
+        const restoreFocus = (previous: Option.Option<HTMLElement>): void => {
+          if (Option.isNone(previous)) return;
+          const element = previous.value;
+          if (!element.isConnected) return;
+          if (shadow.activeElement !== null) return;
+          const active = doc.activeElement;
+          if (active !== null && active !== doc.body) return;
+          // `preventScroll`, because this is a repair and not an action of the
+          // user. Nothing on the page may move.
+          element.focus({ preventScroll: true });
+        };
+
+        /**
          * Put the host back in the document, with the style that we gave it.
          *
          * This runs at start, on every `layer` call, and before every action
@@ -636,6 +677,7 @@ export class Ui extends Context.Service<Ui, {
          */
         const ensureAttached: Effect.Effect<void> = Effect.gen(function*() {
           const owned = yield* Ref.get(viewportOwned);
+          const focused = yield* Ref.get(lastFocused);
           yield* dom.probeOr(() => {
             restoreHostStyle(owned);
             // At `document-start` there may be no `documentElement` yet. Doing
@@ -645,6 +687,10 @@ export class Ui extends Context.Service<Ui, {
             if (parent === null) return false;
             if (!hostNeedsAttachment(parent, host.parentNode)) return false;
             parent.appendChild(host);
+            // A move takes the focus off every node inside the host. An open
+            // dialog would otherwise keep the keyboard while the focus sits on
+            // the body of the page.
+            restoreFocus(focused);
             return true;
           }, false);
         });
