@@ -17,11 +17,10 @@
  * Tab and moves the focus by hand inside the dialog. The dialog also gives the
  * focus back to the element that had it.
  *
- * **A dialog never holds the keyboard while the user cannot see it.** It asks
- * `ui.visibilityFault` before it opens, and a fiber asks again while it is
- * open. A fault closes the dialog, which gives every key back to the page, and
- * the reason goes to the console. The HUD cannot carry that message, because
- * the HUD is inside the overlay that the fault hides.
+ * **A dialog never holds the keyboard while the measured overlay is hidden.**
+ * It asks `ui.visibilityFault` before it opens. A fiber asks again while it is
+ * open. The check measures both the host box and the computed paint properties
+ * of its ancestors. A fault closes the dialog and gives every key back.
  *
  * The settings form is data. `SETTINGS_SECTIONS` names every documented
  * setting, and the build step below draws the controls from that list. The

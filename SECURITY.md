@@ -70,37 +70,48 @@ the page scrolled to 2759 px: `will-change: transform`,
 dialog box at -2711, and the correction puts it back at 48, which is where it
 sits with no rule at all.
 
-_Class 2: a rule that makes `html` paint nothing._ The overlay disappears, and
-the page disappears with it, so the user sees a blank page and not a hidden
-interface. Example: `html { opacity: 0 }`. `display: none`,
-`visibility: hidden`, `content-visibility: hidden`, `filter: opacity(0)` and
-`transform: scale(0)` belong here as well. No measure inside the script answers
-this class:
+_Class 2: a rule that prevents `html` from painting._ The overlay and the page
+disappear together. The user sees a blank page, and not a hidden interface over
+a readable page.
 
-- We could only answer with a rule of our own on `html`, and a userscript that
-  wrote `html { opacity: 1 !important }` would break every page that animates
-  its root element.
-- The top layer is not an answer either. `showModal` makes the page inert, which
-  the overlay must never do, and a `popover` is still skipped inside an ancestor
-  with `content-visibility: hidden`.
+`ui.visibilityFault` uses a second measurement for this class. It reads the
+computed paint properties of the host and its ancestor chain. The check detects
+these measured effects:
 
-**The invariant that holds for both classes.** The overlay never holds the
-keyboard while the user cannot see it. `ui.visibilityFault` repairs the style,
-the place and the offset, and then measures what is left. A fault closes the
-dialog, which gives every key back to the page, and the reason goes to the
-console of the browser. The HUD cannot carry that message, because the HUD is
-inside the overlay that the fault hides.
+- `display: none`;
+- `visibility: hidden`;
+- `content-visibility: hidden`;
+- `opacity: 0`;
+- `filter: opacity(0)`;
+- a full inset clip, such as `clip-path: inset(100%)`.
 
-Both dialogs ask that question today, because a dialog is the mode that holds
-every key for a long time. Link hints, the find prompt and the omnibar do not
-ask yet. Each one holds the keyboard as well, so each one must make the same
-call, and that is the next change.
+This is an effect list, and not a complete list of CSS properties. A mask or a
+future paint property can give the same blank-page result. The script does not
+write a counter-rule on `html`, because that rule would break an honest page. A
+top-layer element is not an answer. `showModal` makes the page inert, and a
+`popover` stays inside the same ancestor paint effects.
 
-What the script does defend is the host itself: every inline declaration on the
-host carries the important priority, the guard in `src/ui/Ui.ts` compares each
-of those declarations and writes them again when the page changed one, and a
-mutation observer puts the host back under `documentElement` after a removal or
-a move.
+**The invariant for the measured cases.** A dialog never holds the keyboard
+while these checks report that the overlay is hidden. The check first repairs
+the host style, its parent and its position. It then measures the box and the
+computed paint properties. A fault closes the dialog and gives every key back.
+
+Only the dialogs ask today. Link hints, the find prompt and the omnibar also
+hold the keyboard.
+[Issue #62](https://github.com/evanlouie/vimium-webkit/issues/62) records the
+work that adds the same check to those three modes.
+
+What the script does defend is the host itself. Every inline declaration on the
+host carries the important priority. The guard in `src/ui/Ui.ts` compares these
+declarations and repairs a change. A mutation observer repairs a removal or a
+move.
+
+The palette uses custom properties in the closed shadow tree. Each declaration
+has the important priority. This priority reverses the cascade order between the
+page and the shadow tree, so a page rule cannot replace the palette.
+`--vw-scale` is the other application custom property. It is in `HOST_STYLE`, so
+the derived guard reads it. A page can set other custom properties, but no
+application rule reads them.
 
 That repair has a budget of 32 writes for each quiet second, because a page that
 removes the host inside its own mutation observer would otherwise fight us in a

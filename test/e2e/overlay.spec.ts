@@ -31,18 +31,22 @@
  *    transform, a containment, a filter or a perspective belongs to this
  *    class, and so does any future property with the same effect. `alignHost`
  *    measures the host box and moves the host back on to the viewport.
- * 2. **A rule that makes `html` paint nothing.** The overlay disappears, and
- *    the page disappears with it, so the user sees a blank page. Example:
- *    `html { opacity: 0 }`. A rule of our own on `html` would break every
- *    honest page that fades its root element, so the script does not answer
- *    this class.
+ * 2. **A rule that prevents `html` from painting.** The overlay and the page
+ *    disappear together. `visibilityFault` reads the computed paint properties
+ *    of the host and its ancestor chain. It closes a dialog for each measured
+ *    effect. The effect list is not a complete list of CSS properties.
  *
  * `SECURITY.md` names both classes.
  */
 
 import type { Page } from "@playwright/test";
 import { expect, test } from "./harness/fixtures.ts";
-import { overlayBox, overlayFocusWithin } from "./harness/overlay.ts";
+import {
+  overlayBox,
+  overlayComputedStyle,
+  overlayFocusWithin,
+  visibleHintMarkers,
+} from "./harness/overlay.ts";
 
 /** A resolved style property of the host itself, which is in the light DOM. */
 const hostStyle = (page: Page, property: string): Promise<string> =>
@@ -51,6 +55,22 @@ const hostStyle = (page: Page, property: string): Promise<string> =>
       getComputedStyle(element).getPropertyValue(name),
     property,
   );
+
+/** One inline declaration of the host, before the cascade resolves it. */
+const hostInlineStyle = (page: Page, property: string): Promise<string> =>
+  page.locator("vimium-webkit-overlay").first().evaluate(
+    (element: HTMLElement, name: string): string =>
+      element.style.getPropertyValue(name),
+    property,
+  );
+
+/** Add a rule that stays in the outer tree of the page. */
+const addPageStyle = (page: Page, css: string): Promise<void> =>
+  page.evaluate((text: string) => {
+    const style = document.createElement("style");
+    style.textContent = text;
+    document.documentElement.appendChild(style);
+  }, css);
 
 const openHelp = async (page: Page): Promise<void> => {
   await page.keyboard.press("?");
@@ -129,6 +149,21 @@ const styleRoot = (page: Page, declaration: string): Promise<void> =>
     document.documentElement.style.cssText = rule;
   }, declaration);
 
+/** Record an unbound key that reaches the page after the dialog closes. */
+const recordPageKey = (page: Page, key: string): Promise<void> =>
+  page.evaluate((wanted: string) => {
+    document.documentElement.dataset["receivedKey"] = "";
+    globalThis.addEventListener("keydown", (event) => {
+      if (event.key === wanted) {
+        document.documentElement.dataset["receivedKey"] = wanted;
+      }
+    });
+  }, key);
+
+/** The key that the page received after the overlay released it. */
+const receivedPageKey = (page: Page): Promise<string> =>
+  page.evaluate(() => document.documentElement.dataset["receivedKey"] ?? "");
+
 /** How many dialogs the overlay holds now. */
 const dialogCount = (page: Page): Promise<number> =>
   page.evaluate((): number => {
@@ -170,6 +205,31 @@ test.describe("the overlay host under hostile CSS", () => {
     expect(box).not.toBeNull();
     expect(box?.width ?? 0).toBeGreaterThan(300);
     expect(box?.height ?? 0).toBeGreaterThan(100);
+  });
+
+  test("keeps the HUD palette under page custom properties", async ({ vw, page }) => {
+    await vw.open("/long-text.html");
+    await addPageStyle(
+      page,
+      `* {
+        --vw-fg: transparent !important;
+        --vw-bg: transparent !important;
+        --vw-bg-raised: transparent !important;
+        --vw-border: transparent !important;
+        --vw-accent: transparent !important;
+        --vw-accent-fg: transparent !important;
+        --vw-muted: transparent !important;
+        --vw-danger: transparent !important;
+        --vw-shadow: none !important;
+      }`,
+    );
+
+    await vw.press("n");
+    await vw.waitForHud("No previous search");
+    expect(await overlayComputedStyle(page, ".vw-hud", "color"))
+      .not.toBe("rgba(0, 0, 0, 0)");
+    expect(await overlayComputedStyle(page, ".vw-hud", "background-color"))
+      .not.toBe("rgba(0, 0, 0, 0)");
   });
 
   test("keeps a size that the page cannot take away", async ({ vw, page }) => {
@@ -446,9 +506,10 @@ test.describe("the overlay host when the page spends the repair budget", () => {
       "html",
     );
 
-    // And it answers a further move at once.
+    // And it answers a further move at once. If `resumeGuard` did not reset
+    // the count, this move waits for another full quiet second.
     expect(await cageHost(page)).toBe(true);
-    await expect.poll(() => hostParentTag(page)).toBe("html");
+    await expect.poll(() => hostParentTag(page), { timeout: 800 }).toBe("html");
 
     await openHelp(page);
     expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
@@ -512,7 +573,7 @@ test.describe("the overlay under an ancestor rule of class 1", () => {
       // the document. The layers inside the host must follow it as well: each
       // one is `position: fixed`, so `contain: layout` on the host keeps them
       // in the box of the host and not in the box of the document.
-      for (const offset of [1200, 0, 3000]) {
+      for (const offset of [0, 1380, 2759]) {
         // oxlint-disable-next-line no-await-in-loop
         await page.evaluate((y: number) => globalThis.scrollTo(0, y), offset);
         // oxlint-disable-next-line no-await-in-loop
@@ -520,6 +581,18 @@ test.describe("the overlay under an ancestor rule of class 1", () => {
       }
     });
   }
+
+  test("drops the correction when a scale cannot use it", async ({ vw, page }) => {
+    await vw.open("/long-text.html");
+
+    // A scale is not a translation. The first correction still leaves an
+    // error, so the withdrawal path must remove that correction again.
+    await styleRoot(page, "transform: scale(0.5)");
+    await page.keyboard.press("?");
+
+    expect(await dialogCount(page)).toBe(0);
+    expect(await hostInlineStyle(page, "transform")).toBe("none");
+  });
 
   test("gives the keyboard back when it cannot correct the rule", async ({ vw, page }) => {
     const lines = consoleLines(page);
@@ -538,4 +611,64 @@ test.describe("the overlay under an ancestor rule of class 1", () => {
     ).toBe(true);
     expect(await dialogCount(page)).toBe(0);
   });
+
+  test("drops an old correction before hints draw", async ({ vw, page }) => {
+    await vw.open("/link-dense.html");
+    await page.evaluate(() => globalThis.scrollTo(0, 2000));
+    await styleRoot(page, "will-change: transform");
+
+    // A scroll makes the class-1 correction active.
+    await page.evaluate(() => globalThis.scrollBy(0, 1));
+    await expect.poll(async () => {
+      const box = await page.locator("vimium-webkit-overlay").boundingBox();
+      return Math.abs(box?.y ?? 1000) < 2;
+    }).toBe(true);
+
+    // An honest page removes `will-change` after the animation. No scroll
+    // follows. The next layer access must measure and remove the old shift.
+    await styleRoot(page, "");
+    expect(
+      Math.abs(
+        (await page.locator("vimium-webkit-overlay").boundingBox())?.y ?? 0,
+      ),
+    )
+      .toBeGreaterThan(100);
+
+    await vw.startHints();
+    const viewport = page.viewportSize() ?? { width: 1280, height: 800 };
+    const markers = await visibleHintMarkers(page);
+    expect(markers.length).toBeGreaterThan(0);
+    expect(
+      markers.some(({ box }) =>
+        box.left >= 0 && box.top >= 0 && box.left < viewport.width &&
+        box.top < viewport.height
+      ),
+    ).toBe(true);
+  });
+});
+
+test.describe("the overlay under a rule that prevents paint", () => {
+  for (
+    const rule of [
+      "opacity: 0",
+      "visibility: hidden",
+      "filter: opacity(0)",
+      "content-visibility: hidden",
+      "clip-path: inset(100%)",
+    ]
+  ) {
+    test(`closes the dialog under ${rule}`, async ({ vw, page }) => {
+      await vw.open("/long-text.html");
+      await openHelp(page);
+      await recordPageKey(page, "q");
+
+      await styleRoot(page, rule);
+      await expect.poll(() => dialogCount(page), { timeout: 5_000 }).toBe(0);
+
+      // The closed dialog no longer holds the keyboard. `q` is unbound, so it
+      // reaches the page when the dialog mode leaves the stack.
+      await page.keyboard.press("q");
+      await expect.poll(() => receivedPageKey(page)).toBe("q");
+    });
+  }
 });

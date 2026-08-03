@@ -25,6 +25,7 @@ import {
   NO_SHIFT,
   outOfDateHostProperties,
   ownedDeclarations,
+  preventsOverlayPaint,
   type ViewportRect,
 } from "~/ui/Ui.ts";
 
@@ -86,6 +87,7 @@ describe("the guarded set", () => {
       const guarded = comparableHostProperties(asBrowser);
       for (
         const property of [
+          "--vw-scale",
           "position",
           "top",
           "right",
@@ -187,6 +189,7 @@ describe("the overlay host style", () => {
 
 describe("the properties that the viewport sync owns", () => {
   const OWNED: ReadonlyMap<string, string> = new Map([
+    ["--vw-scale", "0.8"],
     ["transform", "translate(0px, 84px)"],
     ["width", "390px"],
     ["height", "580px"],
@@ -212,6 +215,7 @@ describe("the properties that the viewport sync owns", () => {
       // line with the visual viewport under the toolbar of iOS, and during a
       // pinch zoom, until the next resize or scroll event.
       const written = new Map(hostDeclarations(OWNED));
+      assert.strictEqual(written.get("--vw-scale"), "0.8");
       assert.strictEqual(written.get("transform"), "translate(0px, 84px)");
       assert.strictEqual(written.get("width"), "390px");
       assert.strictEqual(written.get("height"), "580px");
@@ -392,9 +396,49 @@ describe("the declarations that the viewport sync writes", () => {
         { ...VIEW, offsetTop: 84 },
         { dx: 0, dy: 2759 },
       );
+      assert.strictEqual(owned.get("--vw-scale"), "1");
       assert.strictEqual(owned.get("transform"), "translate(0px, 2843px)");
       assert.strictEqual(owned.get("width"), "1280px");
       assert.strictEqual(owned.get("height"), "800px");
+    }));
+});
+
+describe("the paint of the host ancestor chain", () => {
+  const visible = {
+    display: "block",
+    visibility: "visible",
+    opacity: "1",
+    contentVisibility: "visible",
+    filter: "none",
+    clipPath: "none",
+  };
+
+  for (
+    const [property, value] of [
+      ["opacity", "0"],
+      ["visibility", "hidden"],
+      ["filter", "opacity(0)"],
+      ["contentVisibility", "hidden"],
+      ["clipPath", "inset(100%)"],
+    ] as const
+  ) {
+    it.effect(`finds ${property}: ${value}`, () =>
+      Effect.sync(() => {
+        assert.isTrue(preventsOverlayPaint({
+          ...visible,
+          [property]: value,
+        }));
+      }));
+  }
+
+  it.effect("keeps a visible style", () =>
+    Effect.sync(() => {
+      assert.isFalse(preventsOverlayPaint(visible));
+      assert.isFalse(preventsOverlayPaint({
+        ...visible,
+        filter: "brightness(1)",
+        clipPath: "inset(0)",
+      }));
     }));
 });
 
