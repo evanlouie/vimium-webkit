@@ -41,10 +41,15 @@
  * test, and a quantifier in the body counts in the budget below.
  *
  * The body of an assertion runs again for each way that the text before it can
- * match. `.*(?=.*x)` therefore costs a window times a window, which is the
- * same cost as `a.*b.*c`, and both are refused. `(?=.*foo)(?=.*bar)` costs two
- * windows, because nothing before the two assertions can vary, and both are
- * accepted.
+ * match. `.*(?=.*x)` therefore costs a window times a window. The check refuses
+ * it and `a.*b.*c`.
+ *
+ * A bounded repeat pays the cost of its body for each possible iteration. The
+ * maximum count sets that cost. Saturating arithmetic stops the cost above the
+ * limit. Thus, nested fixed repeats cannot hide a large constant cost.
+ *
+ * `(?=.*foo)(?=.*bar)` costs two windows. Nothing before the assertions can
+ * vary, so the two costs are added and both assertions are accepted.
  *
  * # What the check does not promise
  *
@@ -98,7 +103,11 @@ const MANY_LOOPS =
   "this pattern can try too many ways to match one piece of text, " +
   "and that can hang the page";
 const MANY_ASSERTIONS =
-  "this pattern holds too many lookaheads or lookbehinds for the safety check";
+  "a pattern may hold at most eight lookaheads or lookbehinds; " +
+  "divide the query into two searches";
+const NESTED_ASSERTIONS =
+  "an assertion may hold at most three nested assertions; simplify the " +
+  "assertion";
 const PROPERTY_ESCAPE =
   "a property escape such as `\\p{L}` needs the `u` flag, which this field " +
   "does not allow; write a character class such as `[a-zA-Z]` instead";
@@ -379,6 +388,7 @@ const parse = (
   let index = 0;
   let failure: string | null = null;
   let assertions = 0;
+  let assertionDepth = 0;
 
   const fail = (reason: string): Node => {
     failure ??= reason;
@@ -600,17 +610,21 @@ const parse = (
       }
     }
 
+    if (look) {
+      assertions++;
+      if (assertions > ASSERTION_LIMIT) return fail(MANY_ASSERTIONS);
+      assertionDepth++;
+      if (assertionDepth > ASSERTION_DEPTH_LIMIT) {
+        return fail(NESTED_ASSERTIONS);
+      }
+    }
+
     const body = parseAlternation();
+    if (look) assertionDepth--;
     if (failure !== null) return EMPTY_NODE;
     if (source[index] !== ")") return fail(UNSUPPORTED_SYNTAX);
     index++;
-    if (!look) return body;
-    // The blunt limit. The cost model below reads inside an assertion, and a
-    // long chain of assertions is the shape that a wrong answer there costs
-    // the most. Refuse the chain, and say so.
-    assertions++;
-    if (assertions > ASSERTION_LIMIT) return fail(MANY_ASSERTIONS);
-    return { kind: "look", body };
+    return look ? { kind: "look", body } : body;
   };
 
   const parseAtom = (): Node => {
@@ -732,6 +746,9 @@ const SEQUENCE_LIMIT = 64;
  */
 const ASSERTION_LIMIT = 8;
 
+/** The most assertions that can contain each other. */
+const ASSERTION_DEPTH_LIMIT = 3;
+
 /**
  * The most positions that one quantifier can try inside one window of text.
  *
@@ -745,11 +762,12 @@ const WINDOW_WIDTH = 1024;
 /**
  * The most ways that one pattern may try to match one piece of text.
  *
- * One unbounded quantifier that competes with the text after it costs one
- * window, and the budget of the caller pays for that. Two of them cost a
- * window times a window. `a.*b.*c` and `.*(?=.*x)` are both that shape.
+ * One unbounded quantifier that competes with later text costs one window. The
+ * factor of eight lets a small fixed loop repeat that cost. Two unbounded
+ * choices still cost a window times a window. The check refuses that cost.
  */
-const PATH_BUDGET = WINDOW_WIDTH;
+const PATH_BUDGET = WINDOW_WIDTH * ASSERTION_LIMIT;
+const OVER_PATH_BUDGET = PATH_BUDGET + 1;
 
 /**
  * Every answer that the rules ask about one tree.
@@ -1176,9 +1194,12 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
     intersect(extend(left), firstOfParts(parts, from)) &&
     intersect(last(left), anywhereOfParts(parts, from));
 
-  /** A product that can never grow past the point where it is refused. */
-  const capped = (value: number): number =>
-    Math.min(value, PATH_BUDGET * PATH_BUDGET);
+  /** Multiply two costs, and stop at the first value above the limit. */
+  const multiplyCosts = (left: number, right: number): number => {
+    if (left > PATH_BUDGET || right > PATH_BUDGET) return OVER_PATH_BUDGET;
+    if (left > Math.floor(PATH_BUDGET / right)) return OVER_PATH_BUDGET;
+    return left * right;
+  };
 
   /**
    * How many end positions this expression can try.
@@ -1189,7 +1210,9 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
   const width = (node: Node): number => {
     const reach = span(node);
     const range = reach.max - reach.min;
-    return range >= WINDOW_WIDTH ? WINDOW_WIDTH : Math.max(1, range);
+    return range >= WINDOW_WIDTH
+      ? WINDOW_WIDTH
+      : Math.max(1, range + 1);
   };
 
   const cost = (node: Node): number =>
@@ -1214,10 +1237,17 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
         case "repeat": {
           if (target.max <= 1) return cost(target.body);
           const inner = cost(target.body);
-          // Where the loop stops is a choice of the part before it, and the
-          // concatenation counts that choice. Only the work inside the body
-          // is paid again for each iteration.
-          return inner <= 1 ? 1 : capped(inner * width(target));
+          if (inner <= 1) return 1;
+          // The width counts possible end positions. The iteration count is
+          // separate. A fixed count has one end position, but its body still
+          // runs once for each iteration.
+          const iterations = Number.isFinite(target.max)
+            ? Math.min(target.max, WINDOW_WIDTH)
+            : WINDOW_WIDTH;
+          return multiplyCosts(
+            inner,
+            Math.max(width(target), iterations),
+          );
         }
       }
     });
@@ -1236,9 +1266,9 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
     for (let index = 0; index < parts.length; index++) {
       const part = parts[index];
       if (part === undefined) continue;
-      worst = Math.max(worst, capped(before * cost(part)));
+      worst = Math.max(worst, multiplyCosts(before, cost(part)));
       if (slidesInto(part, parts, index + 1)) {
-        before = capped(before * width(part));
+        before = multiplyCosts(before, width(part));
       }
     }
     return Math.max(worst, before);
