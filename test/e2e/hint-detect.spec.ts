@@ -63,6 +63,46 @@ test.describe("image maps with awkward names", () => {
   });
 });
 
+test.describe("image-map standard rules", () => {
+  test("requires a hash in usemap", async ({ vw }) => {
+    await vw.open("/image-maps-standard.html");
+    await vw.startHints();
+
+    await vw.expectNoHint("Missing hash area");
+  });
+
+  test("uses the suffix after the first hash", async ({ vw, page }) => {
+    await vw.open("/image-maps-standard.html");
+    await vw.startHints();
+
+    await vw.activateHint("Prefix area");
+    await expect(page).toHaveURL(/#prefix$/);
+  });
+
+  test("matches a map id", async ({ vw, page }) => {
+    await vw.open("/image-maps-standard.html");
+    await vw.startHints();
+
+    await vw.activateHint("ID area");
+    await expect(page).toHaveURL(/#id-only$/);
+  });
+
+  test("finds a map in the image shadow tree", async ({ vw, page }) => {
+    await vw.open("/image-maps-standard.html");
+    await vw.startHints();
+
+    await vw.activateHint("Shadow nav area");
+    await expect(page).toHaveURL(/#shadow-nav$/);
+  });
+
+  test("does not use a document map for a shadow image", async ({ vw }) => {
+    await vw.open("/image-maps-standard.html");
+    await vw.startHints();
+
+    await vw.expectNoHint("Document-only area");
+  });
+});
+
 test.describe("discovery on a very large document", () => {
   test("Escape during discovery ends the round and leaves nothing", async ({ vw, page }) => {
     await vw.open("/dom-huge.html");

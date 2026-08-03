@@ -120,13 +120,18 @@ const hintLabelForText = (needle: string): string | null => {
     // same way detection does.
     if (element instanceof HTMLAreaElement) {
       const map = element.closest("map");
-      const name = map?.getAttribute("name") ?? "";
-      const image = name === ""
-        ? null
-        : document.querySelector<HTMLImageElement>(
-          `img[usemap="#${CSS.escape(name)}"]`,
+      const name = map?.getAttribute("id") ?? map?.getAttribute("name") ?? "";
+      const root = map?.getRootNode() as Document | ShadowRoot | undefined;
+      const image = name === "" || root === undefined
+        ? undefined
+        : [...root.querySelectorAll<HTMLImageElement>("img[usemap]")].find(
+          (candidate) => {
+            const usemap = candidate.getAttribute("usemap") ?? "";
+            const separator = usemap.indexOf("#");
+            return separator >= 0 && usemap.slice(separator + 1) === name;
+          },
         );
-      if (image === null) return element.getBoundingClientRect();
+      if (image === undefined) return element.getBoundingClientRect();
 
       const base = image.getBoundingClientRect();
       const coords = element.coords.split(",").map((part) =>
