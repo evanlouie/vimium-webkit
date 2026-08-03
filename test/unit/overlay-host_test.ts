@@ -15,6 +15,7 @@ import { Effect } from "effect";
 import {
   allHostProperties,
   comparableHostProperties,
+  focusIsFree,
   HOST_STYLE,
   hostDeclarations,
   hostNeedsAttachment,
@@ -280,5 +281,30 @@ describe("the host that the page moved", () => {
       // call tries again.
       assert.isFalse(hostNeedsAttachment(null, null));
       assert.isFalse(hostNeedsAttachment(null, node("DIV")));
+    }));
+});
+
+describe("the focus after a repair", () => {
+  /** A node that stands for an element in these pure tests. */
+  const node = (name: string): Node => ({ nodeName: name } as unknown as Node);
+  const body = node("BODY");
+
+  it.effect("takes the focus back while nothing holds it", () =>
+    Effect.sync(() => {
+      assert.isTrue(focusIsFree(null, null, body));
+      assert.isTrue(focusIsFree(null, body, body));
+    }));
+
+  it.effect("leaves the focus that the overlay already holds", () =>
+    Effect.sync(() => {
+      // A second repair must not move the focus that the first one gave back.
+      assert.isFalse(focusIsFree(node("BUTTON"), null, body));
+    }));
+
+  it.effect("leaves the focus that the page took", () =>
+    Effect.sync(() => {
+      // Page script can focus one of its own controls at any moment. The user
+      // is then typing into the page, and a repair must not take that away.
+      assert.isFalse(focusIsFree(null, node("A"), body));
     }));
 });
