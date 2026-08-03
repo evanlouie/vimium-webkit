@@ -423,6 +423,7 @@ describe("the admission of a JOIN", () => {
           const sent = yield* Effect.result(
             bus.send(toFrame(CHILD_FRAME as FrameId), {
               kind: "KEYSTROKE",
+              roundId: "round-1",
               notation: "a",
             }),
           );

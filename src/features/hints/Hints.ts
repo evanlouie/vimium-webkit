@@ -45,6 +45,8 @@
  *    `frameId` is not the frame that sent it is dropped, and an element
  *    reference never leaves the frame that owns it. Only the four fields of
  *    `HintDescriptor` travel.
+ * 5. **A timeout ends the named round everywhere.** The origin broadcasts
+ *    `CANCEL_HINTS`. Each matching frame removes its round and session.
  */
 
 import {
@@ -116,7 +118,7 @@ export { HINT_CSS, hintCss, isSafeUserCss } from "./Markers.ts";
  * the outer wait ends at the same moment as the inner one. A frame that hangs
  * must cost its own hints, and no more.
  */
-const COLLECT_DEADLINE_MS = REQUEST_DEADLINE_MS + 500;
+export const COLLECT_DEADLINE_MS = REQUEST_DEADLINE_MS + 500;
 
 /**
  * How long a round keeps authorising a remote activation.
@@ -132,7 +134,7 @@ const ROUND_TTL_MS = 120_000;
 export const FILTER_CONFIRM_DELAY_MS = 200;
 
 /** Give the keyboard back after this long, and do not eat the keys of the user. */
-export const KEY_BUFFER_SAFETY_MS = 1000;
+export const KEY_BUFFER_SAFETY_MS = COLLECT_DEADLINE_MS + 500;
 
 /** The alphabet that is used when the setting cannot give a usable one. */
 const DEFAULT_HINT_CHARACTERS = "sadfjklewcmpgh";
@@ -151,16 +153,6 @@ const MAX_WIRE_LINK_TEXT = 256;
  * widget listens for `mousedown`, and a menu that follows the pointer opens on
  * `mouseover` only.
  */
-const CLICK_SEQUENCE = [
-  "pointerover",
-  "mouseover",
-  "pointerdown",
-  "mousedown",
-  "pointerup",
-  "mouseup",
-  "click",
-] as const;
-
 const HOVER_SEQUENCE = ["pointerover", "mouseover"] as const;
 
 const INDICATORS: Readonly<Record<HintMode, string>> = {
@@ -267,6 +259,23 @@ export const buttonStateFor = (type: string): ButtonState => {
 /** Where an activation came from. A remote one has no gesture of the user. */
 export type ActivationOrigin = "local" | "remote";
 
+/** Collect and bound the descriptors that the coordinator received. */
+export const collectFrameDescriptors = Effect.fn(
+  "Hints.collectFrameDescriptors",
+)(function*(
+  peers: readonly FrameId[],
+  request: (
+    frameId: FrameId,
+  ) => Effect.Effect<readonly HintDescriptor[]>,
+) {
+  const replies = yield* Effect.forEach(peers, request, {
+    concurrency: "unbounded",
+  });
+  const all = replies.flat();
+  const descriptors = limitDescriptors(all);
+  return { descriptors, dropped: all.length - descriptors.length };
+});
+
 // ---------------------------------------------------------------------------
 // Revalidation
 // ---------------------------------------------------------------------------
@@ -288,10 +297,9 @@ export type ActivationOrigin = "local" | "remote";
  *   each of its own hints again, and it draws the markers where the targets
  *   are now. One pass for each animation frame. This is the moment that keeps
  *   the marker on its element while the user reads.
- * - At the key press, in the frame that owns the element, in front of every
- *   mode. This is the moment that decides the click. A reflow that no event
- *   reports is caught here, because the check measures and does not trust the
- *   last draw.
+ * - At the key press, the owning frame checks before every mode.
+ * - Click mode checks again before `mousedown` and before `click`. Page event
+ *   handlers run between these checks and can change the target.
  *
  * **What we compare.** Three things, because an identity alone proves nothing.
  * The page can move an element, and it can put another element on top of it.
@@ -316,9 +324,8 @@ export type ActivationOrigin = "local" | "remote";
  * position that it would carry belongs to the viewport of its own frame. The
  * origin frame therefore never validates a remote hint. It sends
  * `ACTIVATE_HINT`, and the frame that owns the element runs exactly the same
- * check in its own document, against its own anchors and its own last draw,
- * before it acts. A frame that refuses says so in its own HUD, because the
- * protocol carries no answer to an `ACTIVATE_HINT`.
+ * check in its own document before it acts. A refusal returns to the origin
+ * frame, which shows the message after its hint mode closes.
  */
 
 /**
@@ -399,10 +406,8 @@ export const hitAccepts = <T>(
  * frame hangs is worse than a few keystrokes that are dropped, so `release`
  * gives the keyboard back at that moment.
  *
- * The round ends at that moment as well. A frame that answers later would
- * otherwise build a session, draw markers and take the keyboard from a user
- * who is already typing into the page. The abort completes here, so the
- * collection is interrupted and every late answer is dropped.
+ * The round ends at that moment as well. The origin broadcasts its round ID.
+ * Every participant then removes its markers, listener and session fiber.
  */
 export const abortAfterSafety = (
   abort: Deferred.Deferred<void>,
@@ -429,6 +434,7 @@ export const raceUntilAbort = <A>(
 type SessionRole = "origin" | "participant";
 
 interface SessionConfig {
+  readonly roundId: string;
   readonly mode: HintMode;
   readonly entries: readonly HintEntry[];
   readonly role: SessionRole;
@@ -454,6 +460,7 @@ interface SessionState {
 /** The live session, as the message handlers of this service see it. */
 interface LiveSession {
   readonly id: number;
+  readonly roundId: string;
   readonly mode: HintMode;
   readonly role: SessionRole;
   readonly driver: Option.Option<FrameId>;
@@ -462,6 +469,8 @@ interface LiveSession {
 
 /** What this frame remembers about the round that it answered. */
 interface LocalRound {
+  readonly roundId: string;
+  readonly coordinator: FrameId;
   readonly mode: HintMode;
   readonly openedAt: number;
   /** The frame that drives the round. It is known from the `ACTIVATE`. */
@@ -470,9 +479,16 @@ interface LocalRound {
 
 /** What the top frame remembers about the one live round of the page. */
 interface TopRound {
+  readonly roundId: string;
   readonly origin: FrameId;
   readonly mode: HintMode;
   readonly startedAt: number;
+  readonly cancelled: Deferred.Deferred<void>;
+}
+
+interface PendingActivation {
+  readonly roundId: string;
+  readonly owner: FrameId;
 }
 
 // ---------------------------------------------------------------------------
@@ -557,6 +573,24 @@ export class Hints extends Context.Service<Hints, {
       const topRoundRef = yield* Ref.make(Option.none<TopRound>());
       const sessionRef = yield* Ref.make(Option.none<LiveSession>());
       const sessionSeq = yield* Ref.make(0);
+      const roundSeq = yield* Ref.make(0);
+      const pendingActivationRef = yield* Ref.make(
+        Option.none<PendingActivation>(),
+      );
+      const cancelledRoundsRef = yield* Ref.make<ReadonlySet<string>>(
+        new Set(),
+      );
+      const rememberCancelled = (roundId: string): Effect.Effect<void> =>
+        Ref.update(cancelledRoundsRef, (current) => {
+          const next = new Set(current);
+          next.add(roundId);
+          while (next.size > 32) {
+            const oldest = next.values().next().value;
+            if (oldest === undefined) break;
+            next.delete(oldest);
+          }
+          return next;
+        });
       /** True while a round is collected, before its session exists. */
       const startingRef = yield* Ref.make(false);
       /** One session at a time. A new one interrupts the one before it. */
@@ -763,17 +797,82 @@ export class Hints extends Context.Service<Hints, {
           Ref.set(hoverRef, Option.some(new WeakRef(element))),
         );
 
-      /**
-       * Send one sequence of pointer events.
-       *
-       * The whole sequence is inside one `attempt`, because a listener of the
-       * page runs inside `dispatchEvent`, and a listener of the page can throw.
-       * A throw of the page must not become a defect of ours.
-       */
-      const dispatchSequence = (
+      /** Send one event without letting page code become our defect. */
+      const dispatchOne = (
         element: Element,
-        types: readonly string[],
+        type: string,
+        init: MouseEventInit,
       ): Effect.Effect<void> =>
+        Effect.ignore(dom.attempt("Element.dispatchEvent", () => {
+          dispatchPointerish(element, type, init);
+        }));
+
+      /** End a partial sequence and remove the hover that it started. */
+      const cancelSequence = (
+        element: Element,
+        init: MouseEventInit,
+        buttonDown: boolean,
+      ): Effect.Effect<void> =>
+        Effect.gen(function*() {
+          if (buttonDown) {
+            yield* dispatchOne(element, "pointerup", init);
+            yield* dispatchOne(element, "mouseup", init);
+          }
+          yield* dispatchOne(element, "pointerout", init);
+          yield* dispatchOne(element, "mouseout", init);
+          yield* Ref.set(hoverRef, Option.none());
+        });
+
+      /**
+       * Send a click and check after page handlers can change its target.
+       *
+       * Check before `mousedown` and before `click`. A failed check balances a
+       * started press, removes hover, and does not send the click.
+       */
+      const simulateClick = (
+        localIndex: number,
+        hint: LocalHint,
+      ): Effect.Effect<boolean> =>
+        Effect.gen(function*() {
+          const element = hint.element;
+          yield* prepare(element);
+          const { x, y } = yield* dom.probeOr(
+            () => centreOf(element),
+            { x: 0, y: 0 },
+          );
+          const init = eventInit(x, y);
+
+          yield* dispatchOne(element, "pointerover", init);
+          yield* dispatchOne(element, "mouseover", init);
+          if (!(yield* stillTheSameTarget(localIndex, hint))) {
+            yield* cancelSequence(element, init, false);
+            return false;
+          }
+
+          yield* dispatchOne(element, "pointerdown", init);
+          if (!(yield* stillTheSameTarget(localIndex, hint))) {
+            yield* cancelSequence(element, init, true);
+            return false;
+          }
+
+          yield* dispatchOne(element, "mousedown", init);
+          if (!(yield* stillTheSameTarget(localIndex, hint))) {
+            yield* cancelSequence(element, init, true);
+            return false;
+          }
+
+          yield* dispatchOne(element, "pointerup", init);
+          yield* dispatchOne(element, "mouseup", init);
+          if (!(yield* stillTheSameTarget(localIndex, hint))) {
+            yield* cancelSequence(element, init, false);
+            return false;
+          }
+
+          yield* dispatchOne(element, "click", init);
+          return true;
+        });
+
+      const simulateHover = (element: Element): Effect.Effect<void> =>
         Effect.gen(function*() {
           yield* prepare(element);
           const { x, y } = yield* dom.probeOr(
@@ -781,18 +880,10 @@ export class Hints extends Context.Service<Hints, {
             { x: 0, y: 0 },
           );
           const init = eventInit(x, y);
-          yield* Effect.ignore(dom.attempt("Element.dispatchEvent", () => {
-            for (const type of types) {
-              dispatchPointerish(element, type, init);
-            }
-          }));
+          for (const type of HOVER_SEQUENCE) {
+            yield* dispatchOne(element, type, init);
+          }
         });
-
-      const simulateClick = (element: Element): Effect.Effect<void> =>
-        dispatchSequence(element, CLICK_SEQUENCE);
-
-      const simulateHover = (element: Element): Effect.Effect<void> =>
-        dispatchSequence(element, HOVER_SEQUENCE);
 
       /**
        * Undo the last hover.
@@ -866,51 +957,53 @@ export class Hints extends Context.Service<Hints, {
           origin: ActivationOrigin,
         ) {
           const element = hint.element;
+          const refuse = (
+            detail: string,
+          ): Effect.Effect<Option.Option<string>> =>
+            Effect.gen(function*() {
+              if (origin === "local") yield* report.error(detail);
+              return Option.some(detail);
+            });
 
-          // Depth behind the round check. The reasoning that used to stand here
-          // — that a remote copy runs outside a key task and is refused — is
-          // wrong: the clipboard falls back to the manager, which needs no
-          // activation at all. A clipboard write with no sign, and with
-          // contents that an attacker chose, is a known phishing primitive.
           if (origin === "remote" && COPY_MODES.has(mode)) {
-            yield* report.error(
+            return yield* refuse(
               "Ignored a clipboard request from another frame.",
             );
-            return;
           }
 
-          // In front of every mode, and not in front of the click alone. A
-          // copy mode that takes the URL of another element is a wrong action
-          // as well, and the user asked for the element under the marker.
           if (!(yield* stillTheSameTarget(localIndex, hint))) {
-            yield* report.error(
+            return yield* refuse(
               "The page moved that hint. Nothing was activated.",
             );
-            return;
           }
 
           switch (mode) {
             case "activate":
-              yield* simulateClick(element);
-              return;
+              if (!(yield* simulateClick(localIndex, hint))) {
+                return yield* refuse(
+                  "The page moved that hint. Nothing was activated.",
+                );
+              }
+              return Option.none<string>();
 
             case "activate-new-tab":
             case "activate-new-tab-background": {
               if (Option.isNone(hint.href)) {
-                // There is nothing to give to `Tabs.open`, and a synthetic
-                // modifier-click would be a plain click. Do the honest thing,
-                // and say what happened.
-                yield* simulateClick(element);
+                if (!(yield* simulateClick(localIndex, hint))) {
+                  return yield* refuse(
+                    "The page moved that hint. Nothing was activated.",
+                  );
+                }
                 yield* hud.show("No link URL: activated in this tab.");
-                return;
+                return Option.none<string>();
               }
               yield* openInNewTab(hint.href.value, mode === "activate-new-tab");
-              return;
+              return Option.none<string>();
             }
 
             case "hover":
               yield* simulateHover(element);
-              return;
+              return Option.none<string>();
 
             case "focus":
               yield* Effect.ignore(dom.attempt("Element.focus", () => {
@@ -921,27 +1014,21 @@ export class Hints extends Context.Service<Hints, {
                   element.focus({ preventScroll: true });
                 }
               }));
-              return;
+              return Option.none<string>();
 
             case "copy-link-url":
               if (Option.isNone(hint.href)) {
-                yield* report.error("That hint has no URL to copy.");
-                return;
+                return yield* refuse("That hint has no URL to copy.");
               }
               yield* copy(hint.href.value, hint.href.value);
-              return;
+              return Option.none<string>();
 
             case "copy-link-text":
               yield* copy(hint.linkText, "link text");
-              return;
+              return Option.none<string>();
 
             case "open-with-omnibar":
-              // The omnibar takes no initial query, so the URL cannot be filled
-              // in. To show it keeps the command useful instead of confusing.
               if (Option.isSome(hint.href)) yield* hud.show(hint.href.value);
-              // Through the registry, and not through an import: a feature must
-              // not depend on another feature. A build without the omnibar
-              // answers "unavailable", and the user reads why.
               yield* Effect.catch(
                 commands.run("Vomnibar.activate", {
                   count: 1,
@@ -950,19 +1037,14 @@ export class Hints extends Context.Service<Hints, {
                 }),
                 (error) => report.error(error.detail),
               );
-              return;
+              return Option.none<string>();
 
             case "download":
-              // Tier C. Upstream does this with a synthetic Alt-click, which
-              // WebKit does not route to the download path for an untrusted
-              // event.
-              yield* report.error(
+              return yield* refuse(
                 "Download-link hints are not possible in a userscript on " +
-                  "WebKit: a synthetic Alt-click is untrusted, and it never " +
-                  "reaches the download path. Use the context menu " +
-                  "(Control-click, then Download Linked File).",
+                  "WebKit. A synthetic Alt-click cannot start a download. " +
+                  "Use Control-click, then select Download Linked File.",
               );
-              return;
           }
         },
       );
@@ -1032,17 +1114,13 @@ export class Hints extends Context.Service<Hints, {
         local: readonly LocalHint[],
         remote: readonly HintDescriptor[],
       ): readonly HintEntry[] => {
-        const own = descriptorsFor(bus.frameId, local);
-        // Drop any echo of our own descriptors. Upstream measured the removal
-        // of them from each reply as a large gain, and we must not count them
-        // two times.
-        const others = remote.filter(
-          (descriptor) => descriptor.frameId !== bus.frameId,
-        );
-        // The same bound, and the same shares, in every frame. Each frame sees
-        // its own descriptors and the descriptors that the top frame sent, and
-        // `limitDescriptors` gives the same list for both views.
-        return limitDescriptors([...own, ...others]).map((descriptor) => ({
+        // A cross-frame payload contains the complete bounded list. This keeps
+        // the byte decision identical in every frame. A local round builds its
+        // list from its own detection result.
+        const descriptors = remote.length > 0
+          ? limitDescriptors(remote)
+          : limitDescriptors(descriptorsFor(bus.frameId, local));
+        return descriptors.map((descriptor) => ({
           frameId: asFrameId(descriptor.frameId),
           localIndex: descriptor.localIndex,
           linkText: descriptor.linkText,
@@ -1260,6 +1338,12 @@ export class Hints extends Context.Service<Hints, {
           yield* dom.listen("window", "resize", () => onLayoutChange, {
             passive: true,
           });
+          yield* dom.listenOn(
+            dom.document.fonts,
+            "loadingdone",
+            () => onLayoutChange,
+            { passive: true },
+          );
 
           // -- activation --------------------------------------------------
 
@@ -1294,8 +1378,16 @@ export class Hints extends Context.Service<Hints, {
                 return;
               }
 
+              yield* Ref.set(
+                pendingActivationRef,
+                Option.some({
+                  roundId: config.roundId,
+                  owner: entry.frameId,
+                }),
+              );
               yield* Effect.ignore(bus.send(toFrame(entry.frameId), {
                 kind: "ACTIVATE_HINT",
+                roundId: config.roundId,
                 localIndex: entry.localIndex,
                 mode: config.mode,
               }));
@@ -1473,7 +1565,11 @@ export class Hints extends Context.Service<Hints, {
 
           const relay = (notation: string): Effect.Effect<void> =>
             config.crossFrame
-              ? Effect.ignore(bus.broadcast({ kind: "KEYSTROKE", notation }))
+              ? Effect.ignore(bus.broadcast({
+                kind: "KEYSTROKE",
+                roundId: config.roundId,
+                notation,
+              }))
               : Effect.void;
 
           const onKeydown = (
@@ -1528,6 +1624,7 @@ export class Hints extends Context.Service<Hints, {
 
           const session: LiveSession = {
             id,
+            roundId: config.roundId,
             mode: config.mode,
             role: config.role,
             driver: config.driver,
@@ -1538,7 +1635,13 @@ export class Hints extends Context.Service<Hints, {
           // waits for the timer fiber of the message before it, and the exit
           // body of the mode runs inside a `keydown`, where nothing may
           // suspend. A finaliser runs in the fiber of the session.
-          yield* Effect.addFinalizer(() => hud.hide);
+          yield* Effect.addFinalizer(() =>
+            Effect.flatMap(Ref.get(pendingActivationRef), (pending) =>
+              isOrigin && Option.isSome(pending) &&
+                pending.value.roundId === config.roundId
+                ? Effect.void
+                : hud.hide)
+          );
 
           yield* Effect.acquireRelease(
             Ref.set(sessionRef, Option.some(session)),
@@ -1555,7 +1658,8 @@ export class Hints extends Context.Service<Hints, {
           yield* Effect.addFinalizer(() =>
             bus.isTop && isOrigin
               ? Ref.update(topRoundRef, (live) =>
-                Option.isSome(live) && live.value.origin === bus.frameId
+                Option.isSome(live) && live.value.origin === bus.frameId &&
+                  live.value.roundId === config.roundId
                   ? Option.none()
                   : live)
               : Effect.void
@@ -1637,30 +1741,39 @@ export class Hints extends Context.Service<Hints, {
           ));
         });
 
+      interface HintsResult {
+        readonly descriptors: readonly HintDescriptor[];
+        readonly dropped: number;
+      }
+
       const readHintsResult = (
-        reply: InboundMessage,
-      ): Option.Option<readonly HintDescriptor[]> =>
-        reply.message.kind === "HINTS_RESULT"
-          ? Option.some(reply.message.descriptors)
+        roundId: string,
+      ) =>
+      (reply: InboundMessage): Option.Option<HintsResult> =>
+        reply.message.kind === "HINTS_RESULT" &&
+          reply.message.roundId === roundId
+          ? Option.some({
+            descriptors: reply.message.descriptors,
+            dropped: reply.message.droppedDescriptors,
+          })
           : Option.none();
 
       const collectRemote = Effect.fn("Hints.collectRemote")(
-        function*(mode: HintMode) {
+        function*(roundId: string, mode: HintMode) {
           const peers = yield* bus.peers;
           // One frame is this frame. There is nobody to ask.
-          if (peers.length <= 1) return [] as readonly HintDescriptor[];
-          // Time-boxed, and it swallows the failure: a frame that never answers
-          // must degrade to "hints for the frames that did", and not to a dead
-          // page.
-          return yield* Effect.orElseSucceed(
-            bus.request(
-              toTop,
-              { kind: "REQUEST_HINTS", mode },
-              readHintsResult,
-              COLLECT_DEADLINE_MS,
-            ),
-            () => [] as readonly HintDescriptor[],
-          );
+          if (peers.length <= 1) {
+            return Option.some({
+              descriptors: [] as readonly HintDescriptor[],
+              dropped: 0,
+            });
+          }
+          return yield* Effect.option(bus.request(
+            toTop,
+            { kind: "REQUEST_HINTS", roundId, mode },
+            readHintsResult(roundId),
+            COLLECT_DEADLINE_MS,
+          ));
         },
       );
 
@@ -1668,8 +1781,12 @@ export class Hints extends Context.Service<Hints, {
         mode: HintMode,
       ) {
         yield* ensureStyles;
+        yield* Ref.set(pendingActivationRef, Option.none());
 
+        const sequence = yield* Ref.modify(roundSeq, (n) => [n, n + 1]);
+        const roundId = `${bus.frameId}-${sequence}`;
         const buffered = yield* Ref.make<readonly string[]>([]);
+        const failed = yield* Ref.make(false);
         const abort = yield* Deferred.make<void>();
 
         // The buffer starts at the first moment: detection is chunked, and so
@@ -1682,21 +1799,62 @@ export class Hints extends Context.Service<Hints, {
           );
           yield* bufferKeys(buffered, abort);
           const local = yield* detectLocal(mode);
-          const remote = yield* collectRemote(mode);
-          return Option.some({ local, remote });
+          const remote = yield* collectRemote(roundId, mode);
+          if (Option.isNone(remote)) {
+            yield* Ref.set(failed, true);
+            return Option.none();
+          }
+          return Option.some({
+            local,
+            remote: remote.value.descriptors,
+            dropped: remote.value.dropped,
+          });
         }));
 
         // Escape during the collection ends the round, and so does the safety
         // timer. The loser of the race is interrupted, which stops the
         // detection at its next slice.
         const collected = yield* raceUntilAbort(collect, abort);
-        if (Option.isNone(collected)) return;
-        const { local, remote } = collected.value;
+        if (Option.isNone(collected)) {
+          if (yield* Ref.get(failed)) {
+            yield* hud.show("Hints stopped: the page did not answer in time.");
+          }
+          yield* rememberCancelled(roundId);
+          const topRound = yield* Ref.get(topRoundRef);
+          if (
+            Option.isSome(topRound) &&
+            topRound.value.roundId === roundId &&
+            topRound.value.origin === bus.frameId
+          ) {
+            yield* Ref.set(topRoundRef, Option.none());
+            yield* Deferred.succeed(topRound.value.cancelled, undefined);
+          }
+          yield* Ref.update(
+            roundRef,
+            (round) =>
+              Option.isSome(round) && round.value.roundId === roundId
+                ? Option.none()
+                : round,
+          );
+          yield* Effect.ignore(bus.broadcast({
+            kind: "CANCEL_HINTS",
+            roundId,
+          }));
+          return;
+        }
+
+        const { local, remote, dropped } = collected.value;
 
         const entries = merge(local, remote);
         if (entries.length === 0) {
           yield* hud.show("No links to select");
           return;
+        }
+
+        if (dropped > 0) {
+          yield* hud.show(
+            `${dropped} hints were omitted to fit the frame message.`,
+          );
         }
 
         const keys = yield* Ref.get(buffered);
@@ -1706,6 +1864,7 @@ export class Hints extends Context.Service<Hints, {
         const filtering = (yield* settings.current).filterLinkHints;
 
         yield* Effect.scoped(runSession({
+          roundId,
           mode,
           entries,
           role: "origin",
@@ -1720,10 +1879,12 @@ export class Hints extends Context.Service<Hints, {
       // ---------------------------------------------------------------------
 
       const readHints = (
+        roundId: string,
         frameId: FrameId,
       ) =>
       (reply: InboundMessage): Option.Option<readonly HintDescriptor[]> => {
         if (reply.message.kind !== "HINTS") return Option.none();
+        if (reply.message.roundId !== roundId) return Option.none();
         if (reply.from !== frameId) return Option.none();
         // A frame speaks for itself only. To give a descriptor to the frame
         // that did not produce it breaks the shared order, which is a
@@ -1745,56 +1906,65 @@ export class Hints extends Context.Service<Hints, {
        * every frame agreeing.
        */
       const collectEveryFrame = Effect.fn("Hints.collectEveryFrame")(
-        function*(mode: HintMode) {
+        function*(origin: FrameId, roundId: string, mode: HintMode) {
           const peers = yield* bus.peers;
-          const replies = yield* Effect.forEach(
+          return yield* collectFrameDescriptors(
             peers,
             (frameId) =>
               Effect.orElseSucceed(
                 bus.request(
                   toFrame(frameId),
-                  { kind: "COLLECT_HINTS", mode },
-                  readHints(frameId),
+                  {
+                    kind: "COLLECT_HINTS",
+                    roundId,
+                    originFrameId: origin,
+                    mode,
+                  },
+                  readHints(roundId, frameId),
                   REQUEST_DEADLINE,
                 ),
                 () => [] as readonly HintDescriptor[],
               ),
-            { concurrency: "unbounded" },
           );
-          return limitDescriptors(replies.flat());
         },
       );
 
       const runHintRound = Effect.fn("Hints.runHintRound")(
-        function*(origin: FrameId, mode: HintMode) {
-          const descriptors = yield* collectEveryFrame(mode);
-          const peers = yield* bus.peers;
+        function*(
+          origin: FrameId,
+          roundId: string,
+          mode: HintMode,
+          cancelled: Deferred.Deferred<void>,
+        ) {
+          const collected = yield* raceUntilAbort(
+            Effect.map(
+              collectEveryFrame(origin, roundId, mode),
+              Option.some,
+            ),
+            cancelled,
+          );
+          if (Option.isNone(collected)) return Option.none();
 
-          // Every frame except the origin learns that a session is live, and
-          // draws its own markers. Each copy has the descriptors of its
-          // receiver removed, because the receiver works them out again from
-          // the local hints that it already holds.
+          const live = yield* Ref.get(topRoundRef);
+          if (Option.isNone(live) || live.value.roundId !== roundId) {
+            return Option.none();
+          }
+
+          const { descriptors, dropped } = collected.value;
+          const peers = yield* bus.peers;
           yield* Effect.forEach(
             peers.filter((frameId) => frameId !== origin),
             (frameId) =>
               Effect.ignore(bus.send(toFrame(frameId), {
                 kind: "ACTIVATE",
+                roundId,
                 originFrameId: origin,
                 mode,
-                descriptors: descriptors.filter(
-                  (descriptor) => descriptor.frameId !== frameId,
-                ),
+                descriptors,
               })),
             { discard: true },
           );
-
-          // The origin gets the same treatment. Upstream measured the removal
-          // of its own descriptors as a large gain on a page with many links,
-          // and it is the reason that the heavy `LocalHint` never crosses a
-          // frame boundary.
-          return descriptors.filter(
-            (descriptor) => descriptor.frameId !== origin,
-          );
+          return Option.some({ descriptors, dropped });
         },
       );
 
@@ -1809,6 +1979,10 @@ export class Hints extends Context.Service<Hints, {
         Effect.gen(function*() {
           if (message.message.kind !== "REQUEST_HINTS") return Option.none();
           const mode = message.message.mode;
+          const roundId = message.message.roundId;
+          if ((yield* Ref.get(cancelledRoundsRef)).has(roundId)) {
+            return Option.none();
+          }
           const now = yield* dom.now;
           const live = yield* Ref.get(topRoundRef);
 
@@ -1822,15 +1996,33 @@ export class Hints extends Context.Service<Hints, {
             live.value.origin !== message.from
           ) return Option.none();
 
+          if (Option.isSome(live)) {
+            yield* Deferred.succeed(live.value.cancelled, undefined);
+          }
+          const cancelled = yield* Deferred.make<void>();
           yield* Ref.set(
             topRoundRef,
-            Option.some({ origin: message.from, mode, startedAt: now }),
+            Option.some({
+              roundId,
+              origin: message.from,
+              mode,
+              startedAt: now,
+              cancelled,
+            }),
           );
 
-          const descriptors = yield* runHintRound(message.from, mode);
+          const descriptors = yield* runHintRound(
+            message.from,
+            roundId,
+            mode,
+            cancelled,
+          );
+          if (Option.isNone(descriptors)) return Option.none();
           return Option.some({
             kind: "HINTS_RESULT" as const,
-            descriptors,
+            roundId,
+            droppedDescriptors: descriptors.value.dropped,
+            descriptors: descriptors.value.descriptors,
           });
         });
 
@@ -1838,17 +2030,32 @@ export class Hints extends Context.Service<Hints, {
         Effect.gen(function*() {
           if (message.message.kind !== "COLLECT_HINTS") return Option.none();
           const mode = message.message.mode;
+          const roundId = message.message.roundId;
+          const origin = asFrameId(message.message.originFrameId);
+          if ((yield* Ref.get(cancelledRoundsRef)).has(roundId)) {
+            return Option.none();
+          }
           const hints = yield* detectLocal(mode);
+          if ((yield* Ref.get(cancelledRoundsRef)).has(roundId)) {
+            return Option.none();
+          }
           const now = yield* dom.now;
           // The round of this frame opens here, and its age is bounded. It is
           // bounded by time and not by "a mode is live", because the origin
           // frame tears its own mode down before it acts.
           yield* Ref.set(
             roundRef,
-            Option.some({ mode, openedAt: now, origin: Option.none() }),
+            Option.some({
+              roundId,
+              coordinator: message.from,
+              mode,
+              openedAt: now,
+              origin: Option.some(origin),
+            }),
           );
           return Option.some({
             kind: "HINTS" as const,
+            roundId,
             descriptors: descriptorsFor(bus.frameId, hints),
           });
         });
@@ -1866,28 +2073,25 @@ export class Hints extends Context.Service<Hints, {
           const now = yield* dom.now;
           // A round exists in this frame only after we answered a
           // `COLLECT_HINTS`. Anything else is not a round that we take part in.
+          const origin = asFrameId(payload.originFrameId);
           if (
             Option.isNone(round) ||
             now - round.value.openedAt > ROUND_TTL_MS ||
-            round.value.mode !== payload.mode
+            round.value.roundId !== payload.roundId ||
+            round.value.mode !== payload.mode ||
+            Option.isNone(round.value.origin) ||
+            round.value.origin.value !== origin
           ) return Option.none();
-
-          const origin = asFrameId(payload.originFrameId);
-          yield* Ref.set(
-            roundRef,
-            Option.some({ ...round.value, origin: Option.some(origin) }),
-          );
 
           yield* ensureStyles;
           const local = yield* Ref.get(localRef);
-          // `local` is the answer of this frame to the `COLLECT_HINTS` that
-          // opened the round, and the descriptors arrive with our own entries
-          // removed, so `merge` builds exactly the order that the origin
-          // worked out.
+          // `local` is the answer of this frame to `COLLECT_HINTS`. The
+          // complete descriptor list gives every frame the same byte limit.
           const entries = merge(local, payload.descriptors);
           if (entries.length === 0) return Option.none();
 
           yield* beginSession({
+            roundId: payload.roundId,
             mode: payload.mode,
             entries,
             role: "participant",
@@ -1907,6 +2111,7 @@ export class Hints extends Context.Service<Hints, {
           const round = yield* Ref.get(roundRef);
           const now = yield* dom.now;
           if (Option.isNone(round)) return Option.none();
+          if (round.value.roundId !== payload.roundId) return Option.none();
           if (now - round.value.openedAt > ROUND_TTL_MS) {
             yield* Ref.set(roundRef, Option.none());
             return Option.none();
@@ -1928,12 +2133,89 @@ export class Hints extends Context.Service<Hints, {
           // cannot be replayed into a click on every element that this frame
           // ever hinted.
           yield* Ref.set(roundRef, Option.none());
-          yield* activateLocal(
+          const refusal = yield* activateLocal(
             payload.localIndex,
             hint,
             payload.mode,
             "remote",
           );
+          yield* Effect.ignore(bus.broadcast({
+            kind: "ACTIVATION_RESULT",
+            roundId: payload.roundId,
+            detail: Option.getOrElse(refusal, () => ""),
+          }));
+          return Option.none();
+        });
+
+      const onCancelHints = (message: InboundMessage): ServeResult =>
+        Effect.gen(function*() {
+          if (message.message.kind !== "CANCEL_HINTS") return Option.none();
+          const roundId = message.message.roundId;
+          yield* rememberCancelled(roundId);
+
+          const localRound = yield* Ref.get(roundRef);
+          if (
+            Option.isSome(localRound) &&
+            localRound.value.roundId === roundId &&
+            Option.isSome(localRound.value.origin) &&
+            (localRound.value.origin.value === message.from ||
+              localRound.value.coordinator === message.from)
+          ) {
+            yield* Ref.set(roundRef, Option.none());
+          }
+
+          const topRound = yield* Ref.get(topRoundRef);
+          if (
+            bus.isTop && Option.isSome(topRound) &&
+            topRound.value.roundId === roundId &&
+            topRound.value.origin === message.from
+          ) {
+            yield* Ref.set(topRoundRef, Option.none());
+            yield* Deferred.succeed(topRound.value.cancelled, undefined);
+            yield* Effect.ignore(bus.broadcast({
+              kind: "CANCEL_HINTS",
+              roundId,
+            }));
+          }
+
+          const session = yield* Ref.get(sessionRef);
+          if (
+            Option.isSome(session) && session.value.roundId === roundId &&
+            Option.isSome(localRound) &&
+            ((Option.isSome(session.value.driver) &&
+              session.value.driver.value === message.from) ||
+              localRound.value.coordinator === message.from)
+          ) {
+            yield* FiberHandle.clear(sessionFiber);
+          }
+          yield* Ref.update(
+            pendingActivationRef,
+            (pending) =>
+              Option.isSome(pending) && pending.value.roundId === roundId
+                ? Option.none()
+                : pending,
+          );
+          return Option.none();
+        });
+
+      const onActivationResult = (message: InboundMessage): ServeResult =>
+        Effect.gen(function*() {
+          if (message.message.kind !== "ACTIVATION_RESULT") {
+            return Option.none();
+          }
+          if (Option.isSome(message.requestId)) return Option.none();
+          const pending = yield* Ref.get(pendingActivationRef);
+          if (
+            Option.isNone(pending) ||
+            pending.value.roundId !== message.message.roundId ||
+            pending.value.owner !== message.from
+          ) return Option.none();
+          if (message.message.detail.length === 0) {
+            yield* Ref.set(pendingActivationRef, Option.none());
+            yield* hud.hide;
+            return Option.none();
+          }
+          yield* report.error(message.message.detail);
           return Option.none();
         });
 
@@ -1941,13 +2223,15 @@ export class Hints extends Context.Service<Hints, {
         Effect.gen(function*() {
           if (message.message.kind !== "KEYSTROKE") return Option.none();
           const notation = message.message.notation;
+          const roundId = message.message.roundId;
 
           if (bus.isTop && notation === "<esc>") {
             // The round of the page ends when the frame that owns it leaves.
             yield* Ref.update(
               topRoundRef,
               (live) =>
-                Option.isSome(live) && live.value.origin === message.from
+                Option.isSome(live) && live.value.origin === message.from &&
+                  live.value.roundId === roundId
                   ? Option.none()
                   : live,
             );
@@ -1956,6 +2240,7 @@ export class Hints extends Context.Service<Hints, {
           const live = yield* Ref.get(sessionRef);
           if (Option.isNone(live)) return Option.none();
           const session = live.value;
+          if (session.roundId !== roundId) return Option.none();
           // A keystroke means something inside a round only, and only from the
           // frame that the user types into.
           if (session.role !== "participant") return Option.none();
@@ -1976,6 +2261,8 @@ export class Hints extends Context.Service<Hints, {
       yield* bus.serve("COLLECT_HINTS", onCollectHints);
       yield* bus.serve("ACTIVATE", onActivate);
       yield* bus.serve("ACTIVATE_HINT", onActivateHint);
+      yield* bus.serve("CANCEL_HINTS", onCancelHints);
+      yield* bus.serve("ACTIVATION_RESULT", onActivationResult);
       yield* bus.serve("KEYSTROKE", onKeystroke);
 
       // ---------------------------------------------------------------------

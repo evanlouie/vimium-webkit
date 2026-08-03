@@ -49,6 +49,7 @@ const wire = (notation: string): FrameWire => ({
   to: WIRE_TARGET_TOP,
   requestId: NO_REQUEST_ID,
   kind: "KEYSTROKE",
+  roundId: "round-1",
   notation,
 });
 

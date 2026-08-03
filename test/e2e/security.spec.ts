@@ -76,13 +76,13 @@ const probeSelfAdmission = (waitMs: number): Promise<ProbeResult> =>
     // Shape 1: the original attack — one `HELLO`, port attached, addressed at
     // our own window.
     globalThis.postMessage(
-      { magic: MAGIC, v: 2, kind: "HELLO" },
+      { magic: MAGIC, v: 3, kind: "HELLO" },
       "*",
       [withPort.port2],
     );
 
     // Shape 2: announce, then try to redeem a token we were never issued.
-    globalThis.postMessage({ magic: MAGIC, v: 2, kind: "HELLO" }, "*");
+    globalThis.postMessage({ magic: MAGIC, v: 3, kind: "HELLO" }, "*");
     const forged = new MessageChannel();
     forged.port1.addEventListener(
       "message",
@@ -92,7 +92,7 @@ const probeSelfAdmission = (waitMs: number): Promise<ProbeResult> =>
     globalThis.postMessage(
       {
         magic: MAGIC,
-        v: 2,
+        v: 3,
         kind: "JOIN",
         token: "guessed",
         helloId: "x",
@@ -163,7 +163,7 @@ test.describe("frame admission", () => {
             addEventListener("message", (event) => {
               const message = event.data;
               if (message?.magic !== "vimium-webkit/frames" ||
-                  message?.v !== 2 || message?.kind !== "CHALLENGE") return;
+                  message?.v !== 3 || message?.kind !== "CHALLENGE") return;
               const channel = new MessageChannel();
               channel.port1.onmessage = (reply) => {
                 if (reply.data?.kind === "WELCOME") welcomed = true;
@@ -171,7 +171,7 @@ test.describe("frame admission", () => {
               channel.port1.start();
               top.postMessage({
                 magic: "vimium-webkit/frames",
-                v: 2,
+                v: 3,
                 kind: "JOIN",
                 token: message.token,
                 helloId: "page-owned",
@@ -179,7 +179,7 @@ test.describe("frame admission", () => {
               }, "*", [channel.port2]);
             });
             top.postMessage({
-              magic: "vimium-webkit/frames", v: 2, kind: "HELLO"
+              magic: "vimium-webkit/frames", v: 3, kind: "HELLO"
             }, "*");
             setTimeout(() => parent.postMessage({ marker, welcomed }, "*"),
               ${waitMs});

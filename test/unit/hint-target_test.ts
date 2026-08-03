@@ -62,6 +62,13 @@ describe("hintHasMoved", () => {
       assert.isTrue(hintHasMoved(rect(10, 20), rect(90, 20), NO_SHIFT));
     }));
 
+  it.effect("refuses five pixels of drift on a wide target", () =>
+    Effect.sync(() => {
+      const wide = { left: 10, top: 20, width: 400, height: 40 };
+      const moved = { ...wide, left: 15 };
+      assert.isTrue(hintHasMoved(wide, moved, NO_SHIFT));
+    }));
+
   it.effect("allows a fraction of a pixel, and no more", () =>
     Effect.sync(() => {
       const inside = MAX_HINT_DRIFT_PX - 0.5;
