@@ -118,6 +118,94 @@ describe("Key", () => {
       assert.strictEqual(notation(shifted, true), "$");
     }));
 
+  /**
+   * macOS Option chords.
+   *
+   * macOS applies Option to the character, so `Option+F` reports the glyph
+   * `\u0192`. The shipped mapping names `<a-f>`, which is the physical F key.
+   * Each row gives the event and the notation that the mapping file writes.
+   */
+  const OPTION_CHORDS: readonly {
+    readonly name: string;
+    readonly event: KeyEventLike;
+    readonly expected: string | null;
+  }[] = [
+    {
+      name: "Option+F reports the glyph f-hook",
+      event: event({ key: "\u0192", code: "KeyF", altKey: true }),
+      expected: "<a-f>",
+    },
+    {
+      name: "Option+M reports the glyph micro",
+      event: event({ key: "\u00b5", code: "KeyM", altKey: true }),
+      expected: "<a-m>",
+    },
+    {
+      name: "Option+Shift+F reports a capital glyph",
+      event: event({
+        key: "\u00cf",
+        code: "KeyF",
+        altKey: true,
+        shiftKey: true,
+      }),
+      expected: "<a-F>",
+    },
+    {
+      name: "Option+E starts a dead key",
+      event: event({ key: "Dead", code: "KeyE", altKey: true }),
+      expected: "<a-e>",
+    },
+    {
+      name: "Option+1 reports an inverted exclamation mark",
+      event: event({ key: "\u00a1", code: "Digit1", altKey: true }),
+      expected: "<a-1>",
+    },
+    {
+      name: "Option+Slash reports a division sign",
+      event: event({ key: "\u00f7", code: "Slash", altKey: true }),
+      expected: "<a-/>",
+    },
+    {
+      name: "Option+Space reports a no-break space",
+      event: event({ key: "\u00a0", code: "Space", altKey: true }),
+      expected: "<a-space>",
+    },
+    {
+      name: "Alt+A on a Linux AZERTY layout keeps its own letter",
+      event: event({ key: "a", code: "KeyQ", altKey: true }),
+      expected: "<a-a>",
+    },
+    {
+      name: "AltGr on Windows keeps the character that it makes",
+      event: event({
+        key: "@",
+        code: "KeyQ",
+        altKey: true,
+        ctrlKey: true,
+      }),
+      expected: "<c-a-@>",
+    },
+    {
+      name: "a chord with no Alt keeps its own character",
+      event: event({ key: "\u0192", code: "KeyF" }),
+      expected: "\u0192",
+    },
+  ];
+
+  for (const row of OPTION_CHORDS) {
+    it.effect(`normalises an Option chord: ${row.name}`, () =>
+      Effect.sync(() => {
+        assert.strictEqual(notation(row.event), row.expected);
+      }));
+  }
+
+  it.effect("gives an Option chord the same notation as its mapping", () =>
+    Effect.sync(() => {
+      // The mapping file writes `<a-f>`, and the event must arrive as `<a-f>`.
+      const optionF = event({ key: "\u0192", code: "KeyF", altKey: true });
+      assert.deepEqual(sequence("<a-f>"), [notation(optionF) ?? ""]);
+    }));
+
   it.effect("reads both composition signals", () =>
     Effect.sync(() => {
       assert.isTrue(isComposing(event({ key: "a", isComposing: true })));

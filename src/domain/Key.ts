@@ -165,11 +165,79 @@ export const isModifierKey = (event: KeyEventLike): boolean =>
 export const isComposing = (event: KeyEventLike): boolean =>
   event.isComposing === true || event.keyCode === 229;
 
+// ---------------------------------------------------------------------------
+// macOS Option chords
+// ---------------------------------------------------------------------------
+
+/**
+ * The character that a physical key gives with no modifier, per `event.code`.
+ *
+ * The table names the US positions. It is used for an Option chord only, where
+ * the character that macOS reports is a glyph that nobody can write in a
+ * mapping file.
+ */
+const CODE_CHARACTERS: ReadonlyMap<string, string> = new Map([
+  ["Minus", "-"],
+  ["Equal", "="],
+  ["BracketLeft", "["],
+  ["BracketRight", "]"],
+  ["Backslash", "\\"],
+  ["Semicolon", ";"],
+  ["Quote", "'"],
+  ["Backquote", "`"],
+  ["Comma", ","],
+  ["Period", "."],
+  ["Slash", "/"],
+]);
+
+/** Is this a single printable ASCII character? */
+const isAsciiPrintable = (key: string): boolean =>
+  key.length === 1 && key >= "\u0020" && key <= "\u007e";
+
+/**
+ * The character of the physical key for an Option chord on macOS.
+ *
+ * macOS applies Option to the character. `Option+F` reports `event.key` as
+ * `\u0192`, and `Option+E` reports `Dead`. A mapping file names `<a-f>`, so
+ * every shipped Option binding was dead on the main platform.
+ *
+ * Three guards keep the documented layout behaviour:
+ *
+ * 1. The rule applies only when the reported character is not printable ASCII.
+ *    A layout that gives a plain letter for an Alt chord, as X11 and Windows
+ *    do, keeps its own character.
+ * 2. A chord with Ctrl keeps its character. AltGr is Ctrl plus Alt on Windows,
+ *    and it makes text.
+ * 3. With Shift only a letter is translated. The character of a shifted digit
+ *    or of shifted punctuation depends on the layout, and `event.code` does
+ *    not carry it.
+ *
+ * `Option.none()` means that the event is not such a chord.
+ */
+const appleAltKey = (event: KeyEventLike): Option.Option<string> => {
+  if (!event.altKey || event.ctrlKey) return Option.none();
+  const code = event.code;
+  if (code === undefined || isAsciiPrintable(event.key)) return Option.none();
+
+  if (code.length === 4 && code.startsWith("Key")) {
+    return Option.some(code.slice(3).toLowerCase());
+  }
+  if (event.shiftKey) return Option.none();
+  if (code === "Space") return Option.some(" ");
+  if (code.length === 6 && code.startsWith("Digit")) {
+    return Option.some(code.slice(5));
+  }
+  return Option.fromNullishOr(CODE_CHARACTERS.get(code) ?? null);
+};
+
 /**
  * Give the base character. The active keyboard layout can be ignored.
  *
  * With `ignoreKeyboardLayout` the physical `event.code` wins. A Dvorak or a
  * Cyrillic layout then still drives the bindings at the QWERTY positions.
+ *
+ * An Option chord on macOS is the other case that reads `event.code`. See
+ * `appleAltKey`.
  *
  * `Option.none()` means that the event carries no character.
  */
@@ -200,7 +268,11 @@ export const keyChar = (
     }
   }
 
-  const key = normaliseAppKitKey(event.key);
+  // An Option chord on macOS reports a glyph. The physical key decides there,
+  // so `map <a-f> ...` still names the F key.
+  const raw = Option.getOrElse(appleAltKey(event), () => event.key);
+
+  const key = normaliseAppKitKey(raw);
   if (key.length === 0 || key === "Unidentified") return Option.none();
 
   const named = NAMED_KEYS.get(key);
