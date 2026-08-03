@@ -10,12 +10,15 @@ import { assert, describe, it } from "@effect/vitest";
 import { Effect, Option } from "effect";
 import {
   compilePattern,
+  exclusionProblems,
   type ExclusionRule,
   isPassKey,
   makeExclusionSet,
+  parseExclusionLines,
   patternProblem,
   patternToRegExp,
 } from "~/domain/Exclusion.ts";
+import { parseExclusionText } from "~/ui/Dialog.ts";
 
 /** Test a compiled pattern. `null` means that the pattern did not compile. */
 const matches = (pattern: string, url: string): boolean | null => {
@@ -221,6 +224,57 @@ describe("Exclusion", () => {
       );
       for (const rule of set.dropped) {
         assert.isAbove(rule.reason.length, 0, `${rule.pattern} gave no reason`);
+      }
+    }));
+
+  it.effect("marks the line of every rule that is dropped", () =>
+    Effect.sync(() => {
+      // A rule that gives no matcher is dropped, and the page then stops being
+      // excluded. Before this list the drop was silent, and a user saw an
+      // active script on a site that they had turned off.
+      const text = [
+        "# a comment",
+        "https://example.com/*",
+        "/(a+)+$/ jk",
+        "",
+        "/[unclosed/",
+      ].join("\n");
+
+      const problems = exclusionProblems(text);
+      assert.strictEqual(problems.length, 2);
+      assert.include(problems[0] ?? "", "line 3");
+      assert.include(problems[0] ?? "", "/(a+)+$/");
+      assert.include(problems[0] ?? "", "can hang the page");
+      assert.include(problems[1] ?? "", "line 5");
+    }));
+
+  it.effect("says nothing about the rules that a user writes", () =>
+    Effect.sync(() => {
+      const text = [
+        "https://example.com/*",
+        "https://*.example.com/*  jk",
+        "/^https?://([a-z0-9-]+\\.)*example\\.com/.*$/",
+        "**",
+      ].join("\n");
+
+      assert.deepEqual(exclusionProblems(text), []);
+    }));
+
+  it.effect("reads the settings text as the settings dialog reads it", () =>
+    Effect.sync(() => {
+      // Two readers of one text can drift apart, and a marked line would then
+      // not be the dropped rule. This test holds the two together.
+      const texts = [
+        "https://example.com/*",
+        "# a comment\n\nhttps://a.test/*  jk\n  /(a+)+$/   x y  \n",
+        "  \n#\nhttps://b.test/*\n\t/x*/\tjk\n",
+      ];
+      for (const text of texts) {
+        assert.deepEqual(
+          parseExclusionLines(text).map((entry) => entry.rule),
+          [...parseExclusionText(text)],
+          `the two readers disagree about ${JSON.stringify(text)}`,
+        );
       }
     }));
 
