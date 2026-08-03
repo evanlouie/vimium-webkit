@@ -246,6 +246,18 @@ describe("Key", () => {
       expected: "<a-`>",
     },
     {
+      // WebKit gives both ISO Option+section and Option+Backquote key code 192.
+      // The physical code keeps these two keys distinct.
+      name: "ISO Option+section keeps the event character",
+      event: event({
+        key: "\u00a7",
+        code: "IntlBackslash",
+        keyCode: 192,
+        altKey: true,
+      }),
+      expected: "<a-\u00a7>",
+    },
+    {
       // A numpad key has its own key codes, 96 to 105, which name no
       // character. The reported character is already the right one.
       name: "US Option+Numpad1 keeps its digit",
@@ -383,8 +395,8 @@ describe("Key", () => {
     // -- macOS layouts that are not Latin ----------------------------------
     {
       // A known limit. WebKit cannot name a Cyrillic letter in `keyCode`, so
-      // it gives the letter of the US position. The letter of the user is in
-      // no field of the event.
+      // it gives the letter of the US position. No field of this event carries
+      // the letter of the user.
       name: "Russian Option+ef gives the letter of the position",
       event: event({
         key: "\u0192",

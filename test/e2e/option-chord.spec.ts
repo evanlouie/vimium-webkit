@@ -14,6 +14,7 @@
  */
 
 import { expect, test } from "./harness/fixtures.ts";
+import { overlayText } from "./harness/overlay.ts";
 import { DETERMINISTIC } from "./harness/settings-seed.ts";
 
 /** The default `scrollStepSize`. */
@@ -21,7 +22,10 @@ const STEP = 60;
 
 test.describe("an Alt chord", () => {
   test.use({
-    settingsPatch: { ...DETERMINISTIC, keyMappings: "map <a-j> scrollDown" },
+    settingsPatch: {
+      ...DETERMINISTIC,
+      keyMappings: "map <a-j> scrollDown\nmap <a-,> scrollDown",
+    },
   });
 
   test("runs the command that the mapping names", async ({ vw }) => {
@@ -30,6 +34,29 @@ test.describe("an Alt chord", () => {
     await vw.page.keyboard.press("Alt+j");
 
     await expect.poll(async () => (await vw.scrollOffsets()).y).toBe(STEP);
+  });
+
+  test("uses the probed Apple flag for an Option glyph", async ({ vw }) => {
+    await vw.open("/scrollables.html");
+
+    // The comma uses the legacy code path that an Apple platform enables.
+    await vw.page.keyboard.press("Alt+,");
+
+    await expect.poll(async () => (await vw.scrollOffsets()).y).toBe(STEP);
+  });
+
+  test("reports the Apple flag from the browser probe", async ({ vw, page }) => {
+    await vw.open("/scrollables.html");
+    await page.keyboard.press("?");
+
+    // The diagnostics are the report that `Keyboard` receives. This checks the
+    // browser navigator, the probe and the service as one path.
+    await expect.poll(async () => {
+      const diagnostics = await overlayText(page, ".vw-diagnostics");
+      return diagnostics?.split("\n").some((line) =>
+        /^applePlatform\s+true$/.test(line)
+      ) ?? false;
+    }).toBe(true);
   });
 
   test("carries the legacy key code that the rule reads", async ({ vw }) => {

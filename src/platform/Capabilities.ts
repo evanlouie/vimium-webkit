@@ -3,8 +3,8 @@
  *
  * Three rules hold this module together:
  *
- * 1. **Probe, do not sniff.** The manager name is kept for a bug report only.
- *    No behaviour may branch on it.
+ * 1. **Probe, do not sniff.** One exception identifies an Apple platform.
+ *    No feature test can identify the behaviour of the Option key.
  * 2. **Every `false` has a defined behaviour.** Where the user can see that
  *    behaviour, the first attempt must give a HUD message.
  * 3. **No probe may throw.** A userscript does not own its globals, and this
@@ -204,16 +204,9 @@ export const probeCapabilities: Effect.Effect<
    *
    * The answer decides how an Option chord is read. See `isApplePlatform`.
    */
-  const applePlatform = yield* flag(() => {
-    const nav: unknown = win.navigator;
-    if (!Predicate.isObjectKeyword(nav)) return false;
-    const ua: unknown = Reflect.get(nav, "userAgent");
-    const platform: unknown = Reflect.get(nav, "platform");
-    return isApplePlatform(
-      Predicate.isString(ua) ? ua : "",
-      Predicate.isString(platform) ? platform : "",
-    );
-  });
+  const applePlatform = yield* flag(() =>
+    isApplePlatform(win.navigator.userAgent, win.navigator.platform)
+  );
 
   const checkVisibility = yield* flag(
     () => isCallable(Element.prototype, "checkVisibility"),

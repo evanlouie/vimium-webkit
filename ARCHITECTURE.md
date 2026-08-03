@@ -68,7 +68,6 @@ flowchart TD
   Modes --> Keyboard
   Exclusions --> Keyboard
   Settings --> Keyboard
-  Caps --> Keyboard
 
   Modes --> Features
   Ui --> Features
