@@ -11,15 +11,21 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import {
+  alignError,
   allHostProperties,
   comparableHostProperties,
   focusIsFree,
   HOST_STYLE,
   hostDeclarations,
+  hostIsDisplaced,
   hostNeedsAttachment,
+  hostTranslate,
+  NO_SHIFT,
   outOfDateHostProperties,
+  ownedDeclarations,
+  type ViewportRect,
 } from "~/ui/Ui.ts";
 
 /** A style that holds exactly what the overlay wrote. */
@@ -90,6 +96,7 @@ describe("the guarded set", () => {
           "pointer-events",
           "z-index",
           "display",
+          "contain",
           "transform",
           "visibility",
           "opacity",
@@ -281,6 +288,113 @@ describe("the host that the page moved", () => {
       // call tries again.
       assert.isFalse(hostNeedsAttachment(null, null));
       assert.isFalse(hostNeedsAttachment(null, node("DIV")));
+    }));
+});
+
+describe("the place of the host in the viewport", () => {
+  /** The viewport of the measurement in WebKit: 1280 by 800 CSS pixels. */
+  const VIEW: ViewportRect = {
+    offsetLeft: 0,
+    offsetTop: 0,
+    width: 1280,
+    height: 800,
+    scale: 1,
+  };
+
+  /** The host where `position: fixed` promises to put it. */
+  const ON_VIEWPORT = { left: 0, top: 0, width: 1280, height: 800 };
+
+  it.effect("finds no error while the host lies on the viewport", () =>
+    Effect.sync(() => {
+      assert.isTrue(Option.isNone(alignError(ON_VIEWPORT, VIEW)));
+      assert.isFalse(hostIsDisplaced(ON_VIEWPORT, VIEW));
+    }));
+
+  it.effect("measures the error that a containing block makes", () =>
+    Effect.sync(() => {
+      // A rule of class 1 on `html`, such as `will-change: transform`, makes
+      // `html` the containing block of our fixed host. The host then holds a
+      // place in the document, so the error is the scroll offset. I measured
+      // -2759 in WebKit with the page at 2759 px.
+      const scrolled = { ...ON_VIEWPORT, top: -2759 };
+      const error = alignError(scrolled, VIEW);
+      assert.isTrue(Option.isSome(error));
+      assert.deepEqual(Option.getOrThrow(error), { dx: 0, dy: 2759 });
+      assert.isTrue(hostIsDisplaced(scrolled, VIEW));
+    }));
+
+  it.effect("keeps the offset of the visual viewport", () =>
+    Effect.sync(() => {
+      // Under the dynamic toolbar of iOS the host must sit at the offset of
+      // the visual viewport, and not at the origin of the layout viewport.
+      const shifted: ViewportRect = { ...VIEW, offsetTop: 84 };
+      assert.isTrue(
+        Option.isNone(alignError({ ...ON_VIEWPORT, top: 84 }, shifted)),
+      );
+      assert.isFalse(hostIsDisplaced({ ...ON_VIEWPORT, top: 84 }, shifted));
+      assert.isTrue(hostIsDisplaced(ON_VIEWPORT, shifted));
+    }));
+
+  it.effect("says nothing about an error of one pixel", () =>
+    Effect.sync(() => {
+      // A rounding of the engine is not an attack. WebKit quantises the
+      // visual viewport to 1/64 px, so a small difference must not make the
+      // guard write on every frame.
+      const rounded = { ...ON_VIEWPORT, left: 0.5, top: -0.5 };
+      assert.isTrue(Option.isNone(alignError(rounded, VIEW)));
+      assert.isFalse(hostIsDisplaced(rounded, VIEW));
+    }));
+
+  it.effect("finds a host that a page rule made small", () =>
+    Effect.sync(() => {
+      // `vimium-webkit-overlay { width: 0 !important }`, and a `scale(0)` on
+      // an ancestor, both end here. A measurement answers every cause, which
+      // a list of CSS properties written by hand cannot.
+      assert.isTrue(hostIsDisplaced({ ...ON_VIEWPORT, width: 0 }, VIEW));
+      assert.isTrue(hostIsDisplaced({ ...ON_VIEWPORT, height: 0 }, VIEW));
+      assert.isTrue(
+        hostIsDisplaced({ left: 0, top: 0, width: 1280, height: 399 }, VIEW),
+      );
+    }));
+
+  it.effect("accepts a size that a scrollbar made smaller", () =>
+    Effect.sync(() => {
+      // A classic scrollbar costs about 15 px, and it hides no interface.
+      assert.isFalse(
+        hostIsDisplaced({ left: 0, top: 0, width: 1265, height: 800 }, VIEW),
+      );
+    }));
+});
+
+describe("the declarations that the viewport sync writes", () => {
+  const VIEW: ViewportRect = {
+    offsetLeft: 0,
+    offsetTop: 0,
+    width: 1280,
+    height: 800,
+    scale: 1,
+  };
+
+  it.effect("writes `none` while nothing moves the host", () =>
+    Effect.sync(() => {
+      // A removal would leave the page rule as the only declaration for
+      // `transform`, and `transform: scale(0) !important` would then win.
+      assert.strictEqual(hostTranslate(0, 0), "none");
+      assert.strictEqual(
+        ownedDeclarations(VIEW, NO_SHIFT).get("transform"),
+        "none",
+      );
+    }));
+
+  it.effect("adds the correction to the offset of the viewport", () =>
+    Effect.sync(() => {
+      const owned = ownedDeclarations(
+        { ...VIEW, offsetTop: 84 },
+        { dx: 0, dy: 2759 },
+      );
+      assert.strictEqual(owned.get("transform"), "translate(0px, 2843px)");
+      assert.strictEqual(owned.get("width"), "1280px");
+      assert.strictEqual(owned.get("height"), "800px");
     }));
 });
 

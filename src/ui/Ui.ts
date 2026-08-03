@@ -21,8 +21,14 @@
  * when the page takes it away or moves it. See `HOST_STYLE` and the removal
  * guard below.
  *
- * The host cannot escape its own ancestors. Read the limit at
- * `outOfDateHostProperties`, and read `SECURITY.md`.
+ * The host cannot escape its own ancestors. Read the two classes of ancestor
+ * rule at `outOfDateHostProperties`, and read `SECURITY.md`.
+ *
+ * **The invariant of this module.** The overlay never holds the keyboard while
+ * the user cannot see it. `visibilityFault` measures the host box against the
+ * viewport, and it reports the state of the removal guard. A feature that
+ * holds the keyboard asks that question, gives the keyboard back when the
+ * answer names a fault, and writes the reason in the console.
  *
  * Each layer of the overlay is hidden from assistive technology while it is
  * inactive, and `expose` opens one layer at a time. A hint marker decorates a
@@ -157,6 +163,14 @@ export const HOST_STYLE: ReadonlyArray<readonly [string, string]> = [
   ["pointer-events", "none"],
   ["z-index", "2147483647"],
   ["display", "block"],
+  // Layout containment, so that the host is the containing block of every
+  // layer inside it. Each layer is `position: fixed`, and a rule on `html`
+  // such as `will-change: transform` makes `html` the containing block of a
+  // fixed element. Without this declaration the layers took the size of the
+  // whole document while the host itself was correct. A measurement in WebKit
+  // gave a dialog of 2257 px inside a host of 800 px. The layers now follow
+  // the host, which the sync and `alignHost` keep on the viewport.
+  ["contain", "layout"],
   // `all: initial !important` already covers each property below, and a
   // measurement in WebKit confirms it. The true defect was the absent
   // important priority: `master` wrote each declaration with no priority, so
@@ -258,16 +272,36 @@ export const hostNeedsAttachment = (
  * The guard compares first and writes only when something changed. A write for
  * each check would make a page that watches the attribute fight us in a loop.
  *
- * **Limit.** This defends the host, and the host only. A page that hides an
- * *ancestor* of the host still wins, because CSS gives a descendant no way out
- * of its ancestors. `documentElement` is the only ancestor that the host has.
- * The removal guard keeps the host a child of it. A page that moves the host
- * into a container of its own therefore loses it again at once. Five rules
- * still win: `html { opacity: 0 }`, `html { transform: scale(0) }`,
- * `html { filter: opacity(0) }`, `html { content-visibility: hidden }` and
- * `html { display: none }`. Each one paints the page itself as nothing, so the
- * user sees a blank page and not a hidden interface. `SECURITY.md` names this
- * limit.
+ * **Limit.** This defends the host, and the host only. A page that writes a
+ * rule on an *ancestor* of the host still reaches the overlay, because CSS
+ * gives a descendant no way out of its ancestors. The removal guard keeps the
+ * host a child of `documentElement`, so `html` is the only ancestor left.
+ * There are exactly two classes of such rule, and the class decides both the
+ * result and the answer.
+ *
+ * **Class 1: a rule that makes `html` the containing block of a fixed
+ * descendant.** The overlay then holds a place in the document, and not in the
+ * viewport, so it scrolls away with the page. The page itself is untouched and
+ * fully readable. Example: `html { will-change: transform }`. The property is
+ * not the definition; the effect is. Every property that gives an element a
+ * transform, a containment, a filter or a perspective belongs to this class —
+ * `transform`, `translate`, `rotate`, `scale`, `will-change`, `contain`,
+ * `container-type`, `perspective`, `filter` and `backdrop-filter` — and so
+ * does any future property with the same effect. `alignHost` answers this
+ * class: it measures the host box and moves the host back on to the viewport.
+ *
+ * **Class 2: a rule that makes `html` paint nothing.** The overlay disappears,
+ * and the page disappears with it, so the user sees a blank page and not a
+ * hidden interface. Example: `html { opacity: 0 }`. `display: none`,
+ * `visibility: hidden`, `content-visibility: hidden`, `filter: opacity(0)` and
+ * `transform: scale(0)` belong here as well. No measure inside the script
+ * answers this class, because a rule of our own on `html` would break every
+ * honest page that fades or animates its root element.
+ *
+ * Class 1 leaves the page readable, and it is therefore the dangerous one.
+ * `visibilityFault` measures what is left after `alignHost`, so an ancestor
+ * that our correction cannot answer takes the keyboard away from the overlay.
+ * `SECURITY.md` names both classes.
  *
  * `read` gives the current value and the current priority of one property, and
  * `guarded` names the properties that this engine can compare. Both are
@@ -287,12 +321,12 @@ export const outOfDateHostProperties = (
     .map(([property]) => property);
 
 /**
- * How many times the guard puts the host back after a removal.
+ * How many times the guard puts the host back for each quiet second.
  *
  * A page that removes the host inside its own mutation observer would fight us
- * in a loop of microtasks, and that loop would starve the page. The observer
- * stops after the cap. The overlay still comes back, because every visible
- * action attaches the host again.
+ * in a loop of microtasks, and that loop would starve the page. The loop needs
+ * *our* write, so the guard stops writing after the cap. It keeps observing,
+ * and it says that it stopped: see `guardYielded`.
  */
 const REATTACH_LIMIT = 32;
 
@@ -302,9 +336,121 @@ const REATTACH_LIMIT = 32;
  * The cap protects against a loop, and a loop happens inside one task. A
  * single-page application that replaces `documentElement` on each route is not
  * a loop, and a lifetime cap would take the guard away from it after 32
- * routes. One quiet second ends the loop and gives the guard back.
+ * routes. One quiet second ends the loop, gives the count back, and repairs
+ * the host again.
  */
 const REATTACH_RESET_MS = 1000;
+
+// ---------------------------------------------------------------------------
+// What the user can see
+// ---------------------------------------------------------------------------
+
+/**
+ * Why the user cannot see the overlay.
+ *
+ * - `misplaced` — the page holds the host somewhere else, and the guard has
+ *   spent its repair budget for this second.
+ * - `displaced` — the host box does not lie on the viewport, and `alignHost`
+ *   could not correct it.
+ *
+ * A feature that holds the keyboard must give it back while a fault stands.
+ * An interface that nobody can see must not take the keys of the user.
+ */
+export type OverlayFault = "misplaced" | "displaced";
+
+/** The border box of the host, in the coordinates of the layout viewport. */
+export interface HostBox {
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+/** How far the host may sit from the viewport origin, in CSS pixels. */
+const ORIGIN_TOLERANCE = 2;
+
+/** How far the host must move before the correction writes anything. */
+const SHIFT_TOLERANCE = 1;
+
+/** The correction that keeps the host on the viewport. */
+export interface HostShift {
+  readonly dx: number;
+  readonly dy: number;
+}
+
+/** No correction: the host lies where `position: fixed` promises. */
+export const NO_SHIFT: HostShift = { dx: 0, dy: 0 };
+
+/**
+ * The `transform` value that puts the host on the visible viewport.
+ *
+ * `none`, and not a removal, for a zero offset: a removal would leave the page
+ * rule as the only declaration for `transform`.
+ */
+export const hostTranslate = (x: number, y: number): string =>
+  x === 0 && y === 0 ? "none" : `translate(${x}px, ${y}px)`;
+
+/**
+ * The declarations that the viewport sync owns.
+ *
+ * The guard compares against these values and the repair writes them, so a
+ * repair can never undo the last sync.
+ */
+export const ownedDeclarations = (
+  view: ViewportRect,
+  shift: HostShift,
+): ReadonlyMap<string, string> =>
+  new Map<string, string>([
+    [
+      "transform",
+      hostTranslate(view.offsetLeft + shift.dx, view.offsetTop + shift.dy),
+    ],
+    ["width", `${view.width}px`],
+    ["height", `${view.height}px`],
+  ]);
+
+/**
+ * How far the host is from the place that it must hold.
+ *
+ * `None` means that it lines up. A rule on `html` of class 1 makes `html` the
+ * containing block of our fixed host, so the host holds a place in the
+ * document instead of the viewport. The error is then the scroll offset, and
+ * it is a pure translation, so one correction answers it.
+ */
+export const alignError = (
+  box: HostBox,
+  view: ViewportRect,
+): Option.Option<HostShift> => {
+  const dx = view.offsetLeft - box.left;
+  const dy = view.offsetTop - box.top;
+  return Math.abs(dx) < SHIFT_TOLERANCE && Math.abs(dy) < SHIFT_TOLERANCE
+    ? Option.none()
+    : Option.some({ dx, dy });
+};
+
+/**
+ * Does the host box disagree with the visible viewport?
+ *
+ * This is a measurement, and not a list of CSS properties. A list written by
+ * hand was incomplete three times. The origin says that an ancestor moved the
+ * host, and the size says that an ancestor or a page rule made it small. Half
+ * the viewport is the bound for the size, because a scrollbar and a rounding
+ * both cost a few pixels and neither one hides an interface.
+ */
+export const hostIsDisplaced = (
+  box: HostBox,
+  view: ViewportRect,
+): boolean =>
+  Math.abs(box.left - view.offsetLeft) > ORIGIN_TOLERANCE ||
+  Math.abs(box.top - view.offsetTop) > ORIGIN_TOLERANCE ||
+  box.width < view.width / 2 ||
+  box.height < view.height / 2;
+
+/** What each fault says to the user, in the console. */
+const FAULT_REASON: Readonly<Record<OverlayFault, string>> = {
+  misplaced: "the page holds the overlay outside the document element",
+  displaced: "a rule of the page takes the overlay out of the viewport",
+};
 
 /**
  * May the guard give the focus back to the node that held it?
@@ -383,6 +529,21 @@ export class Ui extends Context.Service<Ui, {
    * it.
    */
   readonly ensureAttached: Effect.Effect<void>;
+  /**
+   * Why the user cannot see the overlay, measured now.
+   *
+   * `None` means that the host lies on the viewport and that the removal guard
+   * still repairs it. The call first repairs what it can: the style, the
+   * place, and the offset of an ancestor that made `html` a containing block.
+   * What is left is a fault that no measure of ours answers.
+   *
+   * **Every feature that holds the keyboard must ask this.** A mode that keeps
+   * taking keys over an interface that nobody can see is the failure that this
+   * module exists to prevent. Give the keyboard back, and write the reason in
+   * the console: the HUD is inside the overlay, so it cannot carry the
+   * message.
+   */
+  readonly visibilityFault: Effect.Effect<Option.Option<OverlayFault>>;
   /**
    * Show one layer to assistive technology while the scope is open.
    *
@@ -489,6 +650,21 @@ export class Ui extends Context.Service<Ui, {
         // move both take the focus away before the guard runs, so the guard
         // cannot read it at that moment. `focusin` remembers it.
         const lastFocused = yield* Ref.make<Option.Option<HTMLElement>>(
+          Option.none(),
+        );
+
+        // How far the host must move to lie on the viewport. A rule on `html`
+        // that makes it a containing block for a fixed child gives our host a
+        // place in the document, and `alignHost` measures the error.
+        const alignment = yield* Ref.make<HostShift>(NO_SHIFT);
+
+        // Has the removal guard spent its repair budget for this second? While
+        // this is true the page holds the host, so the overlay is not visible.
+        const guardYielded = yield* Ref.make(false);
+
+        // The fault that we reported last. One line for each change, and not
+        // one line for each check.
+        const lastFault = yield* Ref.make<Option.Option<OverlayFault>>(
           Option.none(),
         );
 
@@ -707,6 +883,10 @@ export class Ui extends Context.Service<Ui, {
           element.focus({ preventScroll: true });
         };
 
+        /** The element that must hold the host, or `null` before it exists. */
+        const hostParent = (): Element | null =>
+          doc.documentElement ?? doc.body ?? null;
+
         /**
          * Put the host back in the document, with the style that we gave it.
          *
@@ -726,8 +906,7 @@ export class Ui extends Context.Service<Ui, {
             restoreHostStyle(owned);
             // At `document-start` there may be no `documentElement` yet. Doing
             // nothing is correct, because the next `layer` call tries again.
-            const parent: Element | null = doc.documentElement ?? doc.body ??
-              null;
+            const parent = hostParent();
             if (
               parent !== null && hostNeedsAttachment(parent, host.parentNode)
             ) {
@@ -756,10 +935,58 @@ export class Ui extends Context.Service<Ui, {
         // The removal guard
         // ---------------------------------------------------------------
 
+        /**
+         * Publish the reason why the user cannot see the overlay.
+         *
+         * One line for each change of the answer, and not one line for each
+         * check. The console is the only channel that is left, because the HUD
+         * is inside the overlay that the fault hides. The application installs
+         * a console logger with a minimum level of `Warn`, so this line
+         * reaches the developer and the user.
+         */
+        const publishFault = (
+          next: Option.Option<OverlayFault>,
+        ): Effect.Effect<Option.Option<OverlayFault>> =>
+          Effect.gen(function*() {
+            const previous = yield* Ref.getAndSet(lastFault, next);
+            const same = Option.isNone(next)
+              ? Option.isNone(previous)
+              : Option.isSome(previous) && previous.value === next.value;
+            if (same) return next;
+            yield* Effect.logWarning(
+              Option.isSome(next)
+                ? `the overlay is not visible, so it gives the keyboard back: ${
+                  FAULT_REASON[next.value]
+                }`
+                : "the overlay is visible again, and it takes its keys again",
+            );
+            return next;
+          });
+
         const reattachments = yield* Ref.make(0);
         // One quiet second puts the count back to zero. A new reattachment
         // interrupts the fiber that the one before it started.
         const reattachReset = yield* FiberHandle.make<void, never>();
+
+        /**
+         * Repair the host again after one quiet second.
+         *
+         * This gives back the count **and** the repair. A cap that only
+         * counted down would leave a page that spent the budget with the host
+         * for the rest of the session.
+         */
+        const resumeGuard = Effect.gen(function*() {
+          yield* Ref.set(reattachments, 0);
+          const yielded = yield* Ref.getAndSet(guardYielded, false);
+          yield* ensureAttached;
+          if (yielded) yield* publishFault(Option.none());
+        });
+
+        /** Start the quiet second again. A newer report replaces an older one. */
+        const armReset = Effect.asVoid(FiberHandle.run(
+          reattachReset,
+          Effect.andThen(Effect.sleep(REATTACH_RESET_MS), resumeGuard),
+        ));
 
         // The services of this layer, for the observer callback. The callback
         // is an imperative caller, and `runSyncExitWith` is the bridge that
@@ -804,11 +1031,7 @@ export class Ui extends Context.Service<Ui, {
                 // moved into a container of its own is still connected, and
                 // the page then owns the visibility of the overlay.
                 const misplaced = yield* dom.probeOr(
-                  () =>
-                    hostNeedsAttachment(
-                      doc.documentElement ?? doc.body ?? null,
-                      host.parentNode,
-                    ),
+                  () => hostNeedsAttachment(hostParent(), host.parentNode),
                   false,
                 );
                 if (!misplaced) return;
@@ -817,20 +1040,19 @@ export class Ui extends Context.Service<Ui, {
                   (current) => current + 1,
                 );
                 if (count > REATTACH_LIMIT) {
-                  yield* dom.probeOr(() => {
-                    observer.disconnect();
-                    return true;
-                  }, false);
+                  // The budget for this second is gone. Stop writing, because
+                  // the loop needs our write, but **keep observing** and say
+                  // what happened. A guard that disconnected here stayed
+                  // silent for the rest of the session, and the page then held
+                  // an invisible interface that still took every key.
+                  yield* Ref.set(guardYielded, true);
+                  yield* publishFault(Option.some("misplaced"));
+                  yield* armReset;
                   return;
                 }
+                yield* Ref.set(guardYielded, false);
                 yield* ensureAttached;
-                yield* FiberHandle.run(
-                  reattachReset,
-                  Effect.andThen(
-                    Effect.sleep(REATTACH_RESET_MS),
-                    Ref.set(reattachments, 0),
-                  ),
-                );
+                yield* armReset;
               }));
               // A defect inside the guard must not disappear. The overlay is
               // gone at this moment, so a silent failure looks like a page
@@ -989,77 +1211,13 @@ export class Ui extends Context.Service<Ui, {
         yield* syncColorScheme;
 
         // ---------------------------------------------------------------
-        // The visual viewport
+        // The visual viewport, and the place of the host in it
         // ---------------------------------------------------------------
 
         const visualViewport = yield* dom.probeOr(
           () => Option.fromNullishOr(win.visualViewport),
           Option.none<VisualViewport>(),
         );
-
-        /**
-         * Move the whole overlay, so that a `position: fixed` child lines up
-         * with the *visual* viewport and not the layout viewport.
-         *
-         * The two move apart under the dynamic toolbar of iOS, and during a
-         * pinch zoom.
-         */
-        const syncViewport = (visual: VisualViewport): Effect.Effect<void> =>
-          Effect.gen(function*() {
-            const read = yield* dom.probeOr<
-              Option.Option<ReadonlyMap<string, string>>
-            >(() => {
-              const { offsetLeft, offsetTop } = visual;
-              return Option.some(
-                new Map<string, string>([
-                  // `none`, and not a removal: a removal would leave the page
-                  // rule as the only declaration for `transform`, and a page
-                  // that writes `transform: scale(0) !important` would then
-                  // win.
-                  [
-                    "transform",
-                    offsetLeft === 0 && offsetTop === 0
-                      ? "none"
-                      : `translate(${offsetLeft}px, ${offsetTop}px)`,
-                  ],
-                  ["width", `${visual.width}px`],
-                  ["height", `${visual.height}px`],
-                ]),
-              );
-            }, Option.none<ReadonlyMap<string, string>>());
-            if (Option.isNone(read)) return;
-            const owned = read.value;
-            // The guard reads this, so it must agree with the style before the
-            // next check. A repair then writes the viewport values again
-            // instead of the constant `none` of `HOST_STYLE`.
-            yield* Ref.set(viewportOwned, owned);
-            yield* dom.probeOr(() => {
-              // The important priority again, and for two reasons. Page CSS
-              // must not move the overlay, and `all: initial !important` above
-              // wins over a normal declaration in the same block whatever the
-              // order.
-              for (const [property, value] of owned) {
-                host.style.setProperty(property, value, "important");
-              }
-              host.style.setProperty("--vw-scale", String(visual.scale));
-              return true;
-            }, false);
-          });
-
-        if (Option.isSome(visualViewport)) {
-          const visual = visualViewport.value;
-          const viewportFiber = yield* FiberHandle.make<void, never>();
-          // One write for each animation frame. A resize and a scroll arrive
-          // many times inside one frame, and a newer one interrupts the fiber
-          // that the one before it started.
-          const scheduleSync = Effect.asVoid(FiberHandle.run(
-            viewportFiber,
-            Effect.andThen(dom.nextFrame, syncViewport(visual)),
-          ));
-          yield* dom.listenOn(visual, "resize", () => scheduleSync);
-          yield* dom.listenOn(visual, "scroll", () => scheduleSync);
-          yield* syncViewport(visual);
-        }
 
         const viewport: Effect.Effect<ViewportRect> = Effect.gen(function*() {
           if (Option.isSome(visualViewport)) {
@@ -1080,6 +1238,142 @@ export class Ui extends Context.Service<Ui, {
             scale: 1,
           }), FALLBACK_VIEWPORT);
         });
+
+        /** Where the host lies now, or `None` when the read is refused. */
+        const measureHost: Effect.Effect<Option.Option<HostBox>> = dom.probeOr(
+          () => {
+            const rect = host.getBoundingClientRect();
+            return Option.some<HostBox>({
+              left: rect.left,
+              top: rect.top,
+              width: rect.width,
+              height: rect.height,
+            });
+          },
+          Option.none<HostBox>(),
+        );
+
+        /**
+         * Write the declarations that the sync owns.
+         *
+         * They move the whole overlay, so that a `position: fixed` child lines
+         * up with the *visual* viewport and not the layout viewport. The two
+         * move apart under the dynamic toolbar of iOS, and during a pinch
+         * zoom. `alignment` adds the correction of `alignHost`.
+         */
+        const applyOwned: Effect.Effect<void> = Effect.gen(function*() {
+          const view = yield* viewport;
+          const shift = yield* Ref.get(alignment);
+          const owned = ownedDeclarations(view, shift);
+          // The guard reads this, so it must agree with the style before the
+          // next check. A repair then writes the viewport values again
+          // instead of the constant `none` of `HOST_STYLE`.
+          yield* Ref.set(viewportOwned, owned);
+          yield* dom.probeOr(() => {
+            // The important priority again, and for two reasons. Page CSS
+            // must not move the overlay, and `all: initial !important` above
+            // wins over a normal declaration in the same block whatever the
+            // order.
+            for (const [property, value] of owned) {
+              host.style.setProperty(property, value, "important");
+            }
+            host.style.setProperty("--vw-scale", String(view.scale));
+            return true;
+          }, false);
+        });
+
+        /**
+         * Put the host back on the viewport when an ancestor moved it.
+         *
+         * A rule on `html` such as `will-change: transform`, `contain: paint`
+         * or `perspective: 1px` makes `html` the containing block of our fixed
+         * host. The host then holds a place in the document, so it scrolls
+         * away with the page while the page stays fully readable. A
+         * measurement in WebKit shows it: with the page at 2759 px the dialog
+         * box sat at -2711, and one translation of the measured error put it
+         * back at 48.
+         *
+         * The error is a pure translation, so one correction answers it. When
+         * a second measurement says that it did not, the ancestor does
+         * something that we cannot undo, for example a scale. The correction
+         * then goes back to nothing, and `visibilityFault` takes the keyboard
+         * away from the overlay instead of fighting for the geometry.
+         *
+         * A page that does not do this pays one box read, and no write at all.
+         */
+        const alignHost: Effect.Effect<void> = Effect.gen(function*() {
+          const view = yield* viewport;
+          const before = yield* measureHost;
+          if (Option.isNone(before)) return;
+          const error = alignError(before.value, view);
+          if (Option.isNone(error)) return;
+          yield* Ref.update(alignment, (current) => ({
+            dx: current.dx + error.value.dx,
+            dy: current.dy + error.value.dy,
+          }));
+          yield* applyOwned;
+          const after = yield* measureHost;
+          if (Option.isNone(after)) return;
+          if (Option.isNone(alignError(after.value, view))) return;
+          yield* Ref.set(alignment, NO_SHIFT);
+          yield* applyOwned;
+        });
+
+        const viewportFiber = yield* FiberHandle.make<void, never>();
+        // One pass for each animation frame. A resize and a scroll arrive many
+        // times inside one frame, and a newer one interrupts the fiber that
+        // the one before it started.
+        const scheduleSync = Effect.asVoid(FiberHandle.run(
+          viewportFiber,
+          Effect.andThen(
+            dom.nextFrame,
+            Option.isSome(visualViewport)
+              ? Effect.andThen(applyOwned, alignHost)
+              : alignHost,
+          ),
+        ));
+
+        if (Option.isSome(visualViewport)) {
+          const visual = visualViewport.value;
+          yield* dom.listenOn(visual, "resize", () => scheduleSync);
+          yield* dom.listenOn(visual, "scroll", () => scheduleSync);
+          yield* applyOwned;
+        }
+
+        // The page scroll, because a host under a containing block of class 1
+        // moves with the document. A page that does not have such an ancestor
+        // pays one box read for each frame that it scrolls, and no write.
+        yield* dom.listenOn(win, "scroll", () => scheduleSync, {
+          passive: true,
+        });
+        yield* alignHost;
+
+        /**
+         * Why the user cannot see the overlay, measured now.
+         *
+         * The order is repair first, and judge afterwards: the style, the
+         * place, and then the offset of an ancestor. What is left is a fault
+         * that no measure of ours answers, and the caller must then give the
+         * keyboard back to the page.
+         */
+        const visibilityFault: Effect.Effect<Option.Option<OverlayFault>> =
+          Effect.gen(function*() {
+            if (yield* Ref.get(guardYielded)) {
+              return yield* publishFault(Option.some("misplaced"));
+            }
+            yield* ensureAttached;
+            yield* alignHost;
+            const box = yield* measureHost;
+            // A realm that refuses the read tells us nothing. Claiming a fault
+            // there would take the keyboard away for no measured reason.
+            if (Option.isNone(box)) return yield* publishFault(Option.none());
+            const view = yield* viewport;
+            return yield* publishFault(
+              hostIsDisplaced(box.value, view)
+                ? Option.some("displaced")
+                : Option.none(),
+            );
+          });
 
         // ---------------------------------------------------------------
         // Ownership
@@ -1106,6 +1400,7 @@ export class Ui extends Context.Service<Ui, {
           shadow,
           layer: layerOf,
           ensureAttached,
+          visibilityFault,
           expose,
           addStyle,
           setStyle,

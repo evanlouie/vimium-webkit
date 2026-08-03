@@ -17,6 +17,12 @@
  * Tab and moves the focus by hand inside the dialog. The dialog also gives the
  * focus back to the element that had it.
  *
+ * **A dialog never holds the keyboard while the user cannot see it.** It asks
+ * `ui.visibilityFault` before it opens, and a fiber asks again while it is
+ * open. A fault closes the dialog, which gives every key back to the page, and
+ * the reason goes to the console. The HUD cannot carry that message, because
+ * the HUD is inside the overlay that the fault hides.
+ *
  * The settings form is data. `SETTINGS_SECTIONS` names every documented
  * setting, and the build step below draws the controls from that list. The
  * README promises that all of them are editable here, and only a list that a
@@ -54,11 +60,20 @@ import { Capabilities, formatCapabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { deepActiveElement } from "~/platform/Elements.ts";
 import type { KeyValueKind } from "~/platform/KeyValueStore.ts";
-import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
+import { acceptPointerEvents, type OverlayFault, Ui } from "~/ui/Ui.ts";
 
 // ---------------------------------------------------------------------------
 // Text
 // ---------------------------------------------------------------------------
+
+/**
+ * How often a dialog asks whether the user can still see the overlay.
+ *
+ * A page needs many tasks to take the overlay away, so half a second is fast
+ * enough to answer it, and slow enough to cost nothing. The check is two box
+ * reads.
+ */
+const OVERLAY_CHECK_MS = 500;
 
 /**
  * Where the settings in this dialog are kept.
@@ -801,9 +816,49 @@ export class Dialog extends Context.Service<Dialog, {
       // key path; it runs in this fiber instead.
       const saves = yield* FiberHandle.make<void, never>();
 
+      // One watcher at a time. It asks whether the user can still see the
+      // overlay while a dialog holds the keyboard.
+      const watches = yield* FiberHandle.make<void, never>();
+
       const close: Effect.Effect<void> = Effect.gen(function*() {
         const open = yield* Ref.getAndSet(openScope, Option.none());
         if (Option.isSome(open)) yield* Scope.close(open.value, Exit.void);
+      });
+
+      /**
+       * Say why the dialog gave the keyboard back.
+       *
+       * The console, and not the HUD. The HUD is inside the overlay, so a
+       * fault that hides the dialog hides the message with it. The application
+       * installs a console logger with a minimum level of `Warn`.
+       */
+      const reportHidden = (fault: OverlayFault): Effect.Effect<void> =>
+        Effect.logWarning(
+          `the dialog closed and gave the keyboard back, because the ` +
+            `overlay is not visible (${fault})`,
+        );
+
+      /**
+       * Watch the overlay while a dialog is open.
+       *
+       * A page can take the overlay away after the dialog opened: it can hold
+       * the host until the removal guard has spent its budget, or it can write
+       * a rule that takes the host out of the viewport. A modal that stayed
+       * open would keep every key over an interface that nobody can see.
+       *
+       * The fiber ends by itself when the dialog closes, so it never has to
+       * interrupt the scope that started it.
+       */
+      const watchOverlay: Effect.Effect<void> = Effect.gen(function*() {
+        while (true) {
+          yield* Effect.sleep(OVERLAY_CHECK_MS);
+          if (Option.isNone(yield* Ref.get(openScope))) return;
+          const fault = yield* ui.visibilityFault;
+          if (Option.isNone(fault)) continue;
+          yield* reportHidden(fault.value);
+          yield* close;
+          return;
+        }
       });
 
       /**
@@ -831,12 +886,21 @@ export class Dialog extends Context.Service<Dialog, {
        *
        * `build` gets the scope, so a listener that it registers goes away with
        * the dialog.
+       *
+       * The answer is `None` when the overlay is not visible. Nothing opens
+       * then, so the keyboard stays with the page, and the console carries the
+       * reason.
        */
       const present = Effect.fn("Dialog.present")(
         function*<A extends { readonly dialog: HTMLElement }>(
           build: Effect.Effect<A, never, Scope.Scope>,
         ) {
           yield* close;
+          const fault = yield* ui.visibilityFault;
+          if (Option.isSome(fault)) {
+            yield* reportHidden(fault.value);
+            return Option.none<A>();
+          }
           const scope = yield* Scope.make();
           const inScope = <B>(
             effect: Effect.Effect<B, never, Scope.Scope>,
@@ -926,7 +990,10 @@ export class Dialog extends Context.Service<Dialog, {
             parts.dialog.focus({ preventScroll: true });
           });
 
-          return parts;
+          // Started after the dialog holds the keyboard, and not before.
+          yield* FiberHandle.run(watches, watchOverlay);
+
+          return Option.some(parts);
         },
       );
 
