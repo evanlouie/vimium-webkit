@@ -72,24 +72,62 @@ export const DEFAULT_MATCH_LIMIT = 500;
 export const MATCH_BUDGET_MS = 50;
 
 /**
- * The most characters that one `exec` reads.
+ * The largest window that the search reads in one `exec`.
  *
- * This is the work between two looks at the clock. One `exec` cannot be stopped
- * from JavaScript, so the window is the true limit on how long find can hold
- * the main thread. The slowest expression that the safety check accepts is
- * quadratic at one start position, and 1024 characters of it cost about 2 ms.
+ * A window grows only after a window of the size below it was measured and was
+ * cheap. See `FIRST_WINDOW`.
  */
 export const SEARCH_WINDOW = 1024;
+
+/**
+ * The first window, and the smallest one.
+ *
+ * One `exec` cannot be stopped from JavaScript, so the size of one window is
+ * the true limit on how long find can hold the main thread. Nothing has
+ * measured the pattern when the search starts, so the search starts small and
+ * grows only while each window stays cheap.
+ */
+const FIRST_WINDOW = 32;
+
+/**
+ * The most that one window may cost before the next window becomes smaller.
+ *
+ * The window doubles only when the window before it cost a quarter of this
+ * value or less. A pattern whose cost grows with the square of the window
+ * therefore stays inside the budget after it doubles, and a slower pattern
+ * overruns it once and then shrinks.
+ */
+const WINDOW_BUDGET_MS = 8;
 
 /**
  * The text that each window keeps on both sides.
  *
  * A window is a slice of the haystack, so `\b`, a lookbehind and a lookahead
- * need the text beside it. A match that is longer than this, or a lookaround
- * that reads further than this, is not found at the edge of a window. A find
- * query is far shorter than this in every normal use.
+ * need the text beside it. A match that reaches the end of the slice grows the
+ * slice instead, so no match is lost or moved.
+ *
+ * The text *after* the window is the text that one `exec` reads at each start
+ * position, so it never exceeds the size of the window itself. The text before
+ * the window is never a start position, so it costs one copy and no search.
  */
 const WINDOW_CONTEXT = 256;
+
+/**
+ * How much longer a slice becomes when a match reaches its end.
+ *
+ * The step is measured, exactly as the window is. A slice grows only while the
+ * work so far in this window stayed inside `WINDOW_BUDGET_MS`.
+ */
+const SLICE_GROWTH = 4;
+
+/**
+ * The longest match that the search can find.
+ *
+ * A slice never grows past this length. A match that still reaches the end of
+ * such a slice is not reported, and the search reports a stop instead. A wrong
+ * span is worse than no span.
+ */
+export const MAX_MATCH_LENGTH = 65_536;
 
 /**
  * The clock for the budget.
@@ -102,7 +140,7 @@ const now = (): number =>
 /** What one search of a haystack gave, and whether it read all of it. */
 export interface SpanSearch {
   readonly spans: ReadonlyArray<MatchSpan>;
-  /** True when the deadline stopped the search before the end of the text. */
+  /** True when the search stopped before the end of the text. */
   readonly stopped: boolean;
 }
 
@@ -113,10 +151,20 @@ export interface SpanSearch {
  * expression is state that changes, and a caller that used one expression for
  * two searches would lose the first half of the second search.
  *
- * The text is read in windows of `SEARCH_WINDOW` characters. Each window also
- * holds `WINDOW_CONTEXT` characters of the text on both sides, so that a word
- * boundary and a lookaround still see what is beside them. A match belongs to
- * the window that holds its first character, so no match is counted twice.
+ * The text is read in windows. Each window also holds `WINDOW_CONTEXT`
+ * characters of the text on both sides, so that a word boundary and a
+ * lookaround still see what is beside them. A match belongs to the window that
+ * holds its first character, so no match is counted twice.
+ *
+ * Two limits bound the work:
+ *
+ * - the clock is read between two windows, and the search stops at `deadline`;
+ * - each window is measured, and the next window is smaller when a window cost
+ *   more than `WINDOW_BUDGET_MS`. The first window is `FIRST_WINDOW`
+ *   characters, because nothing has measured the pattern yet.
+ *
+ * A match that reaches the end of its slice grows the slice, up to
+ * `MAX_MATCH_LENGTH`. The search then finds the whole match, or reports a stop.
  */
 export const collectSpans = (
   haystack: string,
@@ -134,27 +182,30 @@ export const collectSpans = (
   // Where the next match may begin. A match can end after the window that
   // holds its first character, and the text that it covers is then taken.
   let cursor = 0;
+  let window = FIRST_WINDOW;
 
-  for (let from = 0; from < haystack.length; from += SEARCH_WINDOW) {
+  while (cursor < haystack.length) {
     // The clock is read between two windows. One `exec` cannot be stopped, so
     // the window is the work that one look at the clock cannot prevent.
     if (now() > deadline) return { spans, stopped: true };
 
-    const windowEnd = Math.min(from + SEARCH_WINDOW, haystack.length);
-    if (cursor >= windowEnd) continue;
-
-    const sliceStart = Math.max(0, from - WINDOW_CONTEXT);
-    const sliceEnd = Math.min(
+    const started = now();
+    const windowEnd = Math.min(cursor + window, haystack.length);
+    const sliceStart = Math.max(0, cursor - WINDOW_CONTEXT);
+    let sliceEnd = Math.min(
       haystack.length,
-      from + SEARCH_WINDOW + WINDOW_CONTEXT,
+      windowEnd + Math.min(WINDOW_CONTEXT, window),
     );
-    const isTail = sliceEnd === haystack.length;
-    const slice = haystack.slice(sliceStart, sliceEnd);
-    regex.lastIndex = Math.max(from, cursor) - sliceStart;
+    let slice = haystack.slice(sliceStart, sliceEnd);
+    regex.lastIndex = cursor - sliceStart;
 
     for (;;) {
       const match = regex.exec(slice);
       if (match === null) break;
+
+      const start = sliceStart + match.index;
+      // The next window owns this match, and it begins its search there.
+      if (start >= windowEnd) break;
 
       const text = match[0];
       if (text.length === 0) {
@@ -166,22 +217,57 @@ export const collectSpans = (
         continue;
       }
 
-      const start = sliceStart + match.index;
-      // The next window owns this match, and it begins its search there.
-      if (start >= windowEnd) break;
       const end = start + text.length;
-      // A window that is not the end of the text cannot trust a match that
-      // touches the end of the window: `$` matches there, and a longer match
-      // would be cut there.
-      if (!isTail && end >= sliceEnd) break;
+      if (end >= sliceEnd && sliceEnd < haystack.length) {
+        // The match reaches the end of the slice, so the text beside it could
+        // make the match longer, or could take it away: `$` matches at the end
+        // of a slice as well. Read the same position again with more text.
+        // Nothing is recorded until the whole match is inside the slice.
+        if (
+          sliceEnd - sliceStart >= MAX_MATCH_LENGTH ||
+          now() - started > WINDOW_BUDGET_MS ||
+          now() > deadline
+        ) {
+          return { spans, stopped: true };
+        }
+        sliceEnd = Math.min(
+          haystack.length,
+          sliceStart + Math.min(
+            (sliceEnd - sliceStart) * SLICE_GROWTH,
+            MAX_MATCH_LENGTH,
+          ),
+        );
+        slice = haystack.slice(sliceStart, sliceEnd);
+        regex.lastIndex = start - sliceStart;
+        continue;
+      }
 
       spans.push({ start, end });
       cursor = end;
       if (spans.length >= limit) return { spans, stopped: false };
     }
+
+    cursor = Math.max(cursor, windowEnd);
+    window = nextWindow(window, now() - started);
   }
 
   return { spans, stopped: false };
+};
+
+/**
+ * The size of the window that follows a window of `size` that cost `elapsed`.
+ *
+ * The window doubles only with a margin of four, and it halves as soon as one
+ * window overruns the budget. The size therefore follows the cost of the
+ * pattern, and one slow pattern costs one slow window.
+ */
+const nextWindow = (size: number, elapsed: number): number => {
+  if (elapsed > WINDOW_BUDGET_MS) {
+    return Math.max(FIRST_WINDOW, Math.floor(size / 2));
+  }
+  return elapsed * 4 <= WINDOW_BUDGET_MS
+    ? Math.min(SEARCH_WINDOW, size * 2)
+    : size;
 };
 
 // ---------------------------------------------------------------------------

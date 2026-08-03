@@ -311,7 +311,8 @@ const compileError = (
   //
   // The check refuses only the shapes that it can prove ambiguous. It does not
   // promise a linear match, so `~/features/find/Engine.ts` reads the page text
-  // in windows and stops at a deadline. That budget is the second line.
+  // in measured windows and stops at a deadline. That budget is the second
+  // limit on the same pattern.
   return Option.map(
     regexSafetyError(source, flags),
     (reason) => `${reason}; try a simpler one`,

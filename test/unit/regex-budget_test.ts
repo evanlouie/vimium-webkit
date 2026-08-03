@@ -1,5 +1,5 @@
 /**
- * The second line of defence: the budget at the time of use.
+ * The second limit on a pattern: the budget at the time of use.
  *
  * The static check in `~/domain/RegexSafety.ts` refuses only the shapes that it
  * can prove ambiguous. It does not promise a linear match. `[a-z]*x` is linear
@@ -15,7 +15,11 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Option } from "effect";
 import { compilePattern, MAX_REGEX_URL_LENGTH } from "~/domain/Exclusion.ts";
-import { collectSpans, SEARCH_WINDOW } from "~/features/find/Engine.ts";
+import {
+  collectSpans,
+  MAX_MATCH_LENGTH,
+  SEARCH_WINDOW,
+} from "~/features/find/Engine.ts";
 
 /** A URL that no expression can match, and that every loop must walk. */
 const hostileUrl = (length: number): string => "a".repeat(length);
@@ -184,5 +188,69 @@ describe("the find budget", () => {
       const passed = collectSpans(haystack, /x*/g);
       assert.deepEqual(passed.spans, []);
       assert.isFalse(passed.stopped);
+    }));
+
+  it.effect("gives the whole span of a match of 400 characters", () =>
+    Effect.sync(() => {
+      // The window kept 256 characters of text on each side, and a match that
+      // reached the end of that text was dropped. The next window began after
+      // it, so the match was lost or moved, and nothing said so. A wrong span
+      // is worse than a stop.
+      const length = 400;
+      for (const at of [800, 1000, 1023, 1024]) {
+        const haystack = `${"a".repeat(at)}${"b".repeat(length)}${
+          "a".repeat(4096)
+        }`;
+        const passed = collectSpans(haystack, new RegExp(`b{${length}}`, "g"));
+        assert.isFalse(passed.stopped, `the search at ${at} stopped`);
+        assert.deepEqual(
+          passed.spans,
+          [{ start: at, end: at + length }],
+          `the match at ${at} moved`,
+        );
+      }
+    }));
+
+  it.effect("gives the whole span of a match of 4500 characters", () =>
+    Effect.sync(() => {
+      // `/.+/` over a long paragraph. `collectSpans` gave 4096 to 4500 here,
+      // and one search over the whole text gives 0 to 4500.
+      const haystack = "the quick brown fox jumps over the lazy dog. "
+        .repeat(200)
+        .slice(0, 4500);
+      const passed = collectSpans(haystack, /.+/g);
+      assert.isFalse(passed.stopped);
+      assert.deepEqual(passed.spans, [{ start: 0, end: 4500 }]);
+    }));
+
+  it.effect("reports a stop for a match that is longer than the limit", () =>
+    Effect.sync(() => {
+      // The slice grows until the match ends, and it stops growing at
+      // `MAX_MATCH_LENGTH`. A match that is still not complete there is not
+      // reported at all, and the search says that it stopped.
+      const haystack = "z".repeat(MAX_MATCH_LENGTH * 2);
+      const passed = collectSpans(haystack, /.+/g);
+      assert.isTrue(passed.stopped, "the search reported no stop");
+      assert.deepEqual(passed.spans, []);
+    }));
+
+  it.effect("bounds one window, and not only the whole walk", () =>
+    Effect.sync(() => {
+      // The deadline is read between two windows, so one window is the time
+      // that a keystroke cannot give back. The window starts at 32 characters
+      // and grows only while each window stays cheap, so a slow pattern never
+      // reaches a window that costs seconds.
+      //
+      // This pattern is the blocker of the second review of pull request 55.
+      // The check refuses it now, and this test proves the second limit: one
+      // 1024-character window of it costs 545 ms, and the whole walk over
+      // 200 000 characters costs less than that.
+      const haystack = "a".repeat(200_000);
+      const started = performance.now();
+      const passed = collectSpans(haystack, /.*(?=.*x)/g);
+      const elapsed = performance.now() - started;
+
+      assert.isTrue(passed.stopped, "the search read the whole page");
+      assert.isBelow(elapsed, 300, `the search cost ${elapsed}ms`);
     }));
 });
