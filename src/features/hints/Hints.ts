@@ -98,7 +98,7 @@ import type { FrameId } from "~/platform/Realm.ts";
 import { Tabs } from "~/platform/Tabs.ts";
 import { Hud } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
-import { detectHints, type LocalHint } from "./Detect.ts";
+import { detectHints, type HintRect, type LocalHint } from "./Detect.ts";
 import { hintCss, makeMarkerLayer, type MarkerSpec } from "./Markers.ts";
 
 export type { LocalHint } from "./Detect.ts";
@@ -267,6 +267,131 @@ export const buttonStateFor = (type: string): ButtonState => {
 /** Where an activation came from. A remote one has no gesture of the user. */
 export type ActivationOrigin = "local" | "remote";
 
+// ---------------------------------------------------------------------------
+// Revalidation
+// ---------------------------------------------------------------------------
+
+/**
+ * The marker says one element, and the click must land on that element.
+ *
+ * A marker is drawn for the element that detection found. The user then reads
+ * the page and presses a key. Between those two moments a container can scroll,
+ * the page can reflow, and the page can take the element away. A click that
+ * lands on another element is the defect, and it is a security defect, because
+ * the page chooses what stands under the marker at that moment.
+ *
+ * The four decisions are these.
+ *
+ * **When we check.** At two moments, and for two different reasons.
+ *
+ * - On every scroll and on every resize, the session measures the target of
+ *   each of its own hints again, and it draws the markers where the targets
+ *   are now. One pass for each animation frame. This is the moment that keeps
+ *   the marker on its element while the user reads.
+ * - At the key press, in the frame that owns the element, in front of every
+ *   mode. This is the moment that decides the click. A reflow that no event
+ *   reports is caught here, because the check measures and does not trust the
+ *   last draw.
+ *
+ * **What we compare.** Three things, because an identity alone proves nothing.
+ * The page can move an element, and it can put another element on top of it.
+ *
+ * 1. The element and its hit target are still in the document.
+ * 2. The target has not moved. `anchor` is where the target stood at the
+ *    detection pass, and `shift` is how far the last draw moved the marker
+ *    with it. A difference of more than `MAX_HINT_DRIFT_PX` between the two is
+ *    a layout that the user did not see.
+ * 3. The point at the centre of the drawn marker still hits the target. The
+ *    walk of the hit stack is the walk of the detection pass: our own overlay
+ *    is skipped, the target and anything inside it are accepted, a host of the
+ *    target is accepted, and the first other element refuses the hint.
+ *
+ * **What happens when the check fails.** Nothing is clicked, nothing is
+ * copied, and the user reads one line in the HUD. We do not activate a
+ * neighbour, and we do not guess. We also do not start a new round, because a
+ * round that starts by itself takes the keyboard back from a user who has
+ * moved on. The user presses the hint key again.
+ *
+ * **A hint of another frame.** A descriptor carries no geometry, and the
+ * position that it would carry belongs to the viewport of its own frame. The
+ * origin frame therefore never validates a remote hint. It sends
+ * `ACTIVATE_HINT`, and the frame that owns the element runs exactly the same
+ * check in its own document, against its own anchors and its own last draw,
+ * before it acts. A frame that refuses says so in its own HUD, because the
+ * protocol carries no answer to an `ACTIVATE_HINT`.
+ */
+
+/**
+ * How far a hint target may move between the last draw and the key press.
+ *
+ * A fraction of a pixel comes from a scroll that ends between two animation
+ * frames. More than a few pixels is a different layout.
+ */
+export const MAX_HINT_DRIFT_PX = 4;
+
+/** How far a marker has moved with its target since the detection pass. */
+export interface HintShift {
+  readonly dx: number;
+  readonly dy: number;
+}
+
+const NO_SHIFT: HintShift = { dx: 0, dy: 0 };
+
+/** What the last draw of one local marker knew about its target. */
+interface Placement {
+  readonly shift: HintShift;
+  /** The page took the element out of the document. */
+  readonly gone: boolean;
+}
+
+/** A hint that nothing has moved yet. */
+const AT_REST: Placement = { shift: NO_SHIFT, gone: false };
+
+/** Move a rect by the shift of its target. */
+export const shiftedRect = (rect: HintRect, shift: HintShift): HintRect => ({
+  left: rect.left + shift.dx,
+  top: rect.top + shift.dy,
+  width: rect.width,
+  height: rect.height,
+});
+
+/**
+ * Has the target moved away from the marker that the user saw?
+ *
+ * `anchor` is where the target stood at the detection pass. `shift` is the
+ * movement that the last draw already applied to the marker. What is left is
+ * movement that no draw followed, and the user aimed at the old place.
+ */
+export const hintHasMoved = (
+  anchor: HintRect,
+  current: HintRect,
+  shift: HintShift,
+  tolerance: number = MAX_HINT_DRIFT_PX,
+): boolean =>
+  Math.abs(current.left - anchor.left - shift.dx) > tolerance ||
+  Math.abs(current.top - anchor.top - shift.dy) > tolerance;
+
+/**
+ * Does the front-to-back hit stack of one point belong to our hint?
+ *
+ * Our own overlay is skipped, because it is drawn over the whole viewport and
+ * takes no pointer event. The first element after it decides: it is ours, or
+ * the page painted something else at that point and the hint is refused.
+ *
+ * The walk is generic, so that it can be tested without a document.
+ */
+export const hitAccepts = <T>(
+  stack: readonly T[],
+  isOverlay: (candidate: T) => boolean,
+  isOurs: (candidate: T) => boolean,
+): boolean => {
+  for (const candidate of stack) {
+    if (isOverlay(candidate)) continue;
+    return isOurs(candidate);
+  }
+  return false;
+};
+
 /**
  * Give the keyboard back after the safety time, and end the round.
  *
@@ -406,6 +531,19 @@ export class Hints extends Context.Service<Hints, {
       const cssRef = yield* Ref.make(Option.none<string>());
       /** The hints of the last detection pass of this frame. */
       const localRef = yield* Ref.make<readonly LocalHint[]>([]);
+      /**
+       * Where the hit target of each local hint stood at the detection pass.
+       *
+       * The key is the local index of the hint, which is the index that a
+       * descriptor and an `ACTIVATE_HINT` carry.
+       */
+      const anchorsRef = yield* Ref.make<ReadonlyMap<number, HintRect>>(
+        new Map(),
+      );
+      /** What the last draw of each local marker knew about its target. */
+      const placementsRef = yield* Ref.make<ReadonlyMap<number, Placement>>(
+        new Map(),
+      );
       const warnedRef = yield* Ref.make(false);
       /**
        * The element that we pointed at last.
@@ -469,6 +607,138 @@ export class Hints extends Context.Service<Hints, {
         const rect = element.getBoundingClientRect();
         return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
       };
+
+      const rectOf = (element: Element): HintRect => {
+        const rect = element.getBoundingClientRect();
+        return {
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          height: rect.height,
+        };
+      };
+
+      /**
+       * The element that carries the geometry of a hint.
+       *
+       * An `<area>` of an image map has no layout box of its own, so the image
+       * carries its geometry. `Detect.ts` puts the image in `hitTarget` for
+       * exactly that reason.
+       */
+      const targetOf = (hint: LocalHint): Element =>
+        Option.getOrElse(hint.hitTarget, () => hint.element);
+
+      /**
+       * Does `ancestor` hold `node`, across an open shadow boundary?
+       *
+       * `Node.contains` stops at a shadow root, so a hit inside the own open
+       * shadow root of the element would look like an unrelated element that
+       * is painted on top. `Detect.ts` holds the same walk for the detection
+       * pass, and the two stay apart on purpose: one decides what takes a
+       * hint, and this one decides what a key press may click.
+       */
+      const containsDeep = (ancestor: Element, node: Element): boolean => {
+        let current: Node | null = node;
+        for (;;) {
+          if (current === null) return false;
+          if (ancestor.contains(current)) return true;
+          const root = current.getRootNode();
+          if (!(root instanceof ShadowRoot)) return false;
+          current = root.host;
+        }
+      };
+
+      /** Every shadow host above `element`, nearest first. */
+      const shadowHostChain = (element: Element): readonly Element[] => {
+        const chain: Element[] = [];
+        let node: Node = element;
+        for (;;) {
+          const root = node.getRootNode();
+          if (!(root instanceof ShadowRoot)) break;
+          chain.push(root.host);
+          node = root.host;
+        }
+        return chain;
+      };
+
+      /**
+       * Measure the target of every local hint again.
+       *
+       * The result is the shift of each marker against the detection pass. A
+       * hint whose element has left the document is marked, so that its marker
+       * is hidden and its activation is refused.
+       */
+      const remeasure: Effect.Effect<void> = Effect.gen(function*() {
+        const hints = yield* Ref.get(localRef);
+        const anchors = yield* Ref.get(anchorsRef);
+        const next = yield* dom.probeOr(() => {
+          const places = new Map<number, Placement>();
+          for (let index = 0; index < hints.length; index++) {
+            const hint = hints[index];
+            if (hint === undefined) continue;
+            const anchor = anchors.get(index);
+            if (anchor === undefined) continue;
+            const target = targetOf(hint);
+            if (!hint.element.isConnected || !target.isConnected) {
+              places.set(index, { shift: NO_SHIFT, gone: true });
+              continue;
+            }
+            const now = rectOf(target);
+            places.set(index, {
+              shift: {
+                dx: now.left - anchor.left,
+                dy: now.top - anchor.top,
+              },
+              gone: false,
+            });
+          }
+          return places;
+        }, new Map<number, Placement>());
+        yield* Ref.set(placementsRef, next);
+      });
+
+      /**
+       * Is this hint still the element that the user saw at that place?
+       *
+       * Read the section "Revalidation" above for the reasoning. Nothing here
+       * suspends, so a copy mode still writes the clipboard inside the
+       * activation window of the key press.
+       */
+      const stillTheSameTarget = (
+        localIndex: number,
+        hint: LocalHint,
+      ): Effect.Effect<boolean> =>
+        Effect.gen(function*() {
+          const anchor = (yield* Ref.get(anchorsRef)).get(localIndex);
+          // No measurement of our own means that no round of ours drew this
+          // marker. Refuse, because we cannot say what the user saw.
+          if (anchor === undefined) return false;
+          const placement = (yield* Ref.get(placementsRef)).get(localIndex) ??
+            AT_REST;
+          if (placement.gone) return false;
+          const host = ui.shadow.host;
+          return yield* dom.probeOr(() => {
+            const target = targetOf(hint);
+            if (!hint.element.isConnected || !target.isConnected) return false;
+            if (hintHasMoved(anchor, rectOf(target), placement.shift)) {
+              return false;
+            }
+            const drawn = shiftedRect(hint.rect, placement.shift);
+            if (drawn.width <= 0 || drawn.height <= 0) return false;
+            const hosts = shadowHostChain(target);
+            const stack = dom.document.elementsFromPoint(
+              drawn.left + drawn.width / 2,
+              drawn.top + drawn.height / 2,
+            );
+            return hitAccepts(
+              stack,
+              (candidate) => candidate === host,
+              (candidate) =>
+                candidate === target || containsDeep(target, candidate) ||
+                hosts.includes(candidate),
+            );
+          }, false);
+        });
 
       /**
        * Focus before the click, and record the hover target.
@@ -590,6 +860,7 @@ export class Hints extends Context.Service<Hints, {
        */
       const activateLocal = Effect.fn("Hints.activateLocal")(
         function*(
+          localIndex: number,
           hint: LocalHint,
           mode: HintMode,
           origin: ActivationOrigin,
@@ -604,6 +875,16 @@ export class Hints extends Context.Service<Hints, {
           if (origin === "remote" && COPY_MODES.has(mode)) {
             yield* report.error(
               "Ignored a clipboard request from another frame.",
+            );
+            return;
+          }
+
+          // In front of every mode, and not in front of the click alone. A
+          // copy mode that takes the URL of another element is a wrong action
+          // as well, and the user asked for the element under the marker.
+          if (!(yield* stillTheSameTarget(localIndex, hint))) {
+            yield* report.error(
+              "The page moved that hint. Nothing was activated.",
             );
             return;
           }
@@ -729,6 +1010,20 @@ export class Hints extends Context.Service<Hints, {
         }
 
         yield* Ref.set(localRef, result.hints);
+        // The anchors of this pass. They are measured now, and not from the
+        // rects of the detection, because a hint rect is cropped to the visible
+        // region and an `<area>` takes its geometry from its image.
+        const anchors = yield* dom.probeOr(() => {
+          const map = new Map<number, HintRect>();
+          for (let index = 0; index < result.hints.length; index++) {
+            const hint = result.hints[index];
+            if (hint === undefined) continue;
+            map.set(index, rectOf(targetOf(hint)));
+          }
+          return map;
+        }, new Map<number, HintRect>());
+        yield* Ref.set(anchorsRef, anchors);
+        yield* Ref.set(placementsRef, new Map<number, Placement>());
         return result.hints;
       });
 
@@ -864,22 +1159,24 @@ export class Hints extends Context.Service<Hints, {
 
           const alphabetSpecs = (
             snapshot: SessionState,
+            placements: ReadonlyMap<number, Placement>,
           ): readonly MarkerSpec[] => {
             const specs: MarkerSpec[] = [];
             for (const position of localPositions) {
               const entry = config.entries[position];
               if (entry === undefined || Option.isNone(entry.hint)) continue;
               const hint = entry.hint.value;
+              const place = placements.get(entry.localIndex) ?? AT_REST;
               const hintString = hintList[position] ?? "";
               specs.push({
-                rect: hint.rect,
+                rect: shiftedRect(hint.rect, place.shift),
                 hintString,
                 matchedLength: snapshot.typed.length,
                 secondary: entry.secondary,
                 active: false,
                 linkText: hint.linkText,
                 showLinkText: false,
-                hidden: !hintString.startsWith(snapshot.typed),
+                hidden: place.gone || !hintString.startsWith(snapshot.typed),
               });
             }
             return specs;
@@ -887,6 +1184,7 @@ export class Hints extends Context.Service<Hints, {
 
           const filterSpecs = (
             snapshot: SessionState,
+            placements: ReadonlyMap<number, Placement>,
           ): readonly MarkerSpec[] => {
             const numbering = new Map<number, FilterMatch>();
             for (const match of snapshot.outcome.matched) {
@@ -903,29 +1201,65 @@ export class Hints extends Context.Service<Hints, {
               const entry = config.entries[position];
               if (entry === undefined || Option.isNone(entry.hint)) continue;
               const hint = entry.hint.value;
+              const place = placements.get(entry.localIndex) ?? AT_REST;
               const match = numbering.get(position);
               const hintString = match?.hintString ?? "";
               specs.push({
-                rect: hint.rect,
+                rect: shiftedRect(hint.rect, place.shift),
                 hintString,
                 matchedLength: matchedPrefixLength(hintString, snapshot.digits),
                 secondary: entry.secondary,
                 active: position === activeIndex,
                 linkText: hint.linkText,
                 showLinkText: hint.showLinkText,
-                hidden: match === undefined || !visible.has(position),
+                hidden: place.gone || match === undefined ||
+                  !visible.has(position),
               });
             }
             return specs;
           };
 
-          const render: Effect.Effect<void> = Effect.flatMap(
-            Ref.get(state),
-            (snapshot) =>
-              markers.render(
-                filtering ? filterSpecs(snapshot) : alphabetSpecs(snapshot),
-              ),
+          const render: Effect.Effect<void> = Effect.gen(function*() {
+            const snapshot = yield* Ref.get(state);
+            const placements = yield* Ref.get(placementsRef);
+            yield* markers.render(
+              filtering
+                ? filterSpecs(snapshot, placements)
+                : alphabetSpecs(snapshot, placements),
+            );
+          });
+
+          /**
+           * Draw the markers again where their targets are now.
+           *
+           * The layer translation follows a scroll of the page only. A
+           * container that scrolls inside the page, a resize and a reflow move
+           * one target and not the layer. The targets are therefore measured
+           * again, the layer takes the scroll position of now, and the markers
+           * are drawn at the new rects.
+           */
+          const refresh: Effect.Effect<void> = Effect.gen(function*() {
+            yield* remeasure;
+            yield* markers.reanchor;
+            yield* render;
+          });
+
+          // One pass for each animation frame. A scroll arrives far more often
+          // than we can usefully measure and draw again.
+          const layout = yield* FiberHandle.make<void, never>();
+          const onLayoutChange = Effect.asVoid(
+            FiberHandle.run(layout, Effect.andThen(dom.nextFrame, refresh)),
           );
+
+          // The capture phase: a scroll does not bubble from the element that
+          // scrolls, and a hint inside an inner scroller must follow it.
+          yield* dom.listen("document", "scroll", () => onLayoutChange, {
+            capture: true,
+            passive: true,
+          });
+          yield* dom.listen("window", "resize", () => onLayoutChange, {
+            passive: true,
+          });
 
           // -- activation --------------------------------------------------
 
@@ -949,7 +1283,12 @@ export class Hints extends Context.Service<Hints, {
                 // a copy mode still happens inside the activation window, and
                 // so that a mode which must wait does not suspend the key path.
                 yield* Effect.forkDetach(
-                  activateLocal(entry.hint.value, config.mode, "local"),
+                  activateLocal(
+                    entry.localIndex,
+                    entry.hint.value,
+                    config.mode,
+                    "local",
+                  ),
                   { startImmediately: true },
                 );
                 return;
@@ -1222,7 +1561,10 @@ export class Hints extends Context.Service<Hints, {
               : Effect.void
           );
 
-          yield* render;
+          // The first draw measures the targets, because the page can move
+          // between the detection pass and this moment. Every later draw uses
+          // the measurements of the last layout change.
+          yield* refresh;
 
           for (const notation of config.replay) {
             if (!(yield* isLive)) {
@@ -1586,7 +1928,12 @@ export class Hints extends Context.Service<Hints, {
           // cannot be replayed into a click on every element that this frame
           // ever hinted.
           yield* Ref.set(roundRef, Option.none());
-          yield* activateLocal(hint, payload.mode, "remote");
+          yield* activateLocal(
+            payload.localIndex,
+            hint,
+            payload.mode,
+            "remote",
+          );
           return Option.none();
         });
 

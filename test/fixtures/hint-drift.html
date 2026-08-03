@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Hint drift</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+    /*
+     * A panel that scrolls inside the page. A scroll here does not move the
+     * marker layer, so every marker must be measured again.
+     */
+    #panel {
+      width: 420px;
+      height: 240px;
+      overflow-y: scroll;
+      border: 1px solid #999;
+      margin: 12px 0;
+    }
+    #panel a {
+      display: block;
+      /* An exact row pitch, so a scroll of a whole number of rows puts one
+         link exactly where another link was. */
+      height: 20px;
+      line-height: 20px;
+      padding: 0 8px;
+      box-sizing: border-box;
+    }
+    #shifty {
+      display: inline-block;
+      margin: 24px 0;
+      padding: 4px 8px;
+      border: 1px solid #39c;
+    }
+    /* An opaque cover that the page can put over the steady link. */
+    #cover {
+      display: none;
+      position: fixed;
+      z-index: 20;
+      background: #223;
+      color: #fff;
+      padding: 8px;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>Hint drift</h1>
+    <p class="note">
+      A panel that scrolls inside the page, a link that the page moves after
+      the markers are drawn, and a link that the page covers.
+    </p>
+
+    <div id="panel"></div>
+
+    <p>
+      <a id="shifty" href="#shifty-target">Shifty link</a>
+    </p>
+
+    <p>
+      <a id="steady" href="#steady-target">Steady link</a>
+    </p>
+
+    <div id="cover">Cover</div>
+
+    <script src="assets/hint-drift.js"></script>
+  </body>
+</html>
