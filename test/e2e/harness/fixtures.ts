@@ -46,6 +46,21 @@ interface SnapshotHost {
 const BOOT_TIMEOUT_MS = 15_000;
 
 /**
+ * How long to wait for the marker of one element.
+ *
+ * A cross-frame round draws in two steps. The top frame collects the
+ * descriptors of every frame, draws its own markers, and sends `ACTIVATE` to
+ * each other frame. Each of those frames then draws its own markers. The
+ * message that carries `ACTIVATE` is sealed, so it must be encrypted, posted
+ * and decrypted first.
+ *
+ * `waitForHints` returns at the first marker of the top frame, which is before
+ * the markers of a child frame exist. A test that asks for a marker of a child
+ * frame therefore waits for the DOM of that frame, and not for a fixed time.
+ */
+const HINT_MARKER_TIMEOUT_MS = 10_000;
+
+/**
  * Settle time after the overlay host appears.
  *
  * `createUiRoot` runs a few statements before `normalMode.enter()`, and there
@@ -366,11 +381,37 @@ export class Vimium {
       return;
     }
 
-    const label = await this.hintLabelFor(linkText);
+    const label = await this.waitForHintLabel(linkText);
     if (label === null) {
       throw new Error(`no hint marker is drawn on "${linkText}"`);
     }
     await this.type(label);
+  }
+
+  /**
+   * The label drawn on `linkText`, as soon as some frame draws it.
+   *
+   * Every frame is asked at once, and each one waits on its own document. The
+   * first frame that draws the marker gives the answer. This is a wait on a
+   * signal of the browser, and not a sleep: `waitForFunction` runs the check
+   * again on each animation frame.
+   */
+  private async waitForHintLabel(linkText: string): Promise<string | null> {
+    try {
+      return await Promise.any(
+        this.page.frames().map(async (frame) => {
+          const handle = await frame.waitForFunction(
+            hintLabelForText,
+            linkText,
+            { timeout: HINT_MARKER_TIMEOUT_MS },
+          );
+          return (await handle.jsonValue()) as string;
+        }),
+      );
+    } catch {
+      // Every frame timed out, or lost its document. Neither one has a label.
+      return null;
+    }
   }
 
   /**
