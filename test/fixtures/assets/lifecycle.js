@@ -13,6 +13,7 @@ const idField = document.getElementById("document-id");
 const restoredField = document.getElementById("restored");
 const child = document.getElementById("child");
 const dropChild = document.getElementById("drop-child");
+const removeChild = document.getElementById("remove-child");
 
 if (idField !== null) idField.textContent = documentId;
 if (restoredField !== null) restoredField.textContent = "no";
@@ -24,8 +25,18 @@ globalThis.addEventListener("pageshow", (event) => {
 
 // The child document goes away, and the top document stays. This is the one
 // case where "final page exit" means one frame only.
+//
+// A frame goes away in two ways, and the browser sends `pagehide` for both.
+// The first button navigates the child. The second takes the element out of
+// the tree, which is the case that the name "goes away" promises.
 if (dropChild !== null && child !== null) {
   dropChild.addEventListener("click", () => {
     child.src = "frames/remote.html";
+  });
+}
+
+if (removeChild !== null && child !== null) {
+  removeChild.addEventListener("click", () => {
+    child.remove();
   });
 }

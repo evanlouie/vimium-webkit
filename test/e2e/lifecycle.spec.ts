@@ -20,6 +20,14 @@
  * > therefore driven by the two events that the browser would send, which is
  * > exactly what the code branches on. The real "leave and come back" is tested
  * > as well, and it asserts that the key bindings work afterwards.
+ * >
+ * > One thing the synthetic events do not do: a real restore **freezes** the
+ * > document first. Every timer, the Effect scheduler and every suspended fiber
+ * > stop, and then start again. This test therefore shows that the branch is
+ * > correct. It does not show that a frozen scheduler still delivers work.
+ * > Chromium refuses the cache while a DevTools client is attached. Firefox
+ * > loses its execution context, and WebKit gives a new document. No engine
+ * > that Playwright drives can show it.
  *
  * Under `smoothScroll: false`: what is under test is whether a key still does
  * anything at all, and an assertion on an offset mid-animation would be a flake
@@ -27,7 +35,7 @@
  */
 
 import type { Page } from "@playwright/test";
-import { expect, test } from "./harness/fixtures.ts";
+import { expect, test, type Vimium } from "./harness/fixtures.ts";
 import { DETERMINISTIC } from "./harness/settings-seed.ts";
 
 test.use({ settingsPatch: DETERMINISTIC });
@@ -138,5 +146,119 @@ test.describe("the page lifecycle", () => {
     await vw.press("j");
     await expect.poll(async () => (await vw.scrollOffsets()).y).toBe(STEP);
     expect(errors).toEqual([]);
+  });
+
+  test("a child frame that is removed leaves the top frame alone", async ({ vw, page }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+
+    await page.goto("/lifecycle.html");
+    await vw.bootAllFrames();
+
+    // The other test navigates the child. This one takes the element out of
+    // the tree. WebKit sends `pagehide` with `persisted === false` for both.
+    await page.locator("#remove-child").click();
+    await expect(page.locator("#child")).toHaveCount(0);
+
+    await expect(page.locator("vimium-webkit-overlay")).toHaveCount(1);
+    await vw.press("j");
+    await expect.poll(async () => (await vw.scrollOffsets()).y).toBe(STEP);
+    expect(errors).toEqual([]);
+  });
+});
+
+/**
+ * Does a changed value reach the store when the page goes away?
+ *
+ * This is issue #11, end to end. Every group joins its writes for a while:
+ * marks for 100 ms, settings for 250 ms and the history index for two seconds.
+ * A user who leaves inside one of those windows used to lose the change.
+ *
+ * The store of the harness is mirrored into `localStorage` under a private
+ * prefix, so it survives the document. The spec can therefore change a value,
+ * leave the page, and read the value back on the next document.
+ */
+test.describe("what a dying page saves", () => {
+  /** The marks group joins its writes for 100 ms. This is inside that window. */
+  const INSIDE_THE_WINDOW_MS = 20;
+
+  const MARKS_KEY = "vimium-webkit:marks";
+
+  /**
+   * What the store held before the dispatch, and what it held inside it.
+   *
+   * Both reads happen in the page, in one turn with the dispatch of the event.
+   * That is the whole question of issue #11: the acceptance criterion is that
+   * the backend call starts before the handler returns. A macrotask that starts
+   * inside `pagehide` never runs, so nothing later counts.
+   */
+  const dispatchAndRead = (page: Page): Promise<{
+    before: string | null;
+    during: string | null;
+  }> =>
+    page.evaluate((key: string) => {
+      const host = globalThis as unknown as {
+        __vimiumHarness?: { store: Map<string, string> };
+      };
+      const store = host.__vimiumHarness?.store ?? new Map<string, string>();
+      const before = store.get(key) ?? null;
+
+      let event: Event;
+      try {
+        event = new PageTransitionEvent("pagehide", { persisted: false });
+      } catch {
+        event = new Event("pagehide");
+        Object.defineProperty(event, "persisted", { value: false });
+      }
+      globalThis.dispatchEvent(event);
+
+      // The same synchronous turn. This is everything that a dying page saves.
+      return { before, during: store.get(key) ?? null };
+    }, MARKS_KEY);
+
+  const setLocalMark = async (vw: Vimium, page: Page): Promise<void> => {
+    await vw.open("/lifecycle.html");
+    // `m` then `a` sets the local mark `a`. The write joins the window of the
+    // marks group, so nothing has reached the manager yet.
+    await vw.press("m", "a");
+    await page.waitForTimeout(INSIDE_THE_WINDOW_MS);
+  };
+
+  test("the mark reaches the manager inside the pagehide dispatch", async ({ vw, page }) => {
+    await setLocalMark(vw, page);
+
+    const { before, during } = await dispatchAndRead(page);
+
+    expect(before, "the debounce window must still hold the mark").toBeNull();
+    expect(during ?? "").toContain('"a"');
+  });
+
+  test.describe("with a manager that only gives promises", () => {
+    test.use({ gmVariant: "async" });
+
+    test("the call still starts inside the dispatch", async ({ vw, page }) => {
+      // quoid and Stay have no `GM_setValue`. The exit path calls
+      // `GM.setValue` and does not wait for the promise. The call starts on the
+      // stack of the handler, and the manager finishes it in its own process.
+      await setLocalMark(vw, page);
+
+      const { before, during } = await dispatchAndRead(page);
+
+      expect(before, "the debounce window must still hold the mark").toBeNull();
+      expect(during ?? "").toContain('"a"');
+    });
+  });
+
+  test("a mark survives a real navigation to another document", async ({ vw, page }) => {
+    // The whole loop: change a value, leave the page, and read the value back
+    // on the next document. The store of the harness is mirrored into
+    // `localStorage`, so it outlives the realm that wrote it.
+    await setLocalMark(vw, page);
+
+    await page.locator("#leave").click();
+    await expect(page).toHaveURL(/long-text\.html$/);
+
+    const stored = (await vw.snapshot()).stored;
+    expect(stored[MARKS_KEY] ?? "").toContain('"a"');
   });
 });
