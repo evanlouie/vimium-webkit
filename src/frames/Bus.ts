@@ -121,6 +121,9 @@ const CHALLENGE_TTL_MS = 10_000;
 /** The ceiling on open challenges, so a flood of `HELLO` cannot grow the map. */
 const MAX_PENDING_CHALLENGES = 64;
 
+/** The ceiling on the joins that wait for admission. */
+const MAX_PENDING_JOINS = 16;
+
 /**
  * The greatest number of sealed messages that one link holds.
  *
@@ -352,6 +355,13 @@ interface FrameRecord {
 interface Challenge {
   readonly source: Window;
   readonly issuedAt: number;
+}
+
+/** A `JOIN` that passed the cheap checks and waits for its proof to be read. */
+interface PendingJoin {
+  readonly port: MessagePort;
+  readonly source: Window;
+  readonly message: JoinMessage;
 }
 
 /** One handshake attempt of a child frame. */
@@ -1085,6 +1095,25 @@ export class FrameBus extends Context.Service<FrameBus, {
       });
 
       /**
+       * The joins that wait for admission, in the order that they arrived.
+       *
+       * Order is what makes a repeated handshake safe. A child that announces
+       * itself again opens a new attempt, and it closes the port of the attempt
+       * before it. The join that arrived last is therefore the only one whose
+       * port the child still holds. A fiber for each join could finish them in
+       * another order, and the last admission would then hold a port that
+       * nobody reads. The frame would stay outside the session, and it would
+       * not announce itself again, because it holds the nonce of the session.
+       *
+       * The queue drops when it is full, because page code can send a `JOIN` at
+       * any rate. A dropped join costs one attempt, and the child announces
+       * itself again.
+       */
+      const pendingJoins = yield* Queue.dropping<PendingJoin>(
+        MAX_PENDING_JOINS,
+      );
+
+      /**
        * The half of the handshake that runs on `window`.
        *
        * A `HELLO` earns a challenge, and a `JOIN` redeems one. The two steps
@@ -1121,12 +1150,20 @@ export class FrameBus extends Context.Service<FrameBus, {
           const port = event.ports[0];
           if (port === undefined) return;
 
-          // The proof needs Web Crypto, which is asynchronous. The listener
-          // must not suspend, so the rest runs in a fiber of the layer scope.
-          yield* Effect.forkIn(
-            completeJoin(port, source.value, message),
-            layerScope,
-          );
+          // The proof needs Web Crypto, which is asynchronous, and the listener
+          // must not suspend. One fiber finishes the joins, and it takes them
+          // in the order that they arrived.
+          const queued = Queue.offerUnsafe(pendingJoins, {
+            port,
+            source: source.value,
+            message,
+          });
+          if (!queued) {
+            yield* Effect.sync(() => {
+              port.close();
+            });
+            yield* Effect.logDebug("too many joins wait, so one is dropped");
+          }
         });
 
       // ---------------------------------------------------------------------
@@ -1349,6 +1386,21 @@ export class FrameBus extends Context.Service<FrameBus, {
         // answers a challenge finds a frame that can verify its proof.
         const created = yield* randomId;
         yield* Ref.set(nonceRef, created);
+
+        // One fiber admits the joins, one at a time and in order. See
+        // `pendingJoins` for why the order is a requirement, and not a taste.
+        yield* Effect.forkIn(
+          Effect.forever(
+            Effect.flatMap(
+              Queue.take(pendingJoins),
+              (join) =>
+                Effect.ignore(
+                  completeJoin(join.port, join.source, join.message),
+                ),
+            ),
+          ),
+          layerScope,
+        );
 
         // Registration is accepted at any time and for ever. `document-start`
         // is not reliable on WebKit, a page inserts frames after load, and a
