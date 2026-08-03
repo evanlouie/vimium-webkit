@@ -69,10 +69,10 @@ const start = Effect.gen(function*() {
     /**
      * The runtime of this frame, and the effect that closes it.
      *
-     * The application asks for the release on a final page exit, and only after
-     * the last writes reached storage. A page that goes into the back/forward
-     * cache keeps its runtime, because a restored page never runs its scripts
-     * again and nothing here would build a second one.
+     * The application asks for the release on a final page exit, and only
+     * after the last writes reached storage. A page that goes into the
+     * back/forward cache keeps its runtime. A restored page never runs its
+     * scripts again, so nothing here would build a second one.
      *
      * This holder belongs to one realm. The script runs again in every frame,
      * so a child frame that goes away releases the runtime that the child
