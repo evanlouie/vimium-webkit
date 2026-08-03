@@ -303,6 +303,33 @@ test.describe("the accessibility tree", () => {
     }
   });
 
+  test("the settings dialog says which field it brought into range", async ({ vw, page }) => {
+    await vw.open("/long-text.html");
+    await vw.press("?");
+    await waitForOverlay(page, ".vw-dialog");
+    expect(await clickOverlayButton(page, "Settings")).toBe(true);
+    await waitForOverlay(page, "#vw-set-keyMappings");
+
+    // 20000 is above the bound, so the control stores 10000. It does **not**
+    // keep the stored value, and a message that said so was false.
+    await page.evaluate((): boolean => {
+      const host = globalThis as unknown as {
+        __vimiumHarness?: { shadow: ShadowRoot | null };
+      };
+      const shadow = host.__vimiumHarness?.shadow ?? null;
+      const input = shadow?.getElementById("vw-set-scrollStepSize") ?? null;
+      if (!(input instanceof HTMLInputElement)) return false;
+      input.value = "20000";
+      return true;
+    });
+    expect(await clickOverlayButton(page, "Save")).toBe(true);
+
+    await expect.poll(() => overlayText(page, ".vw-problem"))
+      .toContain("brought into range: Scroll step size (px)");
+    expect(await overlayText(page, ".vw-problem"))
+      .not.toContain("keep their stored value");
+  });
+
   test("the dialog gives the focus back when it closes", async ({ vw, page }) => {
     await vw.open("/long-text.html");
     await page.evaluate(() => {
