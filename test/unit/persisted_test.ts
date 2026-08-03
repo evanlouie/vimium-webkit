@@ -131,6 +131,70 @@ describe("Persisted", () => {
       assert.strictEqual(parsed.success.linkHintCharacters, "sadfjklewcmpgh");
     }));
 
+  /**
+   * Hint alphabets that a case fold breaks.
+   *
+   * Each row gives a stored value and the value that the decoder accepts.
+   * `null` means that the field falls back to the shipped alphabet.
+   */
+  const HINT_ALPHABETS: readonly {
+    readonly name: string;
+    readonly stored: string;
+    readonly expected: string | null;
+  }[] = [
+    {
+      name: "the Turkish dotted capital I expands to i plus a dot",
+      stored: "ab\u0130",
+      expected: null,
+    },
+    {
+      name: "the Turkish dotless i has the case fold of the Latin i",
+      stored: "abi\u0131",
+      expected: null,
+    },
+    {
+      name: "the German sharp s expands to SS",
+      stored: "ab\u00df",
+      expected: null,
+    },
+    {
+      name: "the Greek final sigma has the case fold of the sigma",
+      stored: "\u03c3\u03c2",
+      expected: null,
+    },
+    {
+      name: "a plain duplicate is refused",
+      stored: "aab",
+      expected: null,
+    },
+    {
+      name: "a Greek alphabet is kept",
+      stored: "\u03b1\u03b2\u03b3",
+      expected: "\u03b1\u03b2\u03b3",
+    },
+    {
+      name: "an ASCII alphabet is kept",
+      stored: "asdfg",
+      expected: "asdfg",
+    },
+  ];
+
+  for (const row of HINT_ALPHABETS) {
+    it.effect(`decodes a hint alphabet: ${row.name}`, () =>
+      Effect.sync(() => {
+        const parsed = decodeSettings({
+          ...defaultSettings(),
+          linkHintCharacters: row.stored,
+        });
+        assert.isTrue(Result.isSuccess(parsed));
+        if (Result.isFailure(parsed)) return;
+        assert.strictEqual(
+          parsed.success.linkHintCharacters,
+          row.expected ?? "sadfjklewcmpgh",
+        );
+      }));
+  }
+
   it.effect("falls back on a search URL that has no %s", () =>
     Effect.sync(() => {
       const parsed = decodeSettings({
