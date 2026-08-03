@@ -81,8 +81,13 @@ const isSurrogateHalf = (char: string): boolean => {
  */
 const VISIBLE_CATEGORIES = /^[\p{L}\p{N}\p{P}\p{S}]$/u;
 
-/** Symbols that join an adjacent emoji instead of staying separate. */
-const EMOJI_JOINERS = /^[\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}]$/u;
+/** Does this code point join an adjacent emoji instead of staying separate? */
+const isEmojiJoiner = (char: string): boolean => {
+  const code = char.codePointAt(0);
+  return code !== undefined &&
+    ((code >= 0x1f1e6 && code <= 0x1f1ff) ||
+      (code >= 0x1f3fb && code <= 0x1f3ff));
+};
 
 /** Why a character cannot be a hint character. */
 export type HintRefusal =
@@ -138,7 +143,7 @@ export const refuseHintCharacter = (char: string): HintRefusal | null => {
   if (codePoints(char).length !== 1) return "half-character";
   if (isSurrogateHalf(char)) return "half-character";
   if (!VISIBLE_CATEGORIES.test(char)) return "invisible";
-  if (EMOJI_JOINERS.test(char)) return "emoji-joiner";
+  if (isEmojiJoiner(char)) return "emoji-joiner";
   if (codePoints(char.toLowerCase()).length !== 1) return "case-fold";
   if (codePoints(hintCharacterKey(char)).length !== 1) return "case-fold";
   return null;
