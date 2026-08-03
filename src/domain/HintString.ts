@@ -36,12 +36,20 @@ export const reverseString = (value: string): string =>
 export const hintCharacterKey = (char: string): string =>
   char.toLowerCase().toUpperCase().toLowerCase();
 
+/** Is this one half of a surrogate pair, and therefore half a character? */
+const isSurrogateHalf = (char: string): boolean => {
+  const code = char.codePointAt(0);
+  return code !== undefined && code >= 0xd800 && code <= 0xdfff;
+};
+
 /**
  * Can this character be one character of a hint label?
  *
- * The character must stay one code point through the whole case fold. Three
- * characters break that rule:
+ * The character must be one code point, and it must stay one code point
+ * through the whole case fold. Four characters break that rule:
  *
+ * - Half of a surrogate pair is not a character at all. It comes from a value
+ *   that was cut at a UTF-16 boundary.
  * - The Turkish dotted capital I becomes the Latin i plus a combining dot.
  *   The alphabet then holds a second Latin i, and two hints show the same
  *   label.
@@ -53,6 +61,7 @@ export const hintCharacterKey = (char: string): string =>
 export const isUsableHintCharacter = (char: string): boolean => {
   if (codePoints(char).length !== 1) return false;
   if (char.trim().length === 0) return false;
+  if (isSurrogateHalf(char)) return false;
   if (codePoints(char.toLowerCase()).length !== 1) return false;
   return codePoints(hintCharacterKey(char)).length === 1;
 };

@@ -121,6 +121,15 @@ const distinctCharacters = (value: string): boolean =>
 const usableCharacters = (value: string): boolean =>
   codePoints(value).every(isUsableHintCharacter);
 
+/**
+ * At least two characters, counted by code point.
+ *
+ * `isMinLength` counts UTF-16 units. One emoji has two units, so a set of one
+ * emoji passed the check and then gave no prefix-free code at all.
+ */
+const atLeastTwoCharacters = (value: string): boolean =>
+  codePoints(value).length >= 2;
+
 /** A search template without `%s` silently discards whatever the user typed. */
 const hasQueryPlaceholder = (value: string): boolean => value.includes("%s");
 
@@ -138,7 +147,9 @@ export const settingsSchema = Schema.Struct({
   // --- Link hints ---
   linkHintCharacters: field(
     Schema.String.check(
-      Schema.isMinLength(2),
+      Schema.makeFilter(atLeastTwoCharacters, {
+        message: "at least two hint characters are needed",
+      }),
       Schema.makeFilter(usableCharacters, {
         message: "a hint character must stay one character in both cases",
       }),
@@ -150,7 +161,9 @@ export const settingsSchema = Schema.Struct({
   ),
   linkHintNumbers: field(
     Schema.String.check(
-      Schema.isMinLength(2),
+      Schema.makeFilter(atLeastTwoCharacters, {
+        message: "at least two hint number characters are needed",
+      }),
       Schema.makeFilter(usableCharacters, {
         message: "a hint number must stay one character in both cases",
       }),

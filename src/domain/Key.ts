@@ -78,6 +78,24 @@ const isFunctionKey = (key: string): boolean =>
   /^f([1-9]|1\d|2[0-4])$/.test(key);
 
 // ---------------------------------------------------------------------------
+// Code points
+// ---------------------------------------------------------------------------
+
+/**
+ * The code points of a string.
+ *
+ * A key can be outside the Basic Multilingual Plane. An emoji and a
+ * mathematical letter are each one character, and each one holds two UTF-16
+ * units. A walk over the units gives two halves, and neither half can match a
+ * key that the user pressed.
+ */
+// oxlint-disable-next-line typescript/no-misused-spread
+const codePoints = (value: string): readonly string[] => [...value];
+
+/** How many characters a string holds, counted by code point. */
+const charCount = (value: string): number => codePoints(value).length;
+
+// ---------------------------------------------------------------------------
 // AppKit private-use-area normalisation (iOS hardware keyboards)
 // ---------------------------------------------------------------------------
 
@@ -111,7 +129,7 @@ const appKitFunctionKey = (code: number): string | null => {
 };
 
 export const normaliseAppKitKey = (key: string): string => {
-  if (key.length !== 1) return key;
+  if (charCount(key) !== 1) return key;
   const code = key.codePointAt(0);
   if (code === undefined || code < 0xf700 || code > 0xf8ff) return key;
   return APPKIT_PUA.get(code) ?? appKitFunctionKey(code) ?? key;
@@ -290,7 +308,7 @@ export const keyChar = (
 type ModifierLetter = "c" | "a" | "m" | "s";
 
 const isNamedChar = (char: string): boolean =>
-  char.length > 1 || NAMED_KEYS.has(char) || isFunctionKey(char);
+  charCount(char) > 1 || NAMED_KEYS.has(char) || isFunctionKey(char);
 
 /**
  * Write an event as Vimium key notation.
@@ -318,7 +336,7 @@ export const keyNotation = (
   if (event.metaKey) modifiers.push("m");
   if (event.shiftKey && named) modifiers.push("s");
 
-  if (!named && char.length === 1 && event.shiftKey) {
+  if (!named && charCount(char) === 1 && event.shiftKey) {
     // Under `ignoreKeyboardLayout` the platform did not apply shift to a
     // character that comes from the layout. Apply it here.
     char = char.toUpperCase();
@@ -428,11 +446,11 @@ const parseAngleKey = (
   }
 
   const lowered = last.toLowerCase();
-  const char = last.length === 1
+  const char = charCount(last) === 1
     ? last
     : NAME_ALIASES.get(lowered) ?? lowered;
 
-  if (char.length > 1 && !NAMED_VALUES.has(char) && !isFunctionKey(char)) {
+  if (charCount(char) > 1 && !NAMED_VALUES.has(char) && !isFunctionKey(char)) {
     return Result.fail(
       new KeyNotationError({
         input: original,
@@ -471,10 +489,15 @@ export const parseKeySequence = (
   input: string,
 ): Result.Result<readonly ParsedKey[], KeyNotationError> => {
   const keys: ParsedKey[] = [];
+  // The walk is over code points, and not over UTF-16 units. A walk over the
+  // units cuts an emoji into two halves, and each half becomes a key of its
+  // own. Such a key can never match a press. A position in a message is
+  // therefore a character position as well.
+  const chars = codePoints(input);
   let index = 0;
 
-  while (index < input.length) {
-    const char = input[index];
+  while (index < chars.length) {
+    const char = chars[index];
     if (char === undefined) break;
 
     if (char === "<") {
@@ -484,14 +507,14 @@ export const parseKeySequence = (
       // because a silent change into four separate keys is much worse than a
       // message that names the line to correct. `<lt>` stays available for a
       // literal with no doubt.
-      const following = input[index + 1];
+      const following = chars[index + 1];
       if (following === "<" || following === ">" || following === undefined) {
         keys.push(literalKey(char));
         index += 1;
         continue;
       }
 
-      const close = input.indexOf(">", index + 1);
+      const close = chars.indexOf(">", index + 1);
       if (close === -1) {
         return Result.fail(
           new KeyNotationError({
@@ -500,7 +523,7 @@ export const parseKeySequence = (
           }),
         );
       }
-      const body = input.slice(index + 1, close);
+      const body = chars.slice(index + 1, close).join("");
       if (body.length === 0) {
         return Result.fail(
           new KeyNotationError({
@@ -511,7 +534,10 @@ export const parseKeySequence = (
       }
       // A `<x>` with no modifier is a named key, for example `<esc>`. The same
       // parser reads it, because a split on `-` gives one segment.
-      const parsed = parseAngleKey(body, input.slice(index, close + 1));
+      const parsed = parseAngleKey(
+        body,
+        chars.slice(index, close + 1).join(""),
+      );
       if (Result.isFailure(parsed)) return Result.fail(parsed.failure);
       keys.push(parsed.success);
       index = close + 1;
@@ -630,7 +656,7 @@ export const MAX_COUNT = 9999;
  * user can bind. This is what makes the upstream `map 0 scrollToLeft` work.
  */
 export const isCountDigit = (notation: string, started: boolean): boolean => {
-  if (notation.length !== 1) return false;
+  if (charCount(notation) !== 1) return false;
   return started
     ? notation >= "0" && notation <= "9"
     : notation >= "1" && notation <= "9";
