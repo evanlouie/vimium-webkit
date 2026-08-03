@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Right-to-left scroll containers</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+    /*
+     * A right-to-left container reports `scrollLeft` differently from a
+     * left-to-right one. On every current engine the range is `[-max, 0]`, and
+     * zero is the *right* edge, which is where the container starts.
+     *
+     * `#rtl-outer` holds `#rtl-inner`, so a command that one cannot take goes
+     * to the other. Both are wide enough to scroll.
+     */
+    .row {
+      display: flex;
+      width: 4000px;
+    }
+    .cell {
+      flex: 0 0 200px;
+      padding: 8px;
+      background: repeating-linear-gradient(
+        90deg,
+        #f4f4f4 0 100px,
+        #ebebeb 100px 200px
+      );
+    }
+    #rtl-outer {
+      direction: rtl;
+      width: 600px;
+      height: 220px;
+      overflow: auto;
+      border: 1px solid #999;
+    }
+    #rtl-inner {
+      direction: rtl;
+      width: 400px;
+      height: 120px;
+      overflow: auto;
+      border: 1px solid #c33;
+      margin: 8px;
+    }
+    #ltr-box {
+      direction: ltr;
+      width: 400px;
+      height: 120px;
+      overflow: auto;
+      border: 1px solid #39c;
+      margin: 12px 0;
+    }
+    .handle {
+      padding: 4px 8px;
+      background: #eef;
+    }
+    </style>
+  </head>
+  <body dir="rtl">
+    <h1>Right-to-left scroll containers</h1>
+
+    <div id="rtl-outer">
+      <div class="row">
+        <div class="cell">
+          <div class="handle" id="rtl-outer-focus" tabindex="0">
+            outer handle
+          </div>
+        </div>
+        <div class="cell">outer content</div>
+      </div>
+      <div id="rtl-inner">
+        <div class="row">
+          <div class="cell">
+            <div class="handle" id="rtl-inner-focus" tabindex="0">
+              inner handle
+            </div>
+          </div>
+          <div class="cell">inner content</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="ltr-box">
+      <div class="row">
+        <div class="cell">
+          <div class="handle" id="ltr-focus" tabindex="0">ltr handle</div>
+        </div>
+        <div class="cell">ltr content</div>
+      </div>
+    </div>
+
+    <p id="bottom-marker">bottom of the document</p>
+  </body>
+</html>

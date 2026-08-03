@@ -102,4 +102,61 @@ test.describe("smooth scrolling (shipped default)", () => {
       { timeout: SETTLE_MS },
     ).toBe(STEP * 3);
   });
+
+  test("an inner container gives the rest of a step to its ancestor", async ({ vw }) => {
+    await vw.open("/scrollables.html");
+
+    // Ten pixels of room, and a command of sixty. The animated path measures
+    // the movement of each frame, so it can end a container in the middle of
+    // a command. The rest must reach the ancestor.
+    const room = 10;
+    const limit = await vw.page.evaluate((left: number) => {
+      const inner = document.getElementById("inner");
+      if (inner === null) return -1;
+      const max = inner.scrollHeight - inner.clientHeight;
+      inner.scrollTop = max - left;
+      return max;
+    }, room);
+    expect(limit).toBeGreaterThan(room);
+
+    await vw.page.evaluate(() => {
+      document.getElementById("inner-focus")?.focus({ preventScroll: true });
+    });
+    await vw.press("j");
+
+    await expect.poll(
+      async () => (await vw.scrollOffsets("#inner")).y,
+      { timeout: SETTLE_MS },
+    ).toBe(limit);
+    await expect.poll(
+      async () => (await vw.scrollOffsets("#outer")).y,
+      { timeout: SETTLE_MS },
+    ).toBe(STEP - room);
+    expect((await vw.scrollOffsets()).y).toBe(0);
+  });
+
+  test("a mark jump beats the animation that is running", async ({ vw }) => {
+    await vw.open("/scrollables.html");
+
+    // The mark is set at the top of the document.
+    await vw.press("m", "a");
+
+    // A key that stays down extends the animation for as long as it is held,
+    // so this animation is still running when the mark jump arrives.
+    await vw.page.keyboard.down("j");
+    await expect.poll(async () => (await vw.scrollOffsets()).y)
+      .toBeGreaterThan(STEP);
+
+    await vw.press("`", "a");
+    await vw.page.keyboard.up("j");
+
+    // The next animation frame used to write its own goal over the mark.
+    await expect.poll(
+      async () => (await vw.scrollOffsets()).y,
+      { timeout: SETTLE_MS },
+    ).toBe(0);
+    // And it must stay there, which only a stopped animation can promise.
+    await vw.page.waitForTimeout(300);
+    expect((await vw.scrollOffsets()).y).toBe(0);
+  });
 });

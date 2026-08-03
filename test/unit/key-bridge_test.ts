@@ -13,7 +13,7 @@
 
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Layer, Ref, SubscriptionRef } from "effect";
-import { attachKeyBridge } from "~/boot/KeyBridge.ts";
+import { attachKeyBridge, replayBufferedKeys } from "~/boot/KeyBridge.ts";
 import { CONTINUE_BUBBLING, HandlerStack } from "~/core/HandlerStack.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -99,11 +99,13 @@ const withBridge = (
   Effect.gen(function*() {
     const attached = yield* Ref.make<ReadonlyArray<Attached>>([]);
     const forgotten = yield* Ref.make(0);
+    // Outside the provide, so that the stub scroller writes into the same
+    // list as the handler probe.
+    const seen = yield* Ref.make<ReadonlyArray<string>>([]);
 
     yield* Effect.provide(
       Effect.scoped(Effect.gen(function*() {
         const stack = yield* HandlerStack;
-        const seen = yield* Ref.make<ReadonlyArray<string>>([]);
         const record = (name: string) => () =>
           Effect.as(
             Ref.update(seen, (current) => [...current, name]),
@@ -119,7 +121,13 @@ const withBridge = (
           blur: record("blur"),
         });
 
-        yield* attachKeyBridge;
+        const lifecycle = {
+          keydown: () =>
+            Ref.update(seen, (current) => [...current, "note:keydown"]),
+          keyup: () =>
+            Ref.update(seen, (current) => [...current, "note:keyup"]),
+        };
+        yield* attachKeyBridge(lifecycle);
         yield* body(yield* Ref.get(attached), seen, forgotten);
       })),
       Layer.mergeAll(
@@ -131,6 +139,33 @@ const withBridge = (
   });
 
 describe("the key bridge", () => {
+  it.effect("runs the lifecycle before replaying a guarded key", () =>
+    Effect.gen(function*() {
+      const seen = yield* Ref.make<ReadonlyArray<string>>([]);
+      const program = Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        yield* stack.push({
+          name: "probe",
+          keydown: () =>
+            Effect.as(
+              Ref.update(seen, (current) => [...current, "keydown"]),
+              CONTINUE_BUBBLING,
+            ),
+        });
+        yield* replayBufferedKeys(
+          [event(true) as KeyboardEvent],
+          {
+            keydown: () =>
+              Ref.update(seen, (current) => [...current, "note:keydown"]),
+            keyup: () => Effect.void,
+          },
+        );
+      });
+
+      yield* Effect.provide(Effect.scoped(program), HandlerStack.layer);
+      assert.deepEqual(yield* Ref.get(seen), ["note:keydown", "keydown"]);
+    }));
+
   it.effect("gives the stack an event that the user made", () =>
     withBridge((attached, seen) =>
       Effect.gen(function*() {
@@ -138,12 +173,44 @@ describe("the key bridge", () => {
           yield* fire(attached, type, event(true));
         }
         assert.deepEqual(yield* Ref.get(seen), [
+          "note:keydown",
           "keydown",
+          "note:keyup",
           "keyup",
           "click",
           "focus",
           "blur",
         ]);
+      })
+    ));
+
+  it.effect("runs the key lifecycle before the stack decides", () =>
+    withBridge((attached, seen) =>
+      Effect.gen(function*() {
+        // The scroller counts the presses and holds the keys that are down.
+        // A command body reads that count, so the note must come first.
+        yield* fire(attached, "keydown", event(true));
+        assert.deepEqual(yield* Ref.get(seen), ["note:keydown", "keydown"]);
+
+        yield* fire(attached, "keyup", event(true));
+        assert.deepEqual(yield* Ref.get(seen), [
+          "note:keydown",
+          "keydown",
+          "note:keyup",
+          "keyup",
+        ]);
+      })
+    ));
+
+  it.effect("runs no lifecycle for a key that the page made", () =>
+    withBridge((attached, seen) =>
+      Effect.gen(function*() {
+        // A page-made key must not move the press count either. It would put
+        // the count out of step with the keys that the user holds.
+        yield* fire(attached, "keydown", event(false));
+        yield* fire(attached, "keyup", event(false));
+
+        assert.deepEqual(yield* Ref.get(seen), []);
       })
     ));
 

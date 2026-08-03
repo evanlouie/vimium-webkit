@@ -28,6 +28,17 @@ test.describe("an Alt chord", () => {
     },
   });
 
+  test.beforeEach(async ({ page }) => {
+    // GitHub runs Chromium and Firefox on Linux. Set the platform before the
+    // application starts, so this suite tests the Apple-only Option rule.
+    await page.addInitScript(() => {
+      Object.defineProperty(Navigator.prototype, "platform", {
+        configurable: true,
+        get: () => "MacIntel",
+      });
+    });
+  });
+
   test("runs the command that the mapping names", async ({ vw }) => {
     await vw.open("/scrollables.html");
 
