@@ -24,6 +24,35 @@ const focus = (vw: Vimium, id: string): Promise<void> =>
     if (element instanceof HTMLElement) element.focus({ preventScroll: true });
   }, id);
 
+/** Add an RTL target through CSSOM, which strict CSP permits. */
+const addRtlTarget = (vw: Vimium): Promise<void> =>
+  vw.page.evaluate(() => {
+    const target = document.createElement("section");
+    target.id = "policy-rtl-target";
+    const focusTarget = document.createElement("button");
+    focusTarget.id = "policy-rtl-focus";
+    focusTarget.textContent = "focus";
+    const content = document.createElement("p");
+    content.textContent = "wide content";
+    const set = (element: HTMLElement, property: string, value: string) =>
+      element.style.setProperty(property, value, "important");
+    set(target, "direction", "rtl");
+    set(target, "width", "400px");
+    set(target, "height", "100px");
+    set(target, "overflow", "scroll");
+    set(content, "width", "1000px");
+    set(content, "height", "20px");
+    target.append(focusTarget, content);
+    document.documentElement.appendChild(target);
+    focusTarget.focus({ preventScroll: true });
+  });
+
+/** Read the target offset in raw engine units. */
+const policyTargetX = (vw: Vimium): Promise<number> =>
+  vw.page.evaluate(() =>
+    document.getElementById("policy-rtl-target")?.scrollLeft ?? 1
+  );
+
 /**
  * The horizontal offset of one container, with zero at its left edge.
  *
@@ -244,6 +273,82 @@ test.describe("scrolling", () => {
  * right".
  */
 test.describe("right-to-left scrolling", () => {
+  test("uses the negative model under strict CSP", async ({ vw, page }) => {
+    const violations: string[] = [];
+    await page.addInitScript(() => {
+      globalThis.addEventListener("securitypolicyviolation", (event) => {
+        const scope = globalThis as typeof globalThis & {
+          __scrollPolicyViolations?: string[];
+        };
+        (scope.__scrollPolicyViolations ??= []).push(event.violatedDirective);
+      });
+    });
+    await vw.open("/strict-csp.html");
+    await addRtlTarget(vw);
+
+    await vw.press("h");
+
+    await expect.poll(() => policyTargetX(vw)).toBe(-STEP);
+    violations.push(
+      ...await page.evaluate(() =>
+        (globalThis as typeof globalThis & {
+          __scrollPolicyViolations?: string[];
+        }).__scrollPolicyViolations ?? []
+      ),
+    );
+    expect(violations.filter((value) => value.startsWith("style-src")))
+      .toEqual([]);
+  });
+
+  test("uses the negative model with an important rule for every div", async ({ vw, page }) => {
+    await vw.open("/scrollables.html");
+    await page.addStyleTag({
+      content:
+        "div { direction: ltr !important; overflow: hidden !important; width: 1px !important; }",
+    });
+    await addRtlTarget(vw);
+
+    await vw.press("h");
+
+    await expect.poll(() => policyTargetX(vw)).toBe(-STEP);
+  });
+
+  test("measures again after the document direction changes", async ({ vw, page }) => {
+    await vw.open("/scrollables.html");
+    await addRtlTarget(vw);
+    await page.evaluate(() => {
+      const scope = globalThis as typeof globalThis & { __rtlProbes?: number };
+      scope.__rtlProbes = 0;
+      new MutationObserver((records) => {
+        for (
+          const node of records.flatMap((record) =>
+            Array.from(record.addedNodes)
+          )
+        ) {
+          if (
+            node instanceof HTMLElement &&
+            node.style.position === "fixed" &&
+            node.style.direction === "rtl"
+          ) scope.__rtlProbes = (scope.__rtlProbes ?? 0) + 1;
+        }
+      }).observe(document.documentElement, { childList: true });
+    });
+
+    await vw.press("h");
+    await expect.poll(() => policyTargetX(vw)).toBe(-STEP);
+    await page.evaluate(() => {
+      document.documentElement.dir = "rtl";
+    });
+    await vw.press("h");
+
+    await expect.poll(() => policyTargetX(vw)).toBe(-STEP * 2);
+    await expect.poll(() =>
+      page.evaluate(() =>
+        (globalThis as typeof globalThis & { __rtlProbes?: number }).__rtlProbes
+      )
+    ).toBe(2);
+  });
+
   test("`h` moves a right-to-left container towards its left edge", async ({ vw }) => {
     await vw.open("/rtl-scroll.html");
     await focus(vw, "rtl-inner-focus");

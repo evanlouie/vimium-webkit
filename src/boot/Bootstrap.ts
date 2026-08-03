@@ -196,9 +196,9 @@ export const BootstrapLayer: Layer.Layer<
   const owner = yield* RuntimeOwner;
   const realm = yield* Realm;
   const report = yield* Report;
-  const scroller = yield* Scroller;
   const settings = yield* Settings;
   const keyboard = yield* Keyboard;
+  const scroller = yield* Scroller;
   const storage = yield* Storage;
 
   // Every storage failure becomes one line for the user. The queue behind
@@ -254,8 +254,14 @@ export const BootstrapLayer: Layer.Layer<
   }
   if (realm.isTop) yield* omnibar.noteVisit;
 
-  yield* attachKeyBridge;
-  yield* replayBufferedKeys(yield* boot.drain);
+  // Bootstrap is the composition root. The bridge stays independent of
+  // features, and live and guarded keys use the same lifecycle order.
+  const keyLifecycle = {
+    keydown: scroller.noteKeydown,
+    keyup: scroller.noteKeyup,
+  };
+  yield* attachKeyBridge(keyLifecycle);
+  yield* replayBufferedKeys(yield* boot.drain, keyLifecycle);
 
   // A hook, and not a subscription. The work that a page exit needs must start
   // inside the browser's dispatch. A subscriber of the bus below runs on its

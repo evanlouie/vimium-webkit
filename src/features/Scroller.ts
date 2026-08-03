@@ -166,10 +166,12 @@ const applyOffset = (
  */
 export type RtlScrollModel = "negative" | "nonNegative";
 
-/** The probe container. It is hidden, it is fixed, and it moves no layout. */
-const RTL_PROBE_STYLE = "position:fixed;top:-9999px;left:-9999px;" +
-  "width:4px;height:4px;overflow:scroll;direction:rtl;" +
-  "scroll-behavior:auto;visibility:hidden;pointer-events:none;";
+/** Set one probe property without an inline-style CSP violation. */
+const setProbeStyle = (
+  element: HTMLElement,
+  property: string,
+  value: string,
+): void => element.style.setProperty(property, value, "important");
 
 /**
  * Measure the model. Never read the user agent.
@@ -177,25 +179,51 @@ const RTL_PROBE_STYLE = "position:fixed;top:-9999px;left:-9999px;" +
  * A user agent string is a claim, and every engine copies the claims of the
  * others. The offsets of one hidden right-to-left container are the fact.
  *
- * The container starts at its right edge. A positive offset there means that
- * zero is the left edge, which is the `nonNegative` model. If the offset is
- * zero, a write of `-1` that survives means the `negative` model.
+ * The probe uses new elements instead of a page container. Moving a page
+ * container can show movement, send scroll events, and change page state.
  *
- * `scroll-behavior: auto` is on the probe because a page rule of `smooth` would
- * defer the write, and the read back would then give the old value.
+ * CSSOM property writes work under strict CSP. Important priority defeats broad
+ * page rules. The read-back checks every condition required by the measurement.
+ * If a page still defeats a condition, the safe default is `negative`.
+ * All modern engines use that model. An old engine only loses RTL correction.
  */
 export const detectRtlScrollModel = (document: Document): RtlScrollModel => {
-  const host: Element | null = document.body ?? document.documentElement;
+  const host = document.documentElement;
   if (host === null) return "negative";
 
-  const outer = document.createElement("div");
-  outer.setAttribute("style", RTL_PROBE_STYLE);
-  const inner = document.createElement("div");
-  inner.setAttribute("style", "width:40px;height:1px;");
+  const outer = document.createElement("span");
+  const inner = document.createElement("span");
+  const outerStyles = {
+    display: "block",
+    position: "fixed",
+    top: "-9999px",
+    left: "-9999px",
+    width: "4px",
+    height: "4px",
+    overflow: "scroll",
+    direction: "rtl",
+    "scroll-behavior": "auto",
+    visibility: "hidden",
+    "pointer-events": "none",
+  } as const;
+  for (const [property, value] of Object.entries(outerStyles)) {
+    setProbeStyle(outer, property, value);
+  }
+  setProbeStyle(inner, "display", "block");
+  setProbeStyle(inner, "width", "40px");
+  setProbeStyle(inner, "height", "1px");
   outer.appendChild(inner);
   host.appendChild(outer);
 
   try {
+    const style = document.defaultView?.getComputedStyle(outer);
+    const valid = style?.direction === "rtl" &&
+      style.overflowX === "scroll" &&
+      style.scrollBehavior === "auto" &&
+      outer.clientWidth > 0 &&
+      outer.scrollWidth > outer.clientWidth;
+    if (!valid) return "negative";
+
     if (outer.scrollLeft > 0) return "nonNegative";
     outer.scrollLeft = -1;
     return outer.scrollLeft < 0 ? "negative" : "nonNegative";
@@ -525,13 +553,12 @@ export class Scroller extends Context.Service<Scroller, {
       /** Increased on every keydown that is not a repeat: "this press". */
       const generation = yield* Ref.make(0);
       const heldCodes = yield* Ref.make<ReadonlySet<string>>(new Set());
-      /**
-       * The engine model for a right-to-left offset, measured once.
-       *
-       * The measurement adds one hidden element and forces one layout, so it
-       * happens on the first horizontal command and never on a vertical one.
-       */
-      const rtlModel = yield* Ref.make<Option.Option<RtlScrollModel>>(
+      interface CachedRtlModel {
+        readonly direction: string;
+        readonly model: RtlScrollModel;
+      }
+      /** The model is valid only while the document direction is unchanged. */
+      const rtlModel = yield* Ref.make<Option.Option<CachedRtlModel>>(
         Option.none(),
       );
       const animations: Record<
@@ -560,15 +587,26 @@ export class Scroller extends Context.Service<Scroller, {
       const modelFor = (axis: ScrollAxis): Effect.Effect<RtlScrollModel> =>
         axis === "y" ? Effect.succeed("nonNegative" as const) : Effect.gen(
           function*() {
+            const direction = yield* dom.probeOr(
+              () =>
+                dom.window.getComputedStyle(dom.document.documentElement)
+                  .direction,
+              "",
+            );
             const cached = yield* Ref.get(rtlModel);
-            if (Option.isSome(cached)) return cached.value;
-            // A realm that refuses the probe gets `negative`, which is what
-            // every current engine does.
+            if (
+              Option.isSome(cached) && cached.value.direction === direction
+            ) return cached.value.model;
+
+            // A refused or invalid probe gets the model of every modern engine.
             const measured = yield* dom.probeOr(
               () => detectRtlScrollModel(dom.document),
               "negative" as const,
             );
-            yield* Ref.set(rtlModel, Option.some(measured));
+            yield* Ref.set(
+              rtlModel,
+              Option.some({ direction, model: measured }),
+            );
             return measured;
           },
         );

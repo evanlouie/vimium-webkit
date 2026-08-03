@@ -13,8 +13,13 @@
 import { Effect, type Scope } from "effect";
 import { HandlerStack } from "~/core/HandlerStack.ts";
 import { isUserEvent, Keyboard } from "~/core/Keyboard.ts";
-import { Scroller } from "~/features/Scroller.ts";
 import { Dom } from "~/platform/Dom.ts";
+
+/** Key state operations that must run before stack dispatch. */
+export interface KeyLifecycle {
+  readonly keydown: (event: KeyboardEvent) => Effect.Effect<void>;
+  readonly keyup: (event: KeyboardEvent) => Effect.Effect<void>;
+}
 
 /**
  * Attach every listener that the handler stack needs.
@@ -42,103 +47,103 @@ import { Dom } from "~/platform/Dom.ts";
  * needs the true node therefore reads `event.composedPath()`.
  * `features/Insert.ts` does that.
  *
- * The scroller learns about each press here, before the stack decides what the
- * press means. It counts the presses and it holds the set of keys that are
- * down, and it needs both to answer "is this the same press as the animation
- * that runs now". Nothing called those two methods, so every command looked
- * like the same press, and a new command could merge into an animation for an
- * old target. Both methods only write a `Ref`, so the key path stays
- * synchronous. Read `ARCHITECTURE.md` section 3.
+ * The lifecycle learns about each press before the stack decides what the
+ * press means. The composition root supplies it without naming a feature here.
+ * Its methods must not suspend. Read `ARCHITECTURE.md` section 3.
  */
-export const attachKeyBridge: Effect.Effect<
+export const attachKeyBridge = (
+  lifecycle: KeyLifecycle,
+): Effect.Effect<
   void,
   never,
-  Dom | HandlerStack | Keyboard | Scroller | Scope.Scope
-> = Effect.gen(function*() {
-  const dom = yield* Dom;
-  const stack = yield* HandlerStack;
-  const keyboard = yield* Keyboard;
-  const scroller = yield* Scroller;
+  Dom | HandlerStack | Keyboard | Scope.Scope
+> =>
+  Effect.gen(function*() {
+    const dom = yield* Dom;
+    const stack = yield* HandlerStack;
+    const keyboard = yield* Keyboard;
 
-  yield* dom.listen(
-    "window",
-    "keydown",
-    (event) =>
-      isUserEvent(event)
-        ? Effect.gen(function*() {
-          // Before the dispatch. A command body reads the generation that
-          // this call increases.
-          yield* scroller.noteKeydown(event);
-          yield* stack.bubble("keydown", event);
-        })
-        : Effect.void,
-    { capture: true },
-  );
+    yield* dom.listen(
+      "window",
+      "keydown",
+      (event) =>
+        isUserEvent(event)
+          ? Effect.gen(function*() {
+            // Before the dispatch. A command body reads the generation that
+            // this call increases.
+            yield* lifecycle.keydown(event);
+            yield* stack.bubble("keydown", event);
+          })
+          : Effect.void,
+      { capture: true },
+    );
 
-  yield* dom.listen(
-    "window",
-    "keyup",
-    (event) =>
-      isUserEvent(event)
-        ? Effect.gen(function*() {
-          // Before the dispatch, like the press. The order inside one
-          // dispatch is not observable to the animation, which reads the set
-          // on a frame, but one rule for both is easier to keep.
-          yield* scroller.noteKeyup(event);
-          yield* stack.bubble("keyup", event);
-        })
-        : Effect.void,
-    { capture: true },
-  );
+    yield* dom.listen(
+      "window",
+      "keyup",
+      (event) =>
+        isUserEvent(event)
+          ? Effect.gen(function*() {
+            // Before the dispatch, like the press. The order inside one
+            // dispatch is not observable to the animation, which reads the set
+            // on a frame, but one rule for both is easier to keep.
+            yield* lifecycle.keyup(event);
+            yield* stack.bubble("keyup", event);
+          })
+          : Effect.void,
+      { capture: true },
+    );
 
-  yield* dom.listen(
-    "window",
-    "click",
-    (event) => Effect.asVoid(stack.bubble("click", event)),
-    { capture: true },
-  );
+    yield* dom.listen(
+      "window",
+      "click",
+      (event) => Effect.asVoid(stack.bubble("click", event)),
+      { capture: true },
+    );
 
-  yield* dom.listen(
-    "window",
-    "focus",
-    (event) =>
-      isUserEvent(event)
-        ? Effect.asVoid(stack.bubble("focus", event))
-        : Effect.void,
-    { capture: true },
-  );
+    yield* dom.listen(
+      "window",
+      "focus",
+      (event) =>
+        isUserEvent(event)
+          ? Effect.asVoid(stack.bubble("focus", event))
+          : Effect.void,
+      { capture: true },
+    );
 
-  yield* dom.listen(
-    "window",
-    "blur",
-    (event) =>
-      isUserEvent(event)
-        ? Effect.asVoid(stack.bubble("blur", event))
-        : Effect.void,
-    { capture: true },
-  );
+    yield* dom.listen(
+      "window",
+      "blur",
+      (event) =>
+        isUserEvent(event)
+          ? Effect.asVoid(stack.bubble("blur", event))
+          : Effect.void,
+      { capture: true },
+    );
 
-  // A press whose release we will never see leaves normal mode waiting for a
-  // `keyup` that never comes. The everyday case is a window switch in the
-  // middle of a keystroke. The next release of that physical key would then be
-  // taken from a page that was entitled to it.
-  //
-  // The page must not reach this either. A page-made `blur` would give the page
-  // the release of a press that we took.
-  yield* dom.listen(
-    "window",
-    "blur",
-    (event) => isUserEvent(event) ? keyboard.forgetSuppressed : Effect.void,
-  );
-});
+    // A press whose release we will never see leaves normal mode waiting for a
+    // `keyup` that never comes. The everyday case is a window switch in the
+    // middle of a keystroke. The next release of that physical key would then be
+    // taken from a page that was entitled to it.
+    //
+    // The page must not reach this either. A page-made `blur` would give the page
+    // the release of a press that we took.
+    yield* dom.listen(
+      "window",
+      "blur",
+      (event) => isUserEvent(event) ? keyboard.forgetSuppressed : Effect.void,
+    );
+  });
 
-/** Replay the keys that the guard held while the application started. */
+/** Replay each guarded key through the same lifecycle and stack order. */
 export const replayBufferedKeys = (
   events: ReadonlyArray<KeyboardEvent>,
+  lifecycle: KeyLifecycle,
 ): Effect.Effect<void, never, HandlerStack> =>
   Effect.gen(function*() {
     const stack = yield* HandlerStack;
     for (const event of events) {
+      yield* lifecycle.keydown(event);
       yield* stack.bubble("keydown", event);
     }
   });

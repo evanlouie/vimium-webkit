@@ -68,7 +68,7 @@ class FakeElement {
   readonly clientWidth: number;
   readonly overflowX: string;
   readonly overflowY: string;
-  readonly direction: "ltr" | "rtl";
+  direction: "ltr" | "rtl";
   readonly model: RtlScrollModel;
   readonly shadowRoot: null = null;
   parentElement: FakeElement | null;
@@ -132,7 +132,7 @@ class FakeElement {
     this.scrollTop = options.top;
   }
 
-  /** The probe of the model detection is appended to the body. */
+  /** The model probe is appended to the document element. */
   appendChild(): void {}
 
   getRootNode(): unknown {
@@ -146,8 +146,16 @@ const asElement = (element: FakeElement): Element =>
 /** The probe element that `detectRtlScrollModel` makes. */
 class FakeProbe {
   readonly model: RtlScrollModel;
+  readonly values = new Map<string, string>();
+  readonly style = {
+    setProperty: (property: string, value: string): void => {
+      this.values.set(property, value);
+    },
+  };
   attached = false;
   removed = false;
+  clientWidth = 4;
+  scrollWidth = 4;
   #left: number;
 
   constructor(model: RtlScrollModel) {
@@ -167,8 +175,10 @@ class FakeProbe {
     this.#left = Math.min(Math.max(value, lowest), highest);
   }
 
-  setAttribute(): void {}
-  appendChild(): void {}
+  appendChild(): void {
+    this.scrollWidth = 40;
+  }
+
   remove(): void {
     this.removed = true;
   }
@@ -181,6 +191,7 @@ interface WorldOptions {
   /** Reading `visualViewport` throws, as a poisoned realm would. */
   readonly poisonVisualViewport?: boolean;
   readonly model?: RtlScrollModel;
+  readonly invalidProbeStyle?: boolean;
 }
 
 interface World {
@@ -189,6 +200,7 @@ interface World {
   readonly window: Window & typeof globalThis;
   readonly probes: FakeProbe[];
   focus(element: FakeElement | null): void;
+  setDocumentDirection(direction: "ltr" | "rtl"): void;
   make(options: ElementOptions): FakeElement;
 }
 
@@ -218,6 +230,9 @@ const makeWorld = (options: WorldOptions = {}): World => {
     get activeElement(): Element | null {
       return active === null ? null : asElement(active);
     },
+    get defaultView(): Window & typeof globalThis {
+      return window;
+    },
     createElement: (): unknown => {
       const probe = new FakeProbe(model);
       probes.push(probe);
@@ -236,6 +251,15 @@ const makeWorld = (options: WorldOptions = {}): World => {
     },
     matchMedia: () => ({ matches: false }),
     getComputedStyle: (element: unknown): unknown => {
+      if (element instanceof FakeProbe) {
+        return {
+          overflowX: options.invalidProbeStyle
+            ? "hidden"
+            : element.values.get("overflow"),
+          direction: element.values.get("direction"),
+          scrollBehavior: element.values.get("scroll-behavior"),
+        };
+      }
       const value = element as FakeElement;
       return {
         overflowX: value.overflowX,
@@ -252,6 +276,9 @@ const makeWorld = (options: WorldOptions = {}): World => {
     probes,
     focus: (element) => {
       active = element;
+    },
+    setDocumentDirection: (direction) => {
+      root.direction = direction;
     },
     make: (elementOptions) =>
       new FakeElement({ model, parent: root, ...elementOptions }),
@@ -387,6 +414,37 @@ describe("the scroll chain", () => {
       assert.strictEqual(world.root.scrollTop, 50);
     }));
 
+  for (const smoothScroll of [false, true]) {
+    it.effect(
+      `gives a negative residue to the ancestor with animation ${smoothScroll}`,
+      () =>
+        Effect.gen(function*() {
+          const world = makeWorld();
+          world.root.scrollTop = 100;
+          const inner = world.make({
+            name: "inner",
+            scrollHeight: 1000,
+            clientHeight: 200,
+            startTop: 5,
+          });
+          world.focus(inner);
+
+          yield* withScroller(
+            world,
+            { smoothScroll },
+            (scroller) =>
+              Effect.gen(function*() {
+                yield* scroller.scrollBy("y", -60, Option.none());
+                if (smoothScroll) yield* settle;
+              }),
+          );
+
+          assert.strictEqual(inner.scrollTop, 0);
+          assert.strictEqual(world.root.scrollTop, 45);
+        }),
+    );
+  }
+
   it.effect("keeps the whole step in a container that has the room", () =>
     Effect.gen(function*() {
       const world = makeWorld();
@@ -425,6 +483,32 @@ describe("the right-to-left model", () => {
     const world = makeWorld({ model: "nonNegative" });
     assert.strictEqual(detectRtlScrollModel(world.document), "nonNegative");
   });
+
+  it("uses the modern default when probe styles are invalid", () => {
+    const world = makeWorld({
+      model: "nonNegative",
+      invalidProbeStyle: true,
+    });
+    assert.strictEqual(detectRtlScrollModel(world.document), "negative");
+  });
+
+  it.effect("measures again after the document direction changes", () =>
+    Effect.gen(function*() {
+      const world = makeWorld();
+
+      yield* withScroller(
+        world,
+        { smoothScroll: false },
+        (scroller) =>
+          Effect.gen(function*() {
+            yield* scroller.scrollTo("x", "start");
+            assert.strictEqual(world.probes.length, 2);
+            world.setDocumentDirection("rtl");
+            yield* scroller.scrollTo("x", "start");
+            assert.strictEqual(world.probes.length, 4);
+          }),
+      );
+    }));
 
   /** A right-to-left container at its start, which is its right edge. */
   const rtlWorld = (): {
@@ -467,6 +551,23 @@ describe("the right-to-left model", () => {
       // right-to-left container, and the command went to the document.
       assert.strictEqual(inner.scrollLeft, -60);
       assert.strictEqual(world.root.scrollLeft, 0);
+    }));
+
+  it.effect("gives a negative left residue to the RTL ancestor", () =>
+    Effect.gen(function*() {
+      const { world, middle, inner } = rtlWorld();
+      inner.scrollLeft = -690;
+      middle.scrollLeft = -500;
+      world.focus(inner);
+
+      yield* withScroller(
+        world,
+        { smoothScroll: false },
+        (scroller) => scroller.scrollBy("x", -60, Option.none()),
+      );
+
+      assert.strictEqual(inner.scrollLeft, -700);
+      assert.strictEqual(middle.scrollLeft, -550);
     }));
 
   it.effect("passes a right command on when the container is at its end", () =>
@@ -572,6 +673,20 @@ describe("a page-sized command", () => {
 
       assert.strictEqual(world.root.scrollTop, 400);
     }));
+
+  for (const height of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    it.effect(`uses the window for invalid visual height ${height}`, () =>
+      Effect.gen(function*() {
+        const world = makeWorld({
+          innerHeight: 800,
+          visualViewport: { width: 1000, height },
+        });
+
+        yield* halfPage(world);
+
+        assert.strictEqual(world.root.scrollTop, 400);
+      }));
+  }
 });
 
 // ---------------------------------------------------------------------------

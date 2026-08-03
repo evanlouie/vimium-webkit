@@ -13,10 +13,9 @@
 
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Layer, Ref, SubscriptionRef } from "effect";
-import { attachKeyBridge } from "~/boot/KeyBridge.ts";
+import { attachKeyBridge, replayBufferedKeys } from "~/boot/KeyBridge.ts";
 import { CONTINUE_BUBBLING, HandlerStack } from "~/core/HandlerStack.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
-import { Scroller } from "~/features/Scroller.ts";
 import { Dom } from "~/platform/Dom.ts";
 
 // ---------------------------------------------------------------------------
@@ -68,28 +67,6 @@ const stubKeyboard = (
         }),
     ),
   );
-
-/**
- * `Scroller`, reduced to the two lifecycle methods.
- *
- * They record into the same list as the handler probe, so the test can see
- * that the note happens *before* the stack decides what the key means.
- */
-const stubScroller = (
-  seen: Ref.Ref<ReadonlyArray<string>>,
-): Layer.Layer<Scroller> =>
-  Layer.sync(Scroller, () =>
-    Scroller.of({
-      scrollBy: () => Effect.void,
-      scrollByViewport: () => Effect.void,
-      scrollTo: () => Effect.void,
-      position: Effect.succeed({ x: 0, y: 0 }),
-      restore: () => Effect.void,
-      noteKeydown: () =>
-        Ref.update(seen, (current) => [...current, "note:keydown"]),
-      noteKeyup: () =>
-        Ref.update(seen, (current) => [...current, "note:keyup"]),
-    }));
 
 /** Everything that the bridge reads from an event. */
 const event = (isTrusted: boolean): Event =>
@@ -144,19 +121,51 @@ const withBridge = (
           blur: record("blur"),
         });
 
-        yield* attachKeyBridge;
+        const lifecycle = {
+          keydown: () =>
+            Ref.update(seen, (current) => [...current, "note:keydown"]),
+          keyup: () =>
+            Ref.update(seen, (current) => [...current, "note:keyup"]),
+        };
+        yield* attachKeyBridge(lifecycle);
         yield* body(yield* Ref.get(attached), seen, forgotten);
       })),
       Layer.mergeAll(
         recordingDom(attached),
         HandlerStack.layer,
         stubKeyboard(forgotten),
-        stubScroller(seen),
       ),
     );
   });
 
 describe("the key bridge", () => {
+  it.effect("runs the lifecycle before replaying a guarded key", () =>
+    Effect.gen(function*() {
+      const seen = yield* Ref.make<ReadonlyArray<string>>([]);
+      const program = Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        yield* stack.push({
+          name: "probe",
+          keydown: () =>
+            Effect.as(
+              Ref.update(seen, (current) => [...current, "keydown"]),
+              CONTINUE_BUBBLING,
+            ),
+        });
+        yield* replayBufferedKeys(
+          [event(true) as KeyboardEvent],
+          {
+            keydown: () =>
+              Ref.update(seen, (current) => [...current, "note:keydown"]),
+            keyup: () => Effect.void,
+          },
+        );
+      });
+
+      yield* Effect.provide(Effect.scoped(program), HandlerStack.layer);
+      assert.deepEqual(yield* Ref.get(seen), ["note:keydown", "keydown"]);
+    }));
+
   it.effect("gives the stack an event that the user made", () =>
     withBridge((attached, seen) =>
       Effect.gen(function*() {
@@ -175,7 +184,7 @@ describe("the key bridge", () => {
       })
     ));
 
-  it.effect("tells the scroller about a press before the stack decides", () =>
+  it.effect("runs the key lifecycle before the stack decides", () =>
     withBridge((attached, seen) =>
       Effect.gen(function*() {
         // The scroller counts the presses and holds the keys that are down.
@@ -193,7 +202,7 @@ describe("the key bridge", () => {
       })
     ));
 
-  it.effect("tells the scroller nothing about a key that the page made", () =>
+  it.effect("runs no lifecycle for a key that the page made", () =>
     withBridge((attached, seen) =>
       Effect.gen(function*() {
         // A page-made key must not move the press count either. It would put
