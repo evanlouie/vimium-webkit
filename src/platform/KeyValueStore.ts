@@ -47,6 +47,15 @@ export class KeyValueStore extends Context.Service<KeyValueStore, {
   readonly get: (key: string) => Effect.Effect<Option.Option<string>, GmError>;
   readonly set: (key: string, value: string) => Effect.Effect<void, GmError>;
   readonly remove: (key: string) => Effect.Effect<void, GmError>;
+  /**
+   * Start a write now, with no suspension and no answer.
+   *
+   * For the page exit only. `pagehide` gives one synchronous run, and the
+   * Effect scheduler is a macrotask in a page. A write that goes through a
+   * fiber therefore never reaches the backend. Every backend here starts the
+   * write on the caller's own stack. It throws only what the backend throws.
+   */
+  readonly setUnsafe: (key: string, value: string) => void;
   /** Values written by another tab. Empty when the backend cannot report them. */
   readonly changes: (key: string) => Stream.Stream<Option.Option<string>>;
 }>()("vimium/platform/KeyValueStore") {
@@ -65,6 +74,7 @@ export class KeyValueStore extends Context.Service<KeyValueStore, {
             get: api.get,
             set: api.set,
             remove: api.remove,
+            setUnsafe: api.setUnsafe,
             changes: (key) =>
               Option.match(api.changes, {
                 onNone: () => Stream.empty,
@@ -103,6 +113,9 @@ function memoryStore(): KeyValueStore["Service"] {
       Effect.sync(() => {
         map.delete(key);
       }),
+    setUnsafe: (key, value) => {
+      map.set(key, value);
+    },
     changes: () => Stream.empty,
   });
 }

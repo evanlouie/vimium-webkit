@@ -1,12 +1,14 @@
 /**
  * What this frame does when its page goes away.
  *
- * Two rules are under test, and each one has cost a defect somewhere:
+ * Three rules are under test, and each one has cost a defect somewhere:
  *
- * 1. The release comes after the last write. A release closes the scope that
+ * 1. The direct write comes first. `pagehide` gives one synchronous run, and a
+ *    value that waits for a fiber never reaches the backend.
+ * 2. The release comes after the last write. A release closes the scope that
  *    the storage actor lives in, so a release before the flush would drop the
  *    write that the exit hook exists to save.
- * 2. A page that the browser keeps is not released. `pagehide` with
+ * 3. A page that the browser keeps is not released. `pagehide` with
  *    `persisted === true` means that the page may come back, and a restored
  *    page never runs its scripts again. A released runtime cannot be used
  *    again: `dispose` replaces its context with a defect and closes its scope.
@@ -18,7 +20,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Exit, Layer, ManagedRuntime, Ref } from "effect";
+import { Effect, Exit, Layer, ManagedRuntime } from "effect";
 import { makeOwnedRuntime, onPageExit } from "~/boot/Bootstrap.ts";
 
 // ---------------------------------------------------------------------------
@@ -65,6 +67,7 @@ describe("the runtime of a frame", () => {
           // first run of the application does.
           yield* Effect.promise(() => frame.runtime.runPromise(Effect.void));
           yield* onPageExit({
+            flushAllUnsafe: () => {},
             forgetSuppressed: Effect.void,
             flushAll: Effect.void,
             release: frame.release,
@@ -91,6 +94,7 @@ describe("the runtime of a frame", () => {
         yield* Effect.promise(() => frame.runtime.runPromise(Effect.void));
 
         yield* onPageExit({
+          flushAllUnsafe: () => {},
           forgetSuppressed: Effect.void,
           flushAll: Effect.void,
           release: frame.release,
@@ -117,6 +121,7 @@ describe("the runtime of a frame", () => {
         yield* Effect.promise(() => frame.runtime.runPromise(Effect.void));
 
         yield* onPageExit({
+          flushAllUnsafe: () => {},
           forgetSuppressed: Effect.void,
           flushAll: Effect.void,
           release: frame.release,
@@ -150,6 +155,7 @@ describe("the runtime of a frame", () => {
         // The child document goes away. Each frame has its own realm, its own
         // window and its own runtime, so `pagehide` reaches the child only.
         yield* onPageExit({
+          flushAllUnsafe: () => {},
           forgetSuppressed: Effect.void,
           flushAll: Effect.void,
           release: childFrame.release,
@@ -171,11 +177,17 @@ describe("the order of the exit", () => {
     "releases the runtime only after the last write",
     () =>
       Effect.gen(function*() {
-        const order = yield* Ref.make<ReadonlyArray<string>>([]);
+        // A plain array, because one of the steps is not an effect at all.
+        const order: string[] = [];
         const note = (step: string): Effect.Effect<void> =>
-          Ref.update(order, (current) => [...current, step]);
+          Effect.sync(() => {
+            order.push(step);
+          });
 
         yield* onPageExit({
+          flushAllUnsafe: () => {
+            order.push("direct write");
+          },
           forgetSuppressed: note("forget"),
           // The true flush suspends: it hands the value to the storage actor,
           // and the answer comes back on another fiber.
@@ -183,7 +195,8 @@ describe("the order of the exit", () => {
           release: note("release"),
         })({ final: true });
 
-        assert.deepStrictEqual(yield* Ref.get(order), [
+        assert.deepStrictEqual(order, [
+          "direct write",
           "forget",
           "write",
           "release",
@@ -195,18 +208,23 @@ describe("the order of the exit", () => {
     "starts the work that cannot suspend first",
     () =>
       Effect.gen(function*() {
-        const order = yield* Ref.make<ReadonlyArray<string>>([]);
+        const order: string[] = [];
         const note = (step: string): Effect.Effect<void> =>
-          Ref.update(order, (current) => [...current, step]);
+          Effect.sync(() => {
+            order.push(step);
+          });
 
         // A hidden tab, and not an exit. Nothing may be released.
         yield* onPageExit({
+          flushAllUnsafe: () => {
+            order.push("direct write");
+          },
           forgetSuppressed: note("forget"),
           flushAll: note("write"),
           release: note("release"),
         })({ final: false });
 
-        assert.deepStrictEqual(yield* Ref.get(order), ["forget", "write"]);
+        assert.deepStrictEqual(order, ["direct write", "forget", "write"]);
       }),
   );
 });

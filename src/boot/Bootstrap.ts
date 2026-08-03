@@ -65,6 +65,8 @@ export class RuntimeOwner extends Context.Service<RuntimeOwner, {
 
 /** What the exit hook below needs. Named, so that a test can build it. */
 export interface ExitParts {
+  /** Write every held value to the backend now, with no suspension. */
+  readonly flushAllUnsafe: () => void;
   /** Forget a key that was suppressed but never used. */
   readonly forgetSuppressed: Effect.Effect<void>;
   /** Write every value that is still inside its debounce window. */
@@ -78,21 +80,26 @@ export interface ExitParts {
  *
  * The order is the order of the time budget. Read rule 1 in
  * `boot/Lifecycle.ts`: only the part before the first suspension is sure to
- * run, so the two steps that never suspend come first.
+ * run, so the work that never suspends comes first.
  *
- * 1. Forget the suppressed key. It is in memory, and it costs nothing.
- * 2. Give every held value to storage. Marks wait 100 ms, settings 250 ms and
- *    the history index two seconds. A navigation inside any of those windows
- *    used to lose the write.
- * 3. Release the runtime, but only on a final exit, and only after the writes
- *    reached the backend. A release closes the scope that the storage actor
- *    lives in, so a release before the flush would drop the write that this
- *    hook exists to save. A page that comes back from the back/forward cache
- *    keeps its runtime: it never runs its scripts again, so nothing would build
- *    the runtime a second time.
+ * 1. Write every held value straight to the backend. Marks wait 100 ms,
+ *    settings 250 ms and the history index two seconds. A navigation inside any
+ *    of those windows used to lose the write. This call is a direct call to
+ *    `GM_setValue` or to `localStorage.setItem`, and it takes no scheduler turn.
+ * 2. Forget the suppressed key. It is in memory, and it costs nothing.
+ * 3. Flush through the storage actor as well. The actor reports a failed write,
+ *    it settles the callers that wait for one, and it takes any command that is
+ *    still in its mailbox. This part completes only when the page lives on, as
+ *    it does after `visibilitychange`.
+ * 4. Release the runtime, but only on a final exit. A release closes the scope
+ *    that the storage actor lives in. A release before the flush would drop the
+ *    write that this hook exists to save. A page that comes back from the
+ *    back/forward cache keeps its runtime. It never runs its scripts again, so
+ *    nothing would build the runtime a second time.
  */
 export const onPageExit = (parts: ExitParts): ExitHook => (exit) =>
   Effect.gen(function*() {
+    yield* Effect.sync(() => parts.flushAllUnsafe());
     yield* parts.forgetSuppressed;
     yield* parts.flushAll;
     if (!exit.final) return;
@@ -115,7 +122,7 @@ export interface OwnedRuntime<R, ER> {
  *
  * `dispose` closes the scope that the layer owns, so every listener, port,
  * stylesheet, manager callback and fiber goes with it. It also replaces the
- * context of the runtime with a defect: a runtime that was released cannot run
+ * context of the runtime with a defect. A runtime that was released cannot run
  * anything again. The caller must therefore ask for the release only when this
  * document will not run again.
  */
@@ -251,9 +258,10 @@ export const BootstrapLayer: Layer.Layer<
   yield* replayBufferedKeys(yield* boot.drain);
 
   // A hook, and not a subscription. The work that a page exit needs must start
-  // inside the browser's dispatch, and a subscriber of the bus below runs on
-  // its own fiber, after the dispatch is over.
+  // inside the browser's dispatch. A subscriber of the bus below runs on its
+  // own fiber, after the dispatch is over.
   yield* lifecycle.onExit(onPageExit({
+    flushAllUnsafe: storage.flushAllUnsafe,
     forgetSuppressed: keyboard.forgetSuppressed,
     flushAll: storage.flushAll,
     release: owner.release,

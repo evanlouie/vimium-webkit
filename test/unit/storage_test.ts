@@ -12,13 +12,13 @@
 
 import { assert, describe, it } from "@effect/vitest";
 import {
+  Deferred,
   Effect,
   Exit,
   Fiber,
   Layer,
   Option,
   Queue,
-  Ref,
   Result,
   Stream,
 } from "effect";
@@ -40,17 +40,42 @@ interface Backend {
   readonly read: (key: string) => Effect.Effect<Option.Option<string>>;
   /** Every value that reached the backend, in commit order. */
   readonly writes: Effect.Effect<readonly string[]>;
+  /** The same list, read with no effect. For an assertion inside a dispatch. */
+  readonly writesNow: () => readonly string[];
+  /** How many writes of the actor have started, held or not. */
+  readonly startedNow: () => number;
   /** Make every later read fail with a transport error. */
   readonly breakReads: Effect.Effect<void>;
+  /** Make every later direct write throw, as a full quota does. */
+  readonly breakDirectWrites: Effect.Effect<void>;
+  /** Hold every later write of the actor, until `releaseWrites` runs. */
+  readonly holdWrites: Effect.Effect<void>;
+  readonly releaseWrites: Effect.Effect<void>;
 }
 
+/**
+ * The state is plain, and not a `Ref`.
+ *
+ * The exit path writes with a direct call, and a test must read what it wrote
+ * without taking a turn of its own. A `Ref` would need an effect for that.
+ */
 const makeBackend: Effect.Effect<Backend> = Effect.gen(function*() {
-  const map = yield* Ref.make<ReadonlyMap<string, string>>(new Map());
-  const writes = yield* Ref.make<readonly string[]>([]);
-  const broken = yield* Ref.make(false);
+  const map = new Map<string, string>();
+  const writes: string[] = [];
+  const gate = yield* Deferred.make<void>();
+  let broken = false;
+  let directBroken = false;
+  let held = false;
+  let started = 0;
 
-  const put = (key: string, value: string): Effect.Effect<void> =>
-    Ref.update(map, (current) => new Map(current).set(key, value));
+  const put = (key: string, value: string): void => {
+    map.set(key, value);
+  };
+
+  const record = (key: string, value: string): void => {
+    put(key, value);
+    writes.push(value);
+  };
 
   const service = KeyValueStore.of({
     kind: "memory",
@@ -58,8 +83,8 @@ const makeBackend: Effect.Effect<Backend> = Effect.gen(function*() {
     watchable: false,
     managerPrivate: false,
     get: (key) =>
-      Effect.flatMap(Ref.get(broken), (isBroken) =>
-        isBroken
+      Effect.suspend(() =>
+        broken
           ? Effect.fail(
             new GmError({
               reason: "failed",
@@ -67,34 +92,46 @@ const makeBackend: Effect.Effect<Backend> = Effect.gen(function*() {
               detail: "the backend is unavailable",
             }),
           )
-          : Effect.map(
-            Ref.get(map),
-            (current) => Option.fromNullishOr(current.get(key) ?? null),
-          )),
-    set: (key, value) =>
-      Effect.andThen(
-        put(key, value),
-        Ref.update(writes, (current) => [...current, value]),
+          : Effect.succeed(Option.fromNullishOr(map.get(key) ?? null))
       ),
-    remove: (key) =>
-      Ref.update(map, (current) => {
-        const next = new Map(current);
-        next.delete(key);
-        return next;
+    set: (key, value) =>
+      Effect.gen(function*() {
+        started += 1;
+        if (held) yield* Deferred.await(gate);
+        record(key, value);
       }),
+    remove: (key) =>
+      Effect.sync(() => {
+        map.delete(key);
+      }),
+    setUnsafe: (key, value) => {
+      if (directBroken) throw new Error("the quota of the backend is full");
+      record(key, value);
+    },
     changes: () => Stream.empty,
   });
 
   return {
     layer: Layer.succeed(KeyValueStore, service),
-    seed: put,
+    seed: (key, raw) => Effect.sync(() => put(key, raw)),
     read: (key) =>
-      Effect.map(
-        Ref.get(map),
-        (current) => Option.fromNullishOr(current.get(key) ?? null),
-      ),
-    writes: Ref.get(writes),
-    breakReads: Ref.set(broken, true),
+      Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
+    writes: Effect.sync(() => [...writes]),
+    writesNow: () => [...writes],
+    startedNow: () => started,
+    breakReads: Effect.sync(() => {
+      broken = true;
+    }),
+    breakDirectWrites: Effect.sync(() => {
+      directBroken = true;
+    }),
+    holdWrites: Effect.sync(() => {
+      held = true;
+    }),
+    releaseWrites: Effect.gen(function*() {
+      held = false;
+      yield* Deferred.succeed(gate, undefined);
+    }),
   };
 });
 
@@ -122,6 +159,44 @@ const advanceUntilDone = <A, E>(
 /** The envelope that the store writes around a group value. */
 const envelope = (schemaVersion: number, data: unknown): string =>
   JSON.stringify({ schemaVersion, data });
+
+/**
+ * Give the turn away until a condition holds.
+ *
+ * The group fiber needs a turn to take a command. The loop has a limit, so a
+ * condition that never holds fails the test and does not hang it.
+ */
+const yieldUntil = (
+  ready: () => boolean,
+  steps = 50,
+): Effect.Effect<void> =>
+  Effect.suspend(() => {
+    if (ready()) return Effect.void;
+    if (steps <= 0) return Effect.die(new Error("the condition never held"));
+    return Effect.andThen(Effect.yieldNow, yieldUntil(ready, steps - 1));
+  });
+
+/**
+ * Leave a settings value inside its debounce window.
+ *
+ * The group publishes the value and then holds it, so a published value is the
+ * proof that the group fiber took the command. The write itself completes only
+ * when it reaches the backend, so the caller gets the fiber that waits.
+ */
+const leavePending = (
+  storage: Storage["Service"],
+  scrollStepSize: number,
+): Effect.Effect<Fiber.Fiber<void, StorageError>> =>
+  Effect.gen(function*() {
+    const writing = yield* Effect.forkChild(
+      storage.settings.write({ ...defaultSettings(), scrollStepSize }),
+      { startImmediately: true },
+    );
+    yield* yieldUntil(() =>
+      storage.settings.currentUnsafe().scrollStepSize === scrollStepSize
+    );
+    return writing;
+  });
 
 /** The first issue that storage reports, without waiting for a second. */
 const firstIssue = (
@@ -456,6 +531,153 @@ describe("Storage", () => {
           (yield* storage.findHistory.current).queries,
           ["needle"],
         );
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+});
+
+/**
+ * The path that a dying page uses.
+ *
+ * `pagehide` gives one synchronous run. The Effect scheduler is a macrotask in
+ * a page, so a value that waits for the group fiber never reaches the backend.
+ * Every test below therefore asserts on what the backend holds *before* the
+ * test gives the turn back.
+ */
+describe("the exit path of Storage", () => {
+  it.effect("writes the held value before it gives the turn back", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        const writing = yield* leavePending(storage, 120);
+        assert.deepEqual(
+          backend.writesNow(),
+          [],
+          "the debounce window must still hold the value",
+        );
+
+        // One synchronous step, exactly like a `pagehide` handler.
+        const insideDispatch = yield* Effect.sync(() => {
+          storage.flushAllUnsafe();
+          return backend.writesNow();
+        });
+
+        assert.lengthOf(
+          insideDispatch,
+          1,
+          "the backend call must start before the dispatch returns",
+        );
+        assert.include(insideDispatch[0] ?? "", '"scrollStepSize":120');
+
+        // The actor takes its own turn afterwards, and it finds nothing to do.
+        const outcome = yield* advanceUntilDone(writing);
+        assert.isTrue(Exit.isSuccess(outcome));
+        assert.lengthOf(
+          backend.writesNow(),
+          1,
+          "the value must not be written a second time",
+        );
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("keeps the order of two writes to one key", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        // Both writes are inside one debounce window, so the second replaces
+        // the first. The backend must never see the first one after it.
+        yield* leavePending(storage, 120);
+        const second = yield* leavePending(storage, 90);
+
+        yield* Effect.sync(() => storage.flushAllUnsafe());
+        yield* advanceUntilDone(second);
+
+        const third = yield* leavePending(storage, 150);
+        yield* advanceUntilDone(third);
+
+        const writes = backend.writesNow();
+        assert.lengthOf(writes, 2);
+        assert.include(writes[0] ?? "", '"scrollStepSize":90');
+        assert.include(writes[1] ?? "", '"scrollStepSize":150');
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("leaves alone a value that the actor is already writing", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        yield* backend.holdWrites;
+        const writing = yield* leavePending(storage, 120);
+
+        // The actor takes the value out of the window and stops inside the
+        // backend call. Nothing is owed to the exit path any more.
+        const flushing = yield* Effect.forkChild(storage.settings.flush, {
+          startImmediately: true,
+        });
+        yield* yieldUntil(() => backend.startedNow() === 1);
+
+        yield* Effect.sync(() => storage.flushAllUnsafe());
+        assert.deepEqual(
+          backend.writesNow(),
+          [],
+          "the exit path must not write over a call that is in flight",
+        );
+
+        yield* backend.releaseWrites;
+        yield* Fiber.join(flushing);
+        yield* Fiber.join(writing);
+        assert.lengthOf(backend.writesNow(), 1);
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("returns when the backend throws, and lets the actor try again", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        yield* backend.breakDirectWrites;
+        const writing = yield* leavePending(storage, 120);
+
+        // A throw here would be swallowed by the browser, and the rest of the
+        // exit hook would never run.
+        const thrown = yield* Effect.sync(() => {
+          try {
+            storage.flushAllUnsafe();
+            return null;
+          } catch (cause) {
+            return String(cause);
+          }
+        });
+        assert.isNull(thrown, "the pagehide handler must return");
+        assert.deepEqual(backend.writesNow(), []);
+
+        const issue = yield* firstIssue(storage);
+        assert.isTrue(Option.isSome(issue));
+        if (Option.isNone(issue)) return;
+        assert.strictEqual(issue.value.reason, "backend");
+        assert.strictEqual(issue.value.direction, "write");
+
+        // The value is still pending, so the actor writes it on its own turn.
+        const outcome = yield* advanceUntilDone(writing);
+        assert.isTrue(Exit.isSuccess(outcome));
+        assert.lengthOf(backend.writesNow(), 1);
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("writes nothing when no group holds a value", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        yield* Effect.sync(() => storage.flushAllUnsafe());
+        assert.deepEqual(backend.writesNow(), []);
       }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
     }));
 });
