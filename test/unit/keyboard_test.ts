@@ -447,6 +447,122 @@ describe("Keyboard", () => {
 
           assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
         }).pipe(Effect.provide(overlappingLayer)));
+
+      it.effect("gives the accepted binding the count that came first", () =>
+        Effect.gen(function*() {
+          const stack = yield* HandlerStack;
+          const calls = yield* recorder(names);
+
+          // The count, the accepted binding and the root restart meet here.
+          yield* stack.bubble(
+            "keydown",
+            asEvent(new Press("2", { code: "Digit2" })),
+          );
+          yield* stack.bubble("keydown", asEvent(new Press("a")));
+          yield* stack.bubble("keydown", asEvent(new Press("b")));
+          yield* stack.bubble("keydown", asEvent(new Press("x")));
+
+          // The count belongs to `a`, and `b` did not start a count of its own.
+          assert.deepEqual(yield* Ref.get(calls), ["scrollUp:2"]);
+        }).pipe(Effect.provide(overlappingLayer)));
+
+      it.effect("lets Escape cancel the accepted binding", () =>
+        Effect.gen(function*() {
+          const stack = yield* HandlerStack;
+          const calls = yield* recorder(names);
+
+          yield* stack.bubble("keydown", asEvent(new Press("a")));
+          yield* stack.bubble("keydown", asEvent(new Press("b")));
+          const escape = new Press("Escape", { code: "Escape" });
+          const toPage = yield* stack.bubble("keydown", asEvent(escape));
+
+          // Escape ends the attempt. It runs nothing, and it stays with us.
+          assert.deepEqual(yield* Ref.get(calls), []);
+          assert.isFalse(toPage);
+
+          // The state is clean, so the next key starts a sequence of its own.
+          yield* stack.bubble("keydown", asEvent(new Press("b")));
+          assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
+        }).pipe(Effect.provide(overlappingLayer)));
+    });
+
+    /**
+     * The accepted binding belongs to the branch that accepted it.
+     *
+     * A branch is one live attempt at a mapping. It starts when the root opens
+     * a child. It dies when its node has no child for the next key, and its
+     * accepted binding dies with it. When every branch dies, the accepted
+     * binding of the branch that lived longest runs.
+     */
+    describe("an accepted binding that belongs to a branch", () => {
+      const names = ["scrollUp", "scrollToTop", "scrollLeft"];
+
+      it.effect("keeps the binding of the branch that lived longest", () =>
+        Effect.gen(function*() {
+          const stack = yield* HandlerStack;
+          const calls = yield* recorder(names);
+
+          // `c` opens `bc`, which is one key deep and carries `scrollLeft`. The
+          // attempt at `abcd` is deeper, and it accepted `scrollUp` at `ab`.
+          yield* stack.bubble("keydown", asEvent(new Press("a")));
+          yield* stack.bubble("keydown", asEvent(new Press("b")));
+          yield* stack.bubble("keydown", asEvent(new Press("c")));
+          yield* stack.bubble("keydown", asEvent(new Press("x")));
+
+          assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
+        }).pipe(Effect.provide(layerFor({
+          mappings: [
+            "map ab scrollUp",
+            "map abcd scrollToTop",
+            "map bc scrollLeft",
+          ].join("\n"),
+        }))));
+
+      /**
+       * The branch `ab` dies at the third key, because `abc` is bound nowhere.
+       * The binding that `a` accepted dies with that branch. The branch `bc`
+       * lives on, so it alone decides what the next keys do.
+       */
+      describe("a binding whose branch died", () => {
+        const deadBranch = layerFor({
+          mappings: [
+            "map a scrollUp",
+            "map abz scrollToTop",
+            "map bcd scrollLeft",
+          ].join("\n"),
+        });
+
+        it.effect("does not run two keys later", () =>
+          Effect.gen(function*() {
+            const stack = yield* HandlerStack;
+            const calls = yield* recorder(names);
+
+            yield* stack.bubble("keydown", asEvent(new Press("a")));
+            yield* stack.bubble("keydown", asEvent(new Press("b")));
+            yield* stack.bubble("keydown", asEvent(new Press("c")));
+            yield* stack.bubble("keydown", asEvent(new Press("x")));
+
+            // `scrollUp` died at `c`, and `bcd` accepted nothing.
+            assert.deepEqual(yield* Ref.get(calls), []);
+          }).pipe(Effect.provide(deadBranch)));
+
+        it.effect("leaves the live branch to finish its own mapping", () =>
+          Effect.gen(function*() {
+            const stack = yield* HandlerStack;
+            const calls = yield* recorder(names);
+
+            yield* stack.bubble("keydown", asEvent(new Press("a")));
+            yield* stack.bubble("keydown", asEvent(new Press("b")));
+            yield* stack.bubble("keydown", asEvent(new Press("c")));
+            yield* stack.bubble("keydown", asEvent(new Press("d")));
+
+            // The single slot gave this answer as well, so this test holds
+            // before the branch model and after it. It is here because the two
+            // tests together are the point: the accepted binding of a dead
+            // branch must never decide, whichever key comes next.
+            assert.deepEqual(yield* Ref.get(calls), ["scrollLeft:1"]);
+          }).pipe(Effect.provide(deadBranch)));
+      });
     });
   });
 
@@ -527,6 +643,81 @@ describe("Keyboard", () => {
           "map gg scrollToTop",
           "map x scrollDown",
         ].join("\n"),
+      }))));
+
+    it.effect("passes as many keys as the count in front of the command", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const keyboard = yield* Keyboard;
+        const commands = yield* Commands;
+        const calls = yield* recorder(["scrollToTop", "scrollDown"]);
+
+        yield* commands.register(
+          "passNextKey",
+          ({ count }) =>
+            Effect.andThen(
+              Ref.update(calls, (current) => [
+                ...current,
+                `passNextKey:${count}`,
+              ]),
+              keyboard.passNextKey(count),
+            ),
+        );
+
+        // The count, the accepted binding and the pass counter meet here.
+        yield* stack.bubble(
+          "keydown",
+          asEvent(new Press("2", { code: "Digit2" })),
+        );
+        yield* stack.bubble("keydown", asEvent(new Press("g")));
+
+        // `x` ends the sequence, so it is the first of the two keys that pass.
+        const first = new Press("x");
+        assert.isTrue(yield* stack.bubble("keydown", asEvent(first)));
+        assert.isFalse(first.defaultPrevented);
+        assert.isTrue(
+          yield* stack.bubble("keydown", asEvent(new Press("x"))),
+        );
+        assert.deepEqual(yield* Ref.get(calls), ["passNextKey:2"]);
+
+        // The counter is spent, so the third `x` is ours again.
+        yield* stack.bubble("keydown", asEvent(new Press("x")));
+        assert.deepEqual(yield* Ref.get(calls), [
+          "passNextKey:2",
+          "scrollDown:1",
+        ]);
+      }).pipe(Effect.provide(layerFor({
+        mappings: [
+          "map g passNextKey",
+          "map gg scrollToTop",
+          "map x scrollDown",
+        ].join("\n"),
+      }))));
+
+    it.effect("keeps the promise to pass when the focus moves", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const keyboard = yield* Keyboard;
+        const commands = yield* Commands;
+        const calls = yield* recorder(["scrollDown"]);
+
+        yield* commands.register(
+          "passNextKey",
+          ({ count }) => keyboard.passNextKey(count),
+        );
+
+        yield* stack.bubble("keydown", asEvent(new Press("p")));
+        // The focus reset ends a half-typed sequence. The promise to give one
+        // key to the page is not a half-typed sequence, so it stands.
+        yield* stack.bubble("focus", asFocus());
+
+        const promised = new Press("j");
+        const toPage = yield* stack.bubble("keydown", asEvent(promised));
+        assert.isTrue(toPage);
+        assert.isFalse(promised.defaultPrevented);
+        assert.deepEqual(yield* Ref.get(calls), []);
+      }).pipe(Effect.provide(layerFor({
+        mappings: "map p passNextKey\nmap j scrollDown",
       }))));
   });
 

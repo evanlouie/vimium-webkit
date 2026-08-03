@@ -29,13 +29,11 @@ import { isPassKey } from "~/domain/Exclusion.ts";
 import { appendCountDigit, isCountDigit } from "~/domain/Key.ts";
 import { isComposing, isModifierKey, keyNotation } from "~/domain/Key.ts";
 import {
-  acceptedBinding,
   canExtend,
-  continuesSequence,
-  deepestBinding,
-  type KeyBinding,
-  trieCandidates,
-  type TrieNode,
+  deepestBranch,
+  extendBranches,
+  type KeyBranch,
+  openBranch,
 } from "~/domain/Mapping.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { mediaPlayerHasFocus } from "~/platform/Elements.ts";
@@ -83,20 +81,36 @@ export const MEDIA_KEYS: ReadonlySet<string> = new Set([
 export const isUserEvent = (event: Pick<Event, "isTrusted">): boolean =>
   event.isTrusted === true;
 
+/**
+ * The key state, in the per-branch model.
+ *
+ * A branch is one live attempt at a mapping. It holds the trie node that the
+ * keys of the attempt reached, and the binding that the attempt accepted.
+ *
+ * A branch starts when the root opens a child for the key. The accepted binding
+ * of a new branch is the binding of that child alone. A key extends a branch
+ * when the node of the branch has a child for the key. A binding on that child
+ * replaces the accepted binding of the branch.
+ *
+ * A branch dies when its node has no child for the key. Its accepted binding
+ * dies with it. When every branch dies, the accepted binding of the branch that
+ * lived longest runs. The key then starts again at the root.
+ *
+ * `map g scrollUp` together with `map gg scrollToTop` puts `scrollUp` in the
+ * branch `g`. The next key decides: `g` extends that branch and runs
+ * `scrollToTop`, and any other key runs `scrollUp` first.
+ *
+ * With `map a`, `map abc` and `map b`, the key `b` after `a` opens two
+ * branches. The branch `ab` carries on the attempt at `abc`, and the branch `b`
+ * is new. The attempt at `abc` consumes the keystroke `b`: `advance` suppresses
+ * the key, and the pending indicator shows it. The binding of `b` therefore
+ * never runs, and a stray key after it runs the binding of `a`.
+ */
 interface KeyState {
-  /** Never empty. Element 0 is the trie root. */
-  readonly nodes: ReadonlyArray<TrieNode>;
+  /** Every live branch, shallowest first. Empty means "at the root". */
+  readonly branches: ReadonlyArray<KeyBranch>;
   readonly count: number;
   readonly pending: ReadonlyArray<string>;
-  /**
-   * A binding that the keys so far accepted, and that a longer sequence can
-   * still replace.
-   *
-   * `map g scrollUp` together with `map gg scrollToTop` puts `scrollUp` here
-   * when the user presses `g`. The next key decides: `g` extends the sequence
-   * and runs `scrollToTop`, and any other key runs `scrollUp` first.
-   */
-  readonly deferred: Option.Option<KeyBinding>;
 }
 
 export class Keyboard extends Context.Service<Keyboard, {
@@ -150,10 +164,9 @@ export class Keyboard extends Context.Service<Keyboard, {
 
       const pending = yield* SubscriptionRef.make<string | null>(null);
       const state = yield* Ref.make<KeyState>({
-        nodes: [mappings.compiledUnsafe().trie],
+        branches: [],
         count: 0,
         pending: [],
-        deferred: Option.none(),
       });
       const passNext = yield* Ref.make(0);
       // The `event.code` values whose `keydown` we took. A page that listens
@@ -164,12 +177,7 @@ export class Keyboard extends Context.Service<Keyboard, {
 
       const reset = Effect.gen(function*() {
         const current = yield* Ref.get(state);
-        yield* Ref.set(state, {
-          nodes: [mappings.compiledUnsafe().trie],
-          count: 0,
-          pending: [],
-          deferred: Option.none(),
-        });
+        yield* Ref.set(state, { branches: [], count: 0, pending: [] });
         if (current.pending.length > 0) {
           yield* SubscriptionRef.set(pending, null);
         }
@@ -209,7 +217,7 @@ export class Keyboard extends Context.Service<Keyboard, {
        * `1` in the HUD until the user pressed Escape.
        */
       const isCountKey = (current: KeyState, notation: string): boolean => {
-        if (current.nodes.length !== 1) return false;
+        if (current.branches.length > 0) return false;
         if (!isCountDigit(notation, current.count > 0)) return false;
         if (current.count > 0) return true;
         return !mappings.compiledUnsafe().trie.children.has(notation);
@@ -249,15 +257,19 @@ export class Keyboard extends Context.Service<Keyboard, {
         });
 
       /**
-       * Take one key into the trie walk.
+       * Take one key into the branch walk.
        *
-       * The key can go back to `onKeydown` once. That happens when a binding
-       * that an earlier key accepted must run before this key is read again.
-       * The key then truly starts at the root: the pass keys, the media keys
-       * and the pass counter all read it as a first key.
+       * The key extends every live branch. A branch that has no child for the
+       * key dies, and its accepted binding dies with it. The root opens a new
+       * branch, which has accepted nothing that an earlier key typed.
        *
-       * The recursion is bounded at one call. `reset` clears the deferred
-       * binding before the key goes back, so the branch cannot run twice.
+       * When the key ends every live branch, the accepted binding of the branch
+       * that lived longest runs. The key then goes back to `onKeydown`, so it
+       * truly starts at the root. The pass keys, the media keys and the pass
+       * counter all read it as a first key.
+       *
+       * The recursion is bounded at one call. `reset` clears every branch
+       * before the key goes back, so no accepted binding can run twice.
        */
       const advance = (
         notation: string,
@@ -269,38 +281,47 @@ export class Keyboard extends Context.Service<Keyboard, {
           if (isCountKey(current, notation)) {
             const nextPending = [...current.pending, notation];
             yield* Ref.set(state, {
-              nodes: current.nodes,
+              branches: current.branches,
               count: appendCountDigit(current.count, notation),
               pending: nextPending,
-              deferred: current.deferred,
             });
             yield* showPending(nextPending);
             return yield* suppress(event);
           }
 
-          // A binding that the keys so far accepted, and a key that cannot
-          // extend the sequence any further. The binding runs now, with the
-          // count that the user typed before it. The key then starts again at
-          // the root, through `onKeydown`. Without this, `map g scrollUp` could
-          // never run while `map gg scrollToTop` also existed.
+          // Every live branch takes the key, or it dies here.
+          const extended = extendBranches(current.branches, notation);
+          const deepestDead = deepestBranch(current.branches);
+
+          // The key ended every live attempt, and the attempt that lived
+          // longest accepted a binding. The binding runs now, with the count
+          // that the user typed in front of it. The key then starts again at
+          // the root. Without this, `map g scrollUp` could never run while
+          // `map gg scrollToTop` also existed.
           if (
-            Option.isSome(current.deferred) &&
-            !continuesSequence(current.nodes, notation)
+            extended.length === 0 && Option.isSome(deepestDead) &&
+            Option.isSome(deepestDead.value.accepted)
           ) {
-            const { command, options } = current.deferred.value;
+            const { command, options } = deepestDead.value.accepted.value;
             const count = current.count === 0 ? 1 : current.count;
             yield* reset;
             yield* runCommand(command, options, count, event);
-            // Back to the top of the rules, and not to the trie walk. A key
+            // Back to the top of the rules, and not to the branch walk. A key
             // that the exclusion or a media player owns must go to the page,
             // and `passNextKey` may have just claimed this very key.
             return yield* onKeydown(event);
           }
 
-          const candidates = trieCandidates(current.nodes, notation);
+          // A new branch is one key deep, so it goes in front of the others.
+          // The cursor stays shallowest first, and the deepest branch stays
+          // last.
+          const opened = openBranch(mappings.compiledUnsafe().trie, notation);
+          const branches = Option.isSome(opened)
+            ? [opened.value, ...extended]
+            : extended;
 
-          if (candidates.length === 0) {
-            const wasPartial = current.nodes.length > 1 || current.count > 0;
+          if (branches.length === 0) {
+            const wasPartial = current.branches.length > 0 || current.count > 0;
             yield* reset;
             // A sequence that ran out is still ours. The user typed `g` on
             // purpose, so giving the next key to the page would be a surprise.
@@ -308,14 +329,17 @@ export class Keyboard extends Context.Service<Keyboard, {
             return wasPartial ? yield* suppress(event) : CONTINUE_BUBBLING;
           }
 
-          // The deepest candidate is the most specific continuation, because
-          // the node list is ordered shallowest first. If it can still be
-          // extended, this sequence is not finished. Firing the shorter binding
-          // here is what made `map gg` unreachable behind `map g`.
-          const terminal = deepestBinding(candidates);
+          // The deepest branch decides, because it is the longest attempt.
+          // While its node can take another key, the attempt is not finished.
+          // Firing the shorter binding here is what made `map gg` unreachable
+          // behind `map g`.
+          const deepest = deepestBranch(branches);
 
-          if (!canExtend(candidates) && Option.isSome(terminal)) {
-            const { command, options } = terminal.value;
+          if (
+            Option.isSome(deepest) && !canExtend(deepest.value) &&
+            Option.isSome(deepest.value.accepted)
+          ) {
+            const { command, options } = deepest.value.accepted.value;
             const count = current.count === 0 ? 1 : current.count;
             // Reset first, so that a command which enters another mode finds a
             // clean normal mode underneath it.
@@ -324,24 +348,11 @@ export class Keyboard extends Context.Service<Keyboard, {
             return yield* suppress(event);
           }
 
-          // Only a node that carries on the sequence may accept a binding. A
-          // node that the root opens starts a new sequence, and a new sequence
-          // has accepted nothing yet. Before this rule, `map b` took the place
-          // of `map a` while `map abc` was still live, and `a` was lost.
-          const accepted = acceptedBinding(current.nodes, notation);
-
           const nextPending = [...current.pending, notation];
           yield* Ref.set(state, {
-            nodes: [
-              current.nodes[0] ?? mappings.compiledUnsafe().trie,
-              ...candidates,
-            ],
+            branches,
             count: current.count,
             pending: nextPending,
-            // A step that accepts no binding of its own keeps the earlier one.
-            // With `map a` and `map abc` bound, `ab` must still run `a` when
-            // the user stops there.
-            deferred: Option.isSome(accepted) ? accepted : current.deferred,
           });
           yield* showPending(nextPending);
           return yield* suppress(event);
@@ -376,7 +387,7 @@ export class Keyboard extends Context.Service<Keyboard, {
             return CONTINUE_BUBBLING;
           }
 
-          const atRoot = current.nodes.length === 1 && current.count === 0;
+          const atRoot = current.branches.length === 0 && current.count === 0;
 
           if (isEscape(event)) {
             if (atRoot) return CONTINUE_BUBBLING;

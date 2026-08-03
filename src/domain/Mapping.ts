@@ -421,94 +421,109 @@ const insert = (trie: MutableTrieNode, binding: KeyBinding): void => {
 // ---------------------------------------------------------------------------
 
 /**
- * The live nodes of a half-typed sequence, shallowest first.
+ * The per-branch model of a half-typed sequence.
  *
- * Element 0 is the root, and it stays there, so a new sequence can start inside
- * one that the user abandoned. `g` and then `j` scrolls down, as upstream
- * Vimium does.
+ * A branch is one live attempt at a mapping. It holds the trie node that the
+ * keys of the attempt reached. It also holds the binding that the attempt
+ * accepted, which is the deepest binding on its own path.
+ *
+ * A branch starts when the root opens a child for a key. The accepted binding
+ * of a new branch is the binding of that child alone. A new branch has accepted
+ * nothing that an earlier key typed.
+ *
+ * A key extends a branch when the node of the branch has a child for that key.
+ * A binding on the child replaces the accepted binding of that branch. A child
+ * with no binding keeps the accepted binding of the branch.
+ *
+ * A branch dies when its node has no child for the key. The accepted binding
+ * belongs to the branch, so it dies with the branch.
+ *
+ * The deepest branch is the branch that lived longest. When every branch dies,
+ * the dispatcher runs the accepted binding of that branch. The key then starts
+ * again at the root.
+ *
+ * With `map a`, `map abc` and `map b`, the key `b` after `a` opens two
+ * branches. The branch `ab` carries on the attempt at `abc`, and the branch `b`
+ * is new. The attempt at `abc` consumes the keystroke `b`: the dispatcher
+ * suppresses the key, and the pending indicator shows it. The binding of `b`
+ * therefore never runs, and a stray key after it runs the binding of `a`.
  */
-export type TrieCursor = readonly TrieNode[];
+export interface KeyBranch {
+  readonly node: TrieNode;
+  readonly accepted: Option.Option<KeyBinding>;
+}
 
-/** The nodes that this key opens, in the order of the cursor. */
-export const trieCandidates = (
-  cursor: TrieCursor,
+/**
+ * Every live branch, shallowest first.
+ *
+ * The root is not a branch, so an empty cursor means "at the root". The last
+ * branch is the deepest one, and it is the branch that lived longest. A new
+ * branch is always one key deep, so it goes in front of the others.
+ */
+export type BranchCursor = readonly KeyBranch[];
+
+/**
+ * The branch that this key starts at the root.
+ *
+ * The new branch accepts the binding of the child, and nothing else. `g` and
+ * then `j` scrolls down, as upstream Vimium does, because `j` starts here.
+ */
+export const openBranch = (
+  root: TrieNode,
   key: string,
-): readonly TrieNode[] => {
-  const found: TrieNode[] = [];
-  for (const node of cursor) {
-    const child = node.children.get(key);
-    if (child !== undefined) found.push(child);
-  }
-  return found;
+): Option.Option<KeyBranch> => {
+  const child = root.children.get(key);
+  if (child === undefined) return Option.none();
+  return Option.some({ node: child, accepted: child.binding });
 };
 
 /**
- * Can the half-typed sequence take this key?
+ * Take one key into every live branch.
  *
- * The root is not part of the answer. A key that matches at the root only
- * starts a new sequence; it does not continue the one that the user typed. The
- * dispatcher asks this to learn whether a binding that it accepted earlier must
- * run now.
+ * A branch whose node has the key moves to the child. A binding on the child
+ * replaces the accepted binding of that branch. A branch whose node does not
+ * have the key is absent from the answer, because it died. Its accepted binding
+ * dies with it.
+ *
+ * An empty answer means that this key ends every live attempt.
  */
-export const continuesSequence = (
-  cursor: TrieCursor,
+export const extendBranches = (
+  cursor: BranchCursor,
   key: string,
-): boolean => {
-  for (let index = 1; index < cursor.length; index++) {
-    if (cursor[index]?.children.has(key) === true) return true;
+): readonly KeyBranch[] => {
+  const out: KeyBranch[] = [];
+  for (const branch of cursor) {
+    const child = branch.node.children.get(key);
+    if (child === undefined) continue;
+    out.push({
+      node: child,
+      accepted: Option.isSome(child.binding) ? child.binding : branch.accepted,
+    });
   }
-  return false;
+  return out;
 };
 
 /**
- * The binding of the most specific node.
+ * The deepest branch, which is the branch that lived longest.
  *
- * The cursor is shallowest first, so the last binding in it is the longest
- * match, and the longest match wins.
+ * The cursor is shallowest first, so the last branch is the deepest one. That
+ * branch decides, and the longest attempt therefore wins.
  */
-export const deepestBinding = (
-  cursor: TrieCursor,
-): Option.Option<KeyBinding> => {
-  let found: Option.Option<KeyBinding> = Option.none();
-  for (const node of cursor) {
-    if (Option.isSome(node.binding)) found = node.binding;
-  }
-  return found;
+export const deepestBranch = (
+  cursor: BranchCursor,
+): Option.Option<KeyBranch> => {
+  const last = cursor[cursor.length - 1];
+  return last === undefined ? Option.none() : Option.some(last);
 };
 
 /**
- * The binding that this key accepts for the sequence in progress.
+ * Can this branch take another key?
  *
- * Element 0 of the cursor is the root. While a sequence is live, a node that
- * the root opens only starts a new sequence. Such a node has accepted nothing.
- * Its binding must therefore not replace the binding that an earlier key
- * accepted.
- *
- * At the root the cursor holds the root alone. The key then starts the
- * sequence, so the node that it opens gives the answer.
- *
- * With `map a`, `map abc` and `map b`, the key `b` after `a` opens two nodes.
- * The node `ab` carries on the sequence, and the node `b` starts a new one.
- * Only `ab` may accept a binding here, so the binding of `a` survives.
- */
-export const acceptedBinding = (
-  cursor: TrieCursor,
-  key: string,
-): Option.Option<KeyBinding> =>
-  deepestBinding(
-    trieCandidates(cursor.length > 1 ? cursor.slice(1) : cursor, key),
-  );
-
-/**
- * Can the most specific node take another key?
- *
- * While it can, the sequence is not finished, and a binding on the node waits.
+ * While it can, the attempt is not finished, and a binding on the node waits.
  * Firing it at once is what made `map gg` unreachable behind `map g`.
  */
-export const canExtend = (cursor: TrieCursor): boolean => {
-  const deepest = cursor[cursor.length - 1];
-  return deepest !== undefined && deepest.children.size > 0;
-};
+export const canExtend = (branch: KeyBranch): boolean =>
+  branch.node.children.size > 0;
 
 // ---------------------------------------------------------------------------
 // Inspection (the help dialog and the tests)
