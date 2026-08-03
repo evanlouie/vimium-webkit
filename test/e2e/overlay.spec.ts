@@ -14,16 +14,30 @@
  * every inline declaration, a check before each visible action, and a mutation
  * observer that puts the host back under `documentElement`.
  *
- * There is a limit, and it is written here because a test cannot hold it. The
- * host is a child of `documentElement`, and CSS gives a descendant no way out
- * of its ancestors. `documentElement` is the only ancestor that the host has.
- * The removal guard keeps the host a child of it. A page that moves the host
- * into a container of its own therefore loses it again at once. Five rules
- * still win: `html { opacity: 0 }`, `html { transform: scale(0) }`,
- * `html { filter: opacity(0) }`, `html { content-visibility: hidden }` and
- * `html { display: none }`. Each one paints the page itself as nothing, so the
- * user sees a blank page and not a hidden interface. `SECURITY.md` names this
- * limit.
+ * The repair has a budget of 32 writes for each quiet second, because a page
+ * that removes the host inside its own observer would fight us in a loop of
+ * microtasks. A page that spends the budget keeps the host until the next
+ * quiet second. The guard does not go silent for that time: it keeps
+ * observing, and the overlay gives the keyboard back to the page.
+ *
+ * The host cannot escape its own ancestors, and `documentElement` is the only
+ * ancestor that it has. Two classes of rule on `html` reach the overlay, and
+ * the class decides both the result and the answer.
+ *
+ * 1. **A rule that makes `html` the containing block of a fixed descendant.**
+ *    The overlay then holds a place in the document, so it scrolls away with
+ *    the page, and **the page stays fully readable**. Example:
+ *    `html { will-change: transform }`. Every property that gives an element a
+ *    transform, a containment, a filter or a perspective belongs to this
+ *    class, and so does any future property with the same effect. `alignHost`
+ *    measures the host box and moves the host back on to the viewport.
+ * 2. **A rule that makes `html` paint nothing.** The overlay disappears, and
+ *    the page disappears with it, so the user sees a blank page. Example:
+ *    `html { opacity: 0 }`. A rule of our own on `html` would break every
+ *    honest page that fades its root element, so the script does not answer
+ *    this class.
+ *
+ * `SECURITY.md` names both classes.
  */
 
 import type { Page } from "@playwright/test";
@@ -91,6 +105,15 @@ const hostParentTag = (page: Page): Promise<string | null> =>
     return parent === null ? null : parent.tagName.toLowerCase();
   });
 
+/** Move the host into a new container once for each task. */
+const cageHostTimes = (page: Page, times: number): Promise<number> =>
+  page.evaluate((count: number): Promise<number> => {
+    const repeat = (globalThis as unknown as {
+      cageVimiumHostTimes?: (times: number) => Promise<number>;
+    }).cageVimiumHostTimes;
+    return repeat === undefined ? Promise.resolve(0) : repeat(count);
+  }, times);
+
 /** Let page script take the focus, as an autofocus or a script does. */
 const focusPageTarget = (page: Page): Promise<boolean> =>
   page.evaluate((): boolean => {
@@ -99,6 +122,31 @@ const focusPageTarget = (page: Page): Promise<boolean> =>
     }).focusVimiumTarget;
     return focus === undefined ? false : focus();
   });
+
+/** Write one declaration on the root element of the page. */
+const styleRoot = (page: Page, declaration: string): Promise<void> =>
+  page.evaluate((rule: string) => {
+    document.documentElement.style.cssText = rule;
+  }, declaration);
+
+/** How many dialogs the overlay holds now. */
+const dialogCount = (page: Page): Promise<number> =>
+  page.evaluate((): number => {
+    const host = globalThis as unknown as {
+      __vimiumHarness?: { shadow: ShadowRoot | null };
+    };
+    const shadow = host.__vimiumHarness?.shadow ?? null;
+    return shadow === null ? 0 : shadow.querySelectorAll(".vw-dialog").length;
+  });
+
+/** Everything that the page wrote to its console. */
+const consoleLines = (page: Page): readonly string[] => {
+  const lines: string[] = [];
+  page.on("console", (message) => {
+    lines.push(message.text());
+  });
+  return lines;
+};
 
 test.describe("the overlay host under hostile CSS", () => {
   test("keeps the properties that make it visible", async ({ vw, page }) => {
@@ -208,6 +256,7 @@ test.describe("the overlay host after page script strips a declaration", () => {
       ["clip-path", "none"],
       ["filter", "none"],
       ["transform", "none"],
+      ["contain", "layout"],
       ["display", "block"],
       ["visibility", "visible"],
       ["opacity", "1"],
@@ -374,5 +423,119 @@ test.describe("the focus after the guard puts the host back", () => {
     // the guard did not take the focus.
     await expect.poll(() => vw.focusedId()).toBe("target");
     expect(await overlayFocusWithin(page, ".vw-dialog")).toBe(false);
+  });
+});
+
+test.describe("the overlay host when the page spends the repair budget", () => {
+  // 33 moves, each one in a task of its own. The cap is 32 for each quiet
+  // second, and it exists because a page that removes the host inside its own
+  // observer would fight us in a loop of microtasks. A guard that answered
+  // this by disconnecting its observer went silent for the rest of the
+  // session, and the page then held an invisible interface that still took
+  // every key.
+  test("repairs the host again after one quiet second", async ({ vw, page }) => {
+    await vw.open("/hostile-overlay.html");
+    expect(await cageHostTimes(page, 33)).toBe(33);
+
+    // The budget is spent, so the page keeps the host for now.
+    expect(await hostParentTag(page)).toBe("div");
+
+    // The guard still answers. One quiet second gives back the count and the
+    // repair, and nothing else has to happen for that.
+    await expect.poll(() => hostParentTag(page), { timeout: 5_000 }).toBe(
+      "html",
+    );
+
+    // And it answers a further move at once.
+    expect(await cageHost(page)).toBe(true);
+    await expect.poll(() => hostParentTag(page)).toBe("html");
+
+    await openHelp(page);
+    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
+      .toBeGreaterThan(300);
+  });
+
+  test("gives the keyboard back while the page holds the host", async ({ vw, page }) => {
+    const lines = consoleLines(page);
+    await vw.open("/hostile-overlay.html");
+    await openHelp(page);
+    expect(await dialogCount(page)).toBe(1);
+
+    const before = (await vw.scrollOffsets()).y;
+    expect(await cageHostTimes(page, 33)).toBe(33);
+
+    // The overlay is inside a container of the page, and the user can see
+    // nothing of it. It must not keep the keys.
+    await expect.poll(() => dialogCount(page), { timeout: 5_000 }).toBe(0);
+    await expect.poll(() =>
+      lines.some((line) => line.includes("gives the keyboard back"))
+    ).toBe(true);
+
+    // The page has its keys again: `j` scrolls it, which no dialog allows.
+    await vw.press("j");
+    await expect.poll(async () => (await vw.scrollOffsets()).y)
+      .toBeGreaterThan(before);
+  });
+});
+
+test.describe("the overlay under an ancestor rule of class 1", () => {
+  // A rule that makes `html` the containing block of a fixed descendant. The
+  // overlay then holds a place in the document instead of the viewport, so it
+  // scrolls away, and **the page stays fully readable**. I measured each rule
+  // below in WebKit: with the page at 2759 px the dialog box sat at -2711.
+  // `alignHost` measures the host box and puts it back on the viewport.
+  for (
+    const rule of [
+      "will-change: transform",
+      "transform: translateZ(0)",
+      "contain: paint",
+      "perspective: 1px",
+    ]
+  ) {
+    test(`draws the dialog in the viewport under ${rule}`, async ({ vw, page }) => {
+      await vw.open("/long-text.html");
+      await page.evaluate(() => globalThis.scrollTo(0, 2759));
+      await styleRoot(page, rule);
+      await openHelp(page);
+
+      const height = page.viewportSize()?.height ?? 800;
+      /** Does the whole dialog lie inside the visible part of the page? */
+      const inViewport = async (): Promise<boolean> => {
+        const box = await overlayBox(page, ".vw-dialog");
+        if (box === null) return false;
+        return box.top > -2 && box.top + box.height < height + 2;
+      };
+
+      expect(await inViewport()).toBe(true);
+
+      // The correction must follow the page, because the host now moves with
+      // the document. The layers inside the host must follow it as well: each
+      // one is `position: fixed`, so `contain: layout` on the host keeps them
+      // in the box of the host and not in the box of the document.
+      for (const offset of [1200, 0, 3000]) {
+        // oxlint-disable-next-line no-await-in-loop
+        await page.evaluate((y: number) => globalThis.scrollTo(0, y), offset);
+        // oxlint-disable-next-line no-await-in-loop
+        await expect.poll(inViewport).toBe(true);
+      }
+    });
+  }
+
+  test("gives the keyboard back when it cannot correct the rule", async ({ vw, page }) => {
+    const lines = consoleLines(page);
+    await vw.open("/long-text.html");
+
+    // A scale is not a translation, so no offset of ours brings the overlay
+    // back. The measurement says so, and the dialog then does not open at all.
+    await styleRoot(page, "transform: scale(0)");
+    await page.keyboard.press("?");
+
+    // Nothing opens, and nothing takes the keys for even one frame. The
+    // dialog asks before it holds the keyboard, and not only afterwards.
+    expect(await dialogCount(page)).toBe(0);
+    await expect.poll(() =>
+      lines.some((line) => line.includes("gives the keyboard back"))
+    ).toBe(true);
+    expect(await dialogCount(page)).toBe(0);
   });
 });

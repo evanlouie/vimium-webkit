@@ -57,6 +57,29 @@ document.getElementById("cage-host")?.addEventListener("click", () => {
 globalThis.cageVimiumHost = cageHost;
 
 /*
+ * Move the host into a new container once for each task.
+ *
+ * This is the attack that spends the repair budget of the guard. Each move is
+ * a task of its own, so it is not the microtask loop that the cap exists for.
+ * The guard must not go silent for ever after it: it must keep observing, give
+ * the keyboard back, and repair the host again after one quiet second.
+ */
+globalThis.cageVimiumHostTimes = (times) =>
+  new Promise((resolve) => {
+    let done = 0;
+    const step = () => {
+      if (done >= times) {
+        resolve(done);
+        return;
+      }
+      cageHost();
+      done += 1;
+      setTimeout(step, 0);
+    };
+    step();
+  });
+
+/*
  * Give the focus to a link of this page.
  *
  * Page script can do this at any time, and it does it while our dialog is
