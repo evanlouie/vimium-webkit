@@ -16,9 +16,9 @@ import { Effect } from "effect";
 import { defaultSettings } from "~/domain/Persisted.ts";
 import {
   adjustedFields,
+  formNotes,
   parseExclusionText,
   parseLines,
-  refusedFields,
   SETTINGS_FIELDS,
   SETTINGS_SECTIONS,
 } from "~/ui/Dialog.ts";
@@ -28,6 +28,13 @@ const settingKeys = (): readonly string[] =>
 
 const fieldKeys = (): readonly string[] =>
   SETTINGS_FIELDS.map((field) => String(field.key)).toSorted();
+
+/** One control of the form, by the setting that it edits. */
+const field = (key: string) => {
+  const found = SETTINGS_FIELDS.find((one) => String(one.key) === key);
+  assert.isDefined(found, `${key} has no control`);
+  return found;
+};
 
 describe("the settings form", () => {
   it.effect("gives every documented setting a control", () =>
@@ -123,25 +130,43 @@ describe("the settings form", () => {
       // settings and the stored settings agree and `adjustedFields` finds
       // nothing. Without this list the user saw the old value come back with
       // no reason for it.
-      const field = (key: string) => {
-        const found = SETTINGS_FIELDS.find((one) => String(one.key) === key);
-        assert.isDefined(found, `${key} has no control`);
-        return found;
-      };
-      const refused = refusedFields([
+      const notes = formNotes([
         { field: field("linkHintNumbers"), text: "1" },
         { field: field("linkHintCharacters"), text: "a" },
-        { field: field("scrollStepSize"), text: "0" },
-        { field: field("historyIndexLimit"), text: "90000" },
+        { field: field("scrollStepSize"), text: "none at all" },
         { field: field("searchUrl"), text: "https://example.com/?q=%s" },
         { field: field("smoothScroll"), text: "true" },
       ]);
-      assert.deepEqual(refused, [
+      assert.deepEqual(notes.refused, [
         "Digits that choose among filtered hints",
         "Link hint characters",
         "Scroll step size (px)",
+      ]);
+      assert.deepEqual(notes.clamped, []);
+    }));
+
+  it.effect("says that it brought a number into range", () =>
+    Effect.sync(() => {
+      // A number that is out of range does **not** keep its stored value: the
+      // control stores the bound. A message that said the opposite was false,
+      // and the user looked for a value that is not there.
+      const base = defaultSettings();
+      const notes = formNotes([
+        { field: field("scrollStepSize"), text: "20000" },
+        { field: field("historyIndexLimit"), text: "90000" },
+      ]);
+      assert.deepEqual(notes.refused, []);
+      assert.deepEqual(notes.clamped, [
+        "Scroll step size (px)",
         "Entries kept in the index",
       ]);
+      // What the message claims must be what the write function does.
+      const control = field("scrollStepSize");
+      assert.notStrictEqual(control.kind, "toggle");
+      if (control.kind === "toggle") return;
+      const stored = control.write(base, "20000");
+      assert.strictEqual(control.read(stored), "10000");
+      assert.notStrictEqual(control.read(stored), control.read(base));
     }));
 
   it.effect("says nothing about a value that it can use", () =>
@@ -153,20 +178,30 @@ describe("the settings form", () => {
           ? String(one.read(base))
           : one.read(base),
       }));
-      assert.deepEqual(refusedFields(offered), []);
+      assert.deepEqual(formNotes(offered), { refused: [], clamped: [] });
     }));
 
   it.effect("lets every number control say what it refuses", () =>
     Effect.sync(() => {
-      for (const field of SETTINGS_FIELDS) {
-        if (field.kind !== "number") continue;
+      for (const one of SETTINGS_FIELDS) {
+        if (one.kind !== "number") continue;
         assert.isDefined(
-          field.refuses,
-          `the field for ${String(field.key)} cannot report a refusal`,
+          one.refuses,
+          `the field for ${String(one.key)} cannot report a refusal`,
         );
         assert.isTrue(
-          field.refuses?.("not a number") ?? false,
-          `the field for ${String(field.key)} accepted text as a number`,
+          one.refuses?.("not a number") ?? false,
+          `the field for ${String(one.key)} accepted text as a number`,
+        );
+        assert.isDefined(
+          one.clamps,
+          `the field for ${String(one.key)} cannot report a clamp`,
+        );
+        // A refusal and a clamp are two results. Text that holds no number
+        // keeps the stored value, so it is not a clamp.
+        assert.isFalse(
+          one.clamps?.("not a number") ?? true,
+          `the field for ${String(one.key)} called a refusal a clamp`,
         );
       }
     }));

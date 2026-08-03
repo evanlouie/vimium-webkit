@@ -155,12 +155,22 @@ export interface ValueField extends FieldBase {
   /**
    * Does the control refuse this text?
    *
-   * `write` keeps the stored value when it cannot use the new text, and the
-   * user then saw the old value come back with no reason for it. The dialog
-   * asks this before it saves, so the message area can name the field. Only a
-   * control that can refuse declares it.
+   * True means one thing only: `write` keeps the stored value, because it can
+   * read no value at all from the text. The user then saw the old value come
+   * back with no reason for it. The dialog asks this before it saves, so the
+   * message area can name the field. Only a control that can refuse declares
+   * it.
    */
   readonly refuses?: (text: string) => boolean;
+  /**
+   * Does the control bring this text into its range?
+   *
+   * True means that `write` stores a value, and stores a different one. A
+   * refusal and a clamp are two results, and one message cannot describe both:
+   * a clamped field does not keep its stored value. Only a control with a
+   * range declares it.
+   */
+  readonly clamps?: (text: string) => boolean;
   readonly read: (settings: SettingsData) => string;
   readonly write: (settings: SettingsData, value: string) => SettingsData;
 }
@@ -184,10 +194,14 @@ const clampNumber = (
   return Math.min(max, Math.max(min, Math.trunc(value)));
 };
 
-/** Text that `clampNumber` cannot use, for a control with this range. */
+/** Text that holds no number at all. `write` then keeps the stored value. */
+const notANumber = (text: string): boolean =>
+  !Number.isFinite(Number.parseInt(text, 10));
+
+/** A number that `clampNumber` brings into the range of this control. */
 const outsideRange = (min: number, max: number) => (text: string): boolean => {
   const value = Number.parseInt(text, 10);
-  return !Number.isFinite(value) || value < min || value > max;
+  return Number.isFinite(value) && (value < min || value > max);
 };
 
 /** A hint alphabet needs two characters, or it can label one hint only. */
@@ -257,7 +271,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         kind: "number",
         key: "scrollStepSize",
         label: "Scroll step size (px)",
-        refuses: outsideRange(1, 10_000),
+        refuses: notANumber,
+        clamps: outsideRange(1, 10_000),
         read: (settings) => String(settings.scrollStepSize),
         write: (settings, value) => ({
           ...settings,
@@ -521,7 +536,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         key: "historyIndexLimit",
         label: "Entries kept in the index",
         note: "0 stops the recording.",
-        refuses: outsideRange(0, 50_000),
+        refuses: notANumber,
+        clamps: outsideRange(0, 50_000),
         read: (settings) => String(settings.historyIndexLimit),
         write: (settings, value) => ({
           ...settings,
@@ -611,20 +627,42 @@ const refusesText = (field: SettingsField, text: string): boolean =>
   field.kind !== "toggle" && field.refuses !== undefined &&
   field.refuses(text);
 
+/** Does this field bring this text into its range? A toggle never does. */
+const clampsText = (field: SettingsField, text: string): boolean =>
+  field.kind !== "toggle" && field.clamps !== undefined &&
+  field.clamps(text);
+
+/** What the controls did with the text of the user, before the save. */
+export interface FormNotes {
+  /** The fields that keep their stored value, because `write` read nothing. */
+  readonly refused: ReadonlyArray<string>;
+  /** The fields whose number `write` brought into range. */
+  readonly clamped: ReadonlyArray<string>;
+}
+
+/** Nothing to report: the reset button offers the defaults. */
+export const NO_FORM_NOTES: FormNotes = { refused: [], clamped: [] };
+
 /**
- * The fields whose text the form refuses.
+ * What the dialog must tell the user about the text that it read.
  *
- * `write` keeps the stored value for such a field, so the stored settings and
- * the offered settings agree and `adjustedFields` finds nothing. The user
- * typed one character, pressed Save, saw the old value again and got no
- * reason. This names the field instead.
+ * `write` gives the stored settings, and the stored settings alone say
+ * nothing: a refused field keeps its stored value, so `adjustedFields` finds
+ * no difference, and a clamped field stores the bound, so `adjustedFields`
+ * finds no difference either. The user typed, pressed Save, saw another value
+ * and got no reason. This names each field, and it separates the two results,
+ * because a clamped field does **not** keep its stored value.
  */
-export const refusedFields = (
+export const formNotes = (
   offered: ReadonlyArray<OfferedText>,
-): ReadonlyArray<string> =>
-  offered
+): FormNotes => ({
+  refused: offered
     .filter((entry) => refusesText(entry.field, entry.text))
-    .map((entry) => entry.field.label);
+    .map((entry) => entry.field.label),
+  clamped: offered
+    .filter((entry) => clampsText(entry.field, entry.text))
+    .map((entry) => entry.field.label),
+});
 
 // ---------------------------------------------------------------------------
 // The focus trap
@@ -1020,15 +1058,15 @@ export class Dialog extends Context.Service<Dialog, {
        * Store the settings, and tell the truth about the result.
        *
        * The dialog stays open when the mapping source still has an error, when
-       * a control refused what the user typed, and when storage repaired a
-       * field. In all three cases the dialog is the only place where the user
-       * can see what happened.
+       * a control refused what the user typed, when a control brought a number
+       * into range, and when storage repaired a field. In each case the dialog
+       * is the only place where the user can see what happened.
        */
       const store = Effect.fn("Dialog.store")(
         function*(
           form: SettingsForm,
           next: SettingsData,
-          refused: ReadonlyArray<string>,
+          notes: FormNotes,
         ) {
           const outcome = yield* Effect.catch(
             Effect.asSome(settings.save(next)),
@@ -1061,20 +1099,29 @@ export class Dialog extends Context.Service<Dialog, {
           }
 
           const changed = adjustedFields(next, stored);
-          const notes: string[] = [];
-          if (refused.length > 0) {
-            notes.push(
+          const lines: string[] = [];
+          if (notes.refused.length > 0) {
+            lines.push(
               `These fields keep their stored value, because the text was ` +
-                `refused: ${refused.join(", ")}.`,
+                `refused: ${notes.refused.join(", ")}.`,
+            );
+          }
+          if (notes.clamped.length > 0) {
+            // A clamped field did change. Saying that it kept its stored value
+            // would be false, and the user would look for a value that is not
+            // there.
+            lines.push(
+              `These fields were brought into range: ` +
+                `${notes.clamped.join(", ")}.`,
             );
           }
           if (changed.length > 0) {
-            notes.push(`Stored with changes to: ${changed.join(", ")}.`);
+            lines.push(`Stored with changes to: ${changed.join(", ")}.`);
           }
-          if (notes.length > 0) {
-            notes.push("The values above are the stored ones.");
+          if (lines.length > 0) {
+            lines.push("The values above are the stored ones.");
             yield* Effect.sync(() => {
-              form.problems.textContent = notes.join(" ");
+              form.problems.textContent = lines.join(" ");
             });
             return;
           }
@@ -1212,9 +1259,9 @@ export class Dialog extends Context.Service<Dialog, {
         // click dispatch. One fiber holds it, and a second click replaces it.
         const submit = (
           next: SettingsData,
-          refused: ReadonlyArray<string>,
+          notes: FormNotes,
         ): Effect.Effect<void> =>
-          Effect.asVoid(FiberHandle.run(saves, store(form, next, refused)));
+          Effect.asVoid(FiberHandle.run(saves, store(form, next, notes)));
 
         yield* dom.listenOn(
           form.save,
@@ -1225,7 +1272,7 @@ export class Dialog extends Context.Service<Dialog, {
           () =>
             submit(
               readForm(form, settings.currentUnsafe()),
-              refusedFields(offeredText(form)),
+              formNotes(offeredText(form)),
             ),
         );
         yield* dom.listenOn(
@@ -1233,7 +1280,7 @@ export class Dialog extends Context.Service<Dialog, {
           "click",
           // The defaults replace every control, so nothing of the user is
           // refused here.
-          () => submit(defaultSettings(), []),
+          () => submit(defaultSettings(), NO_FORM_NOTES),
         );
         yield* dom.listenOn(form.cancel, "click", () => close);
         return form;
