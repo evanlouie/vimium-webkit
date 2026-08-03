@@ -8,9 +8,10 @@
  * The shape of the pipeline is the shape of upstream, and it does not depend on
  * the engine. What is *not* upstream, and what this file exists to get right:
  *
- * - the whole pass goes through `mapChunked`, because Safari has no
+ * - the whole pass runs in time-boxed slices, because Safari has no
  *   `requestIdleCallback`, and a synchronous walk over a document of five
- *   thousand nodes drops frames;
+ *   thousand nodes drops frames; the walk of the tree is one of those slices,
+ *   and `mapChunked` carries the two passes over what the walk found;
  * - visibility goes through `Element.checkVisibility` where it exists, because
  *   `content-visibility: auto` (Safari 18) makes `getBoundingClientRect()`
  *   report old geometry inside a subtree that the engine skipped;
@@ -21,15 +22,20 @@
  *   gives the retargeted shadow host by specification, and would then refuse
  *   every hint inside a web component.
  *
- * The pass is interruptible. `mapChunked` gives control back to the browser
- * between two slices, and that point is where interruption takes effect. A
- * second `f` therefore stops the first detection.
+ * The pass is interruptible from its first slice. Each slice gives control
+ * back to the browser, and that point is where interruption takes effect. A
+ * second `f`, or Escape, therefore stops the detection that runs. Read the
+ * comment above `ElementWalk` for the division of the work.
  */
 
 import { Effect, Option } from "effect";
 import type { CapabilityReport } from "~/platform/Capabilities.ts";
-import type { Dom } from "~/platform/Dom.ts";
-import { CHUNK_BUDGET_MS, mapChunked } from "~/platform/Scheduler.ts";
+import { Dom } from "~/platform/Dom.ts";
+import {
+  CHUNK_BUDGET_MS,
+  type ChunkedOptions,
+  mapChunked,
+} from "~/platform/Scheduler.ts";
 import type { ViewportRect } from "~/ui/Ui.ts";
 
 // ---------------------------------------------------------------------------
@@ -704,25 +710,141 @@ const looksLikeClosedShadowHost = (element: Element): boolean => {
   return rect.width >= MIN_HINT_SIZE && rect.height >= MIN_HINT_SIZE;
 };
 
-interface Collected {
+/** What one walk of the tree found. */
+export interface Collected {
   readonly elements: Element[];
   unreachableHosts: number;
 }
 
 /**
- * Every element in document order, and down into every *open* shadow root.
+ * Discovery, and how it gives the main thread back.
  *
+ * Discovery walks the whole document. The walk used to run to the end in one
+ * synchronous call, before the first slice of any other work. On a large page
+ * the user waited for that walk, and Escape arrived only after it.
+ *
+ * **How the work is divided.** The walk is a state machine, and not a
+ * recursion. `ElementWalk` holds a stack of the elements that are not yet
+ * visited. `stepWalk` visits at most `count` of them and gives back. The
+ * caller reads the clock after each step, and it starts a new slice when the
+ * budget of 8 ms is gone.
+ *
+ * **Where the thread goes back.** `Dom.yieldToBrowser` runs between two
+ * slices. It posts through a `MessageChannel`, so the browser runs its own
+ * work, and every timer of the page keeps its turn.
+ *
+ * **What cancels a walk.** The walk is one effect in the fiber of the round.
+ * Interruption of that fiber stops the walk at the next yield. `Hints.ts`
+ * interrupts it when the user presses Escape, when a new round starts, when
+ * the mode exits, and when the runtime scope closes on a page change.
+ *
+ * **What a cancelled walk leaves.** Nothing. The walk holds no listener, no
+ * timer and no child fiber. It writes into one array that it owns, and the
+ * garbage collector takes that array with the fiber. It draws no marker,
+ * because a marker is drawn only from the result that it never returns.
+ *
+ * **The result does not change.** A divided walk finds the same elements, in
+ * the same order, as the walk that it replaces. `test/unit/hint-detect_test.ts`
+ * compares the two on a large tree, and it compares slice sizes of 1, 7 and
+ * 5000 against each other.
+ *
+ * **The measurement.** Playwright WebKit, one machine, five rounds. On
+ * `test/fixtures/link-dense.html` (2414 elements) the walk took 0–1 ms before
+ * the change, and it takes 0–1 ms after it, in one slice. On
+ * `test/fixtures/dom-huge.html` (120 036 elements) the walk took 6–19 ms
+ * before, in one block that nothing could interrupt. It now takes 6–24 ms in
+ * one to four slices, and the longest single piece of work is 8 ms. The gain
+ * is not the total. The gain is that the longest piece no longer grows with
+ * the document.
+ */
+export interface ElementWalk {
+  /** The elements that are not visited yet. The last entry is visited next. */
+  readonly pending: Element[];
+  readonly collected: Collected;
+}
+
+/** Stack the element children of `parent`, so that the first one pops first. */
+const pushChildren = (pending: Element[], parent: ParentNode): void => {
+  // The sibling pointers, and not `parent.children`. A collection costs one
+  // allocation for each element that the walk visits, and that is measurable:
+  // on a document of 120 000 elements the collection walk takes 15 ms, and
+  // this one takes 6 ms, which is the time of the walk that it replaces.
+  let child = parent.lastElementChild;
+  while (child !== null) {
+    pending.push(child);
+    child = child.previousElementSibling;
+  }
+};
+
+/** A walk of `root` that has visited nothing yet. */
+export const startWalk = (root: ParentNode): ElementWalk => {
+  const walk: ElementWalk = {
+    pending: [],
+    collected: { elements: [], unreachableHosts: 0 },
+  };
+  pushChildren(walk.pending, root);
+  return walk;
+};
+
+/**
+ * Visit at most `count` elements. It gives `true` while work is left.
+ *
+ * The order is document order, and it goes down into every *open* shadow root.
  * A slotted light-DOM child is already under its host, so it is not visited two
  * times.
  */
-const collectElements = (root: ParentNode, into: Collected): void => {
-  for (const element of root.querySelectorAll("*")) {
-    into.elements.push(element);
+export const stepWalk = (walk: ElementWalk, count: number): boolean => {
+  for (let visited = 0; visited < count; visited += 1) {
+    const element = walk.pending.pop();
+    if (element === undefined) break;
+    walk.collected.elements.push(element);
     const shadow = element.shadowRoot;
-    if (shadow !== null) collectElements(shadow, into);
-    else if (looksLikeClosedShadowHost(element)) into.unreachableHosts += 1;
+    // The light children go on the stack first, so the shadow children pop
+    // before them. The order is the host, then its whole shadow tree, then its
+    // light tree. That is the order of the recursive walk that this replaces.
+    pushChildren(walk.pending, element);
+    if (shadow !== null) pushChildren(walk.pending, shadow);
+    else if (looksLikeClosedShadowHost(element)) {
+      walk.collected.unreachableHosts += 1;
+    }
   }
+  return walk.pending.length > 0;
 };
+
+/**
+ * How many elements one step visits before the clock is read again.
+ *
+ * `performance.now()` is itself measurable when a walk of ten thousand
+ * elements reads it for each one.
+ */
+const WALK_CHECK_EVERY = 64;
+
+/** Walk `root` in time-boxed slices. Interruption stops it at a slice edge. */
+export const collectElements = (
+  root: ParentNode,
+  options: ChunkedOptions,
+): Effect.Effect<Collected, never, Dom> =>
+  Effect.gen(function*() {
+    const dom = yield* Dom;
+    const budget = options.budgetMs ?? CHUNK_BUDGET_MS;
+    const checkEvery = options.checkEvery ?? WALK_CHECK_EVERY;
+    const walk = startWalk(root);
+
+    let more = true;
+    while (more) {
+      const sliceStart = yield* dom.now;
+      for (;;) {
+        more = stepWalk(walk, checkEvery);
+        if (!more) break;
+        if ((yield* dom.now) - sliceStart >= budget) break;
+      }
+      // Sequential by design. The browser gets a turn between two slices, and
+      // an interruption of this fiber takes effect here.
+      if (more) yield* dom.yieldToBrowser;
+    }
+
+    return walk.collected;
+  });
 
 // ---------------------------------------------------------------------------
 // Occlusion
@@ -904,19 +1026,19 @@ const buildHints = (
 /**
  * Run the whole detection pipeline.
  *
- * Two chunked passes, and not one: classification touches every element of the
- * document, and the occlusion test is one forced hit test for each surviving
- * hint. To interleave them would put a hit test in the middle of a loop that
- * reads styles, which is the worst pattern for layout thrash.
+ * Three chunked passes, and not one: discovery walks the tree, classification
+ * touches every element that it found, and the occlusion test is one forced
+ * hit test for each surviving hint. To interleave them would put a hit test in
+ * the middle of a loop that reads styles, which is the worst pattern for
+ * layout thrash.
  */
 export const detectHints = (
   options: DetectOptions,
 ): Effect.Effect<DetectionResult, never, Dom> =>
   Effect.gen(function*() {
-    const collected: Collected = { elements: [], unreachableHosts: 0 };
-    collectElements(options.document, collected);
-
     const chunk = { budgetMs: CHUNK_BUDGET_MS };
+
+    const collected = yield* collectElements(options.document, chunk);
 
     const groups = yield* mapChunked(
       collected.elements,
