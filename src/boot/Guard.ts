@@ -96,19 +96,35 @@ export const claimRealm: Effect.Effect<boolean, never, Dom> = Effect.gen(
 );
 
 /**
+ * The node that the event truly started at.
+ *
+ * A key event inside an open shadow root is retargeted to the host before a
+ * window listener sees it. `event.target` then names the host, and the
+ * editable test answers "no" for a user who is typing into a search box.
+ *
+ * `composedPath()[0]` is the true node while the root is open. A closed root
+ * gives the host, which is the correct answer there.
+ */
+const composedSource = (event: Event): EventTarget | null =>
+  event.composedPath()[0] ?? event.target;
+
+/**
  * Is this a key that must start the application?
  *
  * A page that the user is only typing into must never pay the cost. The
  * editable test is structural, and not a `getComputedStyle` call, because this
  * runs for every keystroke in every frame.
  */
-const isUninteresting = (event: KeyboardEvent): boolean => {
+const isUninteresting = (
+  event: KeyboardEvent,
+  source: EventTarget | null,
+): boolean => {
   if (event.isComposing || event.keyCode === 229) return true;
   const key = event.key;
   if (key === "Shift" || key === "Control" || key === "Alt" || key === "Meta") {
     return true;
   }
-  return isEditable(event.target);
+  return isEditable(source);
 };
 
 /**
@@ -160,9 +176,24 @@ export const awaitActivation: Effect.Effect<
 
   yield* dom.listen("window", "keydown", (event) =>
     Effect.gen(function*() {
-      if (isEditable(event.target)) yield* Ref.set(typed, true);
+      // A key that the page made, and not the user. The check is inline,
+      // because the guard imports nothing above the platform. A page can
+      // dispatch a `KeyboardEvent` that names any key, and only the browser can
+      // set `isTrusted`. Such a key must not start the application. It must
+      // also stay out of the buffer, because the application replays the
+      // buffer. The page would otherwise choose the command that runs.
+      if (event.isTrusted !== true) return;
+      // The composed path, and not `event.target`. A key inside an open shadow
+      // root names the host at a window listener. The call belongs to the
+      // page, so it goes through the probe. A page that poisons `composedPath`
+      // then costs us the shadow case only, and not the whole guard.
+      const source = yield* dom.probeOr(
+        () => composedSource(event),
+        event.target,
+      );
+      if (isEditable(source)) yield* Ref.set(typed, true);
       if (Option.isSome(yield* Deferred.poll(started))) return;
-      if (isUninteresting(event)) return;
+      if (isUninteresting(event, source)) return;
 
       yield* Ref.update(buffer, (current) =>
         current.length >= MAX_BUFFERED_KEYS ? current : [...current, event]);

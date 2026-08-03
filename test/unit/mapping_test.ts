@@ -10,10 +10,16 @@ import { assert, describe, it } from "@effect/vitest";
 import { Effect, Option } from "effect";
 import { COMMANDS, DEFAULT_MAPPINGS } from "~/domain/Command.ts";
 import {
+  type BranchCursor,
+  canExtend,
   compileMappings,
+  deepestBranch,
+  extendBranches,
   formatDiagnostics,
   hasErrors,
+  type KeyBranch,
   keysByCommand,
+  openBranch,
   readLogicalLines,
   type TrieNode,
 } from "~/domain/Mapping.ts";
@@ -274,4 +280,124 @@ describe("Mapping", () => {
       assert.isNull(lookup(result.trie, ["j"]));
       assert.strictEqual(command(result.trie, ["J"]), "showHelp");
     }));
+});
+
+/**
+ * The walk, in the per-branch model.
+ *
+ * A branch is one live attempt at a mapping. It holds the node that the keys
+ * reached, and the binding that the attempt accepted. A branch starts at the
+ * root, and it dies when its node has no child for the next key.
+ */
+describe("the trie walk", () => {
+  const walkTrie = compile("map g scrollUp\nmap gg showHelp\nmap j scrollDown")
+    .trie;
+
+  const nameOf = (binding: Option.Option<{ command: string }>): string =>
+    Option.isSome(binding) ? binding.value.command : "none";
+
+  /** The branch that a key starts at the root. It must exist, or the test is wrong. */
+  const start = (trie: TrieNode, key: string): KeyBranch => {
+    const branch = openBranch(trie, key);
+    if (Option.isNone(branch)) throw new Error(`the root has no ${key}`);
+    return branch.value;
+  };
+
+  /** The accepted binding of the deepest branch, by name. */
+  const decision = (cursor: BranchCursor): string => {
+    const deepest = deepestBranch(cursor);
+    return Option.isNone(deepest) ? "none" : nameOf(deepest.value.accepted);
+  };
+
+  it.effect("gives a new branch the binding of its own node", () =>
+    Effect.sync(() => {
+      // `g` is bound, so the branch that `g` starts accepts `scrollUp`.
+      assert.strictEqual(nameOf(start(walkTrie, "g").accepted), "scrollUp");
+      // `x` is bound nowhere, so it opens no branch at all.
+      assert.isTrue(Option.isNone(openBranch(walkTrie, "x")));
+    }));
+
+  it.effect("lets a deeper node replace the accepted binding", () =>
+    Effect.sync(() => {
+      const after = extendBranches([start(walkTrie, "g")], "g");
+      assert.lengthOf(after, 1);
+      assert.strictEqual(decision(after), "showHelp");
+    }));
+
+  it.effect("kills a branch that has no child for the key", () =>
+    Effect.sync(() => {
+      // `gj` is bound nowhere, so the branch `g` dies. The answer is empty,
+      // which is what tells the dispatcher to run the accepted binding.
+      assert.lengthOf(extendBranches([start(walkTrie, "g")], "j"), 0);
+      assert.lengthOf(extendBranches([], "g"), 0);
+    }));
+
+  it.effect("says whether a branch takes another key", () =>
+    Effect.sync(() => {
+      assert.isTrue(canExtend(start(walkTrie, "g")));
+      const [deep] = extendBranches([start(walkTrie, "g")], "g");
+      assert.isTrue(deep !== undefined && !canExtend(deep));
+    }));
+
+  it.effect("gives no deepest branch when nothing is live", () =>
+    Effect.sync(() => {
+      assert.isTrue(Option.isNone(deepestBranch([])));
+    }));
+
+  /**
+   * Two branches that live at the same time.
+   *
+   * The accepted binding belongs to the branch that accepted it. A new branch
+   * accepts the binding of its own node alone, and it takes nothing from an
+   * older branch.
+   */
+  describe("an accepted binding belongs to its branch", () => {
+    const overlapping =
+      compile("map a scrollUp\nmap abc showHelp\nmap b scrollDown").trie;
+
+    it.effect("keeps the older binding out of a new branch", () =>
+      Effect.sync(() => {
+        // `b` after `a` extends the attempt at `abc`, and it also starts a new
+        // branch at the root. The new branch is one key deep, so it goes first.
+        const extended = extendBranches([start(overlapping, "a")], "b");
+        const cursor = [start(overlapping, "b"), ...extended];
+
+        assert.lengthOf(cursor, 2);
+        // The new branch accepts its own binding, and nothing else.
+        assert.strictEqual(
+          nameOf(cursor[0]?.accepted ?? Option.none()),
+          "scrollDown",
+        );
+        // The deepest branch decides, and it accepted `scrollUp` at `a`.
+        assert.strictEqual(decision(cursor), "scrollUp");
+      }));
+
+    it.effect("gives the deepest branch even when it accepted nothing", () =>
+      Effect.sync(() => {
+        // `ab` accepted nothing, and it is deeper than the new branch `b`,
+        // which accepted `scrollDown`. The deepest branch still decides.
+        const uneven = compile("map abz showHelp\nmap b scrollDown").trie;
+        const cursor = [
+          start(uneven, "b"),
+          ...extendBranches([start(uneven, "a")], "b"),
+        ];
+
+        assert.lengthOf(cursor, 2);
+        assert.strictEqual(decision(cursor), "none");
+      }));
+
+    it.effect("drops the accepted binding when the branch dies", () =>
+      Effect.sync(() => {
+        const live = extendBranches([start(overlapping, "a")], "b");
+        // `abz` is bound nowhere, so the attempt at `abc` dies, and the
+        // binding that `a` accepted dies with it.
+        assert.lengthOf(extendBranches(live, "z"), 0);
+      }));
+
+    it.effect("takes the binding of a node that carries on the attempt", () =>
+      Effect.sync(() => {
+        const live = extendBranches([start(overlapping, "a")], "b");
+        assert.strictEqual(decision(extendBranches(live, "c")), "showHelp");
+      }));
+  });
 });

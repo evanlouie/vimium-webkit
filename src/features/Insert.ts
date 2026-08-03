@@ -86,6 +86,23 @@ const OVERLAY_TAG = "vimium-webkit-overlay";
 const ownsFocus = (target: EventTarget | null): boolean =>
   target instanceof Element && target.closest(OVERLAY_TAG) !== null;
 
+/**
+ * The node that the event truly started at.
+ *
+ * A `focus` or a `blur` inside a shadow root is retargeted to the host before
+ * any window listener sees it. `event.target` therefore names the host, and not
+ * the field. A page that keeps its search box in a web component looked
+ * unfocused. Every key that the user typed into it ran a command.
+ *
+ * `composedPath()[0]` is the true node while the root is open. A closed root
+ * gives the host, which is the correct answer there and is what our own
+ * overlay needs.
+ */
+export const composedTarget = (event: Event): EventTarget | null => {
+  const path = event.composedPath();
+  return path[0] ?? event.target;
+};
+
 const isVisible = (view: Window, element: Element): boolean => {
   const rect = element.getBoundingClientRect();
   if (rect.width === 0 && rect.height === 0) return false;
@@ -229,9 +246,21 @@ export class Insert extends Context.Service<Insert, {
           return PASS_EVENT_TO_PAGE;
         });
 
+      /**
+       * The focused node, through an open shadow root.
+       *
+       * `composedPath` is a call on an object that the page made, so it goes
+       * through the probe. A page that replaces it with an accessor that throws
+       * must cost us the shadow case only, and not the whole handler.
+       */
+      const focusedNode = (
+        event: FocusEvent,
+      ): Effect.Effect<EventTarget | null> =>
+        dom.probeOr(() => composedTarget(event), event.target);
+
       const onFocus = (event: FocusEvent): Effect.Effect<HandlerResult> =>
         Effect.gen(function*() {
-          const target = event.target;
+          const target = yield* focusedNode(event);
           if (ownsFocus(target)) return CONTINUE_BUBBLING;
           if (acceptsTyping(target)) {
             yield* Ref.update(state, (current) => ({
@@ -246,9 +275,14 @@ export class Insert extends Context.Service<Insert, {
       const onBlur = (event: FocusEvent): Effect.Effect<HandlerResult> =>
         Effect.gen(function*() {
           const current = yield* Ref.get(state);
+          // The same rule as the focus above. The blur of a field inside an
+          // open shadow root names the host, so a compare against
+          // `event.target` never matched. Insert mode then stayed on after the
+          // field went away.
+          const target = yield* focusedNode(event);
           if (
             Option.isNone(current.element) ||
-            event.target !== current.element.value
+            target !== current.element.value
           ) {
             return CONTINUE_BUBBLING;
           }

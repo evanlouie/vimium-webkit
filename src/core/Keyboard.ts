@@ -28,7 +28,13 @@ import {
 import { isPassKey } from "~/domain/Exclusion.ts";
 import { appendCountDigit, isCountDigit } from "~/domain/Key.ts";
 import { isComposing, isModifierKey, keyNotation } from "~/domain/Key.ts";
-import type { KeyBinding, TrieNode } from "~/domain/Mapping.ts";
+import {
+  canExtend,
+  deepestBranch,
+  extendBranches,
+  type KeyBranch,
+  openBranch,
+} from "~/domain/Mapping.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { mediaPlayerHasFocus } from "~/platform/Elements.ts";
 import { Realm } from "~/platform/Realm.ts";
@@ -59,9 +65,50 @@ export const MEDIA_KEYS: ReadonlySet<string> = new Set([
   "<space>",
 ]);
 
+/**
+ * Did the browser make this event, or did the page?
+ *
+ * A page can call `dispatchEvent` with a `KeyboardEvent` that names any key.
+ * The browser marks such an event `isTrusted === false`, and only the browser
+ * can set the flag to `true`. A synthetic key must therefore never reach a
+ * command. A command can open a tab, navigate, close a tab or write the
+ * clipboard, and the user pressed nothing.
+ *
+ * The test is strict on purpose. `dispatchEvent` refuses an object that is not
+ * an `Event`, but other paths do not. A page can hand such an object to a
+ * handler of ours directly, so every value except `true` is refused.
+ */
+export const isUserEvent = (event: Pick<Event, "isTrusted">): boolean =>
+  event.isTrusted === true;
+
+/**
+ * The key state, in the per-branch model.
+ *
+ * A branch is one live attempt at a mapping. It holds the trie node that the
+ * keys of the attempt reached, and the binding that the attempt accepted.
+ *
+ * A branch starts when the root opens a child for the key. The accepted binding
+ * of a new branch is the binding of that child alone. A key extends a branch
+ * when the node of the branch has a child for the key. A binding on that child
+ * replaces the accepted binding of the branch.
+ *
+ * A branch dies when its node has no child for the key. Its accepted binding
+ * dies with it. When every branch dies, the accepted binding of the branch that
+ * lived longest runs. The key then starts again at the root.
+ *
+ * `map g scrollUp` together with `map gg scrollToTop` puts `scrollUp` in the
+ * branch `g`. The next key decides: `g` extends that branch and runs
+ * `scrollToTop`, and any other key runs `scrollUp` first.
+ *
+ * With `map a`, `map abc` and `map b`, the key `b` after `a` opens two
+ * branches. The branch `ab` carries on the attempt at `abc`, and the branch `b`
+ * is new. The attempt at `abc` consumes the keystroke `b`: `advance` suppresses
+ * the key, and the pending indicator shows it. The binding of `b` therefore
+ * never runs, and a stray key after it runs the binding of `a`.
+ */
 interface KeyState {
-  /** Never empty. Element 0 is the trie root. */
-  readonly nodes: ReadonlyArray<TrieNode>;
+  /** Every live branch, shallowest first. Empty means "at the root". */
+  readonly branches: ReadonlyArray<KeyBranch>;
   readonly count: number;
   readonly pending: ReadonlyArray<string>;
 }
@@ -117,7 +164,7 @@ export class Keyboard extends Context.Service<Keyboard, {
 
       const pending = yield* SubscriptionRef.make<string | null>(null);
       const state = yield* Ref.make<KeyState>({
-        nodes: [mappings.compiledUnsafe().trie],
+        branches: [],
         count: 0,
         pending: [],
       });
@@ -130,11 +177,7 @@ export class Keyboard extends Context.Service<Keyboard, {
 
       const reset = Effect.gen(function*() {
         const current = yield* Ref.get(state);
-        yield* Ref.set(state, {
-          nodes: [mappings.compiledUnsafe().trie],
-          count: 0,
-          pending: [],
-        });
+        yield* Ref.set(state, { branches: [], count: 0, pending: [] });
         if (current.pending.length > 0) {
           yield* SubscriptionRef.set(pending, null);
         }
@@ -174,7 +217,7 @@ export class Keyboard extends Context.Service<Keyboard, {
        * `1` in the HUD until the user pressed Escape.
        */
       const isCountKey = (current: KeyState, notation: string): boolean => {
-        if (current.nodes.length !== 1) return false;
+        if (current.branches.length > 0) return false;
         if (!isCountDigit(notation, current.count > 0)) return false;
         if (current.count > 0) return true;
         return !mappings.compiledUnsafe().trie.children.has(notation);
@@ -213,20 +256,74 @@ export class Keyboard extends Context.Service<Keyboard, {
           );
         });
 
+      /**
+       * Take one key into the branch walk.
+       *
+       * The key extends every live branch. A branch that has no child for the
+       * key dies, and its accepted binding dies with it. The root opens a new
+       * branch, which has accepted nothing that an earlier key typed.
+       *
+       * When the key ends every live branch, the accepted binding of the branch
+       * that lived longest runs. The key then goes back to `onKeydown`, so it
+       * truly starts at the root. The pass keys, the media keys and the pass
+       * counter all read it as a first key.
+       *
+       * The recursion is bounded at one call. `reset` clears every branch
+       * before the key goes back, so no accepted binding can run twice.
+       */
       const advance = (
         notation: string,
         event: KeyboardEvent,
       ): Effect.Effect<HandlerResult> =>
         Effect.gen(function*() {
           const current = yield* Ref.get(state);
-          const candidates: TrieNode[] = [];
-          for (const node of current.nodes) {
-            const child = node.children.get(notation);
-            if (child) candidates.push(child);
+
+          if (isCountKey(current, notation)) {
+            const nextPending = [...current.pending, notation];
+            yield* Ref.set(state, {
+              branches: current.branches,
+              count: appendCountDigit(current.count, notation),
+              pending: nextPending,
+            });
+            yield* showPending(nextPending);
+            return yield* suppress(event);
           }
 
-          if (candidates.length === 0) {
-            const wasPartial = current.nodes.length > 1 || current.count > 0;
+          // Every live branch takes the key, or it dies here.
+          const extended = extendBranches(current.branches, notation);
+          const deepestDead = deepestBranch(current.branches);
+
+          // The key ended every live attempt, and the attempt that lived
+          // longest accepted a binding. The binding runs now, with the count
+          // that the user typed in front of it. The key then starts again at
+          // the root. Without this, `map g scrollUp` could never run while
+          // `map gg scrollToTop` also existed. The deepest dead branch decides
+          // even when it accepted nothing, and a shallower dead branch with a
+          // binding is then dropped in silence.
+          if (
+            extended.length === 0 && Option.isSome(deepestDead) &&
+            Option.isSome(deepestDead.value.accepted)
+          ) {
+            const { command, options } = deepestDead.value.accepted.value;
+            const count = current.count === 0 ? 1 : current.count;
+            yield* reset;
+            yield* runCommand(command, options, count, event);
+            // Back to the top of the rules, and not to the branch walk. A key
+            // that the exclusion or a media player owns must go to the page,
+            // and `passNextKey` may have just claimed this very key.
+            return yield* onKeydown(event);
+          }
+
+          // A new branch is one key deep, so it goes in front of the others.
+          // The cursor stays shallowest first, and the deepest branch stays
+          // last.
+          const opened = openBranch(mappings.compiledUnsafe().trie, notation);
+          const branches = Option.isSome(opened)
+            ? [opened.value, ...extended]
+            : extended;
+
+          if (branches.length === 0) {
+            const wasPartial = current.branches.length > 0 || current.count > 0;
             yield* reset;
             // A sequence that ran out is still ours. The user typed `g` on
             // purpose, so giving the next key to the page would be a surprise.
@@ -234,23 +331,17 @@ export class Keyboard extends Context.Service<Keyboard, {
             return wasPartial ? yield* suppress(event) : CONTINUE_BUBBLING;
           }
 
-          // The deepest candidate is the most specific continuation, because
-          // the node list is ordered shallowest first. If it can still be
-          // extended, this sequence is not finished. Firing the shorter binding
-          // here is what made `map gg` unreachable behind `map g`.
-          const deepest = candidates[candidates.length - 1];
-          const stillOpen = deepest !== undefined &&
-            deepest.children.size > 0;
+          // The deepest branch decides, because it is the longest attempt.
+          // While its node can take another key, the attempt is not finished.
+          // Firing the shorter binding here is what made `map gg` unreachable
+          // behind `map g`.
+          const deepest = deepestBranch(branches);
 
-          // Later candidates come from deeper entries, so the last binding
-          // found is the most specific match.
-          let terminal: Option.Option<KeyBinding> = Option.none();
-          for (const candidate of candidates) {
-            if (Option.isSome(candidate.binding)) terminal = candidate.binding;
-          }
-
-          if (!stillOpen && Option.isSome(terminal)) {
-            const { command, options } = terminal.value;
+          if (
+            Option.isSome(deepest) && !canExtend(deepest.value) &&
+            Option.isSome(deepest.value.accepted)
+          ) {
+            const { command, options } = deepest.value.accepted.value;
             const count = current.count === 0 ? 1 : current.count;
             // Reset first, so that a command which enters another mode finds a
             // clean normal mode underneath it.
@@ -261,10 +352,7 @@ export class Keyboard extends Context.Service<Keyboard, {
 
           const nextPending = [...current.pending, notation];
           yield* Ref.set(state, {
-            nodes: [
-              current.nodes[0] ?? mappings.compiledUnsafe().trie,
-              ...candidates,
-            ],
+            branches,
             count: current.count,
             pending: nextPending,
           });
@@ -276,6 +364,10 @@ export class Keyboard extends Context.Service<Keyboard, {
         event: KeyboardEvent,
       ): Effect.Effect<HandlerResult> =>
         Effect.gen(function*() {
+          // A key that the page made. It gives no command, and it does not
+          // touch the pending sequence.
+          if (!isUserEvent(event)) return CONTINUE_BUBBLING;
+
           // Composition, from an input method or from a dead key. Without this
           // guard we eat keystrokes in the middle of composition, which is the
           // most damaging failure for a user of a CJK language, and one that
@@ -290,9 +382,9 @@ export class Keyboard extends Context.Service<Keyboard, {
           if (Option.isNone(rawKey)) return CONTINUE_BUBBLING;
           const raw = rawKey.value;
 
-          const compiled = mappings.compiledUnsafe();
-          const notation = compiled.keyRemap.get(raw) ?? raw;
-
+          // The pass counter comes before every other rule, so Escape goes to
+          // the page and spends one pass. That is the point of the command: it
+          // gives any key to the page, and Escape is a key.
           const remaining = yield* Ref.get(passNext);
           if (remaining > 0) {
             yield* Ref.set(passNext, remaining - 1);
@@ -300,7 +392,7 @@ export class Keyboard extends Context.Service<Keyboard, {
             return CONTINUE_BUBBLING;
           }
 
-          const atRoot = current.nodes.length === 1 && current.count === 0;
+          const atRoot = current.branches.length === 0 && current.count === 0;
 
           if (isEscape(event)) {
             if (atRoot) return CONTINUE_BUBBLING;
@@ -308,11 +400,17 @@ export class Keyboard extends Context.Service<Keyboard, {
             return yield* suppress(event);
           }
 
+          // Every pass-through rule reads the *raw* notation, and not the
+          // remapped one. The user gives a physical key to the page, and
+          // `mapkey` describes what the key does for us. A test against the
+          // remapped notation captured a key that the exclusion promised to
+          // the page. It also gave away a key that no rule named.
+
           // A pass key applies to a new sequence only. Once the user has
           // committed to `g`, the next key is ours even if it is in the set.
-          if (
-            atRoot && isPassKey(exclusions.effectiveUnsafe(), notation)
-          ) {
+          // A count starts a sequence as well, so `3 j` runs our binding for
+          // `j` even when the user gave `j` to the page.
+          if (atRoot && isPassKey(exclusions.effectiveUnsafe(), raw)) {
             return CONTINUE_BUBBLING;
           }
 
@@ -320,29 +418,26 @@ export class Keyboard extends Context.Service<Keyboard, {
           // cheap set lookup goes first, because the check behind it walks the
           // document.
           if (
-            atRoot && MEDIA_KEYS.has(notation) &&
+            atRoot && MEDIA_KEYS.has(raw) &&
             settingsNow.passMediaKeys &&
             mediaPlayerHasFocus(dom.document)
           ) {
             return CONTINUE_BUBBLING;
           }
 
-          if (isCountKey(current, notation)) {
-            const nextPending = [...current.pending, notation];
-            yield* Ref.set(state, {
-              nodes: current.nodes,
-              count: appendCountDigit(current.count, notation),
-              pending: nextPending,
-            });
-            yield* showPending(nextPending);
-            return yield* suppress(event);
-          }
+          // The key is ours. `mapkey` now says which binding it drives.
+          const notation = mappings.compiledUnsafe().keyRemap.get(raw) ?? raw;
 
+          // The count prefix and the trie walk both live in `advance`, which
+          // reads the state again. A binding that an earlier key accepted can
+          // run there first. The key then comes back to this function, where a
+          // digit is a count once more and every rule above applies again.
           return yield* advance(notation, event);
         });
 
       const onKeyup = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
         Effect.gen(function*() {
+          if (!isUserEvent(event)) return CONTINUE_BUBBLING;
           if (!event.code) return CONTINUE_BUBBLING;
           const taken = yield* Ref.modify(
             suppressedCodes,
@@ -355,6 +450,25 @@ export class Keyboard extends Context.Service<Keyboard, {
           );
           return taken ? SUPPRESS_EVENT : CONTINUE_BUBBLING;
         });
+
+      /**
+       * The focus moved, so a half-typed sequence is no longer live.
+       *
+       * A user presses `g`, clicks a search box, types a query and leaves it
+       * again. The prefix stayed behind. The binding that `g` accepted then ran
+       * on the next key, and the user typed that `g` minutes before.
+       *
+       * The reset drops the count prefix as well as the keys and the accepted
+       * binding. The three are one half-typed command, and the indicator shows
+       * them together. A count that outlived its keys would be invisible, and
+       * the next key alone would then scroll 50 steps.
+       *
+       * Every focus does this, and not a focus into a text field alone. A
+       * sequence that survives a focus change is a surprise in each case. The
+       * cost is small, because the user types the sequence again.
+       */
+      const onFocus = (): Effect.Effect<HandlerResult> =>
+        Effect.as(reset, CONTINUE_BUBBLING);
 
       /**
        * Normal mode follows the exclusion verdict.
@@ -380,6 +494,7 @@ export class Keyboard extends Context.Service<Keyboard, {
           modes.enter({ name: "normal" }, {
             keydown: onKeydown,
             keyup: onKeyup,
+            focus: onFocus,
           }),
           Scope.Scope,
           scope,

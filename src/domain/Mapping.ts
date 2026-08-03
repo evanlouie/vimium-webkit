@@ -417,6 +417,115 @@ const insert = (trie: MutableTrieNode, binding: KeyBinding): void => {
 };
 
 // ---------------------------------------------------------------------------
+// The walk
+// ---------------------------------------------------------------------------
+
+/**
+ * The per-branch model of a half-typed sequence.
+ *
+ * A branch is one live attempt at a mapping. It holds the trie node that the
+ * keys of the attempt reached. It also holds the binding that the attempt
+ * accepted, which is the deepest binding on its own path.
+ *
+ * A branch starts when the root opens a child for a key. The accepted binding
+ * of a new branch is the binding of that child alone. A new branch has accepted
+ * nothing that an earlier key typed.
+ *
+ * A key extends a branch when the node of the branch has a child for that key.
+ * A binding on the child replaces the accepted binding of that branch. A child
+ * with no binding keeps the accepted binding of the branch.
+ *
+ * A branch dies when its node has no child for the key. The accepted binding
+ * belongs to the branch, so it dies with the branch.
+ *
+ * The deepest branch is the branch that lived longest. When every branch dies,
+ * the dispatcher runs the accepted binding of that branch. The key then starts
+ * again at the root.
+ *
+ * With `map a`, `map abc` and `map b`, the key `b` after `a` opens two
+ * branches. The branch `ab` carries on the attempt at `abc`, and the branch `b`
+ * is new. The attempt at `abc` consumes the keystroke `b`: the dispatcher
+ * suppresses the key, and the pending indicator shows it. The binding of `b`
+ * therefore never runs, and a stray key after it runs the binding of `a`.
+ */
+export interface KeyBranch {
+  readonly node: TrieNode;
+  readonly accepted: Option.Option<KeyBinding>;
+}
+
+/**
+ * Every live branch, shallowest first.
+ *
+ * The root is not a branch, so an empty cursor means "at the root". The last
+ * branch is the deepest one, and it is the branch that lived longest. A new
+ * branch is always one key deep, so it goes in front of the others.
+ */
+export type BranchCursor = readonly KeyBranch[];
+
+/**
+ * The branch that this key starts at the root.
+ *
+ * The new branch accepts the binding of the child, and nothing else. `g` and
+ * then `j` scrolls down, as upstream Vimium does, because `j` starts here.
+ */
+export const openBranch = (
+  root: TrieNode,
+  key: string,
+): Option.Option<KeyBranch> => {
+  const child = root.children.get(key);
+  if (child === undefined) return Option.none();
+  return Option.some({ node: child, accepted: child.binding });
+};
+
+/**
+ * Take one key into every live branch.
+ *
+ * A branch whose node has the key moves to the child. A binding on the child
+ * replaces the accepted binding of that branch. A branch whose node does not
+ * have the key is absent from the answer, because it died. Its accepted binding
+ * dies with it.
+ *
+ * An empty answer means that this key ends every live attempt.
+ */
+export const extendBranches = (
+  cursor: BranchCursor,
+  key: string,
+): readonly KeyBranch[] => {
+  const out: KeyBranch[] = [];
+  for (const branch of cursor) {
+    const child = branch.node.children.get(key);
+    if (child === undefined) continue;
+    out.push({
+      node: child,
+      accepted: Option.isSome(child.binding) ? child.binding : branch.accepted,
+    });
+  }
+  return out;
+};
+
+/**
+ * The deepest branch, which is the branch that lived longest.
+ *
+ * The cursor is shallowest first, so the last branch is the deepest one. That
+ * branch decides, and the longest attempt therefore wins.
+ */
+export const deepestBranch = (
+  cursor: BranchCursor,
+): Option.Option<KeyBranch> => {
+  const last = cursor[cursor.length - 1];
+  return last === undefined ? Option.none() : Option.some(last);
+};
+
+/**
+ * Can this branch take another key?
+ *
+ * While it can, the attempt is not finished, and a binding on the node waits.
+ * Firing it at once is what made `map gg` unreachable behind `map g`.
+ */
+export const canExtend = (branch: KeyBranch): boolean =>
+  branch.node.children.size > 0;
+
+// ---------------------------------------------------------------------------
 // Inspection (the help dialog and the tests)
 // ---------------------------------------------------------------------------
 

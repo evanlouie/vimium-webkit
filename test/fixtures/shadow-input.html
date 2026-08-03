@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Shadow input</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+    #widget-host {
+      display: block;
+      border: 1px dashed #06c;
+      padding: 8px;
+      margin: 12px 0;
+      width: 480px;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>Shadow input</h1>
+    <p class="note">
+      A text field inside an <em>open</em> shadow root. A focus event that
+      starts there is retargeted to the host before a window listener sees it,
+      so a check on <code>event.target</code> says that nothing is focused and
+      every key that the user types runs a command.
+    </p>
+
+    <div id="widget-host"></div>
+
+    <p><input id="light-field" type="text" aria-label="a field in the page" /></p>
+
+    <div class="tall"></div>
+    <p id="bottom-marker">bottom of the document</p>
+
+    <script src="assets/shadow-input.js"></script>
+  </body>
+</html>
