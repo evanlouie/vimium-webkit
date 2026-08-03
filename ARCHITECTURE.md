@@ -186,11 +186,14 @@ The credential also has a group of its own in the value store. `frames/Auth.ts`
 builds that group, and it keeps it in a closure. `Storage` neither builds it nor
 exposes it, so no group that a feature can read holds a field for the
 credential. A feature has no name for the value, and the module that owns it
-gives no method that returns it. One path goes around the fiber, and it exists
-for one moment: the page exit. `flushUnsafe` writes the held value with a direct
-call to the backend. The Effect scheduler is a macrotask in a page, so a value
-that waits for the fiber is lost when the document goes away. Section 7 says
-where that path is used.
+gives no method that returns it.
+
+### 5.2 One path goes around the fiber
+
+The page exit is that one moment. `flushUnsafe` writes the held value with a
+direct call to the backend. The Effect scheduler is a macrotask in a page, so a
+value that waits for the fiber is lost when the document goes away. Section 7
+says where that path is used.
 
 ## 6. Errors
 
@@ -250,10 +253,11 @@ decision:
   dispatch. A subscriber of the event bus does not, because it reads the bus on
   another fiber, and the page can be gone by then. The exit hook therefore does
   the work that a dying page must not lose: it writes every held value to the
-  backend with a direct call. The call is `GM_setValue` or
-  `localStorage.setItem`, and it takes no scheduler turn. A flush through the
-  storage actor follows it, and that flush completes only when the page lives
-  on.
+  backend with a direct call. The call is `GM_setValue`, and it takes no
+  scheduler turn. A manager that gives only the promise form has no direct call,
+  so its writes go earlier through the storage actor instead. A flush through
+  the storage actor follows it, and that flush completes only when the page
+  lives on.
 - `pagehide` with `persisted === true` is not a final exit. The page may come
   back from the back/forward cache, and a restored page never runs its scripts
   again. Nothing is released there.
