@@ -113,6 +113,7 @@ test.describe("find", () => {
     expect((await vw.selection()).text).toBe("");
   });
 });
+
 // ---------------------------------------------------------------------------
 // Composed order, and the boundary that the reader sees
 // ---------------------------------------------------------------------------
@@ -246,6 +247,25 @@ test.describe("find in composed order", () => {
 // ---------------------------------------------------------------------------
 
 test.describe("find inside a nested scroll container", () => {
+  test("Escape puts the panel back where the user left it", async ({ vw }) => {
+    await vw.open("/find-nested-scroll.html");
+    const before = await vw.scrollOffsets("#panel");
+    expect(before.y).toBe(0);
+
+    await vw.press("/");
+    await vw.type(QUERY);
+    // The match is far down inside the panel, so the incremental search has to
+    // scroll the panel to show it. Without this the test would prove nothing.
+    await expect.poll(async () => (await vw.scrollOffsets("#panel")).y)
+      .toBeGreaterThan(0);
+
+    await vw.press("Escape");
+
+    await expect.poll(async () => (await vw.scrollOffsets("#panel")).y)
+      .toBe(before.y);
+    await expect.poll(async () => (await vw.scrollOffsets()).y).toBe(0);
+  });
+
   test("the highlight follows the text when the panel scrolls", async ({ vw }) => {
     await vw.open("/find-nested-scroll.html");
     await commitFind(vw, QUERY);

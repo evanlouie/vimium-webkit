@@ -148,6 +148,48 @@ interface ScrollPosition {
   readonly y: number;
 }
 
+/**
+ * Where one scroll container stood before find moved it.
+ *
+ * `scrollIntoView` moves every ancestor that can scroll, and not only the
+ * window. Escape must give each of them back.
+ */
+interface ScrollSnapshot {
+  readonly element: Element;
+  readonly left: number;
+  readonly top: number;
+}
+
+/**
+ * The containers between `element` and the page that can scroll.
+ *
+ * The walk crosses a shadow boundary through the host, because a match inside
+ * an open shadow root has ancestors on both sides of it. `documentElement` and
+ * `body` are left out: the window position is recorded on its own, and it is
+ * the value that a restore must write.
+ */
+const scrollAncestors = (element: Element): ReadonlyArray<Element> => {
+  const found: Element[] = [];
+  let node: Node | null = element;
+  while (node !== null) {
+    if (
+      node instanceof Element && node !== node.ownerDocument?.documentElement &&
+      node !== node.ownerDocument?.body &&
+      (node.scrollHeight > node.clientHeight + 1 ||
+        node.scrollWidth > node.clientWidth + 1)
+    ) {
+      found.push(node);
+    }
+    const parent: Node | null = node.parentNode;
+    node = parent === null
+      ? null
+      : parent instanceof ShadowRoot
+      ? parent.host
+      : parent;
+  }
+  return found;
+};
+
 /** The live highlight overlay, and the scope that owns it. */
 interface LiveHighlight {
   readonly scope: Scope.Closeable;
@@ -243,6 +285,14 @@ export class Find extends Context.Service<Find, {
        * that reads those runs is then partial, however fast the match is.
        */
       const runsPartial = yield* Ref.make(false);
+      /**
+       * Where each nested container stood before find moved it.
+       *
+       * The list is written the first time that find is about to scroll for a
+       * match, and the first value for one container is kept. A cancel puts
+       * every container back, and a commit keeps what the user now sees.
+       */
+      const scrolled = yield* Ref.make<ReadonlyArray<ScrollSnapshot>>([]);
       const sessionFiber = yield* FiberHandle.make<void, never>();
 
       // -- the browser ---------------------------------------------------
@@ -268,6 +318,54 @@ export class Find extends Context.Service<Find, {
           });
           return true;
         }, false));
+
+      const forgetScrollAncestors = Ref.set(scrolled, []);
+
+      /**
+       * Record every container that the next scroll can move.
+       *
+       * It runs before the scroll, and it keeps the value that a container had
+       * when find first touched it. A container that find moves twice is
+       * therefore restored to where the user left it, and not to where the
+       * search before the last one put it.
+       */
+      const recordScrollAncestors = Effect.fn("Find.recordScrollAncestors")(
+        function*(element: Element) {
+          const seen = yield* dom.probeOr<ReadonlyArray<ScrollSnapshot>>(
+            () =>
+              scrollAncestors(element).map((node) => ({
+                element: node,
+                left: node.scrollLeft,
+                top: node.scrollTop,
+              })),
+            [],
+          );
+          if (seen.length === 0) return;
+          yield* Ref.update(scrolled, (current) => {
+            const merged = [...current];
+            for (const snapshot of seen) {
+              const known = merged.some((entry) =>
+                entry.element === snapshot.element
+              );
+              if (!known) merged.push(snapshot);
+            }
+            return merged;
+          });
+        },
+      );
+
+      /** Put every recorded container back, innermost first. */
+      const restoreScrollAncestors = Effect.gen(function*() {
+        const snapshots = yield* Ref.getAndSet(scrolled, []);
+        if (snapshots.length === 0) return;
+        yield* dom.probeOr(() => {
+          for (const snapshot of snapshots) {
+            snapshot.element.scrollLeft = snapshot.left;
+            snapshot.element.scrollTop = snapshot.top;
+          }
+          return true;
+        }, false);
+      });
 
       // -- the highlight overlay -----------------------------------------
 
@@ -477,6 +575,17 @@ export class Find extends Context.Service<Find, {
           return rect.bottom >= 0 && rect.top <= viewport.height &&
             rect.right >= 0 && rect.left <= viewport.width;
         };
+
+        // The record comes before the move, and only when a move is needed.
+        // `scrollIntoView` below moves every ancestor that can scroll, and a
+        // cancel has to give each of them back.
+        const needsScroll = yield* dom.probeOr(() => !inView(), false);
+        if (needsScroll) {
+          const anchor = elementFor(range);
+          if (Option.isSome(anchor)) {
+            yield* recordScrollAncestors(anchor.value);
+          }
+        }
 
         const done = yield* dom.probeOr(() => {
           if (inView()) return true;
@@ -744,14 +853,23 @@ export class Find extends Context.Service<Find, {
         function*(isBackwards: boolean) {
           const committed = yield* Ref.make(false);
           const snapshot = yield* readScroll;
+          // The list belongs to this session. A container that an earlier `n`
+          // moved is not this session to give back.
+          yield* forgetScrollAncestors;
 
           // The one place that undoes what a cancelled search disturbed. It
           // runs for Escape, for a blur, and for an interruption from `clear`
           // or from a second `enter`.
           yield* Effect.addFinalizer(() =>
             Effect.gen(function*() {
-              if (yield* Ref.get(committed)) return;
+              if (yield* Ref.get(committed)) {
+                yield* forgetScrollAncestors;
+                return;
+              }
               yield* clearState;
+              // The nested containers come first, and the window last: a
+              // container that is put back can move the page under it.
+              yield* restoreScrollAncestors;
               yield* restoreScroll(snapshot);
               yield* hud.hide;
             })
@@ -921,6 +1039,9 @@ export class Find extends Context.Service<Find, {
           yield* ensureStyles;
           yield* closePost;
           yield* clearState;
+          // `*` commits at once, so nothing here is ever put back. The list is
+          // dropped so that it holds no element of the page.
+          yield* forgetScrollAncestors;
           yield* refreshRuns();
           // `*` and `#` set the direction outright. Upstream does the same, and
           // it is what makes a following `n` continue the way that the user
@@ -949,6 +1070,9 @@ export class Find extends Context.Service<Find, {
         yield* FiberHandle.clear(sessionFiber);
         yield* closePost;
         yield* clearState;
+        // The list holds an `Element` for each container, so an abandoned list
+        // would hold a subtree of the page as well.
+        yield* forgetScrollAncestors;
         yield* hud.hide;
       });
 
@@ -958,6 +1082,7 @@ export class Find extends Context.Service<Find, {
         Effect.gen(function*() {
           yield* closePost;
           yield* clearState;
+          yield* forgetScrollAncestors;
         })
       );
 
