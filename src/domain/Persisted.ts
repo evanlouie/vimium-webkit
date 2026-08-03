@@ -25,8 +25,11 @@
 
 import { Effect, Option, Schema } from "effect";
 import {
+  describeHintRefusal,
+  hintCharacterCount,
   hintCharacterKey,
   isUsableHintCharacter,
+  readHintCharacters,
 } from "~/domain/HintString.ts";
 
 // ---------------------------------------------------------------------------
@@ -41,6 +44,19 @@ export interface Migration {
   readonly migrate: (data: unknown) => unknown;
 }
 
+/**
+ * A value that a repair changed, and what the user must be told about it.
+ *
+ * A repair keeps what the user chose. The schema alone can only refuse a whole
+ * field, and a refused field takes every character with it.
+ */
+export interface Repair {
+  /** The data that the schema then reads. */
+  readonly value: unknown;
+  /** One line for each field that changed. Empty when nothing changed. */
+  readonly notices: readonly string[];
+}
+
 /** Everything that `platform/Storage.ts` needs to hold one group. */
 export interface GroupSpec<A> {
   readonly name: string;
@@ -48,6 +64,13 @@ export interface GroupSpec<A> {
   readonly defaults: () => A;
   readonly schemaVersion: number;
   readonly migrations?: readonly Migration[];
+  /**
+   * Repair the data before the schema reads it, and say what changed.
+   *
+   * Storage calls it on the way in and on the way out. It must be pure, and it
+   * must be idempotent: a repaired value repairs to itself, with no notice.
+   */
+  readonly repair?: (data: unknown) => Repair;
   /** Join rapid writes. `0` writes at once. */
   readonly writeDebounceMs?: number;
 }
@@ -128,7 +151,7 @@ const usableCharacters = (value: string): boolean =>
  * emoji passed the check and then gave no prefix-free code at all.
  */
 const atLeastTwoCharacters = (value: string): boolean =>
-  codePoints(value).length >= 2;
+  hintCharacterCount(value) >= 2;
 
 /** A search template without `%s` silently discards whatever the user typed. */
 const hasQueryPlaceholder = (value: string): boolean => value.includes("%s");
@@ -288,12 +311,91 @@ export const defaultSettings = (): Settings =>
 
 export const SETTINGS_SCHEMA_VERSION = 1;
 
+// ---------------------------------------------------------------------------
+// The repair of a hint character set
+// ---------------------------------------------------------------------------
+
+/** The name that the user reads for a field of hint characters. */
+const HINT_FIELDS: ReadonlyMap<string, string> = new Map([
+  ["linkHintCharacters", "Link hint characters"],
+  ["linkHintNumbers", "Hint number characters"],
+]);
+
+/**
+ * Name one character for the user.
+ *
+ * The code point is always given. A character that has no shape cannot be
+ * shown at all, so the message would name nothing without it.
+ */
+const showCharacter = (char: string): string => {
+  const code = char.codePointAt(0) ?? 0;
+  const point = `U+${code.toString(16).toUpperCase().padStart(4, "0")}`;
+  return isUsableHintCharacter(char) ? `${char} (${point})` : point;
+};
+
+/**
+ * Repair the two hint character fields of a stored settings object.
+ *
+ * A stored value can become invalid after an upgrade, and a user can edit the
+ * value in the storage viewer of the manager. Without this step the whole
+ * field falls back to the shipped set, and nothing tells the user.
+ *
+ * The repair keeps every character that can be a hint, drops the others, and
+ * gives one line for each field that it changed. A field that keeps fewer than
+ * two characters is left alone: the schema then refuses it, and the line says
+ * that the shipped set is in use.
+ */
+export const repairSettings = (data: unknown): Repair => {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    return { value: data, notices: [] };
+  }
+
+  const source = data as Record<string, unknown>;
+  const next: Record<string, unknown> = { ...source };
+  const notices: string[] = [];
+
+  for (const [key, label] of HINT_FIELDS) {
+    const offered = source[key];
+    if (typeof offered !== "string") continue;
+
+    const { characters, dropped } = readHintCharacters(offered);
+    const repaired = characters.join("");
+    if (repaired === offered) continue;
+
+    const reasons = dropped
+      .map((drop) =>
+        `${showCharacter(drop.char)} was removed, because ${
+          describeHintRefusal(drop.refusal)
+        }`
+      )
+      .join("; ");
+    // A set can change with no character removed. NFC joins a letter and the
+    // accent that follows it into one character.
+    const detail = reasons.length > 0
+      ? reasons
+      : "each character was composed to one code point";
+
+    if (characters.length >= 2) {
+      next[key] = repaired;
+      notices.push(`${label}: ${detail}. The set in use is "${repaired}".`);
+      continue;
+    }
+    notices.push(
+      `${label}: ${detail}. Fewer than two characters are left, so the ` +
+        "shipped set is in use.",
+    );
+  }
+
+  return { value: next, notices };
+};
+
 export const settingsGroup: GroupSpec<Settings> = {
   name: "settings",
   schema: settingsSchema,
   defaults: defaultSettings,
   schemaVersion: SETTINGS_SCHEMA_VERSION,
   migrations: [],
+  repair: repairSettings,
   writeDebounceMs: 250,
 };
 

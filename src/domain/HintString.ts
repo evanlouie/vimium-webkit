@@ -14,6 +14,23 @@
 // oxlint-disable-next-line typescript/no-misused-spread
 const codePoints = (value: string): readonly string[] => [...value];
 
+/**
+ * The composed form of a string.
+ *
+ * One hint character is one code point *after* NFC. The same alphabet, pasted
+ * from two sources, must give one alphabet: `"é"` as one code point and `"é"`
+ * as `e` plus a combining acute are the same letter for the user. NFC gives
+ * the shorter of the two, so the letter stays one hint character.
+ *
+ * NFC, and not NFD: NFD makes an accent a character of its own, and an accent
+ * alone is not a label that a user can read or type.
+ */
+const toNfc = (value: string): string => value.normalize("NFC");
+
+/** How many characters a string holds, counted by code point after NFC. */
+export const hintCharacterCount = (value: string): number =>
+  codePoints(toNfc(value)).length;
+
 /** Reverse by code point, so an astral character in a custom alphabet survives. */
 export const reverseString = (value: string): string =>
   // The split into code points is intentional. A hint alphabet holds
@@ -43,13 +60,58 @@ const isSurrogateHalf = (char: string): boolean => {
 };
 
 /**
+ * A hint character must be a letter, a number, a punctuation mark or a symbol.
+ *
+ * The four categories are the characters that have a shape of their own. Every
+ * other category breaks a label:
+ *
+ * - A mark (`\p{M}`) draws on the character before it. A combining acute alone
+ *   is not a label.
+ * - A format character (`\p{Cf}`) draws nothing. The variation selector
+ *   U+FE0F and the zero width joiner are the two that a user meets, because
+ *   they hide inside an emoji that was copied from a message.
+ * - A control character, a surrogate half and a private use character
+ *   (`\p{C}`) have no agreed shape.
+ * - A space (`\p{Z}`) gives a label that looks empty.
+ *
+ * With this filter each character of an alphabet is also one grapheme, so the
+ * prefix match can stay a comparison of code points.
+ */
+const VISIBLE_CATEGORIES = /^[\p{L}\p{N}\p{P}\p{S}]$/u;
+
+/** Why a character cannot be a hint character. */
+export type HintRefusal =
+  | "half-character"
+  | "invisible"
+  | "case-fold"
+  | "duplicate";
+
+/** One sentence for the user, for each refusal. */
+export const describeHintRefusal = (refusal: HintRefusal): string => {
+  switch (refusal) {
+    case "half-character":
+      return "it is half of a character";
+    case "invisible":
+      return "it is not a letter, a number, a punctuation mark or a symbol";
+    case "case-fold":
+      return "a case fold makes it two characters";
+    case "duplicate":
+      return "it repeats an earlier character";
+  }
+};
+
+/**
  * Can this character be one character of a hint label?
  *
- * The character must be one code point, and it must stay one code point
- * through the whole case fold. Four characters break that rule:
+ * The character must be one code point, it must have a shape of its own, and
+ * it must stay one code point through the whole case fold. Five kinds of
+ * character break those rules:
  *
  * - Half of a surrogate pair is not a character at all. It comes from a value
  *   that was cut at a UTF-16 boundary.
+ * - An invisible character gives a label that the user cannot see. The
+ *   variation selector U+FE0F is the one that a user meets, because it hides
+ *   inside a copied emoji.
  * - The Turkish dotted capital I becomes the Latin i plus a combining dot.
  *   The alphabet then holds a second Latin i, and two hints show the same
  *   label.
@@ -58,12 +120,57 @@ const isSurrogateHalf = (char: string): boolean => {
  *
  * A label that grows to two characters is a label that the user cannot type.
  */
-export const isUsableHintCharacter = (char: string): boolean => {
-  if (codePoints(char).length !== 1) return false;
-  if (char.trim().length === 0) return false;
-  if (isSurrogateHalf(char)) return false;
-  if (codePoints(char.toLowerCase()).length !== 1) return false;
-  return codePoints(hintCharacterKey(char)).length === 1;
+export const isUsableHintCharacter = (char: string): boolean =>
+  refuseHintCharacter(char) === null;
+
+/** Why this character is refused, or `null` when it is accepted. */
+export const refuseHintCharacter = (char: string): HintRefusal | null => {
+  if (codePoints(char).length !== 1) return "half-character";
+  if (isSurrogateHalf(char)) return "half-character";
+  if (!VISIBLE_CATEGORIES.test(char)) return "invisible";
+  if (codePoints(char.toLowerCase()).length !== 1) return "case-fold";
+  if (codePoints(hintCharacterKey(char)).length !== 1) return "case-fold";
+  return null;
+};
+
+/** One character of a set that was refused, and the reason. */
+export interface DroppedHintCharacter {
+  readonly char: string;
+  readonly refusal: HintRefusal;
+}
+
+/** The characters that a set gives, and the characters that it loses. */
+export interface HintAlphabet {
+  readonly characters: readonly string[];
+  readonly dropped: readonly DroppedHintCharacter[];
+}
+
+/**
+ * Read a character set from the user.
+ *
+ * The value is composed with NFC first. Each code point is then accepted,
+ * refused for its own reason, or dropped as a repeat of an earlier character.
+ * Every accepted character is lowercase, so the label and the keystroke agree.
+ */
+export const readHintCharacters = (characters: string): HintAlphabet => {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const dropped: DroppedHintCharacter[] = [];
+  for (const char of codePoints(toNfc(characters))) {
+    const refusal = refuseHintCharacter(char);
+    if (refusal !== null) {
+      dropped.push({ char, refusal });
+      continue;
+    }
+    const key = hintCharacterKey(char);
+    if (seen.has(key)) {
+      dropped.push({ char, refusal: "duplicate" });
+      continue;
+    }
+    seen.add(key);
+    out.push(char.toLowerCase());
+  }
+  return { characters: out, dropped };
 };
 
 /**
@@ -73,24 +180,17 @@ export const isUsableHintCharacter = (char: string): boolean => {
  * of one character cannot give a prefix-free code at all. Both cases give the
  * fallback, instead of hints that the user cannot type.
  *
- * A character that a case fold expands or that collides with an earlier
- * character is dropped. The result is therefore a sequence of distinct code
- * points, and each one is one hint character.
+ * A character that a case fold expands, a character that has no shape, and a
+ * character that collides with an earlier one are dropped. The result is
+ * therefore a sequence of distinct visible code points, and each one is one
+ * hint character.
  */
 export const normaliseHintCharacters = (
   characters: string,
   fallback: string,
 ): string => {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const char of codePoints(characters)) {
-    if (!isUsableHintCharacter(char)) continue;
-    const key = hintCharacterKey(char);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(char.toLowerCase());
-  }
-  return out.length >= 2 ? out.join("") : fallback;
+  const alphabet = readHintCharacters(characters).characters;
+  return alphabet.length >= 2 ? alphabet.join("") : fallback;
 };
 
 /**
@@ -159,6 +259,9 @@ export const matchByPrefix = (
   if (typed.length === 0) return hints.map((_, index) => index);
   const out: number[] = [];
   for (let index = 0; index < hints.length; index++) {
+    // A count of UTF-16 units is enough here. `startsWith` compares whole
+    // units, and both strings are built from the same alphabet, so a prefix
+    // can never end inside a character.
     if (hints[index]?.startsWith(typed) === true) out.push(index);
   }
   return out;

@@ -148,6 +148,10 @@ export const filterHints = (
  * How many first characters of `hintString` the digit queue used.
  *
  * The marker shows the part that is already typed in a weaker colour.
+ *
+ * A count of UTF-16 units is enough here. The number is used against the same
+ * string that it came from, and `startsWith` compares whole units, so the cut
+ * can never fall inside a character.
  */
 export const matchedPrefixLength = (
   hintString: string,
