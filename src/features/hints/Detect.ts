@@ -491,6 +491,50 @@ const parseCoords = (area: HTMLAreaElement): readonly number[] =>
   area.coords.split(",").map((coord) => Number.parseInt(coord.trim(), 10));
 
 /**
+ * The map name that a `usemap` attribute holds, without the leading `#`.
+ *
+ * An empty name names no map. The HTML standard says the same, so an
+ * `<img usemap="#">` gets no hint, and the pass goes on.
+ */
+export const mapNameOf = (usemap: string): Option.Option<string> => {
+  const name = usemap.startsWith("#") ? usemap.slice(1) : usemap;
+  return name.length === 0 ? Option.none() : Option.some(name);
+};
+
+/**
+ * The `<map>` that `usemap` names, found by iteration.
+ *
+ * The name comes from the page. It can hold a quotation mark, a backslash, a
+ * bracket, a colon, a space, an emoji or a control character. A selector that
+ * is built by joining strings then throws a `SyntaxError`, or it matches the
+ * wrong element. `map[name="a\\"]` is unterminated, and `map[name="a\b"]`
+ * reads `\b` as a hexadecimal escape. One such name used to stop the whole
+ * hint pass, and the page lost every hint, not only this one.
+ *
+ * `CSS.escape` exists in every engine that this application supports, and it
+ * would repair the escaping. A selector is still not necessary here.
+ * Iteration and one string comparison work in an engine that has no
+ * `CSS.escape`, they need no capability probe, and they cannot throw. No name
+ * from the page ever becomes a selector.
+ *
+ * The first map in tree order wins, as `querySelector` did. The comparison is
+ * exact, as an attribute selector is. A name that matches no map gives
+ * `Option.none()`, the image gets no hint, and every other element on the page
+ * keeps its own.
+ */
+export const findImageMap = (
+  document: Document,
+  usemap: string,
+): Option.Option<Element> => {
+  const name = mapNameOf(usemap);
+  if (Option.isNone(name)) return Option.none();
+  for (const map of document.getElementsByTagName("map")) {
+    if (map.getAttribute("name") === name.value) return Option.some(map);
+  }
+  return Option.none();
+};
+
+/**
  * The rects of the `<area>` elements of an image map.
  *
  * Ported from `DomUtils.getClientRectsForAreas`. A circle is approximated by
@@ -514,15 +558,14 @@ const imageMapHints = (
   const imageRect = element.getClientRects()[0];
   if (imageRect === undefined) return Option.some([]);
 
-  const name = rawName.replace(/^#/, "").replaceAll('"', '\\"');
-  const map = options.document.querySelector(`map[name="${name}"]`);
-  if (map === null) return Option.some([]);
+  const map = findImageMap(options.document, rawName);
+  if (Option.isNone(map)) return Option.some([]);
   if (!isRendered(element, options.capabilities, options.window)) {
     return Option.some([]);
   }
 
   const hints: LocalHint[] = [];
-  for (const area of map.getElementsByTagName("area")) {
+  for (const area of map.value.getElementsByTagName("area")) {
     const coords = parseCoords(area);
     const shape = area.shape.toLowerCase();
 
