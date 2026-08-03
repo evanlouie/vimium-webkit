@@ -31,8 +31,7 @@ export type { EffectiveRule };
  *
  * A dropped rule stops protecting the page, and the page then becomes active
  * again where the user turned it off. Silence there is the fault. The settings
- * dialog marks the same rules, and this log line reaches a user who never
- * opens the dialog.
+ * dialog lists the same rules. The log also records each drop for diagnosis.
  */
 const warnAboutDropped = (set: ExclusionSet): Effect.Effect<void> =>
   Effect.forEach(

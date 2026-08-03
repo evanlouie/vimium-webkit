@@ -146,6 +146,18 @@ describe("the settings form", () => {
       assert.deepEqual(notes.truncated, []);
     }));
 
+  it.effect("lists an exclusion rule that gives no matcher", () =>
+    Effect.sync(() => {
+      const notes = formNotes([{
+        field: field("exclusionRules"),
+        text: "https://good.test/*\n/(a+)+$/",
+      }]);
+      assert.strictEqual(notes.dropped.length, 1);
+      assert.include(notes.dropped[0] ?? "", "line 2");
+      assert.include(notes.dropped[0] ?? "", "/(a+)+$/");
+      assert.include(notes.dropped[0] ?? "", "can hang the page");
+    }));
+
   it.effect("says that it brought a number into range", () =>
     Effect.sync(() => {
       // A number that is out of range does **not** keep its stored value: the
@@ -183,6 +195,7 @@ describe("the settings form", () => {
         refused: [],
         clamped: [],
         truncated: [],
+        dropped: [],
       });
     }));
 
