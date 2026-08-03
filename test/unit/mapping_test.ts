@@ -372,6 +372,20 @@ describe("the trie walk", () => {
         assert.strictEqual(decision(cursor), "scrollUp");
       }));
 
+    it.effect("gives the deepest branch even when it accepted nothing", () =>
+      Effect.sync(() => {
+        // `ab` accepted nothing, and it is deeper than the new branch `b`,
+        // which accepted `scrollDown`. The deepest branch still decides.
+        const uneven = compile("map abz showHelp\nmap b scrollDown").trie;
+        const cursor = [
+          start(uneven, "b"),
+          ...extendBranches([start(uneven, "a")], "b"),
+        ];
+
+        assert.lengthOf(cursor, 2);
+        assert.strictEqual(decision(cursor), "none");
+      }));
+
     it.effect("drops the accepted binding when the branch dies", () =>
       Effect.sync(() => {
         const live = extendBranches([start(overlapping, "a")], "b");

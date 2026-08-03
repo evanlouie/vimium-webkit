@@ -297,7 +297,9 @@ export class Keyboard extends Context.Service<Keyboard, {
           // longest accepted a binding. The binding runs now, with the count
           // that the user typed in front of it. The key then starts again at
           // the root. Without this, `map g scrollUp` could never run while
-          // `map gg scrollToTop` also existed.
+          // `map gg scrollToTop` also existed. The deepest dead branch decides
+          // even when it accepted nothing, and a shallower dead branch with a
+          // binding is then dropped in silence.
           if (
             extended.length === 0 && Option.isSome(deepestDead) &&
             Option.isSome(deepestDead.value.accepted)
@@ -380,6 +382,9 @@ export class Keyboard extends Context.Service<Keyboard, {
           if (Option.isNone(rawKey)) return CONTINUE_BUBBLING;
           const raw = rawKey.value;
 
+          // The pass counter comes before every other rule, so Escape goes to
+          // the page and spends one pass. That is the point of the command: it
+          // gives any key to the page, and Escape is a key.
           const remaining = yield* Ref.get(passNext);
           if (remaining > 0) {
             yield* Ref.set(passNext, remaining - 1);
@@ -403,6 +408,8 @@ export class Keyboard extends Context.Service<Keyboard, {
 
           // A pass key applies to a new sequence only. Once the user has
           // committed to `g`, the next key is ours even if it is in the set.
+          // A count starts a sequence as well, so `3 j` runs our binding for
+          // `j` even when the user gave `j` to the page.
           if (atRoot && isPassKey(exclusions.effectiveUnsafe(), raw)) {
             return CONTINUE_BUBBLING;
           }

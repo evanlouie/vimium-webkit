@@ -584,7 +584,115 @@ describe("Keyboard", () => {
             assert.deepEqual(yield* Ref.get(calls), ["scrollLeft:1"]);
           }).pipe(Effect.provide(deadBranch)));
       });
+
+      /**
+       * Two dead branches, at two depths, and only one of them holds a binding.
+       *
+       * The branch `ab` accepted nothing, and it is the deeper of the two. The
+       * branch `b` accepted `scrollDown`, and it is one key deep. The key `x`
+       * kills both. The deepest one lived longest, so it decides, and it runs
+       * no command. The shallower one goes in silence.
+       */
+      describe("two dead branches at two depths", () => {
+        const uneven = layerFor({
+          mappings: [
+            "map abz scrollToTop",
+            "map b scrollDown",
+            "map bz scrollLeft",
+          ].join("\n"),
+        });
+
+        const unevenNames = ["scrollToTop", "scrollDown", "scrollLeft"];
+
+        it.effect("drops a shallower dead branch that holds a binding", () =>
+          Effect.gen(function*() {
+            const stack = yield* HandlerStack;
+            const calls = yield* recorder(unevenNames);
+
+            yield* stack.bubble("keydown", asEvent(new Press("a")));
+            yield* stack.bubble("keydown", asEvent(new Press("b")));
+            const stray = new Press("x");
+            yield* stack.bubble("keydown", asEvent(stray));
+
+            // The deepest dead branch decides, and it accepted nothing.
+            assert.deepEqual(yield* Ref.get(calls), []);
+            // The key ended a half-typed sequence, so it stays with us.
+            assert.isTrue(stray.defaultPrevented);
+          }).pipe(Effect.provide(uneven)));
+
+        it.effect("runs the shallower binding when it is the only branch", () =>
+          Effect.gen(function*() {
+            const stack = yield* HandlerStack;
+            const calls = yield* recorder(unevenNames);
+
+            // The same keys with no `a` in front. The branch `b` is then the
+            // only one, so its binding runs. The pair of tests shows that the
+            // depth alone decides in the test above.
+            yield* stack.bubble("keydown", asEvent(new Press("b")));
+            yield* stack.bubble("keydown", asEvent(new Press("x")));
+
+            assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
+          }).pipe(Effect.provide(uneven)));
+      });
     });
+  });
+
+  /**
+   * The count prefix is a half-typed command of its own.
+   *
+   * A digit starts a sequence, exactly as a key prefix does. Every rule that
+   * asks whether the user is at the root therefore reads the count as well.
+   */
+  describe("a count in front of a key", () => {
+    it.effect("keeps a stray key away from the page", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder(["scrollDown"]);
+
+        yield* stack.bubble(
+          "keydown",
+          asEvent(new Press("5", { code: "Digit5" })),
+        );
+        const stray = new Press("x");
+        const toPage = yield* stack.bubble("keydown", asEvent(stray));
+
+        // The count made this key part of a half-typed command. The user is
+        // in the middle of a sequence, so the page must not see the key.
+        assert.isFalse(toPage);
+        assert.isTrue(stray.defaultPrevented);
+        assert.deepEqual(yield* Ref.get(calls), []);
+
+        // The stray key ended the count, so the next key counts as one.
+        yield* stack.bubble("keydown", asEvent(new Press("j")));
+        assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
+      }).pipe(Effect.provide(layerFor({ mappings: "map j scrollDown" }))));
+
+    it.effect("takes a pass key that a count starts", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder(["scrollDown"]);
+
+        // The user gave `j` to the page, so `j` alone goes to the page.
+        const promised = new Press("j");
+        assert.isTrue(yield* stack.bubble("keydown", asEvent(promised)));
+        assert.isFalse(promised.defaultPrevented);
+        assert.deepEqual(yield* Ref.get(calls), []);
+
+        yield* stack.bubble(
+          "keydown",
+          asEvent(new Press("3", { code: "Digit3" })),
+        );
+        const ours = new Press("j");
+        const toPage = yield* stack.bubble("keydown", asEvent(ours));
+
+        // The count started a sequence, so the pass rule no longer applies.
+        assert.deepEqual(yield* Ref.get(calls), ["scrollDown:3"]);
+        assert.isFalse(toPage);
+        assert.isTrue(ours.defaultPrevented);
+      }).pipe(Effect.provide(layerFor({
+        mappings: "map j scrollDown",
+        exclusion: { enabled: true, passKeys: "j" },
+      }))));
   });
 
   /**
