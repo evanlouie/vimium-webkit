@@ -259,13 +259,23 @@ prove that the expression is ambiguous, because such an expression can make the
 tab stop answering. `\s+\s+\s+` and `(a+)+$` are refused. `(cat|car)+` and
 `^https?://([a-z0-9-]+\.)*example\.com/.*$` are accepted.
 
+The check reads inside a lookahead and a lookbehind as well.
+`^(?=.*foo)(?=.*bar)` is accepted, because nothing before the two assertions can
+vary. `.*(?=.*x)` is refused, because the body of the assertion runs again for
+each way that the `.*` before it can match. An expression may hold at most eight
+assertions.
+
 The check does not promise a linear match, so a budget holds the limit as well:
 
 - An exclusion rule with a raw expression reads at most 512 characters of the
-  URL. It does not match a URL that is longer than that.
-- Find reads the page text in windows and stops at a time limit. The HUD then
-  says `stopped at the time limit`, and the counts are the counts of the text
-  that was read.
+  URL. It does not match a URL that is longer than that. A page can make its own
+  URL longer than 512 characters, and it then escapes the rule. Write the rule
+  as a glob for such a page: a glob reads 4096 characters.
+- Find reads the page text in windows, measures each window, and makes the next
+  window smaller when a window costs too much. It stops at a time limit, and at
+  a match that is longer than 65 536 characters. The HUD then says
+  `stopped before the end of the page`, and the counts are the counts of the
+  text that was read.
 
 The script drops a rule that the check refuses. It writes a warning to the
 console, it says so in the HUD when you save, and it marks the line in the
