@@ -346,18 +346,16 @@ describe("Storage", () => {
       yield* Effect.gen(function*() {
         const storage = yield* Storage;
         yield* storage.session.write({
-          frameSecret: "secret",
           knownTabs: [],
           acknowledged: ["one"],
           zoomByOrigin: {},
         });
-        assert.strictEqual(
-          storage.session.currentUnsafe().frameSecret,
-          "secret",
+        assert.deepEqual(
+          storage.session.currentUnsafe().acknowledged,
+          ["one"],
         );
 
         const reread = yield* storage.session.hydrate;
-        assert.strictEqual(reread.frameSecret, "secret");
         assert.deepEqual(reread.acknowledged, ["one"]);
       }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
     }));
@@ -369,15 +367,14 @@ describe("Storage", () => {
       yield* Effect.gen(function*() {
         const storage = yield* Storage;
         yield* storage.session.write({
-          frameSecret: "secret",
           knownTabs: [],
-          acknowledged: [],
+          acknowledged: ["one"],
           zoomByOrigin: {},
         });
         assert.isTrue(Option.isSome(yield* backend.read(SESSION_KEY)));
 
         const defaults = yield* storage.session.reset;
-        assert.strictEqual(defaults.frameSecret, "");
+        assert.deepEqual(defaults.acknowledged, []);
         assert.isTrue(Option.isNone(yield* backend.read(SESSION_KEY)));
       }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
     }));

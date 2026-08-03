@@ -22,6 +22,11 @@
  * returns it. A caller can ask for a proof, for a check of a proof and for the
  * cipher of one link, and each of those builds its own payload.
  *
+ * The credential also has a group of its own in the value store, and this
+ * module is the only one that builds that group. `Storage` does not expose it,
+ * and the type of every group that `Storage` does expose holds no field for
+ * it. A feature therefore has no name for the credential. Read issue #3.
+ *
  * ## The cipher of one link
  *
  * A page reads every `message` event that a window of the page receives, so it
@@ -68,7 +73,7 @@
  * the safe result as well.
  */
 
-import { Context, Effect, Layer, Option, Ref, Schema } from "effect";
+import { Context, Effect, Layer, Option, Queue, Ref, Schema } from "effect";
 import {
   ENVELOPE,
   joinProofPayload,
@@ -77,9 +82,10 @@ import {
   sealedAad,
   type SealedMessage,
 } from "~/domain/FrameMessage.ts";
+import { frameCredentialGroup } from "~/domain/Persisted.ts";
 import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 import { Realm } from "~/platform/Realm.ts";
-import { Storage } from "~/platform/Storage.ts";
+import { makeGroup, type StorageError } from "~/platform/Storage.ts";
 
 export const FrameAuthFailureReason = Schema.Literals([
   /** This realm has no Web Crypto, or storage is not reachable. */
@@ -238,15 +244,39 @@ export class FrameAuth extends Context.Service<FrameAuth, {
   static readonly layer: Layer.Layer<
     FrameAuth,
     never,
-    Storage | Realm | KeyValueStore
+    Realm | KeyValueStore
   > = Layer
     .effect(
       FrameAuth,
       Effect.gen(function*() {
-        const storage = yield* Storage;
         const realm = yield* Realm;
         const kv = yield* KeyValueStore;
         const cache = yield* Ref.make(Option.none<CachedKey>());
+
+        /**
+         * The store of the credential, and of nothing else.
+         *
+         * This module builds the group, and it keeps it in this closure. No
+         * service publishes it, so a feature cannot read the credential. The
+         * group gives the same serial mailbox that every other group has, so a
+         * read and a write of the credential cannot interleave.
+         */
+        const issues = yield* Queue.unbounded<StorageError>();
+        const store = yield* makeGroup(frameCredentialGroup, kv, issues);
+
+        // A failure of the store also reaches the caller as a
+        // `FrameAuthError`, so this line is a record and not the only signal.
+        yield* Effect.forkScoped(
+          Effect.forever(
+            Effect.flatMap(
+              Queue.take(issues),
+              (issue) =>
+                Effect.logDebug(
+                  `the credential store failed: ${issue.detail}`,
+                ),
+            ),
+          ),
+        );
 
         /** Web Crypto, read again for each call, and never held. */
         const subtle: Effect.Effect<SubtleCrypto, FrameAuthError> = Effect
@@ -303,8 +333,8 @@ export class FrameAuth extends Context.Service<FrameAuth, {
         const secret = Effect.fn("FrameAuth.secret")(function*() {
           yield* privateStore;
 
-          const stored = yield* storage.session.hydrate;
-          if (stored.frameSecret.length > 0) return stored.frameSecret;
+          const stored = yield* store.hydrate;
+          if (stored.secret.length > 0) return stored.secret;
 
           if (!realm.isTop) {
             return yield* new FrameAuthError({
@@ -320,17 +350,21 @@ export class FrameAuth extends Context.Service<FrameAuth, {
           // while this frame collects its random bytes. A credential that is
           // already in use must not be replaced: the two ends of a live link
           // derived their key from it, and a new value would break them.
-          const again = yield* storage.session.hydrate;
-          if (again.frameSecret.length > 0) return again.frameSecret;
+          //
+          // The value store gives no compare-and-set, so this makes the window
+          // small and does not close it. A frame that loses converges on the
+          // next read, and a join inside the window fails and is repeated.
+          const again = yield* store.hydrate;
+          if (again.secret.length > 0) return again.secret;
 
           yield* Effect.mapError(
-            storage.session.update((current) =>
+            store.update((current) =>
               // The same test again, against the value that the group holds.
               // Another tab can reach this group through the change stream of
               // the manager between the read and the write.
-              current.frameSecret.length > 0 ? current : {
+              current.secret.length > 0 ? current : {
                 ...current,
-                frameSecret: created,
+                secret: created,
               }
             ),
             (cause) =>
@@ -342,8 +376,8 @@ export class FrameAuth extends Context.Service<FrameAuth, {
 
           // Keep the value that storage holds, and not the value that this
           // frame made. The two differ when another tab wrote last.
-          const settled = yield* storage.session.hydrate;
-          return settled.frameSecret.length > 0 ? settled.frameSecret : created;
+          const settled = yield* store.hydrate;
+          return settled.secret.length > 0 ? settled.secret : created;
         });
 
         const keyFor = Effect.fn("FrameAuth.key")(function*(value: string) {
