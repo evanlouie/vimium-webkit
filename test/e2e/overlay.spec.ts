@@ -626,13 +626,16 @@ test.describe("the overlay under an ancestor rule of class 1", () => {
 
     // An honest page removes `will-change` after the animation. No scroll
     // follows. The next layer access must measure and remove the old shift.
+    //
+    // Not every engine keeps the old shift. Firefox puts the host back at the
+    // moment the rule goes, so the stale offset never exists there. The engines
+    // that do keep it are the reason this test exists. Record which engine this
+    // is, and then make the same demand of both: the hints must draw where the
+    // user can see them.
     await styleRoot(page, "");
-    expect(
-      Math.abs(
-        (await page.locator("vimium-webkit-overlay").boundingBox())?.y ?? 0,
-      ),
-    )
-      .toBeGreaterThan(100);
+    const staleOffset = Math.abs(
+      (await page.locator("vimium-webkit-overlay").boundingBox())?.y ?? 0,
+    );
 
     await vw.startHints();
     const viewport = page.viewportSize() ?? { width: 1280, height: 800 };
@@ -644,6 +647,21 @@ test.describe("the overlay under an ancestor rule of class 1", () => {
         box.top < viewport.height
       ),
     ).toBe(true);
+
+    // The host is back at the top of the viewport, whether the engine kept the
+    // old shift or removed it itself.
+    expect(
+      Math.abs(
+        (await page.locator("vimium-webkit-overlay").boundingBox())?.y ?? 1000,
+      ),
+    ).toBeLessThan(2);
+
+    // Say which path this engine took, so a later reader knows the test still
+    // covers the engines that keep the old shift.
+    test.info().annotations.push({
+      type: "stale offset after the rule went",
+      description: `${staleOffset.toFixed(0)} px`,
+    });
   });
 });
 
