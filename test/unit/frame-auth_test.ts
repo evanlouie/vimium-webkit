@@ -60,6 +60,7 @@ const makeStore = (managerPrivate: boolean): Store => {
   return {
     map,
     service: KeyValueStore.of({
+      setUnsafe: null,
       kind: managerPrivate ? "gm-sync" : "memory",
       durable: managerPrivate,
       watchable: false,
@@ -149,6 +150,7 @@ const makeRacingStore = (rival: string): Store => {
   return {
     map,
     service: KeyValueStore.of({
+      setUnsafe: null,
       kind: "gm-sync",
       durable: true,
       watchable: false,

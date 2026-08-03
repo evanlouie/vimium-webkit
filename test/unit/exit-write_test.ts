@@ -86,6 +86,7 @@ const makeBackend = (): Backend => {
     layer: Layer.succeed(
       KeyValueStore,
       KeyValueStore.of({
+        managerPrivate: true,
         kind: "gm-sync",
         durable: true,
         watchable: false,

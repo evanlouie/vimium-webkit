@@ -72,6 +72,9 @@ const storeLayer: Layer.Layer<KeyValueStore> = Layer.sync(
         Effect.sync(() => {
           map.delete(key);
         }),
+      setUnsafe: (key, value) => {
+        map.set(key, value);
+      },
       changes: () => Stream.empty,
     });
   },
