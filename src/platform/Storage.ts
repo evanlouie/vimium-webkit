@@ -183,7 +183,15 @@ const describeCause = (cause: unknown): string => {
   return String(cause);
 };
 
-const makeGroup = <A>(
+/**
+ * Build one value group over the value store.
+ *
+ * It is exported for a module that must own a group of its own, and not share
+ * it. `frames/Auth.ts` builds the group of the frame credential in that way,
+ * so no feature can read that value through `Storage`. Every other group
+ * belongs to `Storage` and is reached through the service.
+ */
+export const makeGroup = <A>(
   spec: GroupSpec<A>,
   kv: KeyValueStore["Service"],
   issues: Queue.Queue<StorageError>,

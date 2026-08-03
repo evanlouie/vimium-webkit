@@ -182,6 +182,12 @@ is the only holder of such a value. With no manager store the frames of the page
 stay apart. That is the safe result, because a page that can join the session
 can drive a click inside a document of another origin.
 
+The credential also has a group of its own in the value store. `frames/Auth.ts`
+builds that group, and it keeps it in a closure. `Storage` neither builds it nor
+exposes it, so no group that a feature can read holds a field for the
+credential. A feature has no name for the value, and the module that owns it
+gives no method that returns it.
+
 ## 6. Errors
 
 Every error is a `Schema.TaggedErrorClass`. A `reason` field is used when the

@@ -406,8 +406,6 @@ export const historyGroup: GroupSpec<HistoryIndex> = {
 // ---------------------------------------------------------------------------
 
 export const sessionSchema = Schema.Struct({
-  /** HMAC key shared by userscript frames through manager-private storage. */
-  frameSecret: field(Schema.String, ""),
   /** Tabs we opened via `GM_openInTab`, heartbeated so Omnibar-lite can list them. */
   knownTabs: Schema.mutable(Schema.Array(
     Schema.Struct({
@@ -439,14 +437,46 @@ export const sessionGroup: GroupSpec<SessionState> = {
   name: "session",
   schema: sessionSchema,
   defaults: (): SessionState => ({
-    frameSecret: "",
     knownTabs: [],
     acknowledged: [],
     zoomByOrigin: {},
   }),
   schemaVersion: SESSION_SCHEMA_VERSION,
-  // The frame-authentication credential must reach sibling frames before the
-  // first handshake. Session writes are small; correctness is worth the extra
-  // manager calls.
+  // A heartbeat and a zoom factor are small, and another tab reads them. A
+  // write that waits would show the user a stale list of tabs.
+  writeDebounceMs: 0,
+};
+
+// ---------------------------------------------------------------------------
+// The credential of the cross-frame session
+// ---------------------------------------------------------------------------
+
+/**
+ * The credential that admits a frame to the cross-frame session.
+ *
+ * It has a group of its own, and `Storage` does not expose that group. A
+ * feature that reads `Storage.session` therefore has no field that can hold
+ * the credential, and it cannot name the group either.
+ *
+ * `frames/Auth.ts` builds this group over the value store of the manager, and
+ * no other module imports this specification. The credential stays inside the
+ * one module that needs it. Read issue #3.
+ */
+export const frameCredentialSchema = Schema.Struct({
+  /** HMAC key shared by userscript frames through manager-private storage. */
+  secret: field(Schema.String, ""),
+});
+
+export type FrameCredential = typeof frameCredentialSchema.Type;
+
+export const FRAME_CREDENTIAL_SCHEMA_VERSION = 1;
+
+export const frameCredentialGroup: GroupSpec<FrameCredential> = {
+  name: "frame-credential",
+  schema: frameCredentialSchema,
+  defaults: (): FrameCredential => ({ secret: "" }),
+  schemaVersion: FRAME_CREDENTIAL_SCHEMA_VERSION,
+  // The credential must reach a sibling frame before the first handshake. The
+  // write is one small value, and it happens once for each installation.
   writeDebounceMs: 0,
 };

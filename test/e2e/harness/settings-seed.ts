@@ -30,6 +30,8 @@ const SETTINGS_SCHEMA_VERSION = 1;
 
 export const SETTINGS_KEY = `${STORAGE_PREFIX}settings`;
 const SESSION_KEY = `${STORAGE_PREFIX}session`;
+/** Mirrors `frameCredentialGroup` in `src/domain/Persisted.ts`. */
+const FRAME_CREDENTIAL_KEY = `${STORAGE_PREFIX}frame-credential`;
 const FRAME_SECRET = "e2e-manager-private-frame-credential";
 
 /**
@@ -84,10 +86,13 @@ export const seedWithSettings = (
   [SETTINGS_KEY]: envelope({ ...shippedDefaults(), ...patch }),
   // A real manager shares private storage across frames. Each harness frame
   // has its own in-page Map, so seed the same credential into every one.
+  [FRAME_CREDENTIAL_KEY]: JSON.stringify({
+    schemaVersion: 1,
+    data: { secret: FRAME_SECRET },
+  }),
   [SESSION_KEY]: JSON.stringify({
     schemaVersion: 1,
     data: {
-      frameSecret: FRAME_SECRET,
       knownTabs: [],
       acknowledged: [],
       zoomByOrigin: {},

@@ -9,7 +9,9 @@
  *    installation would otherwise find nothing to sign with.
  * 2. A store that the page can read, or a store that one frame cannot share
  *    with another, gives no credential at all. The service also gives no way
- *    to read the credential, so no caller can carry it out of the module.
+ *    to read the credential, so no caller can carry it out of the module. The
+ *    credential has a group of its own, so no feature can read it through
+ *    `Storage` either.
  * 3. A message on a port is sealed. A holder of a copy of the port reads
  *    nothing, forges nothing, and cannot send a message again or send it back.
  * 4. A frame keeps the credential that storage holds. Two top frames of one
@@ -23,13 +25,14 @@
 
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Layer, Option, Result, Stream } from "effect";
-import { sessionGroup } from "~/domain/Persisted.ts";
+import { frameCredentialGroup, sessionGroup } from "~/domain/Persisted.ts";
 import { FrameAuth, type FrameHandshake } from "~/frames/Auth.ts";
 import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
 import { type FrameId, Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
 
-const SESSION_KEY = `${STORAGE_PREFIX}session`;
+/** The key of the group that only `frames/Auth.ts` builds. */
+const CREDENTIAL_KEY = `${STORAGE_PREFIX}${frameCredentialGroup.name}`;
 
 const TOP_FRAME = "1111111111111111";
 const CHILD_FRAME = "2222222222222222";
@@ -90,7 +93,7 @@ const realmLayer = (isTop: boolean, frameId: string): Layer.Layer<Realm> =>
     }),
   );
 
-/** One frame: its own storage and its own realm, over the shared store. */
+/** One frame: its own credential store and its own realm, over one store. */
 const frameLayer = (
   store: Store,
   isTop: boolean,
@@ -101,38 +104,44 @@ const frameLayer = (
   // of a service is otherwise built once and shared. Two frames of a page each
   // hold their own instance.
   return Layer.fresh(FrameAuth.layer).pipe(
-    Layer.provide(Layer.mergeAll(
-      Layer.fresh(Storage.layer).pipe(Layer.provide(kv)),
-      kv,
-      realmLayer(isTop, frameId),
-    )),
+    Layer.provide(Layer.mergeAll(kv, realmLayer(isTop, frameId))),
   );
 };
 
-/** The credential that the store holds, if it holds one. */
+/**
+ * The credential that the store holds, wherever it holds it.
+ *
+ * The scan covers every group and both field names, because the subject of
+ * these tests is where the credential is not.
+ */
 const storedSecret = (store: Store): string => {
-  const raw = store.map.get(SESSION_KEY);
-  if (raw === undefined) return "";
-  const parsed = JSON.parse(raw) as { readonly data?: unknown };
-  const data = parsed.data as { readonly frameSecret?: unknown } | undefined;
-  return typeof data?.frameSecret === "string" ? data.frameSecret : "";
+  for (const raw of store.map.values()) {
+    const parsed = JSON.parse(raw) as { readonly data?: unknown };
+    const data = parsed.data as Record<string, unknown> | undefined;
+    if (data === undefined) continue;
+    for (const name of ["secret", "frameSecret"]) {
+      const value = data[name];
+      if (typeof value === "string" && value.length > 0) return value;
+    }
+  }
+  return "";
 };
 
-/** The raw value of the session group, as the store holds it. */
-const sessionValue = (frameSecret: string): string =>
+/** The raw value of the credential group, as the store holds it. */
+const credentialValue = (secret: string): string =>
   JSON.stringify({
-    schemaVersion: sessionGroup.schemaVersion,
-    data: { ...sessionGroup.defaults(), frameSecret },
+    schemaVersion: frameCredentialGroup.schemaVersion,
+    data: { ...frameCredentialGroup.defaults(), secret },
   });
 
 /**
  * A store in which another tab writes the credential first.
  *
- * The first read of the session key gives nothing, and the value of the other
- * tab lands in the map at that moment. That is the race that two top frames of
- * one site run: both read an empty store, and both create a credential. A
- * frame must keep the credential that storage holds, because a live link of
- * the other tab already derived its key from it.
+ * The first read of the credential key gives nothing, and the value of the
+ * other tab lands in the map at that moment. That is the race that two top
+ * frames of one site run: both read an empty store, and both create a
+ * credential. A frame must keep the credential that storage holds, because a
+ * live link of the other tab already derived its key from it.
  */
 const makeRacingStore = (rival: string): Store => {
   const map = new Map<string, string>();
@@ -146,11 +155,11 @@ const makeRacingStore = (rival: string): Store => {
       managerPrivate: true,
       get: (key) =>
         Effect.sync(() => {
-          if (key === SESSION_KEY && firstRead) {
+          if (key === CREDENTIAL_KEY && firstRead) {
             firstRead = false;
             // The other tab writes here: after this read, and before our own
             // write.
-            map.set(key, sessionValue(rival));
+            map.set(key, credentialValue(rival));
             return Option.none<string>();
           }
           return Option.fromNullishOr(map.get(key) ?? null);
@@ -281,6 +290,56 @@ describe("FrameAuth", () => {
           assert.isTrue(yield* top.verifyJoin(HANDSHAKE, proof));
         }).pipe(Effect.provide(frameLayer(store, false, CHILD_FRAME)));
       }).pipe(Effect.provide(frameLayer(store, true, TOP_FRAME)));
+    }));
+
+  it.effect("keeps the credential out of every group that a feature reads", () =>
+    Effect.gen(function*() {
+      const store = makeStore(true);
+
+      yield* Effect.gen(function*() {
+        yield* FrameAuth;
+      }).pipe(Effect.provide(frameLayer(store, true, TOP_FRAME)));
+
+      const secret = storedSecret(store);
+      assert.isAbove(secret.length, 0, "no credential was created");
+
+      // A feature holds `Storage`, and nothing else. Every group that a
+      // feature can name is read here, and none of them carries the
+      // credential.
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        const readable = [
+          yield* storage.settings.hydrate,
+          yield* storage.marks.hydrate,
+          yield* storage.findHistory.hydrate,
+          yield* storage.history.hydrate,
+          yield* storage.session.hydrate,
+        ];
+        for (const group of readable) {
+          assert.notInclude(
+            JSON.stringify(group),
+            secret,
+            "a feature can read the frame credential",
+          );
+        }
+      }).pipe(
+        Effect.provide(
+          Layer.fresh(Storage.layer).pipe(
+            Layer.provide(Layer.succeed(KeyValueStore, store.service)),
+          ),
+        ),
+      );
+
+      // The type of the session group holds no field for a credential, so a
+      // feature cannot even name one.
+      assert.notProperty(sessionGroup.defaults(), "frameSecret");
+
+      // The credential is in the store, under a key of its own. Only
+      // `frames/Auth.ts` builds that group.
+      assert.isTrue(
+        store.map.has(CREDENTIAL_KEY),
+        "the credential has no group of its own",
+      );
     }));
 
   it.effect("seals a message that only the other end of the link opens", () =>
