@@ -19,6 +19,13 @@
  *    marker coordinate is relative to the layout viewport, so it must be
  *    translated back by the same amount.
  *
+ * The translation of the whole layer is correct for a scroll of the page, and
+ * for nothing else. A container that scrolls inside the page, a resize and a
+ * reflow all move one target and not the layer. The hints service measures the
+ * targets again for those, and it calls `reanchor` before it draws the new
+ * rects. The layer then holds the offset of the visual viewport only, because
+ * the new rects already carry the scroll of the page.
+ *
  * The container, every listener and the reposition fiber belong to the scope
  * that builds the layer. To close that scope removes the markers. There is no
  * `dispose` method.
@@ -209,6 +216,14 @@ export interface MarkerLayer {
    * marker would mean thousands of node creations for one session.
    */
   readonly render: (specs: readonly MarkerSpec[]) => Effect.Effect<void>;
+  /**
+   * Take the scroll position of now as the position of the next `render`.
+   *
+   * The caller measured the rects of its hints again, so those rects are
+   * against the viewport of now. Without this, the layer would translate them
+   * a second time by every scroll since the detection pass.
+   */
+  readonly reanchor: Effect.Effect<void>;
   /** Hide every marker at once. The elements stay for the next draw. */
   readonly clear: Effect.Effect<void>;
 }
@@ -298,23 +313,37 @@ export const makeMarkerLayer: Effect.Effect<
 
   const markers = yield* Ref.make<ReadonlyArray<HTMLElement>>([]);
 
-  /** Where the page stood when the rects were measured. */
-  const origin = yield* dom.probeOr(
+  /** Where the page stood when the rects of the current specs were measured. */
+  const first = yield* dom.probeOr(
     () => ({ x: dom.window.scrollX, y: dom.window.scrollY }),
     { x: 0, y: 0 },
+  );
+  const originRef = yield* Ref.make(first);
+
+  const scrollNow = Effect.flatMap(
+    Ref.get(originRef),
+    (origin) =>
+      dom.probeOr(
+        () => ({ x: dom.window.scrollX, y: dom.window.scrollY }),
+        origin,
+      ),
   );
 
   const applyOffset = Effect.gen(function*() {
     const viewport = yield* ui.viewport;
-    const scroll = yield* dom.probeOr(
-      () => ({ x: dom.window.scrollX, y: dom.window.scrollY }),
-      origin,
-    );
+    const origin = yield* Ref.get(originRef);
+    const scroll = yield* scrollNow;
     const dx = scroll.x - origin.x + viewport.offsetLeft;
     const dy = scroll.y - origin.y + viewport.offsetTop;
     yield* Effect.sync(() => {
       container.style.transform = `translate(${-dx}px, ${-dy}px)`;
     });
+  });
+
+  const reanchor = Effect.gen(function*() {
+    const scroll = yield* scrollNow;
+    yield* Ref.set(originRef, scroll);
+    yield* applyOffset;
   });
 
   // One write for each animation frame. A scroll arrives far more often than
@@ -390,5 +419,5 @@ export const makeMarkerLayer: Effect.Effect<
       }),
   );
 
-  return { render, clear };
+  return { render, reanchor, clear };
 });
