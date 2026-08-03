@@ -79,6 +79,9 @@ const LINEAR: readonly string[] = [
   "a(?=[a-z]*x)(?=[a-z]*y)b*",
 ];
 
+const NESTED_FIXED_ASSERTIONS =
+  "(?:(?=(?:(?=(?:(?=(?:(?=(?:(?=(?:(?=(?:(?=(?:(?=[a-z]*x)a){8})a){8})a){8})a){8})a){8})a){8})a){8})a){8}";
+
 /**
  * The patterns that grow with a power of the input.
  *
@@ -134,6 +137,11 @@ const SUPER_LINEAR: readonly string[] = [
   "[a-z]*(?=[a-z]*x)",
   "(?=(?:(?=[a-z]*a)a)+)",
   "(?=(?:(?=[a-z]{0,9999}a)a){1,9999})",
+  // A fixed repeat pays the body cost at each iteration. The old cost used
+  // only the number of end positions, so a fixed count paid the body once.
+  "(?:(?=[a-z]*x)a){1024}",
+  "(?:(?=[a-z]*x)a){384}[a-z]+",
+  NESTED_FIXED_ASSERTIONS,
 ];
 
 describe("RegexSafety", () => {
@@ -156,6 +164,12 @@ describe("RegexSafety", () => {
           `${source} passed the check`,
         );
       }
+    }));
+
+  it.effect("refuses eight nested fixed loops over assertions", () =>
+    Effect.sync(() => {
+      assert.strictEqual(NESTED_FIXED_ASSERTIONS.length, 103);
+      assert.isFalse(isLinearRegex(NESTED_FIXED_ASSERTIONS, ""));
     }));
 
   it.effect("gives a reason that a user can read", () =>
@@ -238,7 +252,14 @@ describe("RegexSafety", () => {
           regexSafetyError(`${"(?=a)".repeat(9)}b`, ""),
           () => "",
         ),
-        "too many lookaheads",
+        "at most eight lookaheads",
+      );
+      assert.include(
+        Option.getOrElse(
+          regexSafetyError("(?=(?=(?=(?=a))))", ""),
+          () => "",
+        ),
+        "at most three nested assertions",
       );
       // A pattern that a user writes holds a few assertions, and passes.
       assert.isTrue(isLinearRegex("^(?=.*foo)(?=.*bar)(?=.*baz)", ""));
