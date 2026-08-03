@@ -25,30 +25,30 @@
  * the dispatch. Four rules decide what a hook may do:
  *
  * 1. **The time budget is one synchronous run.** `pagehide` can give no time to
- *    an asynchronous task, and a promise that starts there can stay unsettled
- *    for ever. Work that *must* finish before the handler returns is work that
- *    never suspends: give each held value to storage, and forget the suppressed
- *    key. Work that *may be lost* is everything after the first suspension: the
- *    call to the manager, its answer, and the message about a failed write. The
- *    storage actor takes the flush command on its own turn, so a page that dies
- *    inside the same task loses that write. `visibilitychange` is the reason
- *    that this is rare in practice; see rule 3.
+ *    an asynchronous task. A promise that starts there can stay unsettled for
+ *    ever. The Effect scheduler is `setTimeout(f, 0)` in a page, so a fiber
+ *    that resumes inside `pagehide` never runs. Work that *must* finish before
+ *    the handler returns is work that never suspends. `boot/Bootstrap.ts`
+ *    therefore writes every held value straight to the backend, with a direct
+ *    call. Work that *may be lost* is everything after the first suspension:
+ *    the answer of the backend, and the message about a failed write. The page
+ *    lives on after `visibilitychange`, so that exit loses nothing; see rule 3.
  * 2. **A kept page is not an exit.** `pagehide` with `persisted === true` means
- *    that the page may come back from the back/forward cache, and a restored
- *    page never runs its scripts again. The hook therefore gets `final: false`,
- *    and nothing that must be built again may be released. Only `pagehide` with
+ *    that the page may come back from the back/forward cache. A restored page
+ *    never runs its scripts again. The hook therefore gets `final: false`, and
+ *    nothing that must be built again may be released. Only `pagehide` with
  *    `persisted === false` gives `final: true`.
  * 3. **`visibilitychange` to `hidden` runs the same hooks.** It is the last
- *    moment that mobile WebKit reliably gives us, because a tab that goes to
- *    the background may never see `pagehide`. It is never final: the tab can
- *    come forward again. `unload` is not used at all. WebKit refuses to cache a
- *    page that registers it, and then does not send it either.
- * 4. **A frame exits alone.** This file runs in every frame, and each frame has
- *    its own realm, its own window, its own runtime and its own listeners.
+ *    moment that mobile WebKit reliably gives us. A tab that goes to the
+ *    background may never see `pagehide`. It is never final: the tab can come
+ *    forward again. `unload` is not used at all. WebKit refuses to cache a page
+ *    that registers it, and then does not send it either.
+ * 4. **A frame exits alone.** This file runs in every frame. Each frame has its
+ *    own realm, its own window, its own runtime and its own listeners.
  *    `pagehide` reaches the window of the frame that is going away. "Final page
- *    exit" therefore means "this document will not run again", and a child
- *    frame that leaves releases only what that child built. The top frame keeps
- *    its own runtime, because no listener of the top frame ran.
+ *    exit" therefore means "this document will not run again". A child frame
+ *    that leaves releases only what that child built, and the top frame keeps
+ *    its own runtime.
  */
 
 import {
@@ -98,6 +98,16 @@ export interface PageExit {
  */
 export type ExitHook = (exit: PageExit) => Effect.Effect<void>;
 
+/**
+ * One registration of a hook.
+ *
+ * The token is the key, and not the function. Two scopes may register the same
+ * function reference, and a filter on the reference would remove both.
+ */
+interface Registration {
+  readonly hook: ExitHook;
+}
+
 /** The interval of the last-resource poll. It runs only while visible. */
 const URL_POLL_MS = 900;
 /** The delay after a click, to let the page's router run. */
@@ -127,7 +137,7 @@ export class Lifecycle extends Context.Service<Lifecycle, {
       >(
         Option.none(),
       );
-      const exitHooks = yield* Ref.make<ReadonlyArray<ExitHook>>([]);
+      const exitHooks = yield* Ref.make<ReadonlyArray<Registration>>([]);
 
       const emit = (event: LifecycleEvent): Effect.Effect<void> =>
         Effect.asVoid(PubSub.publish(bus, event));
@@ -159,32 +169,38 @@ export class Lifecycle extends Context.Service<Lifecycle, {
       const onExit = (
         hook: ExitHook,
       ): Effect.Effect<void, never, Scope.Scope> =>
-        Effect.acquireRelease(
-          Ref.update(exitHooks, (current) => [...current, hook]),
-          () =>
-            Ref.update(
-              exitHooks,
-              (current) => current.filter((other) => other !== hook),
-            ),
-        );
+        Effect.suspend(() => {
+          const entry: Registration = { hook };
+          return Effect.acquireRelease(
+            Ref.update(exitHooks, (current) => [...current, entry]),
+            () =>
+              Ref.update(
+                exitHooks,
+                (current) => current.filter((other) => other !== entry),
+              ),
+          );
+        });
 
       /**
        * Start every hook now, on this stack.
        *
-       * `startImmediately` is what makes the work begin inside the browser's
-       * dispatch. Each hook runs until it suspends, and it continues on its own
-       * fiber afterwards. A plain `yield*` would be wrong: the listener runs
-       * with `runSyncExit`, so a hook that suspends would become a defect
+       * `platform/Dom.ts` runs the listener with `runSyncExitWith`. That call
+       * drains its own scheduler, so the part of a hook before the first
+       * suspension happens inside the dispatch. `startImmediately` says the
+       * same thing at the fork, and it does not depend on the drain. A plain
+       * `yield*` would be wrong: a hook that suspends would become a defect
        * instead of work.
        */
       const startExitHooks = (exit: PageExit): Effect.Effect<void> =>
         Effect.flatMap(
           Ref.get(exitHooks),
-          (hooks) =>
+          (entries) =>
             Effect.forEach(
-              hooks,
-              (hook) =>
-                Effect.forkDetach(hook(exit), { startImmediately: true }),
+              entries,
+              (entry) =>
+                Effect.forkDetach(entry.hook(exit), {
+                  startImmediately: true,
+                }),
               { discard: true },
             ),
         );

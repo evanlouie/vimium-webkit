@@ -80,6 +80,24 @@ const dispatch = (
     return outcomes.find(Exit.isFailure) ?? Exit.void;
   });
 
+/**
+ * Dispatch an event without the drain that `runSyncExit` does.
+ *
+ * `runSyncExit` uses a scheduler that it flushes before it returns, so it hides
+ * where a hook started. `runFork` uses the ordinary scheduler, which is a
+ * macrotask. What ran when this returns is what ran on the caller's own stack.
+ */
+const dispatchOnStack = (
+  attached: ReadonlyArray<Attached>,
+  type: string,
+  event: Event,
+): Effect.Effect<void> =>
+  Effect.sync(() => {
+    for (const entry of attached.filter((other) => other.type === type)) {
+      Effect.runFork(entry.run(event));
+    }
+  });
+
 // ---------------------------------------------------------------------------
 // The harness
 // ---------------------------------------------------------------------------
@@ -125,11 +143,13 @@ const record = (started: PageExit[]): ExitHook => (exit) =>
 
 describe("the pagehide dispatch", () => {
   it.effect(
-    "starts a pending write before the dispatch returns",
+    "runs a hook that cannot suspend inside the dispatch",
     () =>
       withLifecycle(({ attached, lifecycle }) =>
         Effect.gen(function*() {
-          // The backend: what a manager would have received.
+          // What the hook does is a plain synchronous step, which is what the
+          // exit path of storage is. `test/unit/exit-write_test.ts` drives the
+          // real `Storage` over a real backend.
           const written: string[] = [];
           const pending = "the mark that the user just set";
 
@@ -145,16 +165,43 @@ describe("the pagehide dispatch", () => {
             pageHide(false),
           );
 
-          // Both assertions matter. The write happened, and the listener did
+          // Both assertions matter. The work happened, and the listener did
           // not become a defect on the way to it.
           assert.deepStrictEqual(
             written,
             [pending],
-            "the write must start inside the dispatch",
+            "the work must start inside the dispatch",
           );
           assert.isTrue(
             Exit.isSuccess(outcome),
             "the pagehide listener must not fail",
+          );
+        })
+      ),
+  );
+
+  it.effect(
+    "starts a hook on the caller's stack, and not on a scheduler turn",
+    () =>
+      withLifecycle(({ attached, lifecycle }) =>
+        Effect.gen(function*() {
+          // The fork uses `startImmediately`, so the hook runs before the fork
+          // returns. Without it the hook waits for a task of the scheduler,
+          // and in a page that task is `setTimeout(f, 0)`. A `pagehide`
+          // handler never sees one.
+          const written: string[] = [];
+          yield* lifecycle.onExit(() =>
+            Effect.sync(() => {
+              written.push("the held value");
+            })
+          );
+
+          yield* dispatchOnStack(attached, "pagehide", pageHide(false));
+
+          assert.deepStrictEqual(
+            written,
+            ["the held value"],
+            "the hook must not wait for the scheduler",
           );
         })
       ),
@@ -296,6 +343,34 @@ describe("the life of a hook", () => {
           yield* dispatch(attached, "pagehide", pageHide(false));
 
           assert.deepStrictEqual(started, []);
+        })
+      ),
+  );
+
+  it.effect(
+    "one scope that closes leaves the other registration of the same hook",
+    () =>
+      withLifecycle(({ attached, lifecycle }) =>
+        Effect.gen(function*() {
+          // Two features may register the same function. A removal by the
+          // function reference would take both away.
+          const started: PageExit[] = [];
+          const shared = record(started);
+
+          const first = yield* Scope.make();
+          const second = yield* Scope.make();
+          yield* Scope.provide(lifecycle.onExit(shared), first);
+          yield* Scope.provide(lifecycle.onExit(shared), second);
+          yield* Scope.close(first, Exit.void);
+
+          yield* dispatch(attached, "pagehide", pageHide(false));
+
+          assert.deepStrictEqual(
+            started,
+            [{ final: true }],
+            "the registration that is still open must run, and only once",
+          );
+          yield* Scope.close(second, Exit.void);
         })
       ),
   );
