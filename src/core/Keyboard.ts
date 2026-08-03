@@ -451,6 +451,11 @@ export class Keyboard extends Context.Service<Keyboard, {
        * again. The prefix stayed behind. The binding that `g` accepted then ran
        * on the next key, and the user typed that `g` minutes before.
        *
+       * The reset drops the count prefix as well as the keys and the accepted
+       * binding. The three are one half-typed command, and the indicator shows
+       * them together. A count that outlived its keys would be invisible, and
+       * the next key alone would then scroll 50 steps.
+       *
        * Every focus does this, and not a focus into a text field alone. A
        * sequence that survives a focus change is a surprise in each case. The
        * cost is small, because the user types the sequence again.

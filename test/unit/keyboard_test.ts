@@ -361,6 +361,27 @@ describe("Keyboard", () => {
         ]);
       }).pipe(Effect.provide(prefixLayer)));
 
+    it.effect("drops the count when the focus moves", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder([
+          "scrollUp",
+          "scrollToTop",
+          "scrollDown",
+        ]);
+
+        // The count and the focus reset meet here. The indicator showed `5`,
+        // and the reset takes the count away with the keys.
+        yield* stack.bubble(
+          "keydown",
+          asEvent(new Press("5", { code: "Digit5" })),
+        );
+        yield* stack.bubble("focus", asFocus());
+        yield* stack.bubble("keydown", asEvent(new Press("j")));
+
+        assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
+      }).pipe(Effect.provide(prefixLayer)));
+
     it.effect("drops the accepted binding when the focus moves", () =>
       Effect.gen(function*() {
         const stack = yield* HandlerStack;
