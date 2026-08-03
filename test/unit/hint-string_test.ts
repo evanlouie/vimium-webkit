@@ -9,7 +9,9 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect } from "effect";
 import {
+  hintCharacterKey,
   hintStrings,
+  isUsableHintCharacter,
   matchByPrefix,
   normaliseHintCharacters,
   numberToHintString,
@@ -120,11 +122,129 @@ describe("HintString", () => {
       assert.strictEqual(normaliseHintCharacters("AaB", "xy"), "ab");
     }));
 
+  /**
+   * Characters that a case fold expands or joins.
+   *
+   * Each row gives an alphabet from the user and the alphabet that the hints
+   * use. A dropped character either grows to two code points in one of the
+   * two cases, or it has the same case fold as an earlier character.
+   */
+  const FOLD_CASES: readonly {
+    readonly name: string;
+    readonly input: string;
+    readonly expected: string;
+  }[] = [
+    {
+      name: "the Turkish dotted capital I expands to i plus a dot",
+      input: "ab\u0130c",
+      expected: "abc",
+    },
+    {
+      name: "the Turkish dotted capital I repeats a Latin i",
+      input: "abi\u0130",
+      expected: "abi",
+    },
+    {
+      name: "the Turkish dotless i has the case fold of the Latin i",
+      input: "abi\u0131",
+      expected: "abi",
+    },
+    {
+      name: "the German sharp s expands to SS",
+      input: "ab\u00df",
+      expected: "ab",
+    },
+    {
+      name: "the German capital sharp s expands to SS",
+      input: "ab\u1e9e",
+      expected: "ab",
+    },
+    {
+      name: "the Greek final sigma has the case fold of the sigma",
+      input: "\u03b1\u03b2\u03c3\u03c2",
+      expected: "\u03b1\u03b2\u03c3",
+    },
+    {
+      name: "the fi ligature expands to FI",
+      input: "ab\ufb01",
+      expected: "ab",
+    },
+    {
+      name: "an emoji is one character",
+      input: "\u{1f600}\u{1f601}",
+      expected: "\u{1f600}\u{1f601}",
+    },
+    {
+      name: "a mathematical letter is one character",
+      input: "\u{1d41a}\u{1d41b}",
+      expected: "\u{1d41a}\u{1d41b}",
+    },
+    {
+      name: "a Greek capital folds onto its own small letter",
+      input: "\u0391\u03b1b",
+      expected: "\u03b1b",
+    },
+  ];
+
+  for (const row of FOLD_CASES) {
+    it.effect(`folds the alphabet: ${row.name}`, () =>
+      Effect.sync(() => {
+        assert.strictEqual(
+          normaliseHintCharacters(row.input, "xy"),
+          row.expected,
+        );
+      }));
+  }
+
+  it.effect("gives distinct labels for an alphabet that folds", () =>
+    Effect.sync(() => {
+      // Every character that survives the fold must be one code point, so no
+      // two links can show the same label.
+      for (const input of FOLD_CASES.map((row) => row.input)) {
+        const alphabet = normaliseHintCharacters(input, "xy");
+        // The split into code points is intentional.
+        const chars = [...alphabet];
+        assert.strictEqual(
+          new Set(chars).size,
+          chars.length,
+          `the alphabet of "${input}" has a duplicate character`,
+        );
+        const hints = hintStrings(60, alphabet);
+        assert.strictEqual(
+          new Set(hints).size,
+          hints.length,
+          `the alphabet of "${input}" gives two equal labels`,
+        );
+        for (const hint of hints) {
+          for (const char of hint) assert.include(alphabet, char);
+        }
+      }
+    }));
+
   it.effect("falls back when the alphabet cannot be used", () =>
     Effect.sync(() => {
       assert.strictEqual(normaliseHintCharacters("", "xy"), "xy");
       assert.strictEqual(normaliseHintCharacters("a", "xy"), "xy");
       assert.strictEqual(normaliseHintCharacters("aaa", "xy"), "xy");
+      // Two characters that fold together leave one character behind.
+      assert.strictEqual(normaliseHintCharacters("i\u0131", "xy"), "xy");
+      assert.strictEqual(normaliseHintCharacters("\u00df\u1e9e", "xy"), "xy");
+    }));
+
+  it.effect("names the characters that a case fold breaks", () =>
+    Effect.sync(() => {
+      assert.isTrue(isUsableHintCharacter("a"));
+      assert.isTrue(isUsableHintCharacter("\u{1f600}"));
+      assert.isFalse(isUsableHintCharacter("\u0130"));
+      assert.isFalse(isUsableHintCharacter("\u00df"));
+      assert.isFalse(isUsableHintCharacter(" "));
+      assert.isFalse(isUsableHintCharacter("ab"));
+      // The fold joins the pair, so the identity is one value.
+      assert.strictEqual(
+        hintCharacterKey("\u03c2"),
+        hintCharacterKey("\u03c3"),
+      );
+      assert.strictEqual(hintCharacterKey("\u0131"), hintCharacterKey("I"));
     }));
 
   it.effect("is decimal for the default digit set", () =>

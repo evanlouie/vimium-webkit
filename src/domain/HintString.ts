@@ -10,12 +10,52 @@
  * visible in a manual test.
  */
 
+/** The code points of a string. A hint character can be outside the BMP. */
+// oxlint-disable-next-line typescript/no-misused-spread
+const codePoints = (value: string): readonly string[] => [...value];
+
 /** Reverse by code point, so an astral character in a custom alphabet survives. */
 export const reverseString = (value: string): string =>
   // The split into code points is intentional. A hint alphabet holds
   // characters, and not words.
-  // oxlint-disable-next-line typescript/no-misused-spread
-  [...value].reverse().join("");
+  [...codePoints(value)].reverse().join("");
+
+/**
+ * The identity of one hint character after a case fold.
+ *
+ * Two characters that give the same identity collide. The round trip through
+ * uppercase finds the pairs that a plain lowercase misses. The Greek final
+ * sigma and the Greek sigma both give the sigma. The Turkish dotless i and
+ * the Latin i both give the Latin i.
+ *
+ * The case map is the invariant one, and not a locale one. A hint alphabet
+ * must give the same labels in every browser. Under a Turkish locale
+ * `toLocaleUpperCase` turns the Latin i into a dotted capital I, so one
+ * setting would give two different alphabets on two machines.
+ */
+export const hintCharacterKey = (char: string): string =>
+  char.toLowerCase().toUpperCase().toLowerCase();
+
+/**
+ * Can this character be one character of a hint label?
+ *
+ * The character must stay one code point through the whole case fold. Three
+ * characters break that rule:
+ *
+ * - The Turkish dotted capital I becomes the Latin i plus a combining dot.
+ *   The alphabet then holds a second Latin i, and two hints show the same
+ *   label.
+ * - The German sharp s becomes the two letters SS in uppercase.
+ * - The fi ligature becomes the two letters FI in uppercase.
+ *
+ * A label that grows to two characters is a label that the user cannot type.
+ */
+export const isUsableHintCharacter = (char: string): boolean => {
+  if (codePoints(char).length !== 1) return false;
+  if (char.trim().length === 0) return false;
+  if (codePoints(char.toLowerCase()).length !== 1) return false;
+  return codePoints(hintCharacterKey(char)).length === 1;
+};
 
 /**
  * Fold a character set from the user into an alphabet that we can use.
@@ -23,6 +63,10 @@ export const reverseString = (value: string): string =>
  * A duplicate makes two different links show the same hint string. An alphabet
  * of one character cannot give a prefix-free code at all. Both cases give the
  * fallback, instead of hints that the user cannot type.
+ *
+ * A character that a case fold expands or that collides with an earlier
+ * character is dropped. The result is therefore a sequence of distinct code
+ * points, and each one is one hint character.
  */
 export const normaliseHintCharacters = (
   characters: string,
@@ -30,11 +74,12 @@ export const normaliseHintCharacters = (
 ): string => {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const char of characters) {
-    const lower = char.toLowerCase();
-    if (lower.trim().length === 0 || seen.has(lower)) continue;
-    seen.add(lower);
-    out.push(lower);
+  for (const char of codePoints(characters)) {
+    if (!isUsableHintCharacter(char)) continue;
+    const key = hintCharacterKey(char);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(char.toLowerCase());
   }
   return out.length >= 2 ? out.join("") : fallback;
 };
@@ -56,8 +101,7 @@ export const hintStrings = (
 ): readonly string[] => {
   if (linkCount <= 0) return [];
   // The split into code points is intentional. See `reverseString`.
-  // oxlint-disable-next-line typescript/no-misused-spread
-  const chars = [...alphabet];
+  const chars = codePoints(alphabet);
   if (chars.length < 2) return [];
 
   const hints: string[] = [""];
@@ -85,8 +129,7 @@ export const numberToHintString = (
   characterSet: string,
 ): string => {
   // The split into code points is intentional. See `reverseString`.
-  // oxlint-disable-next-line typescript/no-misused-spread
-  const chars = [...characterSet];
+  const chars = codePoints(characterSet);
   const base = chars.length;
   if (base < 2 || !Number.isFinite(value) || value < 1) return "";
 

@@ -24,6 +24,10 @@
  */
 
 import { Effect, Option, Schema } from "effect";
+import {
+  hintCharacterKey,
+  isUsableHintCharacter,
+} from "~/domain/HintString.ts";
 
 // ---------------------------------------------------------------------------
 // Group specifications
@@ -92,9 +96,30 @@ const field = <S extends Schema.Top>(schema: S, fallback: S["Type"]) => {
   )(recovered);
 };
 
-/** Characters usable for hint labels must be distinct, or two hints collide. */
+/** The code points of a string. A hint character can be outside the BMP. */
+// oxlint-disable-next-line typescript/no-misused-spread
+const codePoints = (value: string): readonly string[] => [...value];
+
+/**
+ * Characters for hint labels must be distinct, or two hints collide.
+ *
+ * The comparison uses the case fold, and not the code point. The Greek final
+ * sigma and the Greek sigma become the same label, and so do the Turkish
+ * dotless i and the Latin i.
+ */
 const distinctCharacters = (value: string): boolean =>
-  new Set(value).size === value.length;
+  new Set(codePoints(value).map(hintCharacterKey)).size ===
+    codePoints(value).length;
+
+/**
+ * Each character must stay one code point through a case fold.
+ *
+ * The German sharp s becomes SS, and the Turkish dotted capital I becomes the
+ * Latin i plus a combining dot. Such a character gives a label of two
+ * characters, which the user cannot type.
+ */
+const usableCharacters = (value: string): boolean =>
+  codePoints(value).every(isUsableHintCharacter);
 
 /** A search template without `%s` silently discards whatever the user typed. */
 const hasQueryPlaceholder = (value: string): boolean => value.includes("%s");
@@ -114,6 +139,9 @@ export const settingsSchema = Schema.Struct({
   linkHintCharacters: field(
     Schema.String.check(
       Schema.isMinLength(2),
+      Schema.makeFilter(usableCharacters, {
+        message: "a hint character must stay one character in both cases",
+      }),
       Schema.makeFilter(distinctCharacters, {
         message: "hint characters must all be different",
       }),
@@ -123,6 +151,9 @@ export const settingsSchema = Schema.Struct({
   linkHintNumbers: field(
     Schema.String.check(
       Schema.isMinLength(2),
+      Schema.makeFilter(usableCharacters, {
+        message: "a hint number must stay one character in both cases",
+      }),
       Schema.makeFilter(distinctCharacters, {
         message: "hint number characters must all be different",
       }),
