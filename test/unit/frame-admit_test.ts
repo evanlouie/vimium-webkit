@@ -203,6 +203,7 @@ const domLayer = (world: World): Layer.Layer<Dom> =>
 const makeStore = (): KeyValueStore["Service"] => {
   const map = new Map<string, string>();
   return KeyValueStore.of({
+    setUnsafe: null,
     kind: "gm-sync",
     durable: true,
     watchable: false,

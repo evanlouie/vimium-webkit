@@ -186,11 +186,11 @@ The credential also has a group of its own in the value store. `frames/Auth.ts`
 builds that group, and it keeps it in a closure. `Storage` neither builds it nor
 exposes it, so no group that a feature can read holds a field for the
 credential. A feature has no name for the value, and the module that owns it
-gives no method that returns it.
-One path goes around the fiber, and it exists for one moment: the page exit.
-`flushUnsafe` writes the held value with a direct call to the backend. The
-Effect scheduler is a macrotask in a page, so a value that waits for the fiber
-is lost when the document goes away. Section 7 says where that path is used.
+gives no method that returns it. One path goes around the fiber, and it exists
+for one moment: the page exit. `flushUnsafe` writes the held value with a direct
+call to the backend. The Effect scheduler is a macrotask in a page, so a value
+that waits for the fiber is lost when the document goes away. Section 7 says
+where that path is used.
 
 ## 6. Errors
 

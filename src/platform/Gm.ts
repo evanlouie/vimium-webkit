@@ -594,11 +594,10 @@ const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
     identity: readIdentity(surface.info),
     info: surface.info,
     values: Option.orElse(
-      // The async form is preferred on purpose. It is the only one on quoid,
-      // which is the capability floor, and preferring it everywhere gives the
-      // start path the same timing on every manager.
-      asyncValueApi(surface),
-      () => syncValueApi(surface),
+      // Prefer a complete synchronous surface. This changes Stay and other
+      // managers that give both forms. Storage debounces the selected kind.
+      syncValueApi(surface),
+      () => asyncValueApi(surface),
     ),
     hasUnsafeWindow: surface.hasUnsafeWindow,
     canOpenInTab: ns?.openInTab !== undefined || surface.openInTabSync !== null,

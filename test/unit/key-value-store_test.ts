@@ -63,6 +63,9 @@ const valueApi = (): GmValueApi => {
       Effect.sync(() => {
         map.delete(key);
       }),
+    setUnsafe: (key, value) => {
+      map.set(key, value);
+    },
     changes: Option.none(),
   };
 };

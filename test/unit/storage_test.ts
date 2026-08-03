@@ -51,6 +51,8 @@ interface Backend {
   /** Hold every later write of the actor, until `releaseWrites` runs. */
   readonly holdWrites: Effect.Effect<void>;
   readonly releaseWrites: Effect.Effect<void>;
+  /** Make the next actor write fail like a rejected manager promise. */
+  readonly breakNextActorWrite: Effect.Effect<void>;
 }
 
 /**
@@ -68,6 +70,7 @@ const makeBackendFor = (
     const gate = yield* Deferred.make<void>();
     let broken = false;
     let directBroken = false;
+    let actorBroken = false;
     let held = false;
     let started = 0;
 
@@ -80,32 +83,11 @@ const makeBackendFor = (
       writes.push(value);
     };
 
-  const service = KeyValueStore.of({
-    kind: "memory",
-    durable: false,
-    watchable: false,
-    managerPrivate: false,
-    get: (key) =>
-      Effect.suspend(() =>
-        broken
-          ? Effect.fail(
-            new GmError({
-              reason: "failed",
-              api: "test.get",
-              detail: "the backend is unavailable",
-            }),
-          )
-          : Effect.succeed(Option.fromNullishOr(map.get(key) ?? null))
-      ),
-    set: (key, value) =>
-      Effect.gen(function*() {
-        started += 1;
-        if (held) yield* Deferred.await(gate);
-        record(key, value);
     const service = KeyValueStore.of({
       kind,
       durable: false,
       watchable: false,
+      managerPrivate: true,
       get: (key) =>
         Effect.suspend(() =>
           broken
@@ -121,6 +103,16 @@ const makeBackendFor = (
       set: (key, value) =>
         Effect.gen(function*() {
           started += 1;
+          if (actorBroken) {
+            actorBroken = false;
+            return yield* Effect.fail(
+              new GmError({
+                reason: "failed",
+                api: "test.set",
+                detail: "the manager promise rejected",
+              }),
+            );
+          }
           if (held) yield* Deferred.await(gate);
           record(key, value);
         }),
@@ -160,6 +152,9 @@ const makeBackendFor = (
       releaseWrites: Effect.gen(function*() {
         held = false;
         yield* Deferred.succeed(gate, undefined);
+      }),
+      breakNextActorWrite: Effect.sync(() => {
+        actorBroken = true;
       }),
     };
   });
@@ -362,6 +357,71 @@ describe("Storage", () => {
       }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
     }));
 
+  it.effect("waits for a manager promise before it starts the next write", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackendFor("gm-async");
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        const base = yield* storage.session.current;
+        yield* backend.holdWrites;
+
+        const first = yield* Effect.forkChild(
+          storage.session.write({ ...base, acknowledged: ["first"] }),
+          { startImmediately: true },
+        );
+        yield* yieldUntil(() => backend.startedNow() === 1);
+
+        const second = yield* Effect.forkChild(
+          storage.session.write({ ...base, acknowledged: ["second"] }),
+          { startImmediately: true },
+        );
+        for (let turn = 0; turn < 10; turn += 1) yield* Effect.yieldNow;
+
+        assert.strictEqual(backend.startedNow(), 1);
+        yield* backend.releaseWrites;
+        yield* Fiber.join(first);
+        yield* Fiber.join(second);
+
+        const writes = backend.writesNow();
+        assert.lengthOf(writes, 2);
+        assert.include(writes[0] ?? "", "first");
+        assert.include(writes[1] ?? "", "second");
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("reports a rejected manager promise and fails the caller", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackendFor("gm-async");
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        const reported = yield* Effect.forkChild(firstIssue(storage), {
+          startImmediately: true,
+        });
+        yield* backend.breakNextActorWrite;
+
+        const outcome = yield* Effect.result(
+          storage.session.write({
+            ...storage.session.currentUnsafe(),
+            acknowledged: ["rejected"],
+          }),
+        );
+        assert.isTrue(Result.isFailure(outcome));
+        if (Result.isSuccess(outcome)) return;
+        assert.strictEqual(outcome.failure.reason, "backend");
+        assert.strictEqual(outcome.failure.direction, "write");
+
+        yield* yieldUntil(() => reported.pollUnsafe() !== undefined);
+        const issue = yield* Fiber.join(reported);
+        assert.isTrue(Option.isSome(issue));
+        if (Option.isNone(issue)) return;
+        assert.strictEqual(issue.value.reason, outcome.failure.reason);
+        assert.strictEqual(issue.value.direction, outcome.failure.direction);
+        assert.strictEqual(issue.value.detail, outcome.failure.detail);
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
   it.effect("commits a waiting write at once on a flush", () =>
     Effect.gen(function*() {
       const backend = yield* makeBackend;
@@ -494,7 +554,7 @@ describe("Storage", () => {
         const storage = yield* Storage;
         yield* storage.session.write({
           knownTabs: [],
-          acknowledged: ["one"],
+          acknowledged: [],
           zoomByOrigin: {},
         });
         assert.isTrue(Option.isSome(yield* backend.read(SESSION_KEY)));
