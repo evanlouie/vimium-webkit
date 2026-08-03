@@ -253,11 +253,12 @@ decision:
   dispatch. A subscriber of the event bus does not, because it reads the bus on
   another fiber, and the page can be gone by then. The exit hook therefore does
   the work that a dying page must not lose: it writes every held value to the
-  backend with a direct call. The call is `GM_setValue`, and it takes no
-  scheduler turn. A manager that gives only the promise form has no direct call,
-  so its writes go earlier through the storage actor instead. A flush through
-  the storage actor follows it, and that flush completes only when the page
-  lives on.
+  backend with a direct call. The call is `GM_setValue` on a manager that gives
+  it, and a direct write to the memory map on the memory backend. Neither takes
+  a scheduler turn. A manager that gives only the promise form has no direct
+  call, so its writes go earlier through the storage actor instead. A flush
+  through the storage actor follows it, and that flush completes only when the
+  page lives on.
 - `pagehide` with `persisted === true` is not a final exit. The page may come
   back from the back/forward cache, and a restored page never runs its scripts
   again. Nothing is released there.
