@@ -28,7 +28,7 @@
 
 import type { Page } from "@playwright/test";
 import { expect, test } from "./harness/fixtures.ts";
-import { overlayBox } from "./harness/overlay.ts";
+import { overlayBox, overlayFocusWithin } from "./harness/overlay.ts";
 
 /** A resolved style property of the host itself, which is in the light DOM. */
 const hostStyle = (page: Page, property: string): Promise<string> =>
@@ -328,5 +328,22 @@ test.describe("the overlay host after page script moves it", () => {
     await openHelp(page);
     expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
       .toBeGreaterThan(300);
+  });
+});
+
+test.describe("the focus after the guard puts the host back", () => {
+  test("stays inside an open dialog", async ({ vw, page }) => {
+    await vw.open("/hostile-overlay.html");
+    await openHelp(page);
+    await vw.press("Tab");
+    expect(await overlayFocusWithin(page, ".vw-dialog")).toBe(true);
+
+    // A move takes the focus off every node inside the host. The dialog stays
+    // on screen and keeps `aria-modal="true"`, so a keystroke that the user
+    // meant for a control would go to the body of the page.
+    expect(await removeHost(page)).toBe(true);
+    await expect.poll(() => hostCount(page)).toBe(1);
+
+    await expect.poll(() => overlayFocusWithin(page, ".vw-dialog")).toBe(true);
   });
 });
