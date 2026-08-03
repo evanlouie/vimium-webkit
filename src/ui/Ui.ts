@@ -15,10 +15,11 @@
  *   remove it with a selector.
  *
  * The host itself is still a node with a known name in the light DOM. Page CSS
- * can therefore name it, and page script can remove it. Two measures answer
- * that: every inline declaration on the host carries the important priority,
- * and a mutation observer puts the host back when the page takes it away. See
- * `HOST_STYLE` and the removal guard below.
+ * can therefore name it, and page script can remove it or move it. Two measures
+ * answer that: every inline declaration on the host carries the important
+ * priority, and a mutation observer puts the host back under `documentElement`
+ * when the page takes it away or moves it. See `HOST_STYLE` and the removal
+ * guard below.
  *
  * The host cannot escape its own ancestors. Read the limit at
  * `outOfDateHostProperties`, and read `SECURITY.md`.
@@ -216,6 +217,24 @@ export const comparableHostProperties = (
   );
 
 /**
+ * Must the guard put the host back?
+ *
+ * A connection test is not enough. Page script can move the host into a
+ * container of its own, and give that container `opacity: 0`. The host stays
+ * connected, so a guard that asked `isConnected` reported nothing, and the page
+ * owned the visibility of an interface that still held the keyboard. The page
+ * keeps its own visibility, because it chose the container.
+ *
+ * Test the parent instead. `parent` is the element that must hold the host, and
+ * `current` is the node that holds it now. A `parent` of `null` means that the
+ * document has no element yet, and then there is nothing to do.
+ */
+export const hostNeedsAttachment = (
+  parent: Node | null,
+  current: Node | null,
+): boolean => parent !== null && current !== parent;
+
+/**
  * The host properties that no longer hold the value that we wrote.
  *
  * Page script owns the host, because the host is in the light DOM. It can
@@ -228,11 +247,15 @@ export const comparableHostProperties = (
  * each check would make a page that watches the attribute fight us in a loop.
  *
  * **Limit.** This defends the host, and the host only. A page that hides an
- * *ancestor* of the host still wins, because a descendant cannot escape
- * `html { opacity: 0 }`, `html { transform: scale(0) }` or
- * `html { content-visibility: hidden }`. Such a page hides itself as well, so
- * the user sees a blank page and not a hidden interface. `SECURITY.md` names
- * this limit.
+ * *ancestor* of the host still wins, because CSS gives a descendant no way out
+ * of its ancestors. `documentElement` is the only ancestor that the host has.
+ * The removal guard keeps the host a child of it. A page that moves the host
+ * into a container of its own therefore loses it again at once. Five rules
+ * still win: `html { opacity: 0 }`, `html { transform: scale(0) }`,
+ * `html { filter: opacity(0) }`, `html { content-visibility: hidden }` and
+ * `html { display: none }`. Each one paints the page itself as nothing, so the
+ * user sees a blank page and not a hidden interface. `SECURITY.md` names this
+ * limit.
  *
  * `read` gives the current value and the current priority of one property, and
  * `guarded` names the properties that this engine can compare. Both are
@@ -605,21 +628,22 @@ export class Ui extends Context.Service<Ui, {
          * This runs at start, on every `layer` call, and before every action
          * that makes something visible. A single-page application replaces
          * `document.body` often, and some replace `documentElement`, which
-         * detaches us without a sign. Page script can also delete our style.
-         * Both reads are cheap, so paying for them at each access costs less
-         * than the failure that they prevent: an interface that keeps the
-         * keyboard while the user sees nothing.
+         * detaches us without a sign. Page script can also delete our style,
+         * or move the host into a container that it hides. The reads are
+         * cheap, so paying for them at each access costs less than the failure
+         * that they prevent: an interface that keeps the keyboard while the
+         * user sees nothing.
          */
         const ensureAttached: Effect.Effect<void> = Effect.gen(function*() {
           const owned = yield* Ref.get(viewportOwned);
           yield* dom.probeOr(() => {
             restoreHostStyle(owned);
-            if (host.isConnected) return false;
             // At `document-start` there may be no `documentElement` yet. Doing
             // nothing is correct, because the next `layer` call tries again.
             const parent: Element | null = doc.documentElement ?? doc.body ??
               null;
             if (parent === null) return false;
+            if (!hostNeedsAttachment(parent, host.parentNode)) return false;
             parent.appendChild(host);
             return true;
           }, false);
@@ -661,7 +685,7 @@ export class Ui extends Context.Service<Ui, {
         };
 
         /**
-         * Put the host back as soon as the page takes it away.
+         * Put the host back as soon as the page takes it away or moves it.
          *
          * The check above answers when we act. This answers while we wait: a
          * page that removes the host between two actions would leave a mode
@@ -677,7 +701,18 @@ export class Ui extends Context.Service<Ui, {
                   watch(observer);
                   return true;
                 }, false);
-                if (yield* dom.probeOr(() => host.isConnected, true)) return;
+                // The parent, and not the connection. A host that the page
+                // moved into a container of its own is still connected, and
+                // the page then owns the visibility of the overlay.
+                const misplaced = yield* dom.probeOr(
+                  () =>
+                    hostNeedsAttachment(
+                      doc.documentElement ?? doc.body ?? null,
+                      host.parentNode,
+                    ),
+                  false,
+                );
+                if (!misplaced) return;
                 const count = yield* Ref.updateAndGet(
                   reattachments,
                   (current) => current + 1,

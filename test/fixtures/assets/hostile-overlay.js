@@ -1,13 +1,14 @@
 /*
- * Hostile page behaviour: take the overlay host out of the document, and take
- * the style declarations off it.
+ * Hostile page behaviour: take the overlay host out of the document, move it
+ * into a container of this page, and take the style declarations off it.
  *
  * A page can name the host, because the host is a normal element of the light
- * DOM. The guard in src/ui/Ui.ts must put both back, or the user keeps a
+ * DOM. The guard in src/ui/Ui.ts must answer all three, or the user keeps a
  * keyboard that answers and an interface that shows nothing.
  */
 
 let removals = 0;
+let moves = 0;
 
 const removeHost = () => {
   const host = document.querySelector("vimium-webkit-overlay");
@@ -25,6 +26,35 @@ document.getElementById("remove-host")?.addEventListener("click", () => {
 
 // The spec calls this directly, because a click would move the focus.
 globalThis.removeVimiumHost = removeHost;
+
+/*
+ * Move the host into a container of this page, and hide that container.
+ *
+ * This attack is quieter than a removal. The host stays connected, so a guard
+ * that asks `isConnected` reports nothing to repair. The page keeps its own
+ * visibility, because it chose the container, and the overlay keeps the
+ * keyboard while the user sees nothing.
+ */
+const cageHost = () => {
+  const host = document.querySelector("vimium-webkit-overlay");
+  if (host === null) return false;
+  const cage = document.createElement("div");
+  cage.id = `cage-${moves}`;
+  cage.style.setProperty("opacity", "0", "important");
+  cage.style.setProperty("position", "fixed", "important");
+  document.body.appendChild(cage);
+  cage.appendChild(host);
+  moves += 1;
+  const readout = document.getElementById("moves");
+  if (readout !== null) readout.textContent = String(moves);
+  return true;
+};
+
+document.getElementById("cage-host")?.addEventListener("click", () => {
+  cageHost();
+});
+
+globalThis.cageVimiumHost = cageHost;
 
 /*
  * Take one declaration off the host.

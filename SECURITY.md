@@ -43,15 +43,18 @@ measure changes that. The frame protocol is designed so the _content-world_ case
 is sound; the page-world case is documented rather than defended.
 
 **A page that hides its own root element.** The overlay host is a child of
-`documentElement`, and CSS gives no way for a descendant to escape its
-ancestors. A page rule of `html { opacity: 0 }`, `html { transform: scale(0) }`,
-`html { filter: opacity(0) }`, `html { content-visibility: hidden }` or
-`html { display: none }` therefore hides the overlay, and no measure inside the
-script changes that. Three facts bound the risk:
+`documentElement`, and CSS gives a descendant no way out of its ancestors.
+`documentElement` is the only ancestor that the host has. The removal guard
+keeps the host a child of it. A page that moves the host into a container of its
+own therefore loses it again at once. Five rules still win:
+`html { opacity: 0 }`, `html { transform: scale(0) }`,
+`html { filter: opacity(0) }`, `html { content-visibility: hidden }` and
+`html { display: none }`. No measure inside the script changes that. Three facts
+bound the risk:
 
-- The page hides itself as well. Every one of those rules paints nothing at all,
-  so the user sees a blank page and not a hidden interface that takes the
-  keyboard.
+- The page hides itself as well. Each one of those five rules paints the page
+  itself as nothing, so the user sees a blank page and not a hidden interface
+  that takes the keyboard.
 - We could only answer with a rule on the page itself, and a userscript that
   wrote `html { opacity: 1 !important }` would break every page that animates
   its root element.
@@ -62,8 +65,9 @@ script changes that. Three facts bound the risk:
 What the script does defend is the host itself: every inline declaration on the
 host carries the important priority, the guard in `src/ui/Ui.ts` compares each
 of those declarations and writes them again when the page changed one, and a
-mutation observer puts the host back after a removal. A page that names
-`vimium-webkit-overlay` in a selector, or removes the element, does not win.
+mutation observer puts the host back under `documentElement` after a removal or
+a move. A page that names `vimium-webkit-overlay` in a selector, removes the
+element, or moves it into a container of its own, does not win.
 
 **Detectability.** The overlay is an element in the page's own DOM and the
 script installs `keydown` listeners on `window`. A page can tell it is there.
