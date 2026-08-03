@@ -171,6 +171,32 @@ test.describe("scrolling", () => {
 
     await expect.poll(async () => (await vw.scrollOffsets()).y).toBe(STEP * 3);
   });
+
+  test("an inner container gives the rest of a step to its ancestor", async ({ vw }) => {
+    await vw.open("/scrollables.html");
+
+    // Ten pixels of room in `#inner`, and a command of sixty. The other fifty
+    // used to be thrown away, because the fallback ran only when the movement
+    // was zero.
+    const room = 10;
+    const limit = await vw.page.evaluate((left: number) => {
+      const inner = document.getElementById("inner");
+      if (inner === null) return -1;
+      const max = inner.scrollHeight - inner.clientHeight;
+      inner.scrollTop = max - left;
+      return max;
+    }, room);
+    expect(limit).toBeGreaterThan(room);
+
+    await focus(vw, "inner-focus");
+    await vw.press("j");
+
+    await expect.poll(async () => (await vw.scrollOffsets("#inner")).y)
+      .toBe(limit);
+    await expect.poll(async () => (await vw.scrollOffsets("#outer")).y)
+      .toBe(STEP - room);
+    expect((await vw.scrollOffsets()).y).toBe(0);
+  });
 });
 
 /**

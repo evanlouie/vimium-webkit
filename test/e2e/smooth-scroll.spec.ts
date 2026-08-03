@@ -102,4 +102,36 @@ test.describe("smooth scrolling (shipped default)", () => {
       { timeout: SETTLE_MS },
     ).toBe(STEP * 3);
   });
+
+  test("an inner container gives the rest of a step to its ancestor", async ({ vw }) => {
+    await vw.open("/scrollables.html");
+
+    // Ten pixels of room, and a command of sixty. The animated path measures
+    // the movement of each frame, so it can end a container in the middle of
+    // a command. The rest must reach the ancestor.
+    const room = 10;
+    const limit = await vw.page.evaluate((left: number) => {
+      const inner = document.getElementById("inner");
+      if (inner === null) return -1;
+      const max = inner.scrollHeight - inner.clientHeight;
+      inner.scrollTop = max - left;
+      return max;
+    }, room);
+    expect(limit).toBeGreaterThan(room);
+
+    await vw.page.evaluate(() => {
+      document.getElementById("inner-focus")?.focus({ preventScroll: true });
+    });
+    await vw.press("j");
+
+    await expect.poll(
+      async () => (await vw.scrollOffsets("#inner")).y,
+      { timeout: SETTLE_MS },
+    ).toBe(limit);
+    await expect.poll(
+      async () => (await vw.scrollOffsets("#outer")).y,
+      { timeout: SETTLE_MS },
+    ).toBe(STEP - room);
+    expect((await vw.scrollOffsets()).y).toBe(0);
+  });
 });

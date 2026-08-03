@@ -21,6 +21,9 @@
  *   engines. Every offset here is normalised to one convention: zero at the
  *   left edge, and growth to the right. `RtlScrollModel` gives the detail.
  *
+ * A command that one container cannot take in full goes on to the ancestors of
+ * that container. `applyChain` does that walk.
+ *
  * The animation is a forked fiber that waits on `dom.nextFrame`, and not a
  * `requestAnimationFrame` loop. One `FiberHandle` per axis holds the fiber, so
  * a new scroll interrupts the previous one, and the layer scope stops both.
@@ -89,6 +92,14 @@ const SCROLLABLE_OVERFLOW: ReadonlySet<string> = new Set([
   "scroll",
   "overlay",
 ]);
+
+/**
+ * The largest number of containers that one command may pass through.
+ *
+ * The walk goes up a tree, so it ends by itself. The limit is a guard against a
+ * page that gives a parent which is not above the child.
+ */
+const MAX_CHAIN_HOPS = 32;
 
 // ---------------------------------------------------------------------------
 // Pure geometry
@@ -215,6 +226,18 @@ const shiftOf = (
   return rtlShift(view.getComputedStyle(element).direction, axis, model, max);
 };
 
+/** The offset with zero at the left edge, whatever the engine writes. */
+const normalizedOffset = (
+  view: Window,
+  element: Element,
+  axis: ScrollAxis,
+  model: RtlScrollModel,
+): number => readOffset(element, axis) + shiftOf(view, element, axis, model);
+
+/** Give `magnitude` the sign of `amount`. */
+const towards = (amount: number, magnitude: number): number =>
+  amount < 0 ? -magnitude : magnitude;
+
 /**
  * Can `element` absorb a scroll of this sign along `axis`?
  *
@@ -269,6 +292,21 @@ const parentOf = (node: Element): Element | null => {
   return treeRoot instanceof ShadowRoot ? treeRoot.host : null;
 };
 
+/** How much room this element has left, in the direction of `amount`. */
+const roomFor = (
+  view: Window,
+  element: Element,
+  axis: ScrollAxis,
+  amount: number,
+  model: RtlScrollModel,
+): number => {
+  const properties = AXIS_PROPERTIES[axis];
+  const max = element[properties.scrollSize] - element[properties.clientSize];
+  if (max <= 0) return 0;
+  const offset = normalizedOffset(view, element, axis, model);
+  return Math.max(0, amount < 0 ? offset : max - offset);
+};
+
 /**
  * The nearest ancestor that can absorb the scroll.
  *
@@ -295,6 +333,61 @@ const findScrollableAncestor = (
   return root;
 };
 
+/**
+ * Give `amount` to `start`, and give what is left to each ancestor.
+ *
+ * The answer is the distance that the whole chain took.
+ *
+ * A container that has ten pixels of room used to take a sixty-pixel command
+ * and throw away the other fifty. The fallback ran only when the movement was
+ * *zero*. Here each container takes what it can, and the subtraction sends the
+ * rest up the chain to the root element, which is the last container.
+ *
+ * The distance that a container takes comes from its geometry, and not only
+ * from the read back. A page rule of `scroll-behavior: smooth` makes the engine
+ * animate our write, so the read back in the same task gives the old value.
+ * Trusting that read would hand the same distance to the ancestor as well, and
+ * the page would then move twice.
+ */
+const applyChain = (
+  view: Window,
+  root: Element,
+  start: Element,
+  axis: ScrollAxis,
+  amount: number,
+  model: RtlScrollModel,
+): number => {
+  let node: Element | null = start;
+  let remaining = amount;
+  let total = 0;
+
+  for (
+    let hop = 0;
+    node !== null && remaining !== 0 && hop < MAX_CHAIN_HOPS;
+    hop++
+  ) {
+    const room = roomFor(view, node, axis, remaining, model);
+    const moved = applyOffset(node, axis, remaining);
+    const taken = towards(
+      remaining,
+      Math.min(Math.abs(remaining), Math.max(Math.abs(moved), room)),
+    );
+    total += taken;
+    remaining -= taken;
+    if (node === root) break;
+    node = findScrollableAncestor(
+      view,
+      root,
+      parentOf(node),
+      axis,
+      remaining,
+      model,
+    );
+  }
+
+  return total;
+};
+
 // ---------------------------------------------------------------------------
 // The animation state
 // ---------------------------------------------------------------------------
@@ -304,6 +397,8 @@ interface Animation {
   /** The physical key that holds this animation open, for key repeat. */
   readonly code: Option.Option<string>;
   readonly generation: number;
+  /** The engine model for this axis, measured once and carried here. */
+  readonly model: RtlScrollModel;
   readonly amount: number;
   /**
    * The distance already covered when the current leg started.
@@ -324,6 +419,7 @@ interface Animation {
 /** What one step decided, before the element is asked to move. */
 interface Frame {
   readonly element: Element;
+  readonly model: RtlScrollModel;
   readonly frameDelta: number;
   readonly progress: number;
 }
@@ -513,19 +609,25 @@ export class Scroller extends Context.Service<Scroller, {
           yield* FiberHandle.clear(fibers[axis]);
         });
 
-      const applyInstant = Effect.fn("Scroller.applyInstant")(
-        function*(element: Element, axis: ScrollAxis, amount: number) {
-          yield* Effect.sync(() => {
-            const moved = applyOffset(element, axis, amount);
-            // The chosen element refused the scroll, so it lied about being
-            // scrollable. Give the distance to the document instead.
-            if (moved === 0) {
-              const root = rootElement();
-              if (root !== element) applyOffset(root, axis, amount);
-            }
-          });
-        },
-      );
+      /** Move `amount`, and give what one container cannot take to the next. */
+      const applyThroughChain = (
+        element: Element,
+        axis: ScrollAxis,
+        amount: number,
+        model: RtlScrollModel,
+      ): Effect.Effect<number> =>
+        dom.probeOr(
+          () =>
+            applyChain(
+              dom.window,
+              rootElement(),
+              element,
+              axis,
+              amount,
+              model,
+            ),
+          0,
+        );
 
       /**
        * One step of the animation.
@@ -568,6 +670,7 @@ export class Scroller extends Context.Service<Scroller, {
               return [
                 Option.some({
                   element: animation.element,
+                  model: animation.model,
                   frameDelta: Math.trunc(goal - animation.applied),
                   progress,
                 }),
@@ -582,24 +685,18 @@ export class Scroller extends Context.Service<Scroller, {
           );
 
           if (Option.isNone(frame)) return false;
-          const { element, frameDelta, progress } = frame.value;
+          const { element, model, frameDelta, progress } = frame.value;
 
-          const moved = yield* Effect.sync(() =>
-            frameDelta === 0 ? 0 : applyOffset(element, axis, frameDelta)
-          );
+          // The chain, and not the element alone. A container that runs out
+          // half way through a command gives the rest to its ancestors, on
+          // this frame and on every later one.
+          const moved = frameDelta === 0
+            ? 0
+            : yield* applyThroughChain(element, axis, frameDelta, model);
 
           if (frameDelta !== 0 && moved === 0) {
-            // The element refused the scroll. It is at the end of its range, or
-            // it lied about being scrollable. Give the rest to the document
-            // instead of stopping without a word.
-            const state = yield* Ref.get(animations[axis]);
-            const applied = Option.isSome(state) ? state.value.applied : 0;
-            const root = rootElement();
-            if (root !== element && applied === 0) {
-              yield* Effect.sync(() => {
-                applyOffset(root, axis, frameDelta);
-              });
-            }
+            // Nothing in the whole chain had room. The page is at its end, so
+            // stop instead of turning every later frame into the same walk.
             yield* Ref.set(animations[axis], Option.none());
             return false;
           }
@@ -670,6 +767,7 @@ export class Scroller extends Context.Service<Scroller, {
           axis: ScrollAxis,
           amount: number,
           code: Option.Option<string>,
+          model: RtlScrollModel,
         ) {
           yield* Ref.set(
             animations[axis],
@@ -677,6 +775,7 @@ export class Scroller extends Context.Service<Scroller, {
               element,
               code,
               generation: yield* Ref.get(generation),
+              model,
               amount,
               origin: 0,
               duration: durationFor(Math.abs(amount)),
@@ -701,9 +800,10 @@ export class Scroller extends Context.Service<Scroller, {
           axis: ScrollAxis,
           amount: number,
           event: Option.Option<KeyboardEvent>,
+          model: RtlScrollModel,
         ) {
           if (!(yield* animated)) {
-            yield* applyInstant(element, axis, amount);
+            yield* applyThroughChain(element, axis, amount, model);
             return;
           }
 
@@ -731,7 +831,7 @@ export class Scroller extends Context.Service<Scroller, {
             return;
           }
 
-          yield* start(element, axis, amount, code);
+          yield* start(element, axis, amount, code, model);
         },
       );
 
@@ -766,7 +866,7 @@ export class Scroller extends Context.Service<Scroller, {
           if (yield* mergeThisPress(axis, amount)) return;
           const model = yield* modelFor(axis);
           const element = yield* target(axis, amount, model);
-          yield* scrollElementBy(element, axis, amount, event);
+          yield* scrollElementBy(element, axis, amount, event, model);
         },
       );
 
@@ -788,7 +888,7 @@ export class Scroller extends Context.Service<Scroller, {
           const amount = Math.round(size * fraction);
           if (amount === 0) return;
           if (yield* mergeThisPress(axis, amount)) return;
-          yield* scrollElementBy(element, axis, amount, event);
+          yield* scrollElementBy(element, axis, amount, event, model);
         },
       );
 

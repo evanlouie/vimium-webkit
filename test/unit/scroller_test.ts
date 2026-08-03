@@ -16,6 +16,7 @@
 
 import { assert, describe, it } from "@effect/vitest";
 import { Clock, Effect, Layer, Option, Stream } from "effect";
+import { TestClock } from "effect/testing";
 import { Commands } from "~/core/Commands.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
@@ -329,6 +330,83 @@ const withScroller = (
     Effect.flatMap(Scroller, body),
     scrollerOf(world, patch),
   );
+
+// ---------------------------------------------------------------------------
+// The scroll chain
+// ---------------------------------------------------------------------------
+
+/** Let the animation run to its end. */
+const settle = TestClock.adjust("2 seconds");
+
+describe("the scroll chain", () => {
+  /** An inner container with ten pixels left, inside a tall document. */
+  const nearlyExhausted = (): { world: World; inner: FakeElement } => {
+    const world = makeWorld();
+    const inner = world.make({
+      name: "inner",
+      scrollHeight: 1000,
+      clientHeight: 200,
+      startTop: 790,
+    });
+    return { world, inner };
+  };
+
+  it.effect("gives the rest of a step to the ancestor, with no animation", () =>
+    Effect.gen(function*() {
+      const { world, inner } = nearlyExhausted();
+      world.focus(inner);
+
+      yield* withScroller(
+        world,
+        { smoothScroll: false },
+        (scroller) => scroller.scrollBy("y", 60, Option.none()),
+      );
+
+      // Ten pixels of room, sixty of command. The other fifty used to be
+      // thrown away.
+      assert.strictEqual(inner.scrollTop, 800);
+      assert.strictEqual(world.root.scrollTop, 50);
+    }));
+
+  it.effect("gives the rest of a step to the ancestor, while it animates", () =>
+    Effect.gen(function*() {
+      const { world, inner } = nearlyExhausted();
+      world.focus(inner);
+
+      yield* withScroller(
+        world,
+        { smoothScroll: true },
+        (scroller) =>
+          Effect.gen(function*() {
+            yield* scroller.scrollBy("y", 60, Option.none());
+            yield* settle;
+          }),
+      );
+
+      assert.strictEqual(inner.scrollTop, 800);
+      assert.strictEqual(world.root.scrollTop, 50);
+    }));
+
+  it.effect("keeps the whole step in a container that has the room", () =>
+    Effect.gen(function*() {
+      const world = makeWorld();
+      const inner = world.make({
+        name: "inner",
+        scrollHeight: 1000,
+        clientHeight: 200,
+      });
+      world.focus(inner);
+
+      yield* withScroller(
+        world,
+        { smoothScroll: false },
+        (scroller) => scroller.scrollBy("y", 60, Option.none()),
+      );
+
+      assert.strictEqual(inner.scrollTop, 60);
+      assert.strictEqual(world.root.scrollTop, 0);
+    }));
+});
 
 // ---------------------------------------------------------------------------
 // Right-to-left containers
