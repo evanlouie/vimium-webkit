@@ -11,10 +11,11 @@
  * service in `Find.ts` calls them inside `dom.probeOr`, so a realm that refuses
  * a read costs one search and not the application.
  *
- * A run is the longest sequence of text nodes that share one tree root. A match
- * is only ever built *inside* one run, because a `Range` whose two boundaries
- * are in different node trees is not a range: `setEnd` collapses it without a
- * word.
+ * A run is one unbroken line of text, in the order that the reader sees it. A
+ * match is only ever built *inside* one run, for two reasons. A `Range` whose
+ * two boundaries are in different node trees is not a range: `setEnd` collapses
+ * it without a word. And a run ends where the browser draws a break, so a query
+ * cannot match across two blocks that the reader sees as two lines.
  */
 
 import { Option } from "effect";
@@ -388,6 +389,18 @@ export const wordAt = (text: string, offset: number): string => {
 // The walk
 // ---------------------------------------------------------------------------
 
+/**
+ * The node types that the walk reads.
+ *
+ * The numbers are the values of `Node.ELEMENT_NODE` and of its siblings. They
+ * are written out on purpose: the walk must not need a global `Node`, so a unit
+ * test can build a tree of plain objects and run it in Node, where no DOM
+ * exists.
+ */
+const ELEMENT_NODE = 1;
+const TEXT_NODE = 3;
+const DOCUMENT_NODE = 9;
+
 /** The elements whose text the browser never draws as page content. */
 const OPAQUE_TAGS: ReadonlySet<string> = new Set([
   "SCRIPT",
@@ -409,7 +422,16 @@ const OPAQUE_TAGS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * One unbroken stretch of text nodes that share one tree root.
+ * The `display` values that keep the text on the same line.
+ *
+ * Every other value starts a new box, and therefore a new run. `contents`
+ * draws no box of its own, so the children keep the place of the element.
+ * `none` is already gone, because the element is not visible.
+ */
+const INLINE_DISPLAY = /^(?:inline|contents|ruby|none)/;
+
+/**
+ * One unbroken line of text, in the order that the reader sees it.
  *
  * `haystack` is the join of the node data, after normalisation. A match can
  * therefore begin in one node and end in another, which is the usual case on
@@ -422,10 +444,17 @@ export interface TextRun {
   readonly haystack: string;
 }
 
+/** Just the part of the view that the walk reads. */
+export interface StyleSource {
+  readonly getComputedStyle: (
+    element: Element,
+  ) => { readonly display: string; readonly visibility: string };
+}
+
 export interface CollectOptions {
-  readonly view: Window;
+  readonly view: StyleSource;
   readonly document: Document;
-  readonly capabilities: CapabilityReport;
+  readonly capabilities: Pick<CapabilityReport, "checkVisibility">;
   readonly root?: Document | ShadowRoot;
   /** The host of our own closed shadow root. It is never searched. */
   readonly excludeHost: Option.Option<Element>;
@@ -439,24 +468,41 @@ export interface CollectOptions {
 /** About the text of one novel. Above this, nobody is reading the page. */
 export const DEFAULT_MAX_CHARACTERS = 2_000_000;
 
-interface VisibilityCache {
+interface ElementFacts {
+  /** Does the browser draw this element and its subtree? */
   readonly visible: (element: Element) => boolean;
+  /** Does this element break the line that the text beside it is on? */
+  readonly breaks: (element: Element) => boolean;
 }
 
 /**
- * The visibility answers for one walk.
+ * The answers about one element, for one walk.
  *
  * `checkVisibility` is used where it exists, which is Safari 17.4 and later. It
  * is the only check that accounts for `content-visibility: auto`, which Safari
  * 18 has, and which makes an answer from `getComputedStyle` wrong. It is called
  * through a narrowed `unknown`, because the DOM library that we compile against
  * does not agree with every Safari version about the option names.
+ *
+ * Each answer is cached, because an element is asked at most once for each
+ * question, and a page has more edges than elements.
  */
-const visibilityCache = (
-  view: Window,
-  capabilities: CapabilityReport,
-): VisibilityCache => {
-  const cache = new WeakMap<Element, boolean>();
+const elementFacts = (
+  view: StyleSource,
+  capabilities: Pick<CapabilityReport, "checkVisibility">,
+): ElementFacts => {
+  const visibleCache = new WeakMap<Element, boolean>();
+  const breakCache = new WeakMap<Element, boolean>();
+
+  const styleOf = (
+    element: Element,
+  ): { readonly display: string; readonly visibility: string } | null => {
+    try {
+      return view.getComputedStyle(element);
+    } catch {
+      return null;
+    }
+  };
 
   const check = (element: Element): boolean => {
     if (capabilities.checkVisibility) {
@@ -464,19 +510,31 @@ const visibilityCache = (
         checkVisibility?: (options?: Record<string, boolean>) => boolean;
       };
       if (typeof host.checkVisibility === "function") {
-        return host.checkVisibility({
-          contentVisibilityAuto: true,
-          visibilityProperty: true,
-        });
+        if (
+          host.checkVisibility({
+            contentVisibilityAuto: true,
+            visibilityProperty: true,
+          })
+        ) {
+          return true;
+        }
+        // `checkVisibility` answers false for an element that has no box of
+        // its own, and `display: contents` is exactly that: the element draws
+        // nothing, and its children draw in its place. A `<slot>` has that
+        // display by default, so a check with no second opinion would drop
+        // every slotted word on the page.
+        const style = styleOf(element);
+        return style !== null && style.display === "contents";
       }
     }
-    const style = view.getComputedStyle(element);
+    const style = styleOf(element);
+    if (style === null) return true;
     return style.display !== "none" && style.visibility !== "hidden";
   };
 
   return {
     visible: (element: Element): boolean => {
-      const cached = cache.get(element);
+      const cached = visibleCache.get(element);
       if (cached !== undefined) return cached;
       let result: boolean;
       try {
@@ -486,150 +544,202 @@ const visibilityCache = (
         // searchable, instead of dropping half of the page for one bad node.
         result = true;
       }
-      cache.set(element, result);
+      visibleCache.set(element, result);
+      return result;
+    },
+    breaks: (element: Element): boolean => {
+      const cached = breakCache.get(element);
+      if (cached !== undefined) return cached;
+      // `<br>` draws a line break with an inline display, so the value of
+      // `display` cannot answer for it.
+      const style = element.tagName === "BR" ? null : styleOf(element);
+      const result = element.tagName === "BR"
+        ? true
+        : style !== null && !INLINE_DISPLAY.test(style.display);
+      breakCache.set(element, result);
       return result;
     },
   };
 };
 
+type WalkTask =
+  | { readonly kind: "visit"; readonly node: Node }
+  | { readonly kind: "leave"; readonly element: Element };
+
+/** The children of `node`, for a node that draws nothing of its own. */
+const plainChildren = (node: Node): ReadonlyArray<Node> => [...node.childNodes];
+
 /**
- * Collect the searchable text of `root`, and descend into every **open** shadow
- * root.
+ * The children of `element`, in the order that the reader sees them.
+ *
+ * Three rules, and each one follows the flat tree of the DOM standard:
+ *
+ * - **A slot** draws the nodes that the light DOM assigns to it. `flatten`
+ *   opens a slot that is itself assigned to another slot, and it gives the
+ *   fallback children when nothing is assigned.
+ * - **An open shadow root** replaces the light children. Those children reach
+ *   the screen through a slot only, and the walk of the shadow tree finds them
+ *   there, in the place where the reader sees them. A **closed** root is
+ *   invisible to us, so the light children are walked as they stand: that is a
+ *   guess, and it is the only one available.
+ * - **`display: contents`** draws no box, so the element adds no boundary and
+ *   its children keep its place. That falls out of the rule for a run
+ *   boundary, and needs nothing here.
+ */
+const composedChildren = (element: Element): ReadonlyArray<Node> => {
+  if (element.tagName === "SLOT") {
+    const slot = element as HTMLSlotElement;
+    if (typeof slot.assignedNodes === "function") {
+      return [...slot.assignedNodes({ flatten: true })];
+    }
+  }
+  const shadow = element.shadowRoot;
+  return shadow === null ? plainChildren(element) : plainChildren(shadow);
+};
+
+/** Where the walk of `root` begins. */
+const startOfRoot = (root: Document | ShadowRoot): Node | null => {
+  if (root.nodeType !== DOCUMENT_NODE) return root;
+  const document = root as Document;
+  return document.body ?? document.documentElement ?? null;
+};
+
+/**
+ * Collect the searchable text of `root`, in composed order.
+ *
+ * The walk follows the flat tree: it descends into every **open** shadow root
+ * in the place of the host, and it reads a slot as the nodes that are assigned
+ * to it. The order of the runs is therefore the order in which the reader sees
+ * the text, and not the order of the source.
  *
  * A closed root is invisible to us by design. `element.shadowRoot` is `null`,
  * and a patch of `attachShadow` needs a `document-start` that WebKit does not
  * give a userscript. The content of such a root does not appear.
  *
- * Slotted content is collected exactly once, from the light DOM of the host. A
- * `TreeWalker` over a shadow root never visits the assigned nodes of a slot,
- * because those are not its children. Nothing is counted twice, and nothing is
- * lost.
+ * A run ends where the browser draws a break. `<p>north</p><p>west</p>` gives
+ * two runs, so `northwest` matches nothing, and `<span>hemi</span>sphere` gives
+ * one run, so `hemisphere` matches. The boundary is asked for only between two
+ * pieces of text, so a subtree with no text costs no style read.
+ *
+ * `maxCharacters` is the whole text that one walk takes, so that one bad page
+ * cannot block the keystroke that opened find.
  */
 export const collectTextRuns = (
   options: CollectOptions,
 ): ReadonlyArray<TextRun> => {
   const budget = options.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
-  const visibility = visibilityCache(options.view, options.capabilities);
+  const facts = elementFacts(options.view, options.capabilities);
 
   const runs: TextRun[] = [];
-  const pending: Array<Document | ShadowRoot> = [
-    options.root ?? options.document,
-  ];
-  const seen = new Set<Document | ShadowRoot>();
-  let remaining = budget;
+  let nodes: Text[] = [];
+  let lengths: number[] = [];
+  let parts: string[] = [];
 
-  while (pending.length > 0 && remaining > 0) {
-    const root = pending.shift();
-    if (root === undefined || seen.has(root)) continue;
-    seen.add(root);
-
-    const collected = collectFromRoot(root, {
-      document: options.document,
-      visibility,
-      excludeHost: options.excludeHost,
-      remaining,
-    });
-    remaining -= collected.consumed;
-    if (Option.isSome(collected.run)) runs.push(collected.run.value);
-    pending.push(...collected.shadowRoots);
-  }
-
-  return runs;
-};
-
-interface RootCollection {
-  readonly run: Option.Option<TextRun>;
-  readonly shadowRoots: ReadonlyArray<ShadowRoot>;
-  readonly consumed: number;
-}
-
-interface RootContext {
-  readonly document: Document;
-  readonly visibility: VisibilityCache;
-  readonly excludeHost: Option.Option<Element>;
-  readonly remaining: number;
-}
-
-const collectFromRoot = (
-  root: Document | ShadowRoot,
-  context: RootContext,
-): RootCollection => {
-  const shadowRoots: ShadowRoot[] = [];
-  const nodes: Text[] = [];
-  const lengths: number[] = [];
-  const parts: string[] = [];
-  let consumed = 0;
-
-  // A `ShadowRoot` is a `DocumentFragment`, and it has no `createTreeWalker`.
-  // The factory is on `Document`, and the root of a walker may be any node.
-  const scope: Node = root instanceof Document ? (root.body ?? root) : root;
-
-  const walker = context.document.createTreeWalker(
-    scope,
-    NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
-    {
-      acceptNode: (node: Node): number => {
-        if (node.nodeType === Node.TEXT_NODE) {
-          return node.nodeValue !== null && node.nodeValue.length > 0
-            ? NodeFilter.FILTER_ACCEPT
-            : NodeFilter.FILTER_REJECT;
-        }
-        const element = node as Element;
-        if (
-          Option.isSome(context.excludeHost) &&
-          element === context.excludeHost.value
-        ) {
-          return NodeFilter.FILTER_REJECT;
-        }
-        if (OPAQUE_TAGS.has(element.tagName)) return NodeFilter.FILTER_REJECT;
-        if (element.hasAttribute("hidden")) return NodeFilter.FILTER_REJECT;
-        // A reject cuts the whole subtree. That is what makes one visibility
-        // check for each element affordable *and* correct: a `display: none` on
-        // an ancestor is never derived again from a descendant.
-        if (!context.visibility.visible(element)) {
-          return NodeFilter.FILTER_REJECT;
-        }
-        // Accepted only so that the loop below can queue the shadow root. The
-        // light children are still walked, and that is where slotted text is.
-        return element.shadowRoot !== null
-          ? NodeFilter.FILTER_ACCEPT
-          : NodeFilter.FILTER_SKIP;
-      },
-    },
-  );
-
-  for (
-    let node = walker.nextNode();
-    node !== null && consumed < context.remaining;
-    node = walker.nextNode()
-  ) {
-    if (node.nodeType !== Node.TEXT_NODE) {
-      const shadow = (node as Element).shadowRoot;
-      if (shadow !== null) shadowRoots.push(shadow);
-      continue;
-    }
-    const text = node as Text;
-    const data = text.data;
-    nodes.push(text);
-    lengths.push(data.length);
-    parts.push(normaliseHaystack(data));
-    consumed += data.length;
-  }
-
-  if (nodes.length === 0) {
-    return { run: Option.none(), shadowRoots, consumed };
-  }
-
-  return {
-    run: Option.some({
+  const flush = (): void => {
+    if (nodes.length === 0) return;
+    runs.push({
       nodes,
       lengths,
       starts: chunkStarts(lengths),
       haystack: parts.join(""),
-    }),
-    shadowRoots,
-    consumed,
+    });
+    nodes = [];
+    lengths = [];
+    parts = [];
   };
+
+  // The elements that stand between the text that was taken last and the text
+  // that comes next. They are classified only when a second piece of text
+  // arrives, so a subtree with no text asks for no style at all.
+  let gap: Element[] = [];
+  let broken = false;
+
+  const gapBreaks = (): boolean => {
+    if (!broken) {
+      for (const element of gap) {
+        if (facts.breaks(element)) {
+          broken = true;
+          break;
+        }
+      }
+    }
+    gap = [];
+    return broken;
+  };
+
+  // An explicit stack, and not recursion: a page can nest deeper than the
+  // JavaScript stack of the engine allows.
+  const stack: WalkTask[] = [];
+  const push = (children: ReadonlyArray<Node>): void => {
+    for (let index = children.length - 1; index >= 0; index--) {
+      const child = children[index];
+      if (child !== undefined) stack.push({ kind: "visit", node: child });
+    }
+  };
+
+  const start = startOfRoot(options.root ?? options.document);
+  if (start !== null) stack.push({ kind: "visit", node: start });
+
+  let remaining = budget;
+
+  while (stack.length > 0 && remaining > 0) {
+    const task = stack.pop();
+    if (task === undefined) break;
+
+    if (task.kind === "leave") {
+      // The end of a block breaks the line, exactly as its start did.
+      if (!broken) gap.push(task.element);
+      continue;
+    }
+
+    const node = task.node;
+    const type = node.nodeType;
+
+    if (type === TEXT_NODE) {
+      const data = (node as Text).data;
+      if (data.length === 0) continue;
+      if (nodes.length > 0 && gapBreaks()) flush();
+      gap = [];
+      broken = false;
+
+      nodes.push(node as Text);
+      lengths.push(data.length);
+      parts.push(normaliseHaystack(data));
+      remaining -= data.length;
+      continue;
+    }
+
+    if (type !== ELEMENT_NODE) {
+      // A document, a shadow root or a fragment. It draws nothing of its own.
+      push(plainChildren(node));
+      continue;
+    }
+
+    const element = node as Element;
+    if (
+      Option.isSome(options.excludeHost) &&
+      element === options.excludeHost.value
+    ) {
+      continue;
+    }
+    const tag = element.tagName;
+    // Each of these drops the whole subtree. That is what makes one visibility
+    // check for each element affordable *and* correct: a `display: none` on an
+    // ancestor is never derived again from a descendant. An element that draws
+    // nothing also adds no boundary, because the text on both sides of it
+    // stays on one line.
+    if (OPAQUE_TAGS.has(tag)) continue;
+    if (element.hasAttribute("hidden")) continue;
+    if (!facts.visible(element)) continue;
+
+    if (!broken) gap.push(element);
+    if (tag === "BR") continue;
+    stack.push({ kind: "leave", element });
+    push(composedChildren(element));
+  }
+
+  flush();
+  return runs;
 };
 
 // ---------------------------------------------------------------------------

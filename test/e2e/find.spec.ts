@@ -113,3 +113,81 @@ test.describe("find", () => {
     expect((await vw.selection()).text).toBe("");
   });
 });
+// ---------------------------------------------------------------------------
+// Composed order, and the boundary that the reader sees
+// ---------------------------------------------------------------------------
+
+/**
+ * Does the current highlight sit on `selector`?
+ *
+ * Both boxes are read in one call, so a scroll between two calls cannot make
+ * the answer wrong. The test is a containment test: the highlight covers one
+ * word, and the element holds the whole line.
+ */
+const highlightSits = (
+  vw: Vimium,
+  selector: string,
+  shadowHost: string | null = null,
+): Promise<boolean | null> =>
+  vw.page.evaluate(
+    ([query, host]: readonly [string, string | null]): boolean | null => {
+      const harness = globalThis as unknown as {
+        __vimiumHarness?: { shadow: ShadowRoot | null };
+      };
+      const shadow = harness.__vimiumHarness?.shadow ?? null;
+      const drawn = shadow?.querySelector(".vw-find__rect--current") ?? null;
+      const root: Document | ShadowRoot | null = host === null
+        ? document
+        : document.querySelector(host)?.shadowRoot ?? null;
+      const target = root?.querySelector(query) ?? null;
+      if (drawn === null || target === null) return null;
+      const box = drawn.getBoundingClientRect();
+      const wanted = target.getBoundingClientRect();
+      const x = box.left + box.width / 2;
+      const y = box.top + box.height / 2;
+      return x >= wanted.left - 2 && x <= wanted.right + 2 &&
+        y >= wanted.top - 2 && y <= wanted.bottom + 2;
+    },
+    [selector, shadowHost] as const,
+  );
+
+test.describe("find in composed order", () => {
+  test("visits the matches in the order that the reader sees", async ({ vw }) => {
+    await vw.open("/find-composed.html");
+    await commitFind(vw, "widget");
+
+    // alpha is light DOM, beta is the shadow tree of the card, delta is the
+    // light child that the slot of the card draws, and gamma is light DOM
+    // again. Tree order would give alpha, delta, gamma, beta.
+    await vw.waitForHud("1/4");
+    await expect.poll(() => highlightSits(vw, "#alpha")).toBe(true);
+
+    await vw.press("n");
+    await vw.waitForHud("2/4");
+    await expect.poll(() => highlightSits(vw, "#head", "#card")).toBe(true);
+
+    await vw.press("n");
+    await vw.waitForHud("3/4");
+    await expect.poll(() => highlightSits(vw, "#delta")).toBe(true);
+
+    await vw.press("n");
+    await vw.waitForHud("4/4");
+    await expect.poll(() => highlightSits(vw, "#gamma")).toBe(true);
+  });
+
+  test("does not match across two blocks that the reader sees apart", async ({ vw }) => {
+    await vw.open("/find-composed.html");
+    // `<p>north</p><p>west</p>`, with nothing between the two blocks. The
+    // reader sees two lines, so `northwest` is not a word on this page.
+    await commitFind(vw, "northwest");
+
+    await vw.waitForHud("No matches");
+  });
+
+  test("still matches across inline markup on one line", async ({ vw }) => {
+    await vw.open("/long-text.html");
+    await commitFind(vw, QUERY);
+
+    await vw.waitForHud("1/4");
+  });
+});
