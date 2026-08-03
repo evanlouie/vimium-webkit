@@ -211,12 +211,13 @@ one rule, so no service decides for itself how to speak to the user.
 
 ## 7. Starting, and stopping
 
-`src/main.ts` runs in every frame of every page. It does three things:
+`src/main.ts` runs in every frame of every page. It does four things:
 
 1. It claims the realm, so that a second injection does nothing.
 2. It waits until something says that the user wants us: a key that is not for a
    text field, a wake message from an ancestor, or 1200 ms in the top frame.
 3. It builds `AppLayer`, and gives the application the keyboard.
+4. It releases the runtime when this frame's page goes away for good.
 
 Step 2 keeps a page with twenty frames cheap. A frame that never receives a key
 builds the guard only. The guard runtime holds `Dom` and `Realm`, and nothing
@@ -235,8 +236,28 @@ matters:
 so each step that it takes belongs to the layer scope. It is the only file that
 may read a feature and the core in the same breath.
 
-Stopping is the close of the runtime scope. There is no `dispose` method in
-`src/`.
+Stopping is the close of the runtime scope. No service has a `stop` method, and
+no module keeps a list of things to remove.
+
+The page decides when the scope closes, and `src/boot/Lifecycle.ts` reads that
+decision:
+
+- A hook that `Lifecycle.onExit` registers starts **inside** the browser's own
+  dispatch. A subscriber of the event bus does not, because it reads the bus on
+  another fiber, and the page can be gone by then. The exit hook therefore does
+  the work that a dying page must not lose: it gives every held value to
+  storage.
+- `pagehide` with `persisted === true` is not a final exit. The page may come
+  back from the back/forward cache, and a restored page never runs its scripts
+  again. Nothing is released there.
+- `visibilitychange` to `hidden` runs the same hooks, and it is never final. It
+  is the last moment that mobile WebKit reliably gives us. `unload` is never
+  used.
+- A final exit releases the runtime. `src/main.ts` owns that runtime, so it
+  gives the `RuntimeOwner` service that `src/boot/Bootstrap.ts` asks for. The
+  release runs after the last writes reached storage, because it closes the
+  scope that the storage actor lives in. Each frame releases only its own
+  runtime.
 
 ## 8. Directory layout
 
