@@ -25,12 +25,26 @@
  *   `\s+\s+`;
  * - more than one unbounded quantifier that competes with the text after it,
  *   as in `a.*b.*c`;
+ * - more than eight lookaheads or lookbehinds in one pattern;
  * - a backreference.
  *
  * The check compares the character sets of the two parts that compete. A part
  * that cannot take the first character of the next part cannot compete with
  * it. `([a-z0-9-]+\.)*` is therefore safe, because the inner loop cannot take
  * the dot that ends each iteration.
+ *
+ * # A lookahead and a lookbehind
+ *
+ * An assertion gives back no text, but it holds an expression that runs. The
+ * check reads inside it. The body of an assertion competes with the text that
+ * follows the assertion, so its character sets take part in every neighbour
+ * test, and a quantifier in the body counts in the budget below.
+ *
+ * The body of an assertion runs again for each way that the text before it can
+ * match. `.*(?=.*x)` therefore costs a window times a window, which is the
+ * same cost as `a.*b.*c`, and both are refused. `(?=.*foo)(?=.*bar)` costs two
+ * windows, because nothing before the two assertions can vary, and both are
+ * accepted.
  *
  * # What the check does not promise
  *
@@ -43,11 +57,17 @@
  * - The check reads a small model of the pattern. It accepts a shape that the
  *   model cannot describe, because it cannot prove a fault there.
  *
+ * The budget of a caller bounds a pattern whose cost grows with a power of the
+ * length of the text. It cannot bound a pattern whose cost doubles with each
+ * character. The shapes in the list above are the shapes that double, and the
+ * check refuses each one with a proof.
+ *
  * Each caller must therefore hold a budget of its own. `~/domain/Exclusion.ts`
  * caps the length of the URL that a raw expression reads.
- * `~/features/find/Engine.ts` searches the page text in pieces and stops at a
- * deadline. Read those two modules with this one. This check is the first
- * line, and the budget is the second.
+ * `~/features/find/Engine.ts` searches the page text in windows, measures each
+ * window, and makes the next window smaller when a window costs too much. Read
+ * those two modules with this one. This check is the first limit, and the
+ * budget of the caller is the second.
  *
  * The check prefers to accept when it is not sure. A refused pattern costs the
  * user a rule that they must write again, and the budget of the caller holds
@@ -75,8 +95,16 @@ const AMBIGUOUS_BRANCHES =
 const COMPETING_LOOPS =
   "two quantifiers that match the same characters can hang the page";
 const MANY_LOOPS =
-  "more than one unbounded quantifier competes with the text after it, " +
+  "this pattern can try too many ways to match one piece of text, " +
   "and that can hang the page";
+const MANY_ASSERTIONS =
+  "this pattern holds too many lookaheads or lookbehinds for the safety check";
+const PROPERTY_ESCAPE =
+  "a property escape such as `\\p{L}` needs the `u` flag, which this field " +
+  "does not allow; write a character class such as `[a-zA-Z]` instead";
+const LONG_ESCAPE =
+  "`\\u{…}` needs the `u` flag, which this field does not allow; write " +
+  "`\\uFFFF` with four digits instead";
 
 // ---------------------------------------------------------------------------
 // Character sets
@@ -350,10 +378,26 @@ const parse = (
 ): ParseOutcome => {
   let index = 0;
   let failure: string | null = null;
+  let assertions = 0;
 
   const fail = (reason: string): Node => {
     failure ??= reason;
     return EMPTY_NODE;
+  };
+
+  /**
+   * The character at `index`, and the step over it.
+   *
+   * With the `u` flag the engine reads one code point, so `😀+` repeats one
+   * character. Without the flag it reads two code units, and `😀+` repeats the
+   * second one. The model must say what the engine does.
+   */
+  const readCodePoint = (): number => {
+    const point = unicode
+      ? source.codePointAt(index) ?? 0
+      : source.charCodeAt(index);
+    index += point > 0xffff ? 2 : 1;
+    return point;
   };
 
   const parseEscapeItem = (): ClassItem => {
@@ -396,7 +440,7 @@ const parse = (
           // characters `u{41}` without it. Refuse the second reading: a model
           // that does not match the engine is not a safe model.
           if (!unicode) {
-            fail(UNSUPPORTED_SYNTAX);
+            fail(LONG_ESCAPE);
             return OPEN_ITEM;
           }
           const close = source.indexOf("}", index);
@@ -430,7 +474,7 @@ const parse = (
         // flag, and the four literal characters `p{L}` without it. Refuse the
         // second reading, so that the model always says what the engine does.
         if (!unicode) {
-          fail(UNSUPPORTED_SYNTAX);
+          fail(PROPERTY_ESCAPE);
           return OPEN_ITEM;
         }
         // We cannot list the members of the property.
@@ -451,9 +495,7 @@ const parse = (
       index++;
       return parseEscapeItem();
     }
-    const code = source.charCodeAt(index);
-    index++;
-    return { kind: "char", code };
+    return { kind: "char", code: readCodePoint() };
   };
 
   const parseClass = (): Node => {
@@ -562,7 +604,13 @@ const parse = (
     if (failure !== null) return EMPTY_NODE;
     if (source[index] !== ")") return fail(UNSUPPORTED_SYNTAX);
     index++;
-    return look ? { kind: "look", body } : body;
+    if (!look) return body;
+    // The blunt limit. The cost model below reads inside an assertion, and a
+    // long chain of assertions is the shape that a wrong answer there costs
+    // the most. Refuse the chain, and say so.
+    assertions++;
+    if (assertions > ASSERTION_LIMIT) return fail(MANY_ASSERTIONS);
+    return { kind: "look", body };
   };
 
   const parseAtom = (): Node => {
@@ -587,8 +635,7 @@ const parse = (
       case "?":
         return fail(UNSUPPORTED_SYNTAX);
       default:
-        index++;
-        return { kind: "char", set: oneChar(char.charCodeAt(0)) };
+        return { kind: "char", set: oneChar(readCodePoint()) };
     }
   };
 
@@ -675,8 +722,34 @@ interface Span {
 /** The most character sets that one fixed shape holds. */
 const SEQUENCE_LIMIT = 64;
 
-/** How many unbounded quantifiers may compete with the text after them. */
-const SLIDE_LIMIT = 1;
+/**
+ * The most lookaheads and lookbehinds that one pattern may hold.
+ *
+ * This is a blunt limit, and it does not need the model below to be right. An
+ * assertion holds an expression that runs, so a long chain of them is the
+ * shape where a wrong answer from the model costs the most. A pattern that a
+ * user writes holds a few assertions, and never a chain of this length.
+ */
+const ASSERTION_LIMIT = 8;
+
+/**
+ * The most positions that one quantifier can try inside one window of text.
+ *
+ * Each caller reads a bounded piece of text: `~/domain/Exclusion.ts` caps the
+ * URL, and `~/features/find/Engine.ts` reads the page in windows. A quantifier
+ * whose count can vary by more than this value is therefore unbounded in
+ * practice, and the check reads it as unbounded.
+ */
+const WINDOW_WIDTH = 1024;
+
+/**
+ * The most ways that one pattern may try to match one piece of text.
+ *
+ * One unbounded quantifier that competes with the text after it costs one
+ * window, and the budget of the caller pays for that. Two of them cost a
+ * window times a window. `a.*b.*c` and `.*(?=.*x)` are both that shape.
+ */
+const PATH_BUDGET = WINDOW_WIDTH;
 
 /**
  * Every answer that the rules ask about one tree.
@@ -698,6 +771,15 @@ interface Analysis {
   readonly last: (node: Node) => CharSet;
   /** Every character that a match can hold, at any position. */
   readonly anywhere: (node: Node) => CharSet;
+  /**
+   * How many ways this expression can try to match one piece of text.
+   *
+   * The number counts the choices that the text can make, and not the
+   * characters that the expression reads. A value of `1` means that one text
+   * gives one path. `WINDOW_WIDTH` means that one unbounded quantifier can
+   * stop at every position of a window.
+   */
+  readonly cost: (node: Node) => number;
   /**
    * The characters that can make a match longer.
    *
@@ -726,6 +808,7 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
   const lastCache = new Map<Node, CharSet>();
   const anywhereCache = new Map<Node, CharSet>();
   const extendCache = new Map<Node, CharSet>();
+  const costCache = new Map<Node, number>();
   const sequenceCache = new Map<
     Node,
     Option.Option<ReadonlyArray<CharSet>>
@@ -824,8 +907,12 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
       switch (target.kind) {
         case "empty":
         case "anchor":
-        case "look":
           return EMPTY_SET;
+        // An assertion reads the text that follows it, or the text before it.
+        // Its body therefore competes with the neighbours of the assertion,
+        // and its characters must take part in every neighbour test.
+        case "look":
+          return first(target.body);
         case "char":
           return target.set;
         case "concat":
@@ -859,8 +946,9 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
       switch (target.kind) {
         case "empty":
         case "anchor":
-        case "look":
           return EMPTY_SET;
+        case "look":
+          return last(target.body);
         case "char":
           return target.set;
         case "concat": {
@@ -888,8 +976,9 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
       switch (target.kind) {
         case "empty":
         case "anchor":
-        case "look":
           return EMPTY_SET;
+        case "look":
+          return anywhere(target.body);
         case "char":
           return target.set;
         case "concat":
@@ -1087,6 +1176,74 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
     intersect(extend(left), firstOfParts(parts, from)) &&
     intersect(last(left), anywhereOfParts(parts, from));
 
+  /** A product that can never grow past the point where it is refused. */
+  const capped = (value: number): number =>
+    Math.min(value, PATH_BUDGET * PATH_BUDGET);
+
+  /**
+   * How many end positions this expression can try.
+   *
+   * A part whose length cannot vary has one end. `a{0,3}` has four, and `a*`
+   * has one for every position of a window.
+   */
+  const width = (node: Node): number => {
+    const reach = span(node);
+    const range = reach.max - reach.min;
+    return range >= WINDOW_WIDTH ? WINDOW_WIDTH : Math.max(1, range);
+  };
+
+  const cost = (node: Node): number =>
+    memo(costCache, node, (target) => {
+      switch (target.kind) {
+        case "empty":
+        case "anchor":
+        case "char":
+          return 1;
+        // An assertion runs its body at one position. The body pays its own
+        // cost, and the concatenation below multiplies that cost by the ways
+        // that the text before the assertion can match.
+        case "look":
+          return cost(target.body);
+        case "alt":
+          return target.branches.reduce(
+            (most, branch) => Math.max(most, cost(branch)),
+            1,
+          );
+        case "concat":
+          return costOfParts(target.parts);
+        case "repeat": {
+          if (target.max <= 1) return cost(target.body);
+          const inner = cost(target.body);
+          // Where the loop stops is a choice of the part before it, and the
+          // concatenation counts that choice. Only the work inside the body
+          // is paid again for each iteration.
+          return inner <= 1 ? 1 : capped(inner * width(target));
+        }
+      }
+    });
+
+  /**
+   * The cost of a concatenation.
+   *
+   * Each part that can slide gives the text a choice, and every part after it
+   * runs again for each of those choices. The cost of the whole is therefore
+   * the product of the choices, and the worst part is the one that runs after
+   * the most of them.
+   */
+  const costOfParts = (parts: ReadonlyArray<Node>): number => {
+    let before = 1;
+    let worst = 1;
+    for (let index = 0; index < parts.length; index++) {
+      const part = parts[index];
+      if (part === undefined) continue;
+      worst = Math.max(worst, capped(before * cost(part)));
+      if (slidesInto(part, parts, index + 1)) {
+        before = capped(before * width(part));
+      }
+    }
+    return Math.max(worst, before);
+  };
+
   return {
     nullable,
     span,
@@ -1094,6 +1251,7 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
     first,
     last,
     anywhere,
+    cost,
     extend,
     sequence,
     slidesInto,
@@ -1135,28 +1293,6 @@ const hasCompetingNeighbours = (
     }
   }
   return false;
-};
-
-/**
- * How many unbounded quantifiers compete with the text after them.
- *
- * `[a-z]*x` holds one: the loop can take the `x`, so the engine tries every
- * end for the loop. One such quantifier costs a search that grows with the
- * square of the input, which the budget of the caller can pay. Two of them cost
- * a cube: `a.*b.*c` against 4096 characters takes about 8.8 s.
- */
-const countSlides = (
-  parts: ReadonlyArray<Node>,
-  analysis: Analysis,
-): number => {
-  let count = 0;
-  for (let index = 0; index < parts.length; index++) {
-    const part = parts[index];
-    if (part === undefined) continue;
-    if (analysis.span(part).max !== Number.POSITIVE_INFINITY) continue;
-    if (analysis.slidesInto(part, parts, index + 1)) count++;
-  }
-  return count;
 };
 
 /**
@@ -1222,9 +1358,6 @@ const check = (
       if (hasCompetingNeighbours(node.parts, analysis)) {
         return Option.some(COMPETING_LOOPS);
       }
-      if (countSlides(node.parts, analysis) > SLIDE_LIMIT) {
-        return Option.some(MANY_LOOPS);
-      }
       for (const part of node.parts) {
         const problem = check(part, inLoop, analysis);
         if (Option.isSome(problem)) return problem;
@@ -1270,8 +1403,8 @@ const check = (
  * The longest pattern that this module reads.
  *
  * The work of the check grows with the size of the tree. Both callers already
- * cap the pattern below this limit, so the limit is the third lock on the same
- * door.
+ * cap the pattern below this limit, so the limit is the third limit on the
+ * same value.
  */
 export const MAX_PATTERN_LENGTH = 2048;
 
@@ -1292,9 +1425,17 @@ export const regexSafetyError = (
 ): Option.Option<string> => {
   if (source.length > MAX_PATTERN_LENGTH) return Option.some(TOO_LONG);
   const outcome = parse(source, flags.includes("s"), flags.includes("u"));
-  return outcome.ok
-    ? check(outcome.node, false, makeAnalysis(flags.includes("i")))
-    : Option.some(outcome.reason);
+  if (!outcome.ok) return Option.some(outcome.reason);
+
+  const analysis = makeAnalysis(flags.includes("i"));
+  const problem = check(outcome.node, false, analysis);
+  if (Option.isSome(problem)) return problem;
+  // The last rule counts the ways that one piece of text can be divided
+  // between the parts of the pattern. It reads inside an assertion as well,
+  // so `.*(?=.*x)` costs as much as `a.*b.*c` and is refused with it.
+  return analysis.cost(outcome.node) > PATH_BUDGET
+    ? Option.some(MANY_LOOPS)
+    : Option.none();
 };
 
 /** Is this expression free of the ambiguity that this module can prove? */

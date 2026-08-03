@@ -24,6 +24,10 @@ import { isLinearRegex, regexSafetyError } from "~/domain/RegexSafety.ts";
  * one is safe for the same reason: the two parts that could compete accept
  * different characters. `([a-z0-9-]+\.)*` cannot take the dot that ends each
  * of its own iterations, so the division into iterations is fixed.
+ *
+ * The rows with a lookaround are safe for a second reason. Nothing before the
+ * lookaround can vary, so the body of the lookaround runs once for each start
+ * position, and its cost is added and not multiplied.
  */
 const LINEAR: readonly string[] = [
   "^https?://([a-z0-9-]+\\.)*example\\.com/.*$",
@@ -64,6 +68,15 @@ const LINEAR: readonly string[] = [
   // `a` and `ab` are two lengths, so one text has one division only.
   // `/(?:a|ab)*$/` against 4000 characters costs 13 ms.
   "(?:a|ab)*$",
+  // A lookaround whose body runs once for each start position. The cost of the
+  // two bodies is added, and not multiplied, so both stay linear.
+  "(?=[a-z]*x)y",
+  "(?:(?=[a-z]*a)a){3}",
+  "(?<=[a-z]{0,8})x",
+  // Two lookaheads that both hold a loop, after a part of one fixed length.
+  // The two bodies each run once for each start position, so the cost is the
+  // cost of `[a-z]*x` twice: 1.66 ms against 1024 characters.
+  "a(?=[a-z]*x)(?=[a-z]*y)b*",
 ];
 
 /**
@@ -111,6 +124,16 @@ const SUPER_LINEAR: readonly string[] = [
   "(a)\\1",
   // The same shapes inside a lookaround.
   "^(?=(a+)+$)",
+  // An unbounded quantifier that a lookahead hides.
+  //
+  // A lookahead gives back no text, so it was invisible to the rules that
+  // compare neighbours. The body of the lookahead runs again for each way that
+  // the text before it can match, so `.*(?=.*x)` costs a window times a
+  // window. One 1024-character window of it cost 545 ms before this row.
+  ".*(?=.*x)",
+  "[a-z]*(?=[a-z]*x)",
+  "(?=(?:(?=[a-z]*a)a)+)",
+  "(?=(?:(?=[a-z]{0,9999}a)a){1,9999})",
 ];
 
 describe("RegexSafety", () => {
@@ -180,6 +203,45 @@ describe("RegexSafety", () => {
       assert.isFalse(isLinearRegex("\\u{41}", ""));
       assert.isTrue(isLinearRegex("\\p{L}", "u"));
       assert.isTrue(isLinearRegex("\\u{41}", "u"));
+
+      // The reason must tell the user what to write instead. "syntax that the
+      // safety check does not know" is true and useless.
+      const reason = Option.getOrElse(
+        regexSafetyError("\\p{L}+", ""),
+        () => "",
+      );
+      assert.include(reason, "`u` flag");
+      assert.include(reason, "[a-zA-Z]");
+    }));
+
+  it.effect("reads one character as the engine reads it", () =>
+    Effect.sync(() => {
+      // With the `u` flag the engine reads one code point, so `\u{1F600}+`
+      // repeats one character. The model read two code units, so it saw a
+      // repeat of a low surrogate, and `\u{1F600}+\u{1F600}+x` looked safe.
+      // It is the shape of `x+x+y`, which the check refuses.
+      assert.isFalse(isLinearRegex("\u{1F600}+\u{1F600}+x", "u"));
+      assert.isTrue(isLinearRegex("\u{1F600}+x", "u"));
+      assert.isTrue(isLinearRegex("[\\u{1F600}-\\u{1F64F}]+x", "u"));
+    }));
+
+  it.effect("refuses a long chain of lookarounds", () =>
+    Effect.sync(() => {
+      // The blunt limit, and it does not need the model to be right. Fourteen
+      // lookaheads of this shape are 494 characters, which is inside the cap
+      // of find, and one 1024-character window of them cost 6.3 s.
+      const chain = `${"(?=(?:(?=[a-z]{0,9999}a)a){1,9999})".repeat(14)}(?!)`;
+      assert.isBelow(chain.length, 512);
+      assert.isFalse(isLinearRegex(chain, ""));
+      assert.include(
+        Option.getOrElse(
+          regexSafetyError(`${"(?=a)".repeat(9)}b`, ""),
+          () => "",
+        ),
+        "too many lookaheads",
+      );
+      // A pattern that a user writes holds a few assertions, and passes.
+      assert.isTrue(isLinearRegex("^(?=.*foo)(?=.*bar)(?=.*baz)", ""));
     }));
 
   it.effect("refuses a pattern that is too long to read", () =>
