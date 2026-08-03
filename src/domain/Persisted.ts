@@ -102,7 +102,7 @@ const field = <S extends Schema.Top>(schema: S, fallback: S["Type"]) => {
 const hintCharactersSchema = Schema.String.pipe(
   Schema.decode(
     SchemaTransformation.transform({
-      decode: (value) => readHintCharacters(value).characters.join(""),
+      decode: (value) => readHintCharacters(value).join(""),
       encode: (value) => value,
     }),
   ),

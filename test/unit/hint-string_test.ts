@@ -9,16 +9,12 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect } from "effect";
 import {
-  describeHintRefusal,
   hintCharacterCount,
   hintCharacterKey,
   hintStrings,
-  isUsableHintCharacter,
   matchByPrefix,
   normaliseHintCharacters,
   numberToHintString,
-  readHintCharacters,
-  refuseHintCharacter,
   reverseString,
 } from "~/domain/HintString.ts";
 
@@ -235,14 +231,11 @@ describe("HintString", () => {
       assert.strictEqual(normaliseHintCharacters("\u00df\u1e9e", "xy"), "xy");
     }));
 
-  it.effect("names the characters that a case fold breaks", () =>
+  it.effect("gives one matching key to characters that fold together", () =>
     Effect.sync(() => {
-      assert.isTrue(isUsableHintCharacter("a"));
-      assert.isTrue(isUsableHintCharacter("\u{1f600}"));
-      assert.isFalse(isUsableHintCharacter("\u0130"));
-      assert.isFalse(isUsableHintCharacter("\u00df"));
-      assert.isFalse(isUsableHintCharacter(" "));
-      assert.isFalse(isUsableHintCharacter("ab"));
+      assert.strictEqual(normaliseHintCharacters("ab\u0130", "xy"), "ab");
+      assert.strictEqual(normaliseHintCharacters("ab\u00df", "xy"), "ab");
+      assert.strictEqual(normaliseHintCharacters("a b", "xy"), "ab");
       // The fold joins the pair, so the identity is one value.
       assert.strictEqual(
         hintCharacterKey("\u03c2"),
@@ -254,8 +247,8 @@ describe("HintString", () => {
   it.effect("refuses half of an astral character", () =>
     Effect.sync(() => {
       // A value that was cut at a UTF-16 boundary carries such a half.
-      assert.isFalse(isUsableHintCharacter("\ud83d"));
-      assert.isFalse(isUsableHintCharacter("\ude00"));
+      assert.strictEqual(normaliseHintCharacters("ab\ud800", "xy"), "ab");
+      assert.strictEqual(normaliseHintCharacters("ab\udfff", "xy"), "ab");
       assert.strictEqual(normaliseHintCharacters("ab\ud83d", "xy"), "ab");
       // A whole astral character is one hint character.
       assert.strictEqual(
@@ -283,9 +276,29 @@ describe("HintString", () => {
       expected: "\u2764\u{1f600}",
     },
     {
+      name: "a text variation selector",
+      input: "a\ufe0eb",
+      expected: "ab",
+    },
+    {
+      name: "a tag character",
+      input: "a\u{e0061}b",
+      expected: "ab",
+    },
+    {
+      name: "a Hangul choseong filler",
+      input: "\u115fx",
+      expected: "xy",
+    },
+    {
+      name: "a zero width joiner on its own",
+      input: "\u200dabc",
+      expected: "abc",
+    },
+    {
       name: "a zero width joiner inside a family emoji",
       input: "\u{1f468}\u200d\u{1f469}",
-      expected: "\u{1f468}\u{1f469}",
+      expected: "xy",
     },
     {
       name: "a combining acute after a letter",
@@ -343,15 +356,10 @@ describe("HintString", () => {
     readonly labels: readonly string[];
   }[] = [
     {
-      name: "a family loses its zero width joiners",
+      name: "a family selects the complete fallback",
       input: "\u{1f468}\u200d\u{1f469}\u200d\u{1f467}",
-      alphabet: "\u{1f468}\u{1f469}\u{1f467}",
-      labels: [
-        "\u{1f467}",
-        "\u{1f468}\u{1f468}",
-        "\u{1f469}",
-        "\u{1f468}\u{1f469}",
-      ],
+      alphabet: "xy",
+      labels: ["xx", "yx", "xy", "yy"],
     },
     {
       name: "a flag loses its two regional indicators",
@@ -398,48 +406,68 @@ describe("HintString", () => {
       const labels = hintStrings(4, alphabet);
       assert.strictEqual(new Set(labels).size, labels.length);
       for (const label of labels) {
-        for (const char of label) {
-          assert.isTrue(
-            isUsableHintCharacter(char),
-            `"${label}" holds a character with no shape`,
-          );
-        }
+        assert.strictEqual(label.normalize("NFC"), label);
       }
     }));
 
-  it.effect("names the reason for each refusal", () =>
+  it.effect("refuses both endpoints of each emoji joiner property", () =>
     Effect.sync(() => {
-      assert.strictEqual(refuseHintCharacter("a"), null);
-      assert.strictEqual(refuseHintCharacter("\ufe0f"), "invisible");
-      assert.strictEqual(refuseHintCharacter("\u200d"), "invisible");
-      assert.strictEqual(refuseHintCharacter("\u0301"), "invisible");
-      assert.strictEqual(refuseHintCharacter(" "), "invisible");
       assert.strictEqual(
-        refuseHintCharacter("\u{1f1e9}"),
-        "emoji-joiner",
+        normaliseHintCharacters("ab\u{1f1e6}", "xy"),
+        "ab",
       );
       assert.strictEqual(
-        refuseHintCharacter("\u{1f3fd}"),
-        "emoji-joiner",
+        normaliseHintCharacters("ab\u{1f1ff}", "xy"),
+        "ab",
       );
-      assert.strictEqual(refuseHintCharacter("\u00df"), "case-fold");
-      assert.strictEqual(refuseHintCharacter("\ud83d"), "half-character");
       assert.strictEqual(
-        readHintCharacters("aab").dropped[0]?.refusal,
-        "duplicate",
+        normaliseHintCharacters("ab\u{1f3fb}", "xy"),
+        "ab",
       );
-      // Every reason has a sentence, and no sentence is empty.
-      for (
-        const refusal of [
-          "half-character",
-          "invisible",
-          "emoji-joiner",
-          "case-fold",
-          "duplicate",
-        ] as const
-      ) {
-        assert.isAbove(describeHintRefusal(refusal).length, 0);
+      assert.strictEqual(
+        normaliseHintCharacters("ab\u{1f3ff}", "xy"),
+        "ab",
+      );
+    }));
+
+  it.effect("refuses Hangul jamo and pair composition", () =>
+    Effect.sync(() => {
+      assert.strictEqual(normaliseHintCharacters("\u1100x", "xy"), "xy");
+      assert.strictEqual(normaliseHintCharacters("\u1161x", "xy"), "xy");
+      const alphabet = normaliseHintCharacters("\u1100x\u1161\uac00", "xy");
+      assert.strictEqual(alphabet, "x\uac00");
+      const labels = hintStrings(6, alphabet);
+      assert.strictEqual(
+        new Set(labels.map((label) => label.normalize("NFC"))).size,
+        labels.length,
+      );
+
+      const pairs = [...alphabet].flatMap((first) =>
+        [...alphabet].map((second) => first + second)
+      );
+      assert.strictEqual(
+        new Set(pairs.map((pair) => pair.normalize("NFC"))).size,
+        pairs.length,
+      );
+      assert.strictEqual(
+        new Set(pairs.map(hintCharacterKey)).size,
+        pairs.length,
+      );
+      const segmenter = new Intl.Segmenter(undefined, {
+        granularity: "grapheme",
+      });
+      for (const pair of pairs) {
+        assert.lengthOf([...segmenter.segment(pair)], 2);
       }
+    }));
+
+  it.effect("cannot detect font coverage for a Tangsa letter", () =>
+    Effect.sync(() => {
+      // Font coverage depends on the device and is unavailable in this module.
+      assert.strictEqual(
+        normaliseHintCharacters("\u{16a70}x", "xy"),
+        "\u{16a70}x",
+      );
     }));
 
   it.effect("composes the set with NFC before it reads a character", () =>

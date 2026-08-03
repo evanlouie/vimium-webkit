@@ -53,140 +53,102 @@ export const reverseString = (value: string): string =>
 export const hintCharacterKey = (char: string): string =>
   char.toLowerCase().toUpperCase().toLowerCase();
 
-/** Is this one half of a surrogate pair, and therefore half a character? */
-const isSurrogateHalf = (char: string): boolean => {
-  const code = char.codePointAt(0);
-  return code !== undefined && code >= 0xd800 && code <= 0xdfff;
-};
-
-/**
- * A hint character must be a letter, a number, a punctuation mark or a symbol.
- *
- * These categories usually have a shape of their own. The checks below remove
- * symbols that join another emoji into one grapheme.
- *
- * - A mark (`\p{M}`) draws on the character before it. A combining acute alone
- *   is not a label.
- * - A format character (`\p{Cf}`) draws nothing. The variation selector
- *   U+FE0F and the zero width joiner are the two that a user meets, because
- *   they hide inside an emoji that was copied from a message.
- * - A control character, a surrogate half and a private use character
- *   (`\p{C}`) have no agreed shape.
- * - A space (`\p{Z}`) gives a label that looks empty.
- *
- * Each accepted character is one visible NFC code point. It also stays one
- * code point through its case fold. This is the invariant that matching needs.
- * Some scripts can draw adjacent letters as one grapheme, so no grapheme count
- * is claimed here.
- */
+/** Unicode properties that define independent hint characters. */
 const VISIBLE_CATEGORIES = /^[\p{L}\p{N}\p{P}\p{S}]$/u;
+const DEFAULT_IGNORABLE = /^\p{Default_Ignorable_Code_Point}$/u;
+const SURROGATE = /^\p{Surrogate}$/u;
+const REGIONAL_INDICATOR = /^\p{Regional_Indicator}$/u;
+const EMOJI_MODIFIER = /^\p{Emoji_Modifier}$/u;
+const HANGUL_SCRIPT = /^\p{Script=Hangul}$/u;
+const JOIN_CONTROL = /\p{Join_Control}/u;
 
-/** Does this code point join an adjacent emoji instead of staying separate? */
-const isEmojiJoiner = (char: string): boolean => {
-  const code = char.codePointAt(0);
-  return code !== undefined &&
-    ((code >= 0x1f1e6 && code <= 0x1f1ff) ||
-      (code >= 0x1f3fb && code <= 0x1f3ff));
-};
+const graphemeSegmenter = new Intl.Segmenter(undefined, {
+  granularity: "grapheme",
+});
 
-/** Why a character cannot be a hint character. */
-export type HintRefusal =
-  | "half-character"
-  | "invisible"
-  | "emoji-joiner"
-  | "case-fold"
-  | "duplicate";
+/**
+ * Does this character have the Hangul property without being a syllable?
+ *
+ * Unicode NFD decomposes a Hangul syllable. It does not change a conjoining or
+ * compatibility jamo. A jamo can combine with its neighbour, so it is refused.
+ */
+const isHangulJamo = (char: string): boolean =>
+  HANGUL_SCRIPT.test(char) && char.normalize("NFD") === char;
 
-/** One sentence for the user, for each refusal. */
-export const describeHintRefusal = (refusal: HintRefusal): string => {
-  switch (refusal) {
-    case "half-character":
-      return "it is half of a character";
-    case "invisible":
-      return "it is not a letter, a number, a punctuation mark or a symbol";
-    case "emoji-joiner":
-      return "it joins an adjacent emoji into one grapheme";
-    case "case-fold":
-      return "a case fold makes it two characters";
-    case "duplicate":
-      return "it repeats an earlier character";
+/**
+ * Can this code point be one independent hint character?
+ *
+ * Unicode properties refuse default-ignorable characters, Hangul jamo,
+ * regional indicators, emoji modifiers and surrogate halves. Category checks
+ * refuse marks, controls, private-use characters and spaces.
+ *
+ * Font coverage is device-dependent and is not available in this pure module.
+ * Thus, this check cannot detect a missing glyph such as U+16A70.
+ */
+const isIndependentHintCharacter = (char: string): boolean =>
+  codePoints(char).length === 1 &&
+  !SURROGATE.test(char) &&
+  VISIBLE_CATEGORIES.test(char) &&
+  !DEFAULT_IGNORABLE.test(char) &&
+  !REGIONAL_INDICATOR.test(char) &&
+  !EMOJI_MODIFIER.test(char) &&
+  !isHangulJamo(char) &&
+  codePoints(char.toLowerCase()).length === 1 &&
+  codePoints(hintCharacterKey(char)).length === 1;
+
+/** Does the input contain one joined symbol that uses a join control? */
+const hasJoinedSymbol = (value: string): boolean => {
+  for (const { segment } of graphemeSegmenter.segment(value)) {
+    if (codePoints(segment).length > 1 && JOIN_CONTROL.test(segment)) {
+      return true;
+    }
   }
+  return false;
 };
 
 /**
- * Can this character be one character of a hint label?
+ * Can all ordered pairs stay separate and keep unique matching keys?
  *
- * The character must be one code point, it must have a shape of its own, and
- * it must stay one code point through the whole case fold. Five kinds of
- * character break those rules:
- *
- * - Half of a surrogate pair is not a character at all. It comes from a value
- *   that was cut at a UTF-16 boundary.
- * - An invisible character gives a label that the user cannot see. The
- *   variation selector U+FE0F is the one that a user meets, because it hides
- *   inside a copied emoji.
- * - A regional indicator or an emoji modifier joins an adjacent emoji. It does
- *   not stay one displayed character in a longer label.
- * - The Turkish dotted capital I becomes the Latin i plus a combining dot.
- *   The alphabet then holds a second Latin i, and two hints show the same
- *   label.
- * - The German sharp s becomes the two letters SS in uppercase.
- * - The fi ligature becomes the two letters FI in uppercase.
- *
- * A label that grows to two characters is a label that the user cannot type.
+ * NFC stability gives the canonical-composition property. Unicode extended
+ * grapheme cluster rules make sure that each pair stays as two graphemes.
+ * Unique NFC fold keys prevent two pairs from getting one matching string.
  */
-export const isUsableHintCharacter = (char: string): boolean =>
-  refuseHintCharacter(char) === null;
-
-/** Why this character is refused, or `null` when it is accepted. */
-export const refuseHintCharacter = (char: string): HintRefusal | null => {
-  if (codePoints(char).length !== 1) return "half-character";
-  if (isSurrogateHalf(char)) return "half-character";
-  if (!VISIBLE_CATEGORIES.test(char)) return "invisible";
-  if (isEmojiJoiner(char)) return "emoji-joiner";
-  if (codePoints(char.toLowerCase()).length !== 1) return "case-fold";
-  if (codePoints(hintCharacterKey(char)).length !== 1) return "case-fold";
-  return null;
+const hasIndependentPairs = (characters: readonly string[]): boolean => {
+  const keys = new Set<string>();
+  for (const first of characters) {
+    for (const second of characters) {
+      const pair = first + second;
+      if (toNfc(pair) !== pair) return false;
+      if ([...graphemeSegmenter.segment(pair)].length !== 2) return false;
+      const key = toNfc(hintCharacterKey(pair));
+      if (codePoints(key).length !== 2 || keys.has(key)) return false;
+      keys.add(key);
+    }
+  }
+  return true;
 };
-
-/** One character of a set that was refused, and the reason. */
-export interface DroppedHintCharacter {
-  readonly char: string;
-  readonly refusal: HintRefusal;
-}
-
-/** The characters that a set gives, and the characters that it loses. */
-export interface HintAlphabet {
-  readonly characters: readonly string[];
-  readonly dropped: readonly DroppedHintCharacter[];
-}
 
 /**
  * Read a character set from the user.
  *
- * The value is composed with NFC first. Each code point is then accepted,
- * refused for its own reason, or dropped as a repeat of an earlier character.
+ * The value is composed with NFC first. Invalid and repeated code points are
+ * removed. A joined symbol or an unsafe pair refuses the complete alphabet.
  * Every accepted character is lowercase, so the label and the keystroke agree.
  */
-export const readHintCharacters = (characters: string): HintAlphabet => {
+export const readHintCharacters = (characters: string): readonly string[] => {
+  const nfc = toNfc(characters);
+  if (hasJoinedSymbol(nfc)) return [];
+
   const seen = new Set<string>();
   const out: string[] = [];
-  const dropped: DroppedHintCharacter[] = [];
-  for (const char of codePoints(toNfc(characters))) {
-    const refusal = refuseHintCharacter(char);
-    if (refusal !== null) {
-      dropped.push({ char, refusal });
-      continue;
-    }
+  for (const char of codePoints(nfc)) {
+    if (!isIndependentHintCharacter(char)) continue;
     const key = hintCharacterKey(char);
-    if (seen.has(key)) {
-      dropped.push({ char, refusal: "duplicate" });
-      continue;
-    }
+    if (seen.has(key)) continue;
     seen.add(key);
     out.push(char.toLowerCase());
   }
-  return { characters: out, dropped };
+  return hasIndependentPairs(out) ? out : [];
 };
 
 /**
@@ -196,16 +158,15 @@ export const readHintCharacters = (characters: string): HintAlphabet => {
  * of one character cannot give a prefix-free code at all. Both cases give the
  * fallback, instead of hints that the user cannot type.
  *
- * A character that a case fold expands, a character that has no shape, and a
- * character that collides with an earlier one are dropped. The result is
- * therefore a sequence of distinct visible code points, and each one is one
- * hint character.
+ * A character that a case fold expands or has no shape is dropped. A character
+ * that collides with an earlier one is also dropped. Joined symbols and unsafe
+ * pairs select the fallback. Each remaining code point is independent.
  */
 export const normaliseHintCharacters = (
   characters: string,
   fallback: string,
 ): string => {
-  const alphabet = readHintCharacters(characters).characters;
+  const alphabet = readHintCharacters(characters);
   return alphabet.length >= 2 ? alphabet.join("") : fallback;
 };
 
