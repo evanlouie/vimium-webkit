@@ -649,7 +649,14 @@ export const nextFocusIndex = (
   return (current + (backwards ? -1 : 1) + count) % count;
 };
 
-/** The controls of one dialog, in tab order. */
+/**
+ * The controls of one dialog, in document order.
+ *
+ * The order of the list is the order of the nodes, which is the tab order for
+ * both dialogs: neither one holds a positive `tabindex`. A disabled control
+ * and a control with `tabindex="-1"` drop out, because neither takes a Tab
+ * press.
+ */
 const FOCUSABLE_SELECTOR =
   "a[href], button, input, select, textarea, [tabindex]";
 
@@ -729,6 +736,11 @@ export class Dialog extends Context.Service<Dialog, {
        *
        * The root is closed, so `document.activeElement` is the host from
        * outside. `shadow.activeElement` gives the true node.
+       *
+       * `focus()` and not `focus({ preventScroll: true })`. The dialog box
+       * scrolls, and the settings form is longer than it. With `preventScroll`
+       * the ninth Tab press put the focus on a control below the box, and
+       * nothing moved: a sighted keyboard user could not find the focus.
        */
       const moveFocus = (dialog: HTMLElement, backwards: boolean): void => {
         const targets = focusableIn(dialog);
@@ -736,7 +748,7 @@ export class Dialog extends Context.Service<Dialog, {
         const current = targets.findIndex((element) => element === active);
         const index = nextFocusIndex(targets.length, current, backwards);
         const target = index < 0 ? dialog : targets[index];
-        if (target !== undefined) target.focus({ preventScroll: true });
+        if (target !== undefined) target.focus();
       };
 
       /**

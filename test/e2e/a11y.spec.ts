@@ -18,6 +18,7 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./harness/fixtures.ts";
 import {
+  overlayActiveBox,
   overlayActiveElement,
   overlayAriaHidden,
   overlayAttribute,
@@ -270,6 +271,35 @@ test.describe("the accessibility tree", () => {
       await vw.press("Tab");
       // oxlint-disable-next-line no-await-in-loop
       expect(await overlayFocusWithin(page, ".vw-dialog")).toBe(true);
+    }
+  });
+
+  test("the settings dialog scrolls the focused control into view", async ({ vw, page }) => {
+    await vw.open("/long-text.html");
+    await vw.press("?");
+    await waitForOverlay(page, ".vw-dialog");
+    expect(await clickOverlayButton(page, "Settings")).toBe(true);
+    await waitForOverlay(page, "#vw-set-keyMappings");
+
+    // The dialog box scrolls, and the settings form is longer than it. With
+    // `focus({ preventScroll: true })` the ninth press put the focus on a
+    // control at 833 px, the box ended at 794 px, and nothing moved. A sighted
+    // keyboard user pressed Tab, saw no change and could not find the focus.
+    const height = page.viewportSize()?.height ?? 800;
+    for (let press = 0; press < 12; press++) {
+      // oxlint-disable-next-line no-await-in-loop
+      await vw.press("Tab");
+      // oxlint-disable-next-line no-await-in-loop
+      const box = await overlayActiveBox(page);
+      // oxlint-disable-next-line no-await-in-loop
+      const name = await overlayActiveElement(page);
+      expect(box, `press ${press + 1} focused nothing`).not.toBeNull();
+      expect(box?.top ?? -1, `press ${press + 1} put ${name} above the view`)
+        .toBeGreaterThanOrEqual(-1);
+      expect(
+        (box?.top ?? 0) + (box?.height ?? 0),
+        `press ${press + 1} put ${name} below the view`,
+      ).toBeLessThanOrEqual(height + 1);
     }
   });
 

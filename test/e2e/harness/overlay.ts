@@ -100,6 +100,27 @@ export const overlayActiveElement = (
     return `${node.tagName.toLowerCase()}${classes}`;
   });
 
+/**
+ * Border box of the focused node inside the overlay, in viewport coordinates.
+ *
+ * A trap that moves the focus must also bring the control into view. A box
+ * outside the viewport is a control that the user cannot see.
+ */
+export const overlayActiveBox = (page: Page): Promise<OverlayBox | null> =>
+  page.evaluate((): OverlayBox | null => {
+    const host = globalThis as unknown as ShadowHost;
+    const shadow = host.__vimiumHarness?.shadow ?? null;
+    const node = shadow?.activeElement ?? null;
+    if (node === null) return null;
+    const rect = node.getBoundingClientRect();
+    return {
+      width: rect.width,
+      height: rect.height,
+      top: rect.top,
+      left: rect.left,
+    };
+  });
+
 /** Does the focus sit inside this part of the overlay? */
 export const overlayFocusWithin = (
   page: Page,
