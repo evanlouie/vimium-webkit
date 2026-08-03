@@ -48,14 +48,12 @@ export class KeyValueStore extends Context.Service<KeyValueStore, {
   readonly set: (key: string, value: string) => Effect.Effect<void, GmError>;
   readonly remove: (key: string) => Effect.Effect<void, GmError>;
   /**
-   * Start a write now, with no suspension and no answer.
+   * Write now when the selected backend is synchronous.
    *
-   * For the page exit only. `pagehide` gives one synchronous run, and the
-   * Effect scheduler is a macrotask in a page. A write that goes through a
-   * fiber therefore never reaches the backend. Every backend here starts the
-   * write on the caller's own stack. It throws only what the backend throws.
+   * The promise-backed manager API gives `null`. Storage sends those writes
+   * through its actor before the page exit.
    */
-  readonly setUnsafe: (key: string, value: string) => void;
+  readonly setUnsafe: ((key: string, value: string) => void) | null;
   /** Values written by another tab. Empty when the backend cannot report them. */
   readonly changes: (key: string) => Stream.Stream<Option.Option<string>>;
 }>()("vimium/platform/KeyValueStore") {
@@ -74,7 +72,9 @@ export class KeyValueStore extends Context.Service<KeyValueStore, {
             get: api.get,
             set: api.set,
             remove: api.remove,
-            setUnsafe: api.setUnsafe,
+            // The API kind is the existing capability probe. Do not infer
+            // durability from a manager name or from a user agent.
+            setUnsafe: api.kind === "gm-async" ? null : api.setUnsafe,
             changes: (key) =>
               Option.match(api.changes, {
                 onNone: () => Stream.empty,

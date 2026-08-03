@@ -46,8 +46,8 @@ interface Backend {
   readonly startedNow: () => number;
   /** Make every later read fail with a transport error. */
   readonly breakReads: Effect.Effect<void>;
-  /** Make every later direct write throw, as a full quota does. */
-  readonly breakDirectWrites: Effect.Effect<void>;
+  /** Make the next direct write throw, as a full quota does. */
+  readonly breakNextDirectWrite: Effect.Effect<void>;
   /** Hold every later write of the actor, until `releaseWrites` runs. */
   readonly holdWrites: Effect.Effect<void>;
   readonly releaseWrites: Effect.Effect<void>;
@@ -59,23 +59,26 @@ interface Backend {
  * The exit path writes with a direct call, and a test must read what it wrote
  * without taking a turn of its own. A `Ref` would need an effect for that.
  */
-const makeBackend: Effect.Effect<Backend> = Effect.gen(function*() {
-  const map = new Map<string, string>();
-  const writes: string[] = [];
-  const gate = yield* Deferred.make<void>();
-  let broken = false;
-  let directBroken = false;
-  let held = false;
-  let started = 0;
+const makeBackendFor = (
+  kind: KeyValueStore["Service"]["kind"],
+): Effect.Effect<Backend> =>
+  Effect.gen(function*() {
+    const map = new Map<string, string>();
+    const writes: string[] = [];
+    const gate = yield* Deferred.make<void>();
+    let broken = false;
+    let directBroken = false;
+    let held = false;
+    let started = 0;
 
-  const put = (key: string, value: string): void => {
-    map.set(key, value);
-  };
+    const put = (key: string, value: string): void => {
+      map.set(key, value);
+    };
 
-  const record = (key: string, value: string): void => {
-    put(key, value);
-    writes.push(value);
-  };
+    const record = (key: string, value: string): void => {
+      put(key, value);
+      writes.push(value);
+    };
 
   const service = KeyValueStore.of({
     kind: "memory",
@@ -99,41 +102,69 @@ const makeBackend: Effect.Effect<Backend> = Effect.gen(function*() {
         started += 1;
         if (held) yield* Deferred.await(gate);
         record(key, value);
+    const service = KeyValueStore.of({
+      kind,
+      durable: false,
+      watchable: false,
+      get: (key) =>
+        Effect.suspend(() =>
+          broken
+            ? Effect.fail(
+              new GmError({
+                reason: "failed",
+                api: "test.get",
+                detail: "the backend is unavailable",
+              }),
+            )
+            : Effect.succeed(Option.fromNullishOr(map.get(key) ?? null))
+        ),
+      set: (key, value) =>
+        Effect.gen(function*() {
+          started += 1;
+          if (held) yield* Deferred.await(gate);
+          record(key, value);
+        }),
+      remove: (key) =>
+        Effect.sync(() => {
+          map.delete(key);
+        }),
+      setUnsafe: kind === "gm-async"
+        ? null
+        : (key, value) => {
+          if (directBroken) {
+            directBroken = false;
+            throw new Error("the quota of the backend is full");
+          }
+          record(key, value);
+        },
+      changes: () => Stream.empty,
+    });
+
+    return {
+      layer: Layer.succeed(KeyValueStore, service),
+      seed: (key, raw) => Effect.sync(() => put(key, raw)),
+      read: (key) =>
+        Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
+      writes: Effect.sync(() => [...writes]),
+      writesNow: () => [...writes],
+      startedNow: () => started,
+      breakReads: Effect.sync(() => {
+        broken = true;
       }),
-    remove: (key) =>
-      Effect.sync(() => {
-        map.delete(key);
+      breakNextDirectWrite: Effect.sync(() => {
+        directBroken = true;
       }),
-    setUnsafe: (key, value) => {
-      if (directBroken) throw new Error("the quota of the backend is full");
-      record(key, value);
-    },
-    changes: () => Stream.empty,
+      holdWrites: Effect.sync(() => {
+        held = true;
+      }),
+      releaseWrites: Effect.gen(function*() {
+        held = false;
+        yield* Deferred.succeed(gate, undefined);
+      }),
+    };
   });
 
-  return {
-    layer: Layer.succeed(KeyValueStore, service),
-    seed: (key, raw) => Effect.sync(() => put(key, raw)),
-    read: (key) =>
-      Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
-    writes: Effect.sync(() => [...writes]),
-    writesNow: () => [...writes],
-    startedNow: () => started,
-    breakReads: Effect.sync(() => {
-      broken = true;
-    }),
-    breakDirectWrites: Effect.sync(() => {
-      directBroken = true;
-    }),
-    holdWrites: Effect.sync(() => {
-      held = true;
-    }),
-    releaseWrites: Effect.gen(function*() {
-      held = false;
-      yield* Deferred.succeed(gate, undefined);
-    }),
-  };
-});
+const makeBackend = makeBackendFor("memory");
 
 /**
  * Move the test clock forward until the fiber settles.
@@ -308,6 +339,26 @@ describe("Storage", () => {
         assert.isTrue(Option.isSome(raw));
         if (Option.isNone(raw)) return;
         assert.include(raw.value, '"scrollStepSize":120');
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("does not debounce a promise-backed manager", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackendFor("gm-async");
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        const writing = yield* Effect.forkChild(
+          storage.settings.write({
+            ...defaultSettings(),
+            scrollStepSize: 120,
+          }),
+          { startImmediately: true },
+        );
+
+        yield* yieldUntil(() => backend.startedNow() === 1);
+        yield* Fiber.join(writing);
+        assert.lengthOf(backend.writesNow(), 1);
       }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
     }));
 
@@ -641,7 +692,7 @@ describe("the exit path of Storage", () => {
 
       yield* Effect.gen(function*() {
         const storage = yield* Storage;
-        yield* backend.breakDirectWrites;
+        yield* backend.breakNextDirectWrite;
         const writing = yield* leavePending(storage, 120);
 
         // A throw here would be swallowed by the browser, and the rest of the
@@ -668,6 +719,85 @@ describe("the exit path of Storage", () => {
         assert.isTrue(Exit.isSuccess(outcome));
         assert.lengthOf(backend.writesNow(), 1);
       }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("continues after the first group direct write fails", () =>
+    Effect.gen(function*() {
+      const backend = yield* makeBackend;
+
+      yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        const settingsWrite = yield* leavePending(storage, 120);
+        const marksWrite = yield* Effect.forkChild(
+          storage.marks.write({
+            local: {
+              "https://example.test/": {
+                a: { scrollX: 1, scrollY: 2, savedAt: 3 },
+              },
+            },
+            global: {},
+          }),
+          { startImmediately: true },
+        );
+        yield* yieldUntil(() =>
+          storage.marks.currentUnsafe().local["https://example.test/"] !==
+            undefined
+        );
+        yield* backend.breakNextDirectWrite;
+
+        yield* Effect.sync(() => storage.flushAllUnsafe());
+
+        const writes = backend.writesNow();
+        assert.lengthOf(writes, 1);
+        assert.include(writes[0] ?? "", '"a"');
+
+        yield* advanceUntilDone(settingsWrite);
+        yield* advanceUntilDone(marksWrite);
+      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+    }));
+
+  it.effect("uses identical bytes after hydration on both write paths", () =>
+    Effect.gen(function*() {
+      const directBackend = yield* makeBackend;
+      const directBytes = yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        yield* directBackend.seed(
+          SETTINGS_KEY,
+          envelope(0, { scrollStepSize: 120 }),
+        );
+        const migrated = yield* storage.settings.hydrate;
+        assert.strictEqual(migrated.scrollStepSize, 120);
+
+        yield* leavePending(storage, 90);
+        yield* Effect.sync(() => storage.flushAllUnsafe());
+        return directBackend.writesNow()[0] ?? "";
+      }).pipe(
+        Effect.provide(Storage.layer),
+        Effect.provide(directBackend.layer),
+      );
+
+      const actorBackend = yield* makeBackend;
+      const actorBytes = yield* Effect.gen(function*() {
+        const storage = yield* Storage;
+        yield* actorBackend.seed(
+          SETTINGS_KEY,
+          envelope(0, { scrollStepSize: 120 }),
+        );
+        const migrated = yield* storage.settings.hydrate;
+        const writing = yield* Effect.forkChild(
+          storage.settings.write({ ...migrated, scrollStepSize: 90 }),
+          { startImmediately: true },
+        );
+        yield* storage.settings.flush;
+        yield* Fiber.join(writing);
+        return actorBackend.writesNow()[0] ?? "";
+      }).pipe(
+        Effect.provide(Storage.layer),
+        Effect.provide(actorBackend.layer),
+      );
+
+      assert.strictEqual(directBytes, actorBytes);
+      assert.include(directBytes, '"schemaVersion":1');
     }));
 
   it.effect("writes nothing when no group holds a value", () =>

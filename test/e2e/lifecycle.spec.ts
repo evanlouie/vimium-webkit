@@ -233,19 +233,19 @@ test.describe("what a dying page saves", () => {
     expect(during ?? "").toContain('"a"');
   });
 
-  test.describe("with a manager that only gives promises", () => {
+  test.describe("with a promise-only manager surface", () => {
     test.use({ gmVariant: "async" });
 
-    test("the call still starts inside the dispatch", async ({ vw, page }) => {
-      // quoid and Stay have no `GM_setValue`. The exit path calls
-      // `GM.setValue` and does not wait for the promise. The call starts on the
-      // stack of the handler, and the manager finishes it in its own process.
+    test("calls the manager before pagehide", async ({ vw, page }) => {
+      // The stub records the call before it returns a resolved promise. This
+      // proves invocation only. It does not prove promise settlement, write
+      // order, a disk write or survival after a navigation.
       await setLocalMark(vw, page);
 
       const { before, during } = await dispatchAndRead(page);
 
-      expect(before, "the debounce window must still hold the mark").toBeNull();
-      expect(during ?? "").toContain('"a"');
+      expect(before ?? "").toContain('"a"');
+      expect(during).toBe(before);
     });
   });
 

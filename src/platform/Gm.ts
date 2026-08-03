@@ -258,15 +258,8 @@ export interface GmValueApi {
   readonly get: (key: string) => Effect.Effect<Option.Option<string>, GmError>;
   readonly set: (key: string, value: string) => Effect.Effect<void, GmError>;
   readonly remove: (key: string) => Effect.Effect<void, GmError>;
-  /**
-   * Start a write now, with no suspension and no answer.
-   *
-   * For the page exit only. `pagehide` gives one synchronous run, and a task
-   * that the Effect scheduler queues there never runs. The call must therefore
-   * reach the manager on the caller's own stack. It throws only what the
-   * manager throws, and the caller must catch that.
-   */
-  readonly setUnsafe: (key: string, value: string) => void;
+  /** A synchronous API binding, when the manager gives one. */
+  readonly setUnsafe: ((key: string, value: string) => void) | null;
   /** Changes made in another tab. `None` when the manager has no such API. */
   readonly changes: Option.Option<
     (key: string) => Stream.Stream<Option.Option<string>>
@@ -287,9 +280,8 @@ const asyncValueApi = (surface: GmSurface): Option.Option<GmValueApi> => {
   const ns = surface.namespace;
   if (!ns?.getValue || !ns.setValue || !ns.deleteValue) return Option.none();
   const { getValue, setValue, deleteValue } = ns;
-  // The synchronous binding of the same manager, when it has one. Tampermonkey,
-  // Violentmonkey and ScriptCat give both forms, and the page exit needs the
-  // form that finishes before the handler returns.
+  // Some managers give both forms. Stay 2.1.0 is one example. This field
+  // describes the API surface. It does not describe disk durability.
   const sync = surface.setValueSync;
   return Option.some({
     kind: "gm-async",
@@ -299,14 +291,7 @@ const asyncValueApi = (surface: GmSurface): Option.Option<GmValueApi> => {
       gmAttemptAsync("GM.setValue", () => setValue(key, value)),
     remove: (key) => gmAttemptAsync("GM.deleteValue", () => deleteValue(key)),
     setUnsafe: sync === null
-      ? (key, value) => {
-        // quoid and Stay give a promise and nothing else. We start the call and
-        // we do not wait for it. The manager runs in its own process, which
-        // outlives this document, so the write can still land. A rejection
-        // handler keeps it from becoming an unhandled rejection.
-        const started: unknown = setValue(key, value);
-        if (started instanceof Promise) started.catch(() => {});
-      }
+      ? null
       : (key, value) => {
         sync(key, value);
       },
