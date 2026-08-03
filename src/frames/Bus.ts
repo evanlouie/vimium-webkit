@@ -122,15 +122,15 @@ const CHALLENGE_TTL_MS = 10_000;
 const MAX_PENDING_CHALLENGES = 64;
 
 /** The ceiling on the joins that wait for admission. */
-const MAX_PENDING_JOINS = 16;
+export const MAX_PENDING_JOINS = 16;
 
 /**
  * The greatest number of sealed messages that one link holds.
  *
  * Page code holds a copy of the port that a `JOIN` transfers, so page code
  * decides how fast messages arrive. One fiber opens one message at a time, and
- * every open waits for Web Crypto, so an unbounded mailbox would let a page
- * fill the memory of the tab with messages of 4 MB each.
+ * every open waits for Web Crypto. An unbounded mailbox would therefore let a
+ * page fill the memory of the tab with messages of 4 MB each.
  *
  * A full mailbox drops the new message. A flood then costs bounded memory, and
  * it can push out a true message. That is a denial of service, and the holder
@@ -474,8 +474,8 @@ export const makeSealedLink = Effect.fn("FrameBus.link")(function*(
     Effect.gen(function*() {
       // A counter that does not rise is a message that we have already seen, or
       // one that a holder of the port kept and sent again. A message that the
-      // full mailbox dropped leaves a gap, and a gap is safe: the counter only
-      // has to rise, and a page cannot seal the message that fills the gap.
+      // full mailbox dropped leaves a gap. A gap is safe: the counter only has
+      // to rise, and a page cannot seal the message that fills the gap.
       const last = yield* Ref.get(lastSeen);
       if (sealed.seq <= last) return;
 
@@ -1101,15 +1101,24 @@ export class FrameBus extends Context.Service<FrameBus, {
        * itself again opens a new attempt, and it closes the port of the attempt
        * before it. The join that arrived last is therefore the only one whose
        * port the child still holds. A fiber for each join could finish them in
-       * another order, and the last admission would then hold a port that
-       * nobody reads. The frame would stay outside the session, and it would
-       * not announce itself again, because it holds the nonce of the session.
+       * another order. The last admission would then hold a port that nobody
+       * reads. The frame would stay outside the session, and it would not
+       * announce itself again, because it holds the nonce of the session.
        *
-       * The queue drops when it is full, because page code can send a `JOIN` at
-       * any rate. A dropped join costs one attempt, and the child announces
-       * itself again.
+       * The queue slides, so a full queue drops its oldest join and keeps the
+       * newest one. That is the same rule again: the newest join of a window is
+       * the only one that the child can still read. A queue that dropped the
+       * newest join would throw away exactly the join that must win.
+       *
+       * Page code can send a `JOIN` at any rate, so it can push the join of a
+       * true frame out of a full queue. It cannot hold that frame out for ever.
+       * Every new join displaces an older one, so a join is never refused, and
+       * a flood costs bounded memory. A frame whose join was dropped announces
+       * itself again on the retry schedule, and later on each sweep of
+       * `askDescendantsToAnnounce`. The cost is one hint round, and not the
+       * frame.
        */
-      const pendingJoins = yield* Queue.dropping<PendingJoin>(
+      const pendingJoins = yield* Queue.sliding<PendingJoin>(
         MAX_PENDING_JOINS,
       );
 
@@ -1153,6 +1162,22 @@ export class FrameBus extends Context.Service<FrameBus, {
           // The proof needs Web Crypto, which is asynchronous, and the listener
           // must not suspend. One fiber finishes the joins, and it takes them
           // in the order that they arrived.
+          //
+          // Take the oldest join out of a full queue here, so that its port is
+          // closed. The slide of the queue would drop that record silently, and
+          // the port of a dead attempt would stay open. `poll` does not suspend.
+          if (Queue.sizeUnsafe(pendingJoins) >= MAX_PENDING_JOINS) {
+            const oldest = yield* Queue.poll(pendingJoins);
+            if (Option.isSome(oldest)) {
+              yield* Effect.sync(() => {
+                oldest.value.port.close();
+              });
+              yield* Effect.logDebug(
+                "too many joins wait, so the oldest one is dropped",
+              );
+            }
+          }
+
           const queued = Queue.offerUnsafe(pendingJoins, {
             port,
             source: source.value,
@@ -1162,7 +1187,9 @@ export class FrameBus extends Context.Service<FrameBus, {
             yield* Effect.sync(() => {
               port.close();
             });
-            yield* Effect.logDebug("too many joins wait, so one is dropped");
+            yield* Effect.logDebug(
+              "the join queue is closed, so this join is dropped",
+            );
           }
         });
 
@@ -1382,8 +1409,8 @@ export class FrameBus extends Context.Service<FrameBus, {
         // `WELCOME`, which is the first sealed message of a link. A page that
         // holds a copy of the port cannot open it. The credential of the
         // session already exists here: `FrameAuth` creates or loads it when its
-        // layer is built, which is before this layer, so the first child that
-        // answers a challenge finds a frame that can verify its proof.
+        // layer is built. That layer is built before this one, so the first
+        // child that answers a challenge finds a frame that can verify a proof.
         const created = yield* randomId;
         yield* Ref.set(nonceRef, created);
 
