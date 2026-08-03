@@ -50,15 +50,17 @@ const MAX_URL_LENGTH = 4096;
 /**
  * The longest URL that we test a raw regular expression against.
  *
- * This is the second line of defence, and it is the one that holds. The static
- * check in `~/domain/RegexSafety.ts` refuses the shapes that it can prove
- * ambiguous, but it does not promise a linear match. `[a-z]*x` is linear at one
- * start position, and a search over all positions is quadratic.
+ * This is the second check, and it is the one that holds. The static check in
+ * `~/domain/RegexSafety.ts` refuses the shapes that it can prove ambiguous,
+ * but it does not promise a linear match. `[a-z]*x` is linear at one start
+ * position, and a search over all positions is quadratic.
  *
  * The cap turns that class into a fixed cost. The slowest expression that the
  * check accepts is a quadratic one, and 512 characters of it cost about 2 ms.
  * A rule with a raw expression does not match a URL that is longer than the
- * cap, and `~/core/Exclusions.ts` writes a warning when that happens.
+ * cap, and `~/core/Exclusions.ts` writes a warning when that happens. A page
+ * that makes its own URL longer than the cap therefore escapes a raw rule.
+ * Write the rule as a glob for such a page: a glob reads 4096 characters.
  */
 export const MAX_REGEX_URL_LENGTH = 512;
 
@@ -190,6 +192,58 @@ export const compilePattern = (pattern: string): Option.Option<UrlMatcher> => {
 export const patternProblem = (pattern: string): Option.Option<string> => {
   const outcome = compile(pattern);
   return outcome.ok ? Option.none() : Option.some(outcome.reason);
+};
+
+/** One rule of the settings text, and the line that holds it. */
+export interface NumberedRule {
+  /** The line number that the user sees, counted from one. */
+  readonly line: number;
+  readonly rule: ExclusionRule;
+}
+
+/**
+ * Read the rules of the settings text: `pattern [passKeys]` on each line.
+ *
+ * An empty line gives no rule, and `#` starts a comment. The line number comes
+ * with each rule, so that a caller can mark the line that holds a bad rule.
+ */
+export const parseExclusionLines = (
+  text: string,
+): ReadonlyArray<NumberedRule> => {
+  const out: NumberedRule[] = [];
+  const lines = text.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index++) {
+    const trimmed = (lines[index] ?? "").trim();
+    if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
+    const space = trimmed.search(/\s/);
+    out.push({
+      line: index + 1,
+      rule: space === -1 ? { pattern: trimmed, passKeys: "" } : {
+        pattern: trimmed.slice(0, space),
+        passKeys: trimmed.slice(space + 1).trim(),
+      },
+    });
+  }
+  return out;
+};
+
+/**
+ * The lines of the settings text that give no rule, and why.
+ *
+ * A pattern that does not compile is dropped, and the page then stops being
+ * excluded. The user must see which line did that, so the settings dialog
+ * shows this list. The function is pure, so a test can hold the whole table of
+ * reasons.
+ */
+export const exclusionProblems = (text: string): ReadonlyArray<string> => {
+  const problems: string[] = [];
+  for (const { line, rule } of parseExclusionLines(text)) {
+    const problem = patternProblem(rule.pattern);
+    if (Option.isSome(problem)) {
+      problems.push(`line ${line}: ${rule.pattern} - ${problem.value}`);
+    }
+  }
+  return problems;
 };
 
 /**
