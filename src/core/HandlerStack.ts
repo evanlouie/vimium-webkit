@@ -163,19 +163,30 @@ export class HandlerStack extends Context.Service<HandlerStack, {
         Effect.gen(function*() {
           const services = yield* Effect.context<R>();
           const bound: Record<string, unknown> = { name: handler.name };
+
+          // The event bodies. Each one takes an event and answers with a
+          // result, and the types below say exactly that.
           for (const key of Object.keys(handler)) {
-            if (key === "name") continue;
+            if (key === "name" || key === "onDefect") continue;
             const body = (handler as Record<string, unknown>)[key];
             if (typeof body !== "function") continue;
-            // Every other member is a body that takes one argument: an event,
-            // or the cause for `onDefect`. The argument passes through, and
-            // only the services are added.
             const run = body as (
-              argument: unknown,
-            ) => Effect.Effect<unknown, never, R>;
-            bound[key] = (argument: unknown) =>
-              Effect.provideContext(run(argument), services);
+              event: Event,
+            ) => Effect.Effect<HandlerResult, never, R>;
+            bound[key] = (event: Event): Effect.Effect<HandlerResult> =>
+              Effect.provideContext(run(event), services);
           }
+
+          // The cleanup body. It takes a cause, and not an event, so it is
+          // bound on its own. A member with another shape must not compile.
+          const onDefect = handler.onDefect;
+          if (onDefect !== undefined) {
+            bound["onDefect"] = (
+              cause: Cause.Cause<never>,
+            ): Effect.Effect<void> =>
+              Effect.provideContext(onDefect(cause), services);
+          }
+
           return bound as unknown as BoundHandler;
         });
 
