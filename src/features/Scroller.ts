@@ -17,6 +17,9 @@
  *   the reason that `scrollingElement` exists.
  * - Safari uses overlay scrollbars, so a `clientWidth` difference is not a
  *   usable signal for scrollability.
+ * - A right-to-left container writes `scrollLeft` in two different ways across
+ *   engines. Every offset here is normalised to one convention: zero at the
+ *   left edge, and growth to the right. `RtlScrollModel` gives the detail.
  *
  * The animation is a forked fiber that waits on `dom.nextFrame`, and not a
  * `requestAnimationFrame` loop. One `FiberHandle` per axis holds the fiber, so
@@ -107,7 +110,14 @@ const writeOffset = (
   else element.scrollLeft = value;
 };
 
-/** Apply one offset change, and answer how far the element truly moved. */
+/**
+ * Apply one offset change, and answer how far the element truly moved.
+ *
+ * A delta needs no normalisation. In every model that a current engine uses,
+ * `scrollLeft` grows to the right, so a positive delta moves the content to the
+ * right on a left-to-right container and on a right-to-left one. Only the ends
+ * of the range differ, and `rtlShift` below normalises those.
+ */
 const applyOffset = (
   element: Element,
   axis: ScrollAxis,
@@ -116,6 +126,93 @@ const applyOffset = (
   const before = readOffset(element, axis);
   writeOffset(element, axis, before + delta);
   return readOffset(element, axis) - before;
+};
+
+// ---------------------------------------------------------------------------
+// Right-to-left horizontal offsets
+// ---------------------------------------------------------------------------
+
+/**
+ * How an engine writes `scrollLeft` in a right-to-left container.
+ *
+ * - `negative`: the range is `[-max, 0]`, and zero is the *right* edge, which
+ *   is where such a container starts. WebKit, Blink and Gecko do this now.
+ * - `nonNegative`: the range is `[0, max]`, and zero is the *left* edge. Older
+ *   WebKit and older Blink did this, and Safari on an old device still can.
+ *
+ * We normalise both to one convention: **zero at the left edge, and growth to
+ * the right**. That is what a left-to-right container already gives, so every
+ * room check and every endpoint write below reads the same way on both.
+ *
+ * The old Internet Explorer model, where zero is the right edge and the value
+ * grows to the *left*, is out of scope. No engine that runs a userscript
+ * manager uses it, and no read-only test can tell it from `nonNegative`.
+ */
+export type RtlScrollModel = "negative" | "nonNegative";
+
+/** The probe container. It is hidden, it is fixed, and it moves no layout. */
+const RTL_PROBE_STYLE = "position:fixed;top:-9999px;left:-9999px;" +
+  "width:4px;height:4px;overflow:scroll;direction:rtl;" +
+  "scroll-behavior:auto;visibility:hidden;pointer-events:none;";
+
+/**
+ * Measure the model. Never read the user agent.
+ *
+ * A user agent string is a claim, and every engine copies the claims of the
+ * others. The offsets of one hidden right-to-left container are the fact.
+ *
+ * The container starts at its right edge. A positive offset there means that
+ * zero is the left edge, which is the `nonNegative` model. If the offset is
+ * zero, a write of `-1` that survives means the `negative` model.
+ *
+ * `scroll-behavior: auto` is on the probe because a page rule of `smooth` would
+ * defer the write, and the read back would then give the old value.
+ */
+export const detectRtlScrollModel = (document: Document): RtlScrollModel => {
+  const host: Element | null = document.body ?? document.documentElement;
+  if (host === null) return "negative";
+
+  const outer = document.createElement("div");
+  outer.setAttribute("style", RTL_PROBE_STYLE);
+  const inner = document.createElement("div");
+  inner.setAttribute("style", "width:40px;height:1px;");
+  outer.appendChild(inner);
+  host.appendChild(outer);
+
+  try {
+    if (outer.scrollLeft > 0) return "nonNegative";
+    outer.scrollLeft = -1;
+    return outer.scrollLeft < 0 ? "negative" : "nonNegative";
+  } finally {
+    outer.remove();
+  }
+};
+
+/**
+ * What to add to a raw offset to get the normalised one.
+ *
+ * Only a right-to-left container under the `negative` model needs a shift, and
+ * the shift is the whole scroll range: raw `-max` is normalised `0`, and raw
+ * `0` is normalised `max`.
+ */
+const rtlShift = (
+  direction: string,
+  axis: ScrollAxis,
+  model: RtlScrollModel,
+  max: number,
+): number =>
+  axis === "x" && model === "negative" && direction === "rtl" ? max : 0;
+
+/** The same shift, when the caller has no computed style to hand. */
+const shiftOf = (
+  view: Window,
+  element: Element,
+  axis: ScrollAxis,
+  model: RtlScrollModel,
+): number => {
+  if (axis === "y" || model === "nonNegative") return 0;
+  const max = element.scrollWidth - element.clientWidth;
+  return rtlShift(view.getComputedStyle(element).direction, axis, model, max);
 };
 
 /**
@@ -140,6 +237,7 @@ const isScrollable = (
   element: Element,
   axis: ScrollAxis,
   amountSign: number,
+  model: RtlScrollModel,
 ): boolean => {
   const properties = AXIS_PROPERTIES[axis];
   const style = view.getComputedStyle(element);
@@ -150,10 +248,25 @@ const isScrollable = (
   const clientSize = element[properties.clientSize];
   // Sub-pixel layout regularly leaves a fraction of a pixel of overflow on an
   // element that has nothing to scroll.
-  if (scrollSize - clientSize <= 1) return false;
+  const max = scrollSize - clientSize;
+  if (max <= 1) return false;
 
-  const offset = readOffset(element, axis);
-  return amountSign < 0 ? offset > 0 : offset < scrollSize - clientSize - 1;
+  // Normalised, so that a right-to-left container answers the same question as
+  // a left-to-right one. The raw offset of the first is `[-max, 0]` on a
+  // current engine, where `offset > 0` is never true and `offset < max - 1`
+  // is always true: every left command missed it, and every right command was
+  // swallowed by it for ever.
+  const offset = readOffset(element, axis) +
+    rtlShift(style.direction, axis, model, max);
+  return amountSign < 0 ? offset > 0 : offset < max - 1;
+};
+
+/** The parent, through the host of an open shadow root. */
+const parentOf = (node: Element): Element | null => {
+  const parent = node.parentElement;
+  if (parent !== null) return parent;
+  const treeRoot = node.getRootNode();
+  return treeRoot instanceof ShadowRoot ? treeRoot.host : null;
 };
 
 /**
@@ -168,18 +281,15 @@ const findScrollableAncestor = (
   start: Element | null,
   axis: ScrollAxis,
   amount: number,
+  model: RtlScrollModel,
 ): Element => {
   let node: Element | null = start;
 
   while (node !== null && node !== root) {
-    if (isScrollable(view, node, axis, Math.sign(amount) || 1)) return node;
-    const parent: Element | null = node.parentElement;
-    if (parent !== null) {
-      node = parent;
-      continue;
+    if (isScrollable(view, node, axis, Math.sign(amount) || 1, model)) {
+      return node;
     }
-    const treeRoot = node.getRootNode();
-    node = treeRoot instanceof ShadowRoot ? treeRoot.host : null;
+    node = parentOf(node);
   }
 
   return root;
@@ -313,6 +423,15 @@ export class Scroller extends Context.Service<Scroller, {
       /** Increased on every keydown that is not a repeat: "this press". */
       const generation = yield* Ref.make(0);
       const heldCodes = yield* Ref.make<ReadonlySet<string>>(new Set());
+      /**
+       * The engine model for a right-to-left offset, measured once.
+       *
+       * The measurement adds one hidden element and forces one layout, so it
+       * happens on the first horizontal command and never on a vertical one.
+       */
+      const rtlModel = yield* Ref.make<Option.Option<RtlScrollModel>>(
+        Option.none(),
+      );
       const animations: Record<
         ScrollAxis,
         Ref.Ref<Option.Option<Animation>>
@@ -329,6 +448,28 @@ export class Scroller extends Context.Service<Scroller, {
 
       const rootElement = (): Element =>
         dom.document.scrollingElement ?? dom.document.documentElement;
+
+      /**
+       * The model for this axis.
+       *
+       * A vertical offset has one model everywhere, so it needs no
+       * measurement. `nonNegative` is the answer that makes every shift zero.
+       */
+      const modelFor = (axis: ScrollAxis): Effect.Effect<RtlScrollModel> =>
+        axis === "y" ? Effect.succeed("nonNegative" as const) : Effect.gen(
+          function*() {
+            const cached = yield* Ref.get(rtlModel);
+            if (Option.isSome(cached)) return cached.value;
+            // A realm that refuses the probe gets `negative`, which is what
+            // every current engine does.
+            const measured = yield* dom.probeOr(
+              () => detectRtlScrollModel(dom.document),
+              "negative" as const,
+            );
+            yield* Ref.set(rtlModel, Option.some(measured));
+            return measured;
+          },
+        );
 
       /**
        * Should this scroll be animated at all?
@@ -351,6 +492,7 @@ export class Scroller extends Context.Service<Scroller, {
       const target = (
         axis: ScrollAxis,
         amount: number,
+        model: RtlScrollModel,
       ): Effect.Effect<Element> =>
         dom.probeOr(
           () =>
@@ -360,6 +502,7 @@ export class Scroller extends Context.Service<Scroller, {
               deepActiveElement(dom.document),
               axis,
               amount,
+              model,
             ),
           rootElement(),
         );
@@ -621,7 +764,8 @@ export class Scroller extends Context.Service<Scroller, {
           // style at every step, and on the key-repeat path its result is
           // thrown away. That is waste at about 30 Hz.
           if (yield* mergeThisPress(axis, amount)) return;
-          const element = yield* target(axis, amount);
+          const model = yield* modelFor(axis);
+          const element = yield* target(axis, amount, model);
           yield* scrollElementBy(element, axis, amount, event);
         },
       );
@@ -634,7 +778,8 @@ export class Scroller extends Context.Service<Scroller, {
         ) {
           // One walk, and not two: `scrollBy` would resolve the same target
           // again.
-          const element = yield* target(axis, fraction);
+          const model = yield* modelFor(axis);
+          const element = yield* target(axis, fraction, model);
           const properties = AXIS_PROPERTIES[axis];
           const size = element === rootElement()
             ? dom.window[properties.viewport]
@@ -649,19 +794,32 @@ export class Scroller extends Context.Service<Scroller, {
 
       const scrollTo = Effect.fn("Scroller.scrollTo")(
         function*(axis: ScrollAxis, position: "start" | "end" | number) {
-          const element = yield* target(axis, position === "start" ? -1 : 1);
+          const model = yield* modelFor(axis);
+          const element = yield* target(
+            axis,
+            position === "start" ? -1 : 1,
+            model,
+          );
           const properties = AXIS_PROPERTIES[axis];
           const max = element[properties.scrollSize] -
             element[properties.clientSize];
+          // Normalised: zero is the left edge, and `max` is the right one. A
+          // right-to-left container under the negative model needs `-max` and
+          // `0` instead, and the shift below makes that change.
           const value = position === "start"
             ? 0
             : position === "end"
             ? max
             : position;
           yield* cancel(axis);
-          yield* Effect.sync(() => {
-            writeOffset(element, axis, value);
-          });
+          yield* Effect.asVoid(dom.probeOr(() => {
+            writeOffset(
+              element,
+              axis,
+              value - shiftOf(dom.window, element, axis, model),
+            );
+            return true;
+          }, false));
         },
       );
 

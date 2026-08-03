@@ -24,6 +24,47 @@ const focus = (vw: Vimium, id: string): Promise<void> =>
     if (element instanceof HTMLElement) element.focus({ preventScroll: true });
   }, id);
 
+/**
+ * The horizontal offset of one container, with zero at its left edge.
+ *
+ * An engine writes `scrollLeft` in a right-to-left container in one of two
+ * ways, and this reads the model the same way that the userscript does: with a
+ * hidden probe, and never from the user agent string. The answer is therefore
+ * the same number on every engine, which is what the assertions below need.
+ */
+const normalizedX = (
+  vw: Vimium,
+  selector: string,
+): Promise<{ readonly x: number; readonly max: number }> =>
+  vw.page.evaluate((query: string) => {
+    const detect = (): "negative" | "nonNegative" => {
+      const outer = document.createElement("div");
+      outer.setAttribute(
+        "style",
+        "position:fixed;top:-9999px;left:-9999px;width:4px;height:4px;" +
+          "overflow:scroll;direction:rtl;visibility:hidden;",
+      );
+      const inner = document.createElement("div");
+      inner.setAttribute("style", "width:40px;height:1px;");
+      outer.appendChild(inner);
+      document.body.appendChild(outer);
+      let model: "negative" | "nonNegative" = "nonNegative";
+      if (outer.scrollLeft <= 0) {
+        outer.scrollLeft = -1;
+        model = outer.scrollLeft < 0 ? "negative" : "nonNegative";
+      }
+      outer.remove();
+      return model;
+    };
+
+    const element = document.querySelector(query);
+    if (element === null) return { x: -1, max: -1 };
+    const max = element.scrollWidth - element.clientWidth;
+    const rtl = getComputedStyle(element).direction === "rtl";
+    const shift = rtl && detect() === "negative" ? max : 0;
+    return { x: element.scrollLeft + shift, max };
+  }, selector);
+
 /** The default `scrollStepSize`. */
 const STEP = 60;
 
@@ -129,5 +170,79 @@ test.describe("scrolling", () => {
     await vw.press("3", "j");
 
     await expect.poll(async () => (await vw.scrollOffsets()).y).toBe(STEP * 3);
+  });
+});
+
+/**
+ * Right-to-left containers.
+ *
+ * Every engine that Playwright builds writes `scrollLeft` in the range
+ * `[-max, 0]` for such a container, where zero is the right edge. The room
+ * checks used to read that as "no room to the left, and always room to the
+ * right".
+ */
+test.describe("right-to-left scrolling", () => {
+  test("`h` moves a right-to-left container towards its left edge", async ({ vw }) => {
+    await vw.open("/rtl-scroll.html");
+    await focus(vw, "rtl-inner-focus");
+
+    const before = await normalizedX(vw, "#rtl-inner");
+    expect(before.x).toBe(before.max);
+
+    await vw.press("h");
+
+    await expect.poll(async () => (await normalizedX(vw, "#rtl-inner")).x)
+      .toBe(before.max - STEP);
+    // The document must not take a command that the container can absorb.
+    const outer = await normalizedX(vw, "#rtl-outer");
+    expect(outer.x).toBe(outer.max);
+  });
+
+  test("`zH` goes to the left edge, and `zL` to the right one", async ({ vw }) => {
+    await vw.open("/rtl-scroll.html");
+    await focus(vw, "rtl-inner-focus");
+
+    await vw.press("z", "H");
+    await expect.poll(async () => (await normalizedX(vw, "#rtl-inner")).x)
+      .toBe(0);
+
+    await vw.press("z", "L");
+    const end = await normalizedX(vw, "#rtl-inner");
+    expect(end.x).toBe(end.max);
+  });
+
+  test("an exhausted container passes the rest to its ancestor", async ({ vw }) => {
+    await vw.open("/rtl-scroll.html");
+
+    // Give the outer container room to the right, and leave the inner one at
+    // its own right edge.
+    await focus(vw, "rtl-outer-focus");
+    const outerStart = await normalizedX(vw, "#rtl-outer");
+    expect(outerStart.x).toBe(outerStart.max);
+
+    await vw.press("h");
+    await expect.poll(async () => (await normalizedX(vw, "#rtl-outer")).x)
+      .toBe(outerStart.max - STEP);
+
+    await focus(vw, "rtl-inner-focus");
+    const innerBefore = await normalizedX(vw, "#rtl-inner");
+    expect(innerBefore.x).toBe(innerBefore.max);
+
+    await vw.press("l");
+
+    await expect.poll(async () => (await normalizedX(vw, "#rtl-outer")).x)
+      .toBe(outerStart.max);
+    expect((await normalizedX(vw, "#rtl-inner")).x).toBe(innerBefore.x);
+    expect((await vw.scrollOffsets()).x).toBe(0);
+  });
+
+  test("a left-to-right container inside the same page still works", async ({ vw }) => {
+    await vw.open("/rtl-scroll.html");
+    await focus(vw, "ltr-focus");
+
+    await vw.press("l");
+
+    await expect.poll(async () => (await vw.scrollOffsets("#ltr-box")).x)
+      .toBe(STEP);
   });
 });
