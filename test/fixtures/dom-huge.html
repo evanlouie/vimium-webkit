@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Very large document</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+    #bulk div {
+      font-size: 11px;
+    }
+    #bulk section {
+      display: none;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>Very large document</h1>
+    <p class="note">
+      <span id="count">0</span> elements. Discovery walks all of them, so this
+      page measures the walk and not the hints. The bulk is hidden, so only the
+      links below take a hint.
+    </p>
+    <p id="links"></p>
+    <p><a id="beacon" href="#beacon-target">Unmistakable beacon</a></p>
+    <div id="bulk"></div>
+    <script src="assets/dom-huge.js"></script>
+  </body>
+</html>
