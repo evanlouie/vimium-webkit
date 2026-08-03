@@ -18,8 +18,11 @@ import {
   type HintDescriptor,
   hintModeSchema,
   joinProofPayload,
+  limitDescriptors,
   linkKeyPayload,
+  MAX_FRAME_DESCRIPTORS,
   MAX_SEAL_SEQUENCE,
+  MAX_SESSION_DESCRIPTORS,
   NO_REQUEST_ID,
   parseSealed,
   parseWelcome,
@@ -382,5 +385,130 @@ describe("FrameMessage", () => {
   it.effect("stays enabled when the top frame never answers", () =>
     Effect.sync(() => {
       assert.deepEqual(DEFAULT_EXCLUSION, { enabled: true, passKeys: "" });
+    }));
+});
+
+/**
+ * The bound of a round, and the bound of one frame.
+ *
+ * Three frames that each answer inside their own limit used to build one
+ * merged message that the receiver refused, and the whole page lost its hints.
+ * The merged list therefore has a bound of its own, and `limitDescriptors`
+ * shares that bound between the frames.
+ */
+describe("the descriptors of a round", () => {
+  const listFor = (
+    frameId: string,
+    count: number,
+  ): readonly HintDescriptor[] =>
+    Array.from({ length: count }, (_, index) => descriptor(frameId, index));
+
+  it.effect("keeps the merged answer of three frames", () =>
+    Effect.sync(() => {
+      const merged = [
+        ...listFor("1111111111111111", 2000),
+        ...listFor("2222222222222222", 2000),
+        ...listFor("3333333333333333", 2000),
+      ];
+      assert.isAbove(merged.length, MAX_FRAME_DESCRIPTORS);
+
+      // Each frame answered inside its own limit, so each `HINTS` message is
+      // valid. The merged message must be valid as well.
+      for (const frameId of ["1111111111111111", "2222222222222222"]) {
+        assert.isTrue(Option.isSome(parseWire(
+          wire({ kind: "HINTS", descriptors: listFor(frameId, 2000) }),
+          Option.some(NONCE),
+        )));
+      }
+      assert.isTrue(Option.isSome(parseWire(
+        wire({ kind: "HINTS_RESULT", descriptors: merged }),
+        Option.some(NONCE),
+      )));
+      assert.isTrue(Option.isSome(parseWire(
+        wire({
+          kind: "ACTIVATE",
+          originFrameId: "1111111111111111",
+          mode: "activate",
+          descriptors: merged,
+        }),
+        Option.some(NONCE),
+      )));
+    }));
+
+  it.effect("keeps the bound of one frame on the answer of one frame", () =>
+    Effect.sync(() => {
+      const tooMany = listFor("1111111111111111", MAX_FRAME_DESCRIPTORS + 1);
+      assert.isTrue(Option.isNone(parseWire(
+        wire({ kind: "HINTS", descriptors: tooMany }),
+        Option.some(NONCE),
+      )));
+    }));
+
+  it.effect("changes nothing when the round fits", () =>
+    Effect.sync(() => {
+      const merged = [
+        ...listFor("2222222222222222", 3),
+        ...listFor("1111111111111111", 2),
+      ];
+      assert.deepEqual(limitDescriptors(merged), sortDescriptors(merged));
+    }));
+
+  it.effect("shares the bound between the frames that ask for more", () =>
+    Effect.sync(() => {
+      const merged = [
+        ...listFor("1111111111111111", 5000),
+        ...listFor("2222222222222222", 5000),
+        ...listFor("3333333333333333", 5000),
+      ];
+      const capped = limitDescriptors(merged);
+      assert.strictEqual(capped.length, MAX_SESSION_DESCRIPTORS);
+
+      const kept = new Map<string, number>();
+      for (const entry of capped) {
+        kept.set(entry.frameId, (kept.get(entry.frameId) ?? 0) + 1);
+      }
+      // Eight thousand between three frames: two frames keep one more.
+      assert.deepEqual(
+        [...kept.values()].sort((left, right) => left - right),
+        [2666, 2667, 2667],
+      );
+      // Every frame keeps a prefix of its own hints.
+      assert.strictEqual(capped[0]?.localIndex, 0);
+    }));
+
+  it.effect("gives the unused share of a small frame to a large one", () =>
+    Effect.sync(() => {
+      const capped = limitDescriptors([
+        ...listFor("1111111111111111", 10),
+        ...listFor("2222222222222222", 20000),
+      ]);
+      const kept = new Map<string, number>();
+      for (const entry of capped) {
+        kept.set(entry.frameId, (kept.get(entry.frameId) ?? 0) + 1);
+      }
+      assert.strictEqual(kept.get("1111111111111111"), 10);
+      assert.strictEqual(
+        kept.get("2222222222222222"),
+        MAX_SESSION_DESCRIPTORS - 10,
+      );
+    }));
+
+  it.effect("gives every frame the same list of the round", () =>
+    Effect.sync(() => {
+      const mine = listFor("2222222222222222", 5000);
+      const capped = limitDescriptors([
+        ...listFor("1111111111111111", 5000),
+        ...mine,
+        ...listFor("3333333333333333", 5000),
+      ]);
+
+      // What the top frame sends to frame 2222: the merged list, with the
+      // descriptors of the receiver taken out. The receiver puts its own full
+      // list back, and must work out the same round.
+      const asReceiverSees = [
+        ...capped.filter((entry) => entry.frameId !== "2222222222222222"),
+        ...mine,
+      ];
+      assert.deepEqual(limitDescriptors(asReceiverSees), capped);
     }));
 });
