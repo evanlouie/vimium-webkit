@@ -67,8 +67,9 @@ import {
   type FrameMessage,
   type HintDescriptor,
   type HintMode,
+  limitDescriptors,
+  MAX_FRAME_DESCRIPTORS,
   REQUEST_DEADLINE_MS,
-  sortDescriptors,
 } from "~/domain/FrameMessage.ts";
 import {
   type FilterCandidate,
@@ -141,14 +142,6 @@ const DEFAULT_HINT_NUMBERS = "0123456789";
 
 /** The ceiling on the link text of a descriptor. It is the bound of the wire. */
 const MAX_WIRE_LINK_TEXT = 256;
-
-/**
- * The ceiling on the descriptors of one frame. It is the bound of the wire.
- *
- * A frame that gives five thousand hints is already past the point where hints
- * help the user, and a longer array is refused by the schema of the receiver.
- */
-const MAX_WIRE_DESCRIPTORS = 5000;
 
 /**
  * The full sequence of events that a true click produces.
@@ -233,7 +226,7 @@ const descriptorsFor = (
   frameId: FrameId,
   hints: readonly LocalHint[],
 ): readonly HintDescriptor[] =>
-  hints.slice(0, MAX_WIRE_DESCRIPTORS).map((hint, localIndex) => ({
+  hints.slice(0, MAX_FRAME_DESCRIPTORS).map((hint, localIndex) => ({
     frameId,
     localIndex,
     // Cut to the bound of the wire. A longer value makes the whole message
@@ -717,7 +710,10 @@ export class Hints extends Context.Service<Hints, {
         const others = remote.filter(
           (descriptor) => descriptor.frameId !== bus.frameId,
         );
-        return sortDescriptors([...own, ...others]).map((descriptor) => ({
+        // The same bound, and the same shares, in every frame. Each frame sees
+        // its own descriptors and the descriptors that the top frame sent, and
+        // `limitDescriptors` gives the same list for both views.
+        return limitDescriptors([...own, ...others]).map((descriptor) => ({
           frameId: asFrameId(descriptor.frameId),
           localIndex: descriptor.localIndex,
           linkText: descriptor.linkText,
@@ -1390,7 +1386,7 @@ export class Hints extends Context.Service<Hints, {
               ),
             { concurrency: "unbounded" },
           );
-          return sortDescriptors(replies.flat());
+          return limitDescriptors(replies.flat());
         },
       );
 

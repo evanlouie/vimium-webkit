@@ -143,13 +143,36 @@ export const MAX_SEAL_SEQUENCE = 1_000_000;
 /**
  * The greatest length of a sealed payload, in base64 characters.
  *
- * The largest payload that we send is a full set of descriptors, which is about
- * 1.7 MB of text and about 2.3 MB of base64. This ceiling holds that, and it
- * stops a peer from making us decode more.
+ * The largest payload that we send is a merged set of hint descriptors. That
+ * set is bounded by `MAX_SESSION_DESCRIPTORS`, and a descriptor whose link text
+ * is at its own ceiling costs about 330 bytes of JSON. Eight thousand of them
+ * are about 2.7 MB of text, and about 3.6 MB of base64. This ceiling holds
+ * that, and it stops a peer from making us decode more.
  */
 const MAX_SEALED_LENGTH = 4_000_000;
 const MAX_LOCAL_INDEX = 100_000;
-const MAX_DESCRIPTORS = 5_000;
+
+/**
+ * The ceiling on the descriptors of one frame.
+ *
+ * A frame that gives five thousand hints is already past the point where hints
+ * help the user.
+ */
+export const MAX_FRAME_DESCRIPTORS = 5_000;
+
+/**
+ * The ceiling on the merged descriptors of one round.
+ *
+ * The merged list is the sum of the lists of every frame, so the bound of one
+ * frame is the wrong bound for it. With one bound for both, three frames that
+ * each answer inside their own limit build one message that the receiver
+ * refuses, and the whole page loses its hints.
+ *
+ * The value is the largest merged set that certainly fits inside
+ * `MAX_SEALED_LENGTH`. `limitDescriptors` shares it between the frames when a
+ * round asks for more.
+ */
+export const MAX_SESSION_DESCRIPTORS = 8_000;
 const MAX_NOTATION_LENGTH = 64;
 const MAX_PASS_KEYS = 1024;
 
@@ -214,8 +237,13 @@ export const hintDescriptorSchema = Schema.Struct({
 export type HintDescriptor = typeof hintDescriptorSchema.Type;
 
 /** `Schema.Array` is already read-only, so there is no second wrapper. */
-const descriptorsSchema = Schema.Array(hintDescriptorSchema).check(
-  Schema.isMaxLength(MAX_DESCRIPTORS),
+const frameDescriptorsSchema = Schema.Array(hintDescriptorSchema).check(
+  Schema.isMaxLength(MAX_FRAME_DESCRIPTORS),
+);
+
+/** The same array, with the bound of a whole round. */
+const sessionDescriptorsSchema = Schema.Array(hintDescriptorSchema).check(
+  Schema.isMaxLength(MAX_SESSION_DESCRIPTORS),
 );
 
 /**
@@ -238,6 +266,82 @@ export const compareDescriptors = (
 export const sortDescriptors = (
   descriptors: readonly HintDescriptor[],
 ): readonly HintDescriptor[] => [...descriptors].sort(compareDescriptors);
+
+/**
+ * Share a bound between the frames, and cut what does not fit.
+ *
+ * Every frame must end with the same list, because the hint strings come from
+ * the position in that list. A frame does not see the whole round: the top
+ * frame takes the descriptors of the receiver out of each copy that it sends,
+ * and the receiver puts its own back. This function therefore gives the same
+ * answer for both views, and the proof is in the shape of the quota:
+ *
+ * - A frame keeps a prefix of its own descriptors, in `localIndex` order.
+ * - A frame that fits inside its share keeps everything, so its list is the
+ *   same in both views.
+ * - A frame that is cut keeps `level` descriptors, or `level + 1` when it is
+ *   one of the first frames in the canonical order that needed more. Running
+ *   this function again on that result gives the same `level` and the same
+ *   frames the extra one.
+ *
+ * The share is not an equal division. A frame that asks for less than its share
+ * gives the rest back, and the frames that asked for more take it. A page with
+ * one large document and twenty small frames would otherwise lose most of the
+ * hints of the document.
+ */
+export const limitDescriptors = (
+  descriptors: readonly HintDescriptor[],
+  total: number = MAX_SESSION_DESCRIPTORS,
+): readonly HintDescriptor[] => {
+  const sorted = sortDescriptors(descriptors);
+  if (sorted.length <= total) return sorted;
+
+  /** How many each frame asks for, in the canonical order of the frame ids. */
+  const wanted = new Map<string, number>();
+  for (const descriptor of sorted) {
+    wanted.set(descriptor.frameId, (wanted.get(descriptor.frameId) ?? 0) + 1);
+  }
+
+  // The level is the largest number that every frame may keep. A frame that
+  // wants less than the level costs only what it wants, and the rest of its
+  // share raises the level for the frames that want more.
+  const ascending = [...wanted.values()].sort((left, right) => left - right);
+  let remaining = total;
+  let sharers = ascending.length;
+  let level = 0;
+  for (const count of ascending) {
+    const share = Math.floor(remaining / sharers);
+    if (count > share) {
+      level = share;
+      break;
+    }
+    remaining -= count;
+    sharers -= 1;
+  }
+
+  // What is left after every frame took the level. It goes one by one to the
+  // frames that want more, in the canonical order, so that every frame works
+  // out the same list.
+  let spare = remaining - level * sharers;
+  const quota = new Map<string, number>();
+  for (const frameId of [...wanted.keys()].sort()) {
+    const count = wanted.get(frameId) ?? 0;
+    if (count <= level) {
+      quota.set(frameId, count);
+      continue;
+    }
+    quota.set(frameId, spare > 0 ? level + 1 : level);
+    if (spare > 0) spare -= 1;
+  }
+
+  const kept = new Map<string, number>();
+  return sorted.filter((descriptor) => {
+    const taken = kept.get(descriptor.frameId) ?? 0;
+    if (taken >= (quota.get(descriptor.frameId) ?? 0)) return false;
+    kept.set(descriptor.frameId, taken + 1);
+    return true;
+  });
+};
 
 // ---------------------------------------------------------------------------
 // Exclusions
@@ -499,7 +603,7 @@ const collectHints = define({
 /** Frame to top, in answer to `COLLECT_HINTS`. */
 const hints = define({
   kind: Schema.Literal("HINTS"),
-  descriptors: descriptorsSchema,
+  descriptors: frameDescriptorsSchema,
 });
 
 /**
@@ -513,10 +617,14 @@ const hints = define({
  * The frame that merges the answers must accept a descriptor from the frame
  * that produced it only. A descriptor that is given to the wrong frame breaks
  * the shared order, which is a correctness problem and not only an attack.
+ *
+ * The bound here is the bound of a whole round, and not the bound of one frame.
+ * Several frames that each answer inside their own limit would otherwise build
+ * one message that this schema refuses.
  */
 const hintsResult = define({
   kind: Schema.Literal("HINTS_RESULT"),
-  descriptors: descriptorsSchema,
+  descriptors: sessionDescriptorsSchema,
 });
 
 /**
@@ -527,7 +635,7 @@ const activate = define({
   kind: Schema.Literal("ACTIVATE"),
   originFrameId: idSchema,
   mode: hintModeSchema,
-  descriptors: descriptorsSchema,
+  descriptors: sessionDescriptorsSchema,
 });
 
 /**
