@@ -13,6 +13,7 @@ import {
   type ExclusionRule,
   isPassKey,
   makeExclusionSet,
+  patternProblem,
   patternToRegExp,
 } from "~/domain/Exclusion.ts";
 
@@ -109,18 +110,18 @@ describe("Exclusion", () => {
   it.effect("drops a raw expression that can backtrack", () =>
     Effect.sync(() => {
       // The page chooses the URL. A raw expression with this shape turns one
-      // crafted URL into a frozen startup, and the 4,096-character limit on
-      // the URL does not help: `(a+)+$` needs minutes against forty
+      // crafted URL into a startup that does not end. A limit on the length of
+      // the URL does not help on its own: `(a+)+$` needs minutes against forty
       // characters. Such a rule is dropped, and the user keeps every other
       // rule.
-      const bombs = [
+      const slow = [
         "/(a+)+$/",
         "/(a|a)*$/",
         "/https://(x|x)+\\.test/",
         "/.*.*x/",
         "/(\\w+\\s?)*$/",
       ];
-      for (const pattern of bombs) {
+      for (const pattern of slow) {
         assert.isTrue(
           Option.isNone(compilePattern(pattern)),
           `${pattern} compiled`,
@@ -159,6 +160,90 @@ describe("Exclusion", () => {
     Effect.sync(() => {
       assert.strictEqual(matches("/.*/", "https://example.com/"), true);
       assert.strictEqual(matches("/.*/", "x".repeat(5000)), false);
+    }));
+
+  it.effect("keeps the rules that a user writes", () =>
+    Effect.sync(() => {
+      // Every row of this table was refused by the first version of the safety
+      // check, and every row is safe. The canonical subdomain rule is the
+      // first one: the inner loop cannot take the dot that ends each
+      // iteration, so the division into iterations is fixed.
+      const wanted: ReadonlyArray<readonly [string, string]> = [
+        [
+          "/^https?://([a-z0-9-]+\\.)*example\\.com/.*$/",
+          "https://a.b.example.com/x",
+        ],
+        ["/https://(?:\\w+\\.)+test/.*/", "https://a.b.test/x"],
+        ["/https://\\d{1,3}(\\.\\d{1,3}){3}/.*/", "https://10.0.0.1/x"],
+        ["/https://[a-z]+(-[a-z]+)*\\.test/.*/", "https://a-b-c.test/x"],
+      ];
+
+      for (const [pattern, url] of wanted) {
+        assert.isTrue(
+          Option.isNone(patternProblem(pattern)),
+          `${pattern} was dropped: ${
+            Option.getOrElse(patternProblem(pattern), () => "")
+          }`,
+        );
+        assert.strictEqual(matches(pattern, url), true, pattern);
+      }
+    }));
+
+  it.effect("says why it dropped a rule", () =>
+    Effect.sync(() => {
+      // A dropped rule stops protecting the page. The user must learn that
+      // from the log, from the HUD and from the settings dialog, so the reason
+      // has to leave this module.
+      const reason = patternProblem("/(a+)+$/");
+      assert.deepEqual(
+        reason,
+        Option.some(
+          "a quantifier whose body can grow past its own end can hang the page",
+        ),
+      );
+      assert.isTrue(Option.isSome(patternProblem("   ")));
+      assert.isTrue(Option.isSome(patternProblem("/[unclosed/")));
+      assert.isTrue(Option.isNone(patternProblem("https://example.com/*")));
+    }));
+
+  it.effect("lists every rule that it dropped", () =>
+    Effect.sync(() => {
+      const set = makeExclusionSet(rules(
+        { pattern: "https://good.test/*", passKeys: "" },
+        { pattern: "/(a+)+$/", passKeys: "" },
+        { pattern: "/[unclosed/", passKeys: "" },
+      ));
+
+      assert.strictEqual(set.size, 1);
+      assert.deepEqual(
+        set.dropped.map((rule) => rule.pattern),
+        ["/(a+)+$/", "/[unclosed/"],
+      );
+      for (const rule of set.dropped) {
+        assert.isAbove(rule.reason.length, 0, `${rule.pattern} gave no reason`);
+      }
+    }));
+
+  it.effect("describes a glob that holds two wildcards side by side", () =>
+    Effect.sync(() => {
+      // `**` becomes `^.*.*$` when it is translated one wildcard at a time,
+      // and the safety check refuses that shape. A glob never backtracks, so
+      // the check belongs to the raw form only, and a run of `*` collapses.
+      for (const glob of ["**", "https://example.com/**", "a**b"]) {
+        assert.isTrue(
+          Option.isSome(compilePattern(glob)),
+          `${glob} gave no matcher`,
+        );
+        assert.isTrue(
+          Option.isSome(patternToRegExp(glob)),
+          `${glob} was not described`,
+        );
+      }
+
+      const described = patternToRegExp("https://example.com/**");
+      if (Option.isNone(described)) return;
+      assert.isTrue(described.value.test("https://example.com/a/b"));
+      assert.isFalse(described.value.test("https://evil.test/"));
     }));
 
   it.effect("still describes what a glob means", () =>

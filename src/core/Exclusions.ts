@@ -11,17 +11,38 @@
  * frames, and the graph stays a tree.
  */
 
-import { Context, Effect, Layer, Stream, SubscriptionRef } from "effect";
+import { Context, Effect, Layer, Ref, Stream, SubscriptionRef } from "effect";
 import {
   type EffectiveRule,
+  type ExclusionSet,
   FULLY_ENABLED,
+  isRawPattern,
   makeExclusionSet,
+  MAX_REGEX_URL_LENGTH,
 } from "~/domain/Exclusion.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Realm } from "~/platform/Realm.ts";
 import { Settings } from "./Settings.ts";
 
 export type { EffectiveRule };
+
+/**
+ * Say which rules did not compile.
+ *
+ * A dropped rule stops protecting the page, and the page then becomes active
+ * again where the user turned it off. Silence there is the fault. The settings
+ * dialog marks the same rules, and this log line reaches a user who never
+ * opens the dialog.
+ */
+const warnAboutDropped = (set: ExclusionSet): Effect.Effect<void> =>
+  Effect.forEach(
+    set.dropped,
+    (rule) =>
+      Effect.logWarning(
+        `the exclusion rule "${rule.pattern}" was dropped: ${rule.reason}`,
+      ),
+    { discard: true },
+  );
 
 export class Exclusions extends Context.Service<Exclusions, {
   /** The verdict in force for this frame. */
@@ -59,11 +80,38 @@ export class Exclusions extends Context.Service<Exclusions, {
 
       const effective = yield* SubscriptionRef.make(FULLY_ENABLED);
 
+      // The same set of dropped rules must not fill the console. The signature
+      // changes only when the user changes the rules.
+      const warned = yield* Ref.make("");
+      const warnOnce = (set: ExclusionSet): Effect.Effect<void> =>
+        Effect.gen(function*() {
+          const signature = set.dropped.map((rule) => rule.pattern).join("\n");
+          if (signature.length === 0) return;
+          const last = yield* Ref.getAndSet(warned, signature);
+          if (last === signature) return;
+          yield* warnAboutDropped(set);
+        });
+
       const match = (url: string): Effect.Effect<EffectiveRule> =>
-        Effect.map(
-          settings.current,
-          (current) => makeExclusionSet(current.exclusionRules).match(url),
-        );
+        Effect.gen(function*() {
+          const current = yield* settings.current;
+          const set = makeExclusionSet(current.exclusionRules);
+          yield* warnOnce(set);
+          // A raw expression reads a capped length of URL, because the static
+          // safety check does not promise a linear match. Say when the cap
+          // takes effect, so that a rule which stops matching is not silent.
+          if (
+            url.length > MAX_REGEX_URL_LENGTH &&
+            current.exclusionRules.some((rule) => isRawPattern(rule.pattern))
+          ) {
+            yield* Effect.logWarning(
+              `this URL is longer than ${MAX_REGEX_URL_LENGTH} characters, ` +
+                "so an exclusion rule that holds a raw expression cannot " +
+                "match it",
+            );
+          }
+          return set.match(url);
+        });
 
       const resolveLocal = Effect.flatMap(dom.href, match);
 

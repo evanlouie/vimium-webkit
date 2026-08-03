@@ -10,7 +10,15 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer, Option, Stream, SubscriptionRef } from "effect";
+import {
+  Effect,
+  Layer,
+  Logger,
+  Option,
+  References,
+  Stream,
+  SubscriptionRef,
+} from "effect";
 import { Exclusions } from "~/core/Exclusions.ts";
 import { Settings } from "~/core/Settings.ts";
 import {
@@ -97,6 +105,12 @@ const layerFor = (
   );
   return Layer.provideMerge(Exclusions.layer, base);
 };
+
+/** A set with one rule that cannot compile, and one raw rule that can. */
+const DROPPED: readonly ExclusionRule[] = [
+  { pattern: "/(a+)+$/", passKeys: "" },
+  { pattern: "/https://a\\.test/.*/", passKeys: "" },
+];
 
 const EXCLUDED: readonly ExclusionRule[] = [
   { pattern: "https://excluded.test/*", passKeys: "" },
@@ -193,5 +207,44 @@ describe("Exclusions", () => {
       url: "https://excluded.test/advert",
       isTop: false,
       rules: EXCLUDED,
+    }))));
+
+  it.effect("says which rule it dropped, and how long a URL it reads", () =>
+    Effect.gen(function*() {
+      const settings = yield* Settings;
+      const exclusions = yield* Exclusions;
+      yield* settings.reload;
+
+      const written: string[] = [];
+      const capture = Logger.make<unknown, void>((options) => {
+        written.push(String(options.message));
+      });
+
+      yield* Effect.provide(
+        Effect.gen(function*() {
+          // The rule is dropped, so the page is active again. The user must
+          // learn that from the log.
+          assert.deepEqual(
+            yield* exclusions.match("https://excluded.test/inbox"),
+            { enabled: true, passKeys: "" },
+          );
+          // A URL above the cap cannot be read by a raw expression, and that
+          // is said as well.
+          yield* exclusions.match(`https://a.test/${"a".repeat(2000)}`);
+        }),
+        Layer.merge(
+          Logger.layer([capture]),
+          Layer.succeed(References.MinimumLogLevel, "Trace"),
+        ),
+      );
+
+      const joined = written.join("\n");
+      assert.include(joined, "was dropped");
+      assert.include(joined, "(a+)+$");
+      assert.include(joined, "longer than");
+    }).pipe(Effect.provide(layerFor({
+      url: "https://other.test/",
+      isTop: true,
+      rules: DROPPED,
     }))));
 });
