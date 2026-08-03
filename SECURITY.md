@@ -42,32 +42,75 @@ the script can, including the frame-protocol session nonce, and no in-script
 measure changes that. The frame protocol is designed so the _content-world_ case
 is sound; the page-world case is documented rather than defended.
 
-**A page that hides its own root element.** The overlay host is a child of
-`documentElement`, and CSS gives a descendant no way out of its ancestors.
-`documentElement` is the only ancestor that the host has. The removal guard
-keeps the host a child of it. A page that moves the host into a container of its
-own therefore loses it again at once. Five rules still win:
-`html { opacity: 0 }`, `html { transform: scale(0) }`,
-`html { filter: opacity(0) }`, `html { content-visibility: hidden }` and
-`html { display: none }`. No measure inside the script changes that. Three facts
-bound the risk:
+**A page that writes a rule on the root element.** The overlay host is a child
+of `documentElement`, and CSS gives a descendant no way out of its ancestors.
+The removal guard keeps the host a child of `documentElement`, so `html` is the
+only ancestor that it has. There are exactly two classes of such rule, and the
+class decides both the result and the answer.
 
-- The page hides itself as well. Each one of those five rules paints the page
-  itself as nothing, so the user sees a blank page and not a hidden interface
-  that takes the keyboard.
-- We could only answer with a rule on the page itself, and a userscript that
+_Class 1: a rule that makes `html` the containing block of a fixed descendant._
+The overlay then holds a place in the document instead of the viewport, so it
+scrolls away with the page. **The page itself stays fully readable**, which
+makes this the dangerous class. Example: `html { will-change: transform }`. The
+property is not the definition; the effect is. Every property that gives an
+element a transform, a containment, a filter or a perspective belongs to this
+class — `transform`, `translate`, `rotate`, `scale`, `will-change`, `contain`,
+`container-type`, `perspective`, `filter` and `backdrop-filter` — and so does
+any future property with the same effect. `will-change: transform` and
+`transform: translateZ(0)` are also normal performance code, so this is not only
+an attack.
+
+The script answers this class with a measurement, and not with a list of
+properties. `alignHost` in `src/ui/Ui.ts` reads the box of the host, compares it
+with the viewport, and adds the difference to the transform that the host
+already carries. It repeats that after each scroll, because a host under such an
+ancestor moves with the document. A measurement in WebKit shows the result, with
+the page scrolled to 2759 px: `will-change: transform`,
+`transform: translateZ(0)`, `contain: paint` and `perspective: 1px` each put the
+dialog box at -2711, and the correction puts it back at 48, which is where it
+sits with no rule at all.
+
+_Class 2: a rule that makes `html` paint nothing._ The overlay disappears, and
+the page disappears with it, so the user sees a blank page and not a hidden
+interface. Example: `html { opacity: 0 }`. `display: none`,
+`visibility: hidden`, `content-visibility: hidden`, `filter: opacity(0)` and
+`transform: scale(0)` belong here as well. No measure inside the script answers
+this class:
+
+- We could only answer with a rule of our own on `html`, and a userscript that
   wrote `html { opacity: 1 !important }` would break every page that animates
   its root element.
 - The top layer is not an answer either. `showModal` makes the page inert, which
   the overlay must never do, and a `popover` is still skipped inside an ancestor
   with `content-visibility: hidden`.
 
+**The invariant that holds for both classes.** The overlay never holds the
+keyboard while the user cannot see it. `ui.visibilityFault` repairs the style,
+the place and the offset, and then measures what is left. A fault closes the
+dialog, which gives every key back to the page, and the reason goes to the
+console of the browser. The HUD cannot carry that message, because the HUD is
+inside the overlay that the fault hides.
+
+Both dialogs ask that question today, because a dialog is the mode that holds
+every key for a long time. Link hints, the find prompt and the omnibar do not
+ask yet. Each one holds the keyboard as well, so each one must make the same
+call, and that is the next change.
+
 What the script does defend is the host itself: every inline declaration on the
 host carries the important priority, the guard in `src/ui/Ui.ts` compares each
 of those declarations and writes them again when the page changed one, and a
 mutation observer puts the host back under `documentElement` after a removal or
-a move. A page that names `vimium-webkit-overlay` in a selector, removes the
-element, or moves it into a container of its own, does not win.
+a move.
+
+That repair has a budget of 32 writes for each quiet second, because a page that
+removes the host inside its own mutation observer would otherwise fight us in a
+loop of microtasks, and that loop would starve the page. The loop needs our
+write, so the guard stops writing when the budget is gone. It does **not** stop
+watching, and it does not stay silent: it says in the console that the overlay
+is not visible, the overlay gives the keyboard back, and one quiet second gives
+back both the count and the repair. A page that spends more than the budget
+therefore keeps the host until it stops, and it never keeps a user who cannot
+leave.
 
 **Detectability.** The overlay is an element in the page's own DOM and the
 script installs `keydown` listeners on `window`. A page can tell it is there.
