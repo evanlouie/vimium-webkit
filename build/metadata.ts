@@ -19,10 +19,11 @@ export interface MetadataInput {
 /**
  * Both spellings of every storage/tab/clipboard grant.
  *
- * `platform/gm.ts` probes for `GM.*` first and `GM_*` second, so granting only
- * one form would silently disable the other path on managers that honour it.
- * Tampermonkey and Violentmonkey accept both; quoid ignores the ones it does
- * not implement.
+ * `platform/Gm.ts` probes for the complete `GM_*` surface first. Its
+ * synchronous write reduces the page-exit loss window. It then probes `GM.*`.
+ * Granting only one form would disable the other path on managers that honour
+ * it. Tampermonkey and Violentmonkey accept both. quoid ignores unimplemented
+ * grants.
  */
 const GRANTS: readonly string[] = [
   "GM.info",

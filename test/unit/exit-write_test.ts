@@ -3,9 +3,8 @@
  *
  * This is the acceptance test of issue #11, and it uses the real parts: the
  * real `Storage`, the real `Lifecycle`, the real exit hook of
- * `boot/Bootstrap.ts`, and a key-value backend whose write is synchronous. Both
- * `GM_setValue` and `localStorage.setItem` are synchronous, so the stub has the
- * shape that a real manager has.
+ * `boot/Bootstrap.ts`, and a key-value backend whose write is synchronous. The
+ * stub has the `gm-sync` shape of a real manager.
  *
  * The test does what the browser does. It takes the `pagehide` listener that
  * the layer registered, and it runs that listener with `runSyncExit`, exactly
@@ -71,9 +70,8 @@ interface Backend {
 /**
  * A backend with a synchronous write.
  *
- * This is the shape of every durable backend that this project can use:
- * `GM_setValue` on Tampermonkey, Violentmonkey and ScriptCat, and
- * `localStorage.setItem` in the fallback.
+ * This is the shape of the durable `gm-sync` backend. Its direct write uses
+ * the synchronous `GM_setValue` surface.
  */
 const makeBackend = (): Backend => {
   const map = new Map<string, string>();

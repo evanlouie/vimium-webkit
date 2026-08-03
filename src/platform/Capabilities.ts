@@ -243,12 +243,9 @@ export const probeCapabilities: Effect.Effect<
       Option.isSome(gm.values),
     ),
 
-    // Asked of the store that is in use, and not derived again. The two
-    // predicates had moved apart before: a manager with `GM.getValue` and
-    // `GM.setValue` but no `GM.deleteValue` was reported as `gm-async` while
-    // its data went to `localStorage`, which WebKit erases after seven days.
-    // The warning then said nothing. One source of truth removes that class of
-    // defect.
+    // Asked of the selected store, and not derived again. Separate predicates
+    // can make the warning disagree with the selected backend. One source of
+    // truth prevents that defect.
     value: kv.kind,
     valueChangeListener: kv.watchable,
     openInTab: gm.canOpenInTab,
