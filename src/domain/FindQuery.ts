@@ -303,10 +303,15 @@ const compileError = (
   }
 
   // The safety check reads the text of the pattern, and never runs it. A
-  // measurement cannot protect the page here, because the measurement is the
-  // hang: `(a|a|a|a)*$` takes minutes against twenty characters, and nothing
-  // in JavaScript can stop an `exec` that is inside such a pattern. Find mode
-  // owns the keyboard, so the tab is lost.
+  // measurement cannot protect the page here, because the measurement cannot
+  // end before the match ends: `(a|a|a|a)*$` takes minutes against twenty
+  // characters, and nothing in JavaScript can stop an `exec` that is already
+  // inside such a pattern. Find mode owns the keyboard, so the tab stops
+  // answering.
+  //
+  // The check refuses only the shapes that it can prove ambiguous. It does not
+  // promise a linear match, so `~/features/find/Engine.ts` reads the page text
+  // in windows and stops at a deadline. That budget is the second line.
   return Option.map(
     regexSafetyError(source, flags),
     (reason) => `${reason}; try a simpler one`,
