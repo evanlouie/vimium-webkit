@@ -106,9 +106,9 @@ const WINDOW_BUDGET_MS = 8;
  * need the text beside it. A match that reaches the end of the slice grows the
  * slice instead, so no match is lost or moved.
  *
- * The text *after* the window is the text that one `exec` reads at each start
- * position, so it never exceeds the size of the window itself. The text before
- * the window is never a start position, so it costs one copy and no search.
+ * The text after the window always has `WINDOW_CONTEXT` characters when they
+ * exist. An assertion can read this text when the first window is small. The
+ * text before the window holds no start position, so it costs one copy.
  */
 const WINDOW_CONTEXT = 256;
 
@@ -194,7 +194,7 @@ export const collectSpans = (
     const sliceStart = Math.max(0, cursor - WINDOW_CONTEXT);
     let sliceEnd = Math.min(
       haystack.length,
-      windowEnd + Math.min(WINDOW_CONTEXT, window),
+      windowEnd + WINDOW_CONTEXT,
     );
     let slice = haystack.slice(sliceStart, sliceEnd);
     regex.lastIndex = cursor - sliceStart;

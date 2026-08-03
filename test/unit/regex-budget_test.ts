@@ -190,6 +190,62 @@ describe("the find budget", () => {
       assert.isFalse(passed.stopped);
     }));
 
+  it.effect("keeps the trailing context when the first window is small", () =>
+    Effect.sync(() => {
+      // The first window is 32 characters. This assertion needs text after
+      // that window. A short trailing context lost this match and reported no
+      // stop, although a whole-text search found it.
+      const haystack = `Fox${"a".repeat(100)}epsilon`;
+      const passed = collectSpans(haystack, /Fox(?=.*epsilon)/g);
+      assert.deepEqual(passed.spans, [{ start: 0, end: 3 }]);
+      assert.isFalse(passed.stopped);
+    }));
+
+  it.effect("halves the window after an overrun", () =>
+    Effect.sync(() => {
+      // The prefix is cheap, so the window grows to 1024 characters. The next
+      // text is costly at that size. Halving the window keeps the full walk
+      // below the limit, while the same large windows take more than 800 ms.
+      const unit = "a".repeat(8);
+      const repeated = `(?:${unit})+`.repeat(4);
+      const pattern = new RegExp(`(?=${repeated}x)`, "y");
+      const haystack = `${"b".repeat(2016)}${"a".repeat(8000)}`;
+      const started = performance.now();
+      const passed = collectSpans(
+        haystack,
+        pattern,
+        500,
+        Number.POSITIVE_INFINITY,
+      );
+      const elapsed = performance.now() - started;
+
+      assert.deepEqual(passed.spans, []);
+      assert.isFalse(passed.stopped, "the search did not read the full text");
+      assert.isBelow(elapsed, 600, `the search cost ${elapsed}ms`);
+    }));
+
+  it.effect("stops slice growth when one window passes its budget", () =>
+    Effect.sync(() => {
+      // The first match reaches each slice end. The failed alternative becomes
+      // costly after the slice grows. The growth guard must stop before the
+      // next growth step makes one `exec` cost seconds.
+      const unit = "a".repeat(12);
+      const repeated = `(?:${unit})+`.repeat(4);
+      const pattern = new RegExp(`(?:(?=${repeated}x)|a+)`, "y");
+      const started = performance.now();
+      const passed = collectSpans(
+        "a".repeat(20_000),
+        pattern,
+        500,
+        started + 500,
+      );
+      const elapsed = performance.now() - started;
+
+      assert.deepEqual(passed.spans, []);
+      assert.isTrue(passed.stopped, "the growth did not report the stop");
+      assert.isBelow(elapsed, 500, `the growth cost ${elapsed}ms`);
+    }));
+
   it.effect("gives the whole span of a match of 400 characters", () =>
     Effect.sync(() => {
       // The window kept 256 characters of text on each side, and a match that
