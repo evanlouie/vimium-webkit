@@ -18,6 +18,20 @@ import { Effect, Option } from "effect";
 import { isLinearRegex, regexSafetyError } from "~/domain/RegexSafety.ts";
 
 /**
+ * The ceiling for the two timing tests.
+ *
+ * These tests guard one property: the cost of the check follows the pattern,
+ * and never the length of the input. A defect there costs seconds, and not
+ * milliseconds, because it makes the check run the expression.
+ *
+ * The number is therefore high on purpose. A tight ceiling measures the load
+ * of the machine, and not the code: a run beside other work gave 249 ms for
+ * work that takes 12 ms on an idle machine. That failure says nothing about
+ * the check, and it stops a build for no reason.
+ */
+const SLOW_CHECK_MS = 2_000;
+
+/**
  * The patterns that a user writes, and that must keep working.
  *
  * The first sixteen rows are the list of the review of pull request 55. Each
@@ -290,7 +304,7 @@ describe("RegexSafety", () => {
       const started = performance.now();
       for (let round = 0; round < 20; round++) regexSafetyError(pattern, "i");
       const elapsed = performance.now() - started;
-      assert.isBelow(elapsed, 200, `the check took ${elapsed}ms`);
+      assert.isBelow(elapsed, SLOW_CHECK_MS, `the check took ${elapsed}ms`);
     }));
 
   it.effect("decides a hostile pattern in the same time", () =>
@@ -308,6 +322,6 @@ describe("RegexSafety", () => {
       const started = performance.now();
       for (const source of hostile) regexSafetyError(source, "i");
       const elapsed = performance.now() - started;
-      assert.isBelow(elapsed, 200, `the check took ${elapsed}ms`);
+      assert.isBelow(elapsed, SLOW_CHECK_MS, `the check took ${elapsed}ms`);
     }));
 });
