@@ -11,6 +11,10 @@
  * 2. **Record side effects** a browser cannot show us — `GM_openInTab` targets,
  *    clipboard writes, and CSP violation reports.
  * 3. **Capture the overlay's closed shadow root.**
+ * 4. **Keep the value store across a navigation.** The `Map` of the store is
+ *    made again for each document. A mirror in `localStorage` therefore holds
+ *    the same values under a private prefix. A spec can change a value, leave
+ *    the page, and read the value back.
  *
  * On (3): this is a *page-side monkeypatch of `Element.prototype.attachShadow`
  * installed before the extension loads*. It touches nothing in `src/` and
@@ -114,6 +118,16 @@ export interface HarnessHost {
 export const installPageHarness = (init: HarnessInit): void => {
   type GmValue = string | number | boolean | null;
 
+  /**
+   * Where the store keeps a value that must survive the document.
+   *
+   * The `Map` below is made again for each document, so it alone can never
+   * answer "is the value still there after the page closed". The mirror in
+   * `localStorage` can, and it is private to the harness: every key carries
+   * this prefix, and the application never reads one.
+   */
+  const DURABLE_PREFIX = "__vimiumHarness:";
+
   interface OpenInTabOptions {
     readonly active?: boolean;
     readonly loadInBackground?: boolean;
@@ -170,6 +184,44 @@ export const installPageHarness = (init: HarnessInit): void => {
     shadow: null,
   };
   host.__vimiumHarness = state;
+
+  // -- The mirror that survives the document --------------------------------
+
+  const durableStore = (): Storage | null => {
+    try {
+      return globalThis.localStorage;
+    } catch {
+      return null;
+    }
+  };
+
+  /** Read back what an earlier document of this test wrote. */
+  const restoreDurable = (): void => {
+    const durable = durableStore();
+    if (durable === null) return;
+    for (let index = 0; index < durable.length; index++) {
+      const name = durable.key(index);
+      if (name === null || !name.startsWith(DURABLE_PREFIX)) continue;
+      // The stored value wins over the seed. It is the newer of the two.
+      state.store.set(
+        name.slice(DURABLE_PREFIX.length),
+        durable.getItem(name) ?? "",
+      );
+    }
+  };
+
+  const keepDurable = (key: string, value: string | null): void => {
+    const durable = durableStore();
+    if (durable === null) return;
+    try {
+      if (value === null) durable.removeItem(DURABLE_PREFIX + key);
+      else durable.setItem(DURABLE_PREFIX + key, value);
+    } catch {
+      // A quota or a blocked store. The test asserts on the outcome.
+    }
+  };
+
+  restoreDurable();
 
   // -- Closed shadow root capture -------------------------------------------
 
@@ -243,6 +295,11 @@ export const installPageHarness = (init: HarnessInit): void => {
   };
   const writeValue = (key: string, value: GmValue): void => {
     state.store.set(key, String(value));
+    keepDurable(key, String(value));
+  };
+  const dropValue = (key: string): void => {
+    state.store.delete(key);
+    keepDurable(key, null);
   };
   const recordTab = (
     url: string,
@@ -276,9 +333,7 @@ export const installPageHarness = (init: HarnessInit): void => {
     host.GM_info = info;
     host.GM_getValue = readValue;
     host.GM_setValue = writeValue;
-    host.GM_deleteValue = (key: string): void => {
-      state.store.delete(key);
-    };
+    host.GM_deleteValue = dropValue;
     host.GM_openInTab = recordTab;
     host.GM_setClipboard = recordClipboard;
     return;
@@ -294,7 +349,7 @@ export const installPageHarness = (init: HarnessInit): void => {
       return Promise.resolve();
     },
     deleteValue: (key) => {
-      state.store.delete(key);
+      dropValue(key);
       return Promise.resolve();
     },
     openInTab: (url, options) => Promise.resolve(recordTab(url, options)),
