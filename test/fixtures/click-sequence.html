@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Click sequence</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+    #probe {
+      margin: 24px 0;
+      padding: 8px 16px;
+      font-size: 16px;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>Click sequence</h1>
+    <p class="note">
+      The button below records the <code>button</code> and
+      <code>buttons</code> field of every event of a click. A spec compares a
+      true click with a hint activation.
+    </p>
+
+    <button type="button" id="probe">Event probe</button>
+
+    <p>Clicks: <span id="click-count">0</span></p>
+
+    <script src="assets/click-sequence.js"></script>
+  </body>
+</html>

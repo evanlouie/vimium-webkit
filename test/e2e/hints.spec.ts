@@ -11,7 +11,36 @@
  * mode they are in and drive the overlay accordingly.
  */
 
+import type { Page } from "@playwright/test";
 import { expect, test } from "./harness/fixtures.ts";
+
+/** One recorded event of a click sequence. */
+interface RecordedEvent {
+  readonly type: string;
+  readonly button: number;
+  readonly buttons: number;
+}
+
+interface EventLog {
+  __events?: RecordedEvent[];
+}
+
+/** Everything that the fixture recorded, oldest first. */
+const readEvents = (page: Page): Promise<readonly RecordedEvent[]> =>
+  page.evaluate((): readonly RecordedEvent[] => {
+    const host = globalThis as unknown as EventLog;
+    return (host.__events ?? []).map((event) => ({
+      type: event.type,
+      button: event.button,
+      buttons: event.buttons,
+    }));
+  });
+
+const clearEvents = (page: Page): Promise<void> =>
+  page.evaluate((): void => {
+    const host = globalThis as unknown as EventLog;
+    host.__events = [];
+  });
 
 /**
  * Image maps.
@@ -203,6 +232,52 @@ test.describe("Escape", () => {
 
     expect(page.url()).toBe(before);
     expect(await vw.hintsVisible()).toBe(false);
+  });
+});
+
+/**
+ * The button fields of the synthetic sequence.
+ *
+ * A control reads `buttons` to find out whether a button is down. A `mouseup`
+ * or a `click` that says that the primary button is still down is refused by
+ * some controls, and it leaves others in the pressed state. The only reference
+ * that settles this is a true click on the same element.
+ */
+test.describe("the synthetic click sequence", () => {
+  test("carries the button fields of a true click", async ({ vw, page }) => {
+    await vw.open("/click-sequence.html");
+
+    await page.locator("#probe").click();
+    await expect(page.locator("#click-count")).toHaveText("1");
+    const native = await readEvents(page);
+    await clearEvents(page);
+
+    await vw.startHints();
+    await vw.activateHint("Event probe");
+    await expect(page.locator("#click-count")).toHaveText("2");
+    const synthetic = await readEvents(page);
+
+    // The mouse events only. The two families disagree about `button` on an
+    // event that changes no button, and every engine spells that its own way.
+    for (const type of ["mouseover", "mousedown", "mouseup", "click"]) {
+      const made = synthetic.find((event) => event.type === type);
+      const real = native.find((event) => event.type === type);
+      expect(real, `the true click has no ${type}`).toBeDefined();
+      expect(made, `the hint made no ${type}`).toBeDefined();
+      expect(made?.buttons, `${type} reports the wrong buttons`).toBe(
+        real?.buttons,
+      );
+      expect(made?.button, `${type} reports the wrong button`).toBe(
+        real?.button,
+      );
+    }
+
+    // The pointer events of the sequence, against the specification: the
+    // primary button is down for the press only.
+    const down = synthetic.find((event) => event.type === "pointerdown");
+    const up = synthetic.find((event) => event.type === "pointerup");
+    expect(down?.buttons).toBe(1);
+    expect(up?.buttons).toBe(0);
   });
 });
 
