@@ -16,6 +16,7 @@ import { Effect, Layer, Ref, SubscriptionRef } from "effect";
 import { attachKeyBridge } from "~/boot/KeyBridge.ts";
 import { CONTINUE_BUBBLING, HandlerStack } from "~/core/HandlerStack.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
+import { Scroller } from "~/features/Scroller.ts";
 import { Dom } from "~/platform/Dom.ts";
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,28 @@ const stubKeyboard = (
     ),
   );
 
+/**
+ * `Scroller`, reduced to the two lifecycle methods.
+ *
+ * They record into the same list as the handler probe, so the test can see
+ * that the note happens *before* the stack decides what the key means.
+ */
+const stubScroller = (
+  seen: Ref.Ref<ReadonlyArray<string>>,
+): Layer.Layer<Scroller> =>
+  Layer.sync(Scroller, () =>
+    Scroller.of({
+      scrollBy: () => Effect.void,
+      scrollByViewport: () => Effect.void,
+      scrollTo: () => Effect.void,
+      position: Effect.succeed({ x: 0, y: 0 }),
+      restore: () => Effect.void,
+      noteKeydown: () =>
+        Ref.update(seen, (current) => [...current, "note:keydown"]),
+      noteKeyup: () =>
+        Ref.update(seen, (current) => [...current, "note:keyup"]),
+    }));
+
 /** Everything that the bridge reads from an event. */
 const event = (isTrusted: boolean): Event =>
   ({ isTrusted, type: "test" }) as unknown as Event;
@@ -99,11 +122,13 @@ const withBridge = (
   Effect.gen(function*() {
     const attached = yield* Ref.make<ReadonlyArray<Attached>>([]);
     const forgotten = yield* Ref.make(0);
+    // Outside the provide, so that the stub scroller writes into the same
+    // list as the handler probe.
+    const seen = yield* Ref.make<ReadonlyArray<string>>([]);
 
     yield* Effect.provide(
       Effect.scoped(Effect.gen(function*() {
         const stack = yield* HandlerStack;
-        const seen = yield* Ref.make<ReadonlyArray<string>>([]);
         const record = (name: string) => () =>
           Effect.as(
             Ref.update(seen, (current) => [...current, name]),
@@ -126,6 +151,7 @@ const withBridge = (
         recordingDom(attached),
         HandlerStack.layer,
         stubKeyboard(forgotten),
+        stubScroller(seen),
       ),
     );
   });
@@ -138,12 +164,44 @@ describe("the key bridge", () => {
           yield* fire(attached, type, event(true));
         }
         assert.deepEqual(yield* Ref.get(seen), [
+          "note:keydown",
           "keydown",
+          "note:keyup",
           "keyup",
           "click",
           "focus",
           "blur",
         ]);
+      })
+    ));
+
+  it.effect("tells the scroller about a press before the stack decides", () =>
+    withBridge((attached, seen) =>
+      Effect.gen(function*() {
+        // The scroller counts the presses and holds the keys that are down.
+        // A command body reads that count, so the note must come first.
+        yield* fire(attached, "keydown", event(true));
+        assert.deepEqual(yield* Ref.get(seen), ["note:keydown", "keydown"]);
+
+        yield* fire(attached, "keyup", event(true));
+        assert.deepEqual(yield* Ref.get(seen), [
+          "note:keydown",
+          "keydown",
+          "note:keyup",
+          "keyup",
+        ]);
+      })
+    ));
+
+  it.effect("tells the scroller nothing about a key that the page made", () =>
+    withBridge((attached, seen) =>
+      Effect.gen(function*() {
+        // A page-made key must not move the press count either. It would put
+        // the count out of step with the keys that the user holds.
+        yield* fire(attached, "keydown", event(false));
+        yield* fire(attached, "keyup", event(false));
+
+        assert.deepEqual(yield* Ref.get(seen), []);
       })
     ));
 

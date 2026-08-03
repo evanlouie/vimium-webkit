@@ -638,6 +638,103 @@ describe("a restore", () => {
 });
 
 // ---------------------------------------------------------------------------
+// The key lifecycle
+// ---------------------------------------------------------------------------
+
+/** A press, as the bridge reports it. */
+const press = (code: string, repeat = false): KeyboardEvent =>
+  ({ code, repeat }) as unknown as KeyboardEvent;
+
+describe("the key lifecycle", () => {
+  it.effect("starts a new animation when a new press has a new target", () =>
+    Effect.gen(function*() {
+      const world = makeWorld();
+      const first = world.make({
+        name: "first",
+        scrollHeight: 4000,
+        clientHeight: 200,
+      });
+      const second = world.make({
+        name: "second",
+        scrollHeight: 4000,
+        clientHeight: 200,
+      });
+
+      yield* withScroller(
+        world,
+        { smoothScroll: true },
+        (scroller) =>
+          Effect.gen(function*() {
+            world.focus(first);
+            yield* scroller.noteKeydown(press("KeyJ"));
+            yield* scroller.scrollBy("y", 60, Option.some(press("KeyJ")));
+            yield* scroller.noteKeyup(press("KeyJ"));
+
+            // The focus moves while the first animation still glides.
+            world.focus(second);
+            yield* scroller.noteKeydown(press("KeyJ"));
+            yield* scroller.scrollBy("y", 60, Option.some(press("KeyJ")));
+            yield* scroller.noteKeyup(press("KeyJ"));
+            yield* settle;
+          }),
+      );
+
+      // Without the lifecycle calls every command looked like one press, so
+      // the second one merged into the animation of the first target: the
+      // first container took both steps and the second never moved.
+      assert.strictEqual(second.scrollTop, 60);
+      assert.isAbove(first.scrollTop, 0, "the first press must have moved it");
+      assert.isBelow(
+        first.scrollTop,
+        60,
+        "the second press must own the axis now",
+      );
+    }));
+
+  it.effect("treats a key repeat as the same press", () =>
+    Effect.gen(function*() {
+      const world = makeWorld();
+
+      yield* withScroller(
+        world,
+        { smoothScroll: true },
+        (scroller) =>
+          Effect.gen(function*() {
+            yield* scroller.noteKeydown(press("KeyJ"));
+            yield* scroller.scrollBy("y", 60, Option.some(press("KeyJ")));
+            yield* scroller.noteKeydown(press("KeyJ", true));
+            yield* scroller.scrollBy("y", 60, Option.some(press("KeyJ", true)));
+            yield* scroller.noteKeyup(press("KeyJ"));
+            yield* settle;
+          }),
+      );
+
+      assert.strictEqual(world.root.scrollTop, 120);
+    }));
+
+  it.effect("forgets a key when the press ends", () =>
+    Effect.gen(function*() {
+      const world = makeWorld();
+
+      yield* withScroller(
+        world,
+        { smoothScroll: true },
+        (scroller) =>
+          Effect.gen(function*() {
+            yield* scroller.noteKeydown(press("KeyJ"));
+            yield* scroller.scrollBy("y", 60, Option.some(press("KeyJ")));
+            yield* scroller.noteKeyup(press("KeyJ"));
+            yield* settle;
+          }),
+      );
+
+      // A key that is still held extends the animation by another step. The
+      // release must end it at exactly one step.
+      assert.strictEqual(world.root.scrollTop, 60);
+    }));
+});
+
+// ---------------------------------------------------------------------------
 // A guard on the fake itself
 // ---------------------------------------------------------------------------
 

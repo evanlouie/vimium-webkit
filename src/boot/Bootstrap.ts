@@ -29,6 +29,7 @@ import { Realm } from "~/platform/Realm.ts";
 import { Storage, type StorageError } from "~/platform/Storage.ts";
 import { Insert } from "~/features/Insert.ts";
 import { Omnibar } from "~/features/omnibar/Omnibar.ts";
+import { Scroller } from "~/features/Scroller.ts";
 import { attachKeyBridge, replayBufferedKeys } from "./KeyBridge.ts";
 import type { BootSignal } from "./Guard.ts";
 import { type ExitHook, Lifecycle } from "./Lifecycle.ts";
@@ -179,6 +180,7 @@ export const BootstrapLayer: Layer.Layer<
   | Realm
   | Report
   | RuntimeOwner
+  | Scroller
   | Settings
   | Storage
 > = Layer.effectDiscard(Effect.gen(function*() {
@@ -194,6 +196,7 @@ export const BootstrapLayer: Layer.Layer<
   const owner = yield* RuntimeOwner;
   const realm = yield* Realm;
   const report = yield* Report;
+  const scroller = yield* Scroller;
   const settings = yield* Settings;
   const keyboard = yield* Keyboard;
   const storage = yield* Storage;

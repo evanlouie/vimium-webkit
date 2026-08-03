@@ -13,6 +13,7 @@
 import { Effect, type Scope } from "effect";
 import { HandlerStack } from "~/core/HandlerStack.ts";
 import { isUserEvent, Keyboard } from "~/core/Keyboard.ts";
+import { Scroller } from "~/features/Scroller.ts";
 import { Dom } from "~/platform/Dom.ts";
 
 /**
@@ -40,22 +41,36 @@ import { Dom } from "~/platform/Dom.ts";
  * is retargeted to the host before a window listener sees it. A handler that
  * needs the true node therefore reads `event.composedPath()`.
  * `features/Insert.ts` does that.
+ *
+ * The scroller learns about each press here, before the stack decides what the
+ * press means. It counts the presses and it holds the set of keys that are
+ * down, and it needs both to answer "is this the same press as the animation
+ * that runs now". Nothing called those two methods, so every command looked
+ * like the same press, and a new command could merge into an animation for an
+ * old target. Both methods only write a `Ref`, so the key path stays
+ * synchronous. Read `ARCHITECTURE.md` section 3.
  */
 export const attachKeyBridge: Effect.Effect<
   void,
   never,
-  Dom | HandlerStack | Keyboard | Scope.Scope
+  Dom | HandlerStack | Keyboard | Scroller | Scope.Scope
 > = Effect.gen(function*() {
   const dom = yield* Dom;
   const stack = yield* HandlerStack;
   const keyboard = yield* Keyboard;
+  const scroller = yield* Scroller;
 
   yield* dom.listen(
     "window",
     "keydown",
     (event) =>
       isUserEvent(event)
-        ? Effect.asVoid(stack.bubble("keydown", event))
+        ? Effect.gen(function*() {
+          // Before the dispatch. A command body reads the generation that
+          // this call increases.
+          yield* scroller.noteKeydown(event);
+          yield* stack.bubble("keydown", event);
+        })
         : Effect.void,
     { capture: true },
   );
@@ -65,7 +80,13 @@ export const attachKeyBridge: Effect.Effect<
     "keyup",
     (event) =>
       isUserEvent(event)
-        ? Effect.asVoid(stack.bubble("keyup", event))
+        ? Effect.gen(function*() {
+          // Before the dispatch, like the press. The order inside one
+          // dispatch is not observable to the animation, which reads the set
+          // on a frame, but one rule for both is easier to keep.
+          yield* scroller.noteKeyup(event);
+          yield* stack.bubble("keyup", event);
+        })
         : Effect.void,
     { capture: true },
   );
