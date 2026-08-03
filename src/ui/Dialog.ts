@@ -49,7 +49,7 @@ import {
   type CommandGroup,
   DEFAULT_MAPPINGS,
 } from "~/domain/Command.ts";
-import type { ExclusionRule } from "~/domain/Exclusion.ts";
+import { exclusionProblems, type ExclusionRule } from "~/domain/Exclusion.ts";
 import { formatDiagnostics, keysByCommand } from "~/domain/Mapping.ts";
 import {
   defaultSettings,
@@ -142,6 +142,7 @@ interface FieldBase {
   readonly key: SettingsKey;
   readonly label: string;
   readonly note?: string;
+  readonly problems?: (text: string) => ReadonlyArray<string>;
 }
 
 /** One checkbox. */
@@ -595,6 +596,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         key: "exclusionRules",
         label: "Excluded sites",
         minHeight: "100px",
+        problems: exclusionProblems,
         read: (settings) => formatExclusionRules(settings.exclusionRules),
         write: (settings, value) => ({
           ...settings,
@@ -678,6 +680,8 @@ export interface FormNotes {
   readonly clamped: ReadonlyArray<string>;
   /** The fields whose decimals `write` dropped. */
   readonly truncated: ReadonlyArray<string>;
+  /** The exclusion rules that gave no matcher. */
+  readonly dropped: ReadonlyArray<string>;
 }
 
 /** Nothing to report: the reset button offers the defaults. */
@@ -685,6 +689,7 @@ export const NO_FORM_NOTES: FormNotes = {
   refused: [],
   clamped: [],
   truncated: [],
+  dropped: [],
 };
 
 /**
@@ -694,8 +699,8 @@ export const NO_FORM_NOTES: FormNotes = {
  * nothing: a refused field keeps its stored value, so `adjustedFields` finds
  * no difference, and a clamped field stores the bound, so `adjustedFields`
  * finds no difference either. The user typed, pressed Save, saw another value
- * and got no reason. This names each field, and it separates the three
- * results, because each one does something else to the value.
+ * and got no reason. This names each field, and it separates the results.
+ * Each result does something else to the value.
  */
 export const formNotes = (
   offered: ReadonlyArray<OfferedText>,
@@ -709,6 +714,7 @@ export const formNotes = (
   truncated: offered
     .filter((entry) => truncatesText(entry.field, entry.text))
     .map((entry) => entry.field.label),
+  dropped: offered.flatMap((entry) => entry.field.problems?.(entry.text) ?? []),
 });
 
 // ---------------------------------------------------------------------------
@@ -1221,6 +1227,12 @@ export class Dialog extends Context.Service<Dialog, {
             lines.push(
               `These fields keep a whole number only: ` +
                 `${notes.truncated.join(", ")}.`,
+            );
+          }
+          if (notes.dropped.length > 0) {
+            lines.push(
+              `These exclusion rules were dropped, and they do not exclude a page: ` +
+                `${notes.dropped.join("; ")}.`,
             );
           }
           if (changed.length > 0) {
