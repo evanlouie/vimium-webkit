@@ -267,6 +267,40 @@ export const buttonStateFor = (type: string): ButtonState => {
 /** Where an activation came from. A remote one has no gesture of the user. */
 export type ActivationOrigin = "local" | "remote";
 
+/**
+ * Give the keyboard back after the safety time, and end the round.
+ *
+ * The collection is time-boxed. A page whose keyboard is dead because one
+ * frame hangs is worse than a few keystrokes that are dropped, so `release`
+ * gives the keyboard back at that moment.
+ *
+ * The round ends at that moment as well. A frame that answers later would
+ * otherwise build a session, draw markers and take the keyboard from a user
+ * who is already typing into the page. The abort completes here, so the
+ * collection is interrupted and every late answer is dropped.
+ */
+export const abortAfterSafety = (
+  abort: Deferred.Deferred<void>,
+  release: Effect.Effect<void>,
+  delayMs: number = KEY_BUFFER_SAFETY_MS,
+): Effect.Effect<void> =>
+  Effect.andThen(
+    Effect.sleep(delayMs),
+    Effect.andThen(release, Effect.asVoid(Deferred.succeed(abort, undefined))),
+  );
+
+/**
+ * Collect the hints, until the round is aborted.
+ *
+ * The loser of the race is interrupted. An abort therefore stops the detection
+ * at its next slice, and it drops the answers of the other frames.
+ */
+export const raceUntilAbort = <A>(
+  collect: Effect.Effect<Option.Option<A>>,
+  abort: Deferred.Deferred<void>,
+): Effect.Effect<Option.Option<A>> =>
+  Effect.race(collect, Effect.as(Deferred.await(abort), Option.none()));
+
 type SessionRole = "origin" | "participant";
 
 interface SessionConfig {
@@ -1252,12 +1286,13 @@ export class Hints extends Context.Service<Hints, {
               : Effect.void
           );
 
-          yield* Effect.forkScoped(
+          yield* Effect.forkScoped(abortAfterSafety(
+            abort,
             Effect.andThen(
-              Effect.sleep(KEY_BUFFER_SAFETY_MS),
               handle.exit("explicit"),
+              hud.show("Hints stopped: the page did not answer in time."),
             ),
-          );
+          ));
         });
 
       const readHintsResult = (
@@ -1309,12 +1344,10 @@ export class Hints extends Context.Service<Hints, {
           return Option.some({ local, remote });
         }));
 
-        // Escape during the collection ends the round. The loser of the race is
-        // interrupted, which stops the detection at its next slice.
-        const collected = yield* Effect.race(
-          collect,
-          Effect.as(Deferred.await(abort), Option.none()),
-        );
+        // Escape during the collection ends the round, and so does the safety
+        // timer. The loser of the race is interrupted, which stops the
+        // detection at its next slice.
+        const collected = yield* raceUntilAbort(collect, abort);
         if (Option.isNone(collected)) return;
         const { local, remote } = collected.value;
 
