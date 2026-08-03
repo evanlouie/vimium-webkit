@@ -134,4 +134,29 @@ test.describe("smooth scrolling (shipped default)", () => {
     ).toBe(STEP - room);
     expect((await vw.scrollOffsets()).y).toBe(0);
   });
+
+  test("a mark jump beats the animation that is running", async ({ vw }) => {
+    await vw.open("/scrollables.html");
+
+    // The mark is set at the top of the document.
+    await vw.press("m", "a");
+
+    // A key that stays down extends the animation for as long as it is held,
+    // so this animation is still running when the mark jump arrives.
+    await vw.page.keyboard.down("j");
+    await expect.poll(async () => (await vw.scrollOffsets()).y)
+      .toBeGreaterThan(STEP);
+
+    await vw.press("`", "a");
+    await vw.page.keyboard.up("j");
+
+    // The next animation frame used to write its own goal over the mark.
+    await expect.poll(
+      async () => (await vw.scrollOffsets()).y,
+      { timeout: SETTLE_MS },
+    ).toBe(0);
+    // And it must stay there, which only a stopped animation can promise.
+    await vw.page.waitForTimeout(300);
+    expect((await vw.scrollOffsets()).y).toBe(0);
+  });
 });

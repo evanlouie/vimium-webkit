@@ -501,6 +501,7 @@ export class Scroller extends Context.Service<Scroller, {
 
   readonly position: Effect.Effect<ScrollPosition>;
 
+  /** Jump to a saved position. It stops any animation that still runs. */
   readonly restore: (x: number, y: number) => Effect.Effect<void>;
 
   /** Call this from the key path, before a command runs. */
@@ -1002,10 +1003,19 @@ export class Scroller extends Context.Service<Scroller, {
           return { x: root.scrollLeft, y: root.scrollTop };
         }),
         restore: (x, y) =>
-          Effect.sync(() => {
+          Effect.gen(function*() {
+            // Both axes stop first. A running animation writes an offset on
+            // the next frame, and that write would move the page away from the
+            // mark that the user asked for. The animation is on one element,
+            // which may be a container inside the page, so both handles must
+            // go: the fiber that survives is the one that wins.
+            yield* cancel("x");
+            yield* cancel("y");
             // `instant`: a restore is a jump. A smooth restore would fight with
             // whatever the user does next.
-            rootElement().scrollTo({ left: x, top: y, behavior: "instant" });
+            yield* Effect.sync(() => {
+              rootElement().scrollTo({ left: x, top: y, behavior: "instant" });
+            });
           }),
         noteKeydown,
         noteKeyup,

@@ -159,6 +159,9 @@ export class Marks extends Context.Service<Marks, {
 
           const href = yield* dom.href;
           if (markKeyForUrl(mark.value.url) === markKeyForUrl(href)) {
+            // `restore` stops any scroll animation before it writes. Without
+            // that, the next animation frame would move the page away from
+            // the mark that the user asked for.
             yield* scroller.restore(mark.value.scrollX, mark.value.scrollY);
             return;
           }
@@ -201,6 +204,8 @@ export class Marks extends Context.Service<Marks, {
           yield* report.error(`Mark "${letter}" is not set on this page`);
           return;
         }
+        // `restore` stops any scroll animation before it writes. A jump that
+        // happens during a smooth scroll would otherwise last one frame.
         yield* scroller.restore(mark.value.scrollX, mark.value.scrollY);
         yield* hud.show(`Jumped to mark "${letter}"`);
       });

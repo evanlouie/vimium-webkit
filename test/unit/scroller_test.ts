@@ -575,6 +575,69 @@ describe("a page-sized command", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Marks, against a running animation
+// ---------------------------------------------------------------------------
+
+describe("a restore", () => {
+  it.effect("stops the animation of the document first", () =>
+    Effect.gen(function*() {
+      const world = makeWorld();
+      world.root.scrollTop = 4000;
+
+      yield* withScroller(
+        world,
+        { smoothScroll: true },
+        (scroller) =>
+          Effect.gen(function*() {
+            yield* scroller.scrollBy("y", 600, Option.none());
+            yield* TestClock.adjust(`${FRAME_MS * 2} millis`);
+            assert.isAbove(world.root.scrollTop, 4000, "it must be moving");
+
+            yield* scroller.restore(0, 1200);
+            // Every later frame. A live animation would write its own goal
+            // over the mark on the very next one.
+            yield* settle;
+          }),
+      );
+
+      assert.strictEqual(world.root.scrollTop, 1200);
+    }));
+
+  it.effect("stops the animation of a nested container first", () =>
+    Effect.gen(function*() {
+      const world = makeWorld();
+      const inner = world.make({
+        name: "inner",
+        scrollHeight: 4000,
+        clientHeight: 200,
+      });
+      world.focus(inner);
+
+      yield* withScroller(
+        world,
+        { smoothScroll: true },
+        (scroller) =>
+          Effect.gen(function*() {
+            yield* scroller.scrollBy("y", 600, Option.none());
+            yield* TestClock.adjust(`${FRAME_MS * 2} millis`);
+            assert.isAbove(inner.scrollTop, 0, "it must be moving");
+
+            yield* scroller.restore(0, 0);
+            const parked = inner.scrollTop;
+            yield* settle;
+            assert.strictEqual(
+              inner.scrollTop,
+              parked,
+              "the container must not move after the jump",
+            );
+          }),
+      );
+
+      assert.strictEqual(world.root.scrollTop, 0);
+    }));
+});
+
+// ---------------------------------------------------------------------------
 // A guard on the fake itself
 // ---------------------------------------------------------------------------
 
