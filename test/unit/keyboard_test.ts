@@ -31,6 +31,10 @@ import {
   defaultSettings,
   type Settings as SettingsData,
 } from "~/domain/Persisted.ts";
+import {
+  Capabilities,
+  type CapabilityReport,
+} from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Realm } from "~/platform/Realm.ts";
 
@@ -44,6 +48,9 @@ interface PressOptions {
   readonly isTrusted?: boolean;
   readonly ctrlKey?: boolean;
   readonly shiftKey?: boolean;
+  readonly altKey?: boolean;
+  /** The legacy code. It carries the character of the layout on macOS. */
+  readonly keyCode?: number;
 }
 
 /** Everything that the key path reads from a `KeyboardEvent`. */
@@ -53,7 +60,8 @@ class Press {
   readonly isTrusted: boolean;
   readonly ctrlKey: boolean;
   readonly shiftKey: boolean;
-  readonly altKey = false;
+  readonly altKey: boolean;
+  readonly keyCode: number | undefined;
   readonly metaKey = false;
   readonly isComposing = false;
   defaultPrevented = false;
@@ -65,6 +73,8 @@ class Press {
     this.isTrusted = options.isTrusted ?? true;
     this.ctrlKey = options.ctrlKey ?? false;
     this.shiftKey = options.shiftKey ?? false;
+    this.altKey = options.altKey ?? false;
+    this.keyCode = options.keyCode;
   }
 
   preventDefault(): void {
@@ -131,10 +141,51 @@ const exclusionsOf = (rule: EffectiveRule): Layer.Layer<Exclusions> =>
       })),
   );
 
+/**
+ * The capability report, with one flag that a test chooses.
+ *
+ * The key path reads `applePlatform` only. Every other flag is `false`, so a
+ * test that reads one of them fails instead of passing by accident.
+ */
+const capabilitiesOf = (applePlatform: boolean): Layer.Layer<Capabilities> =>
+  Layer.sync(Capabilities, () => {
+    const report = {
+      manager: "unknown",
+      managerVersion: null,
+      scriptVersion: null,
+      world: "unknown",
+      value: "memory",
+      valueChangeListener: false,
+      openInTab: false,
+      openInTabBackground: false,
+      setClipboard: false,
+      xhr: false,
+      menuCommand: false,
+      windowClose: false,
+      adoptedStyleSheets: false,
+      constructableStyleSheets: false,
+      checkVisibility: false,
+      composedRanges: false,
+      caretPositionFromPoint: false,
+      caretRangeFromPoint: false,
+      selectionModify: false,
+      clipboardWrite: false,
+      clipboardRead: false,
+      idleCallback: false,
+      visualViewport: false,
+      secureContext: false,
+      webkitLike: false,
+      applePlatform,
+    } satisfies CapabilityReport;
+    return Capabilities.of(report);
+  });
+
 interface Options {
   readonly mappings: string;
   readonly settings?: Partial<SettingsData>;
   readonly exclusion?: EffectiveRule;
+  /** macOS, iOS or iPadOS. It changes the reading of an Option chord. */
+  readonly applePlatform?: boolean;
 }
 
 /**
@@ -149,6 +200,7 @@ const layerFor = (
   const support = Layer.mergeAll(
     Commands.layer,
     Report.layer,
+    capabilitiesOf(options.applePlatform ?? false),
     Layer.provideMerge(Modes.layer, HandlerStack.layer),
     Layer.provideMerge(Realm.layer, Dom.layer),
     settingsOf(options.settings ?? {}),
@@ -176,6 +228,54 @@ const recorder = Effect.fn("recorder")(function*(
 });
 
 describe("Keyboard", () => {
+  /**
+   * An Option chord, from the key of the user to the command.
+   *
+   * The values are measured, and they are the same rows as in
+   * `test/unit/key_test.ts`. The platform decides: on macOS `<a-f>` is the F
+   * key of the layout, and on Linux `Alt+\u0444` is the Cyrillic letter.
+   */
+  describe("an Option chord", () => {
+    it.effect("runs the command for the F key of a Dvorak layout", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder(["scrollDown"]);
+
+        // The F key of a Dvorak layout sits at the US Y position.
+        const press = new Press("\u0192", {
+          code: "KeyY",
+          keyCode: 70,
+          altKey: true,
+        });
+        yield* stack.bubble("keydown", asEvent(press));
+
+        assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
+      }).pipe(Effect.provide(layerFor({
+        mappings: "map <a-f> scrollDown",
+        applePlatform: true,
+      }))));
+
+    it.effect("leaves a Cyrillic Alt chord to its own letter", () =>
+      Effect.gen(function*() {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder(["scrollDown", "scrollUp"]);
+
+        // `Alt+\u0444` on Linux. The letter of the user must win, and the
+        // letter of the US position must not.
+        const press = new Press("\u0444", {
+          code: "KeyA",
+          keyCode: 65,
+          altKey: true,
+        });
+        yield* stack.bubble("keydown", asEvent(press));
+
+        assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
+      }).pipe(Effect.provide(layerFor({
+        mappings: "map <a-a> scrollDown\nmap <a-\u0444> scrollUp",
+        applePlatform: false,
+      }))));
+  });
+
   describe("synthetic events", () => {
     it.effect("ignores a keydown that the page dispatched", () =>
       Effect.gen(function*() {

@@ -331,7 +331,11 @@ export class Visual extends Context.Service<Visual, {
             if (isComposing(event)) return SUPPRESS_EVENT;
             const notation = keyNotation(
               event,
-              settings.currentUnsafe().ignoreKeyboardLayout,
+              {
+                ignoreKeyboardLayout:
+                  settings.currentUnsafe().ignoreKeyboardLayout,
+                applePlatform: capabilities.applePlatform,
+              },
             );
             if (Option.isNone(notation)) return SUPPRESS_EVENT;
             yield* handleKey(kind, notation.value);

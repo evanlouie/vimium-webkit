@@ -36,6 +36,7 @@ import {
   openBranch,
 } from "~/domain/Mapping.ts";
 import { Dom } from "~/platform/Dom.ts";
+import { Capabilities } from "~/platform/Capabilities.ts";
 import { mediaPlayerHasFocus } from "~/platform/Elements.ts";
 import { Realm } from "~/platform/Realm.ts";
 import { Commands } from "./Commands.ts";
@@ -143,6 +144,7 @@ export class Keyboard extends Context.Service<Keyboard, {
     Keyboard,
     never,
     | Commands
+    | Capabilities
     | Dom
     | Exclusions
     | Mappings
@@ -154,6 +156,7 @@ export class Keyboard extends Context.Service<Keyboard, {
     Keyboard,
     Effect.gen(function*() {
       const commands = yield* Commands;
+      const capabilities = yield* Capabilities;
       const dom = yield* Dom;
       const exclusions = yield* Exclusions;
       const mappings = yield* Mappings;
@@ -378,7 +381,12 @@ export class Keyboard extends Context.Service<Keyboard, {
 
           const current = yield* Ref.get(state);
           const settingsNow = settings.currentUnsafe();
-          const rawKey = keyNotation(event, settingsNow.ignoreKeyboardLayout);
+          // The platform is read once, at the build of this layer. The Option
+          // rule of `keyNotation` needs it, and `domain/` may not read it.
+          const rawKey = keyNotation(event, {
+            ignoreKeyboardLayout: settingsNow.ignoreKeyboardLayout,
+            applePlatform: capabilities.applePlatform,
+          });
           if (Option.isNone(rawKey)) return CONTINUE_BUBBLING;
           const raw = rawKey.value;
 

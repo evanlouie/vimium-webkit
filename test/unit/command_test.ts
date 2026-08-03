@@ -131,46 +131,79 @@ describe("Command", () => {
     }));
 
   /**
-   * The shipped Option bindings, as macOS reports them.
+   * The shipped Option bindings, as WebKit reports them.
    *
-   * macOS applies Option to the character, so the physical key must decide.
-   * Each row gives the glyph of a US layout and the command that must run.
+   * macOS applies Option to the character, so the character of the layout must
+   * decide. Every `key`, `code` and `keyCode` below was measured in a WebKit
+   * view, one row for each layout. `keyCode` carries the character that the
+   * physical key makes with no modifier, which is the key that the user sees.
    */
   const OPTION_BINDINGS: readonly {
     readonly name: string;
     readonly key: string;
     readonly code: string;
-    readonly command: string;
+    readonly keyCode: number;
+    readonly command: string | null;
   }[] = [
     {
-      name: "Option+F opens a hint in a new foreground tab",
+      name: "US Option+F opens a hint in a new foreground tab",
       key: "\u0192",
       code: "KeyF",
+      keyCode: 70,
       command: "LinkHints.activateModeToOpenInNewForegroundTab",
     },
     {
-      name: "Option+H hovers a hint",
+      name: "US Option+H hovers a hint",
       key: "\u02d9",
       code: "KeyH",
+      keyCode: 72,
       command: "LinkHints.activateModeToHover",
     },
     {
-      name: "Option+O opens the omnibar on a hint",
+      name: "US Option+O opens the omnibar on a hint",
       key: "\u00f8",
       code: "KeyO",
+      keyCode: 79,
       command: "LinkHints.activateModeWithOmnibar",
     },
     {
-      name: "Option+M mutes the tab",
+      name: "US Option+M mutes the tab",
       key: "\u00b5",
       code: "KeyM",
+      keyCode: 77,
       command: "toggleMuteTab",
     },
     {
-      name: "Option+P pins the tab",
+      name: "US Option+P pins the tab",
       key: "\u03c0",
       code: "KeyP",
+      keyCode: 80,
       command: "togglePinTab",
+    },
+    {
+      // The M key of a French layout sits at the US Semicolon position.
+      name: "French Option+M mutes the tab",
+      key: "\u00b5",
+      code: "Semicolon",
+      keyCode: 77,
+      command: "toggleMuteTab",
+    },
+    {
+      // The comma of a French layout sits at the US M position. It must not
+      // reach the mute command, which the user did not ask for.
+      name: "French Option+comma runs nothing",
+      key: "\u221e",
+      code: "KeyM",
+      keyCode: 188,
+      command: null,
+    },
+    {
+      // The F key of a Dvorak layout sits at the US Y position.
+      name: "Dvorak Option+F opens a hint in a new foreground tab",
+      key: "\u0192",
+      code: "KeyY",
+      keyCode: 70,
+      command: "LinkHints.activateModeToOpenInNewForegroundTab",
     },
   ];
 
@@ -180,12 +213,18 @@ describe("Command", () => {
         const event: KeyEventLike = {
           key: row.key,
           code: row.code,
+          keyCode: row.keyCode,
           altKey: true,
           ctrlKey: false,
           metaKey: false,
           shiftKey: false,
         };
-        const notation = Option.getOrNull(keyNotation(event));
+        const notation = Option.getOrNull(
+          keyNotation(event, {
+            ignoreKeyboardLayout: false,
+            applePlatform: true,
+          }),
+        );
         const compiled = compileMappings(DEFAULT_MAPPINGS, {
           knownCommands: names,
           rejectReservedShortcuts: true,
@@ -194,7 +233,7 @@ describe("Command", () => {
           (entry) => entry.keys.length === 1 && entry.keys[0] === notation,
         );
         assert.strictEqual(
-          binding?.command,
+          binding?.command ?? null,
           row.command,
           `${notation} runs no default binding`,
         );

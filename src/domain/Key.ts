@@ -179,6 +179,12 @@ export const isModifierKey = (event: KeyEventLike): boolean =>
  * methods where `isComposing` is not reliable. Both are read, because a missed
  * guard makes Vimium-WebKit eat keystrokes during a composition. That is the
  * worst failure for a user of a CJK input method.
+ *
+ * A dead key is not such a composition on the first press. Measured in a
+ * WebKit view with the macOS layout data: `Option+E` on a US layout gives
+ * `key: "Dead"`, `keyCode: 69` and `isComposing: false`. The event therefore
+ * reaches `keyChar`, and `<a-e>` runs. The key that follows the dead key is a
+ * composition, and this guard drops it.
  */
 export const isComposing = (event: KeyEventLike): boolean =>
   event.isComposing === true || event.keyCode === 229;
@@ -188,11 +194,36 @@ export const isComposing = (event: KeyEventLike): boolean =>
 // ---------------------------------------------------------------------------
 
 /**
+ * The character that a Windows virtual key code names.
+ *
+ * WebKit on macOS builds `event.keyCode` from `charactersIgnoringModifiers`,
+ * which is the character of the key under the active layout with no Option and
+ * no Command. A letter gives 65 to 90, a digit gives 48 to 57, and the eleven
+ * punctuation keys give the OEM codes below.
+ *
+ * Measured in a real WebKit view, one row for each entry. See the table in
+ * `test/unit/key_test.ts`.
+ */
+const KEY_CODE_CHARACTERS: ReadonlyMap<number, string> = new Map([
+  [32, " "],
+  [186, ";"],
+  [187, "="],
+  [188, ","],
+  [189, "-"],
+  [190, "."],
+  [191, "/"],
+  [192, "`"],
+  [219, "["],
+  [220, "\\"],
+  [221, "]"],
+  [222, "'"],
+]);
+
+/**
  * The character that a physical key gives with no modifier, per `event.code`.
  *
- * The table names the US positions. It is used for an Option chord only, where
- * the character that macOS reports is a glyph that nobody can write in a
- * mapping file.
+ * The table names the US positions. It is the fallback of the Option rule, for
+ * an event that carries no `keyCode`.
  */
 const CODE_CHARACTERS: ReadonlyMap<string, string> = new Map([
   ["Minus", "-"],
@@ -208,44 +239,112 @@ const CODE_CHARACTERS: ReadonlyMap<string, string> = new Map([
   ["Slash", "/"],
 ]);
 
-/** Is this a single printable ASCII character? */
-const isAsciiPrintable = (key: string): boolean =>
-  key.length === 1 && key >= "\u0020" && key <= "\u007e";
+/** Is this one ASCII letter? */
+const isAsciiLetter = (key: string): boolean =>
+  key.length === 1 && key >= "a" && key <= "z";
 
 /**
- * The character of the physical key for an Option chord on macOS.
+ * The character of the layout, from the legacy `event.keyCode`.
+ *
+ * `keyCode` is deprecated, and it is read here for one reason: it is the only
+ * field of a `KeyboardEvent` that carries the *unmodified* character of the
+ * key. `event.key` carries the character with Option applied, and `event.code`
+ * carries the US position of the key. Neither one is the key of the user.
+ *
+ * `null` means that the code names no character, as a function key and an
+ * arrow key do.
+ */
+const keyCodeCharacter = (keyCode: number | undefined): string | null => {
+  if (keyCode === undefined || keyCode === 0) return null;
+  if (keyCode >= 65 && keyCode <= 90) {
+    return String.fromCharCode(keyCode + 32);
+  }
+  if (keyCode >= 48 && keyCode <= 57) return String.fromCharCode(keyCode);
+  return KEY_CODE_CHARACTERS.get(keyCode) ?? null;
+};
+
+/** The character of the US physical position, from `event.code`. */
+const codeCharacter = (code: string | undefined): string | null => {
+  if (code === undefined) return null;
+  if (code.length === 4 && code.startsWith("Key")) {
+    return code.slice(3).toLowerCase();
+  }
+  if (code.length === 6 && code.startsWith("Digit")) return code.slice(5);
+  if (code === "Space") return " ";
+  return CODE_CHARACTERS.get(code) ?? null;
+};
+
+/**
+ * The character of the physical key for an Option chord on an Apple platform.
  *
  * macOS applies Option to the character. `Option+F` reports `event.key` as
  * `\u0192`, and `Option+E` reports `Dead`. A mapping file names `<a-f>`, so
  * every shipped Option binding was dead on the main platform.
  *
- * Three guards keep the documented layout behaviour:
+ * The rule takes the character that the physical key makes under the active
+ * layout with no modifier. `event.keyCode` carries it, and `event.code` does
+ * not: `event.code` is the US position, so it gives `<a-q>` for the A key of a
+ * French layout and `<a-y>` for the F key of a Dvorak layout.
  *
- * 1. The rule applies only when the reported character is not printable ASCII.
- *    A layout that gives a plain letter for an Alt chord, as X11 and Windows
- *    do, keeps its own character.
- * 2. A chord with Ctrl keeps its character. AltGr is Ctrl plus Alt on Windows,
- *    and it makes text.
- * 3. With Shift only a letter is translated. The character of a shifted digit
- *    or of shifted punctuation depends on the layout, and `event.code` does
- *    not carry it.
+ * The sources, in order, and the cost of each one:
+ *
+ * 1. `event.keyCode`. The character of the layout for a Latin layout. For a
+ *    layout that is not Latin, WebKit falls back to the US position, so a
+ *    Cyrillic or a Greek key gives the letter of the position. That character
+ *    is not the letter of the user, but it is stable and it can be written in
+ *    a mapping file.
+ * 2. `event.code`, when the event carries no `keyCode`. It is the US position
+ *    always, so it is wrong on Dvorak, AZERTY and QWERTZ.
+ * 3. `event.key`, through `Option.none()`. It is the Option glyph, which the
+ *    user cannot write in a mapping file.
+ *
+ * Three guards hold:
+ *
+ * 1. Apple platforms only. On Windows and on Linux, Alt does not change the
+ *    character, so a Cyrillic, Greek or Hebrew letter must stay itself.
+ * 2. A chord with Ctrl keeps its character. WebKit already reports the plain
+ *    character for `Ctrl+Option+F`, and AltGr on Windows makes text.
+ * 3. With Shift only a letter is translated. `keyCode` gives the unshifted
+ *    character, so a shifted digit would fold `Option+Shift+1` onto `<a-1>`,
+ *    which is the notation of `Option+1`. Two chords cannot share a binding.
  *
  * `Option.none()` means that the event is not such a chord.
  */
-const appleAltKey = (event: KeyEventLike): Option.Option<string> => {
-  if (!event.altKey || event.ctrlKey) return Option.none();
-  const code = event.code;
-  if (code === undefined || isAsciiPrintable(event.key)) return Option.none();
+const appleAltKey = (
+  event: KeyEventLike,
+  applePlatform: boolean,
+): Option.Option<string> => {
+  if (!applePlatform || !event.altKey || event.ctrlKey) return Option.none();
 
-  if (code.length === 4 && code.startsWith("Key")) {
-    return Option.some(code.slice(3).toLowerCase());
-  }
-  if (event.shiftKey) return Option.none();
-  if (code === "Space") return Option.some(" ");
-  if (code.length === 6 && code.startsWith("Digit")) {
-    return Option.some(code.slice(5));
-  }
-  return Option.fromNullishOr(CODE_CHARACTERS.get(code) ?? null);
+  const char = keyCodeCharacter(event.keyCode) ?? codeCharacter(event.code);
+  if (char === null) return Option.none();
+  if (event.shiftKey && !isAsciiLetter(char)) return Option.none();
+  return Option.some(char);
+};
+
+/**
+ * What the reader of a key must know about the machine and the settings.
+ *
+ * Both values come from the caller, so this module stays pure. `domain/` may
+ * not read `navigator`, and a key rule that changes with the platform still
+ * needs the platform.
+ */
+export interface KeyContext {
+  /** Bind the physical position, and not the character of the layout. */
+  readonly ignoreKeyboardLayout: boolean;
+  /**
+   * Is this macOS, iOS or iPadOS?
+   *
+   * Only there does Alt change the character that the key makes. See
+   * `appleAltKey`.
+   */
+  readonly applePlatform: boolean;
+}
+
+/** No layout option, and no Apple rule. For a test, and for a plain caller. */
+export const PLAIN_KEY_CONTEXT: KeyContext = {
+  ignoreKeyboardLayout: false,
+  applePlatform: false,
 };
 
 /**
@@ -254,18 +353,18 @@ const appleAltKey = (event: KeyEventLike): Option.Option<string> => {
  * With `ignoreKeyboardLayout` the physical `event.code` wins. A Dvorak or a
  * Cyrillic layout then still drives the bindings at the QWERTY positions.
  *
- * An Option chord on macOS is the other case that reads `event.code`. See
- * `appleAltKey`.
+ * An Option chord on an Apple platform is the other case that does not use
+ * `event.key`. See `appleAltKey`.
  *
  * `Option.none()` means that the event carries no character.
  */
 export const keyChar = (
   event: KeyEventLike,
-  ignoreKeyboardLayout: boolean,
+  context: KeyContext,
 ): Option.Option<string> => {
   if (isModifierKey(event)) return Option.none();
 
-  if (ignoreKeyboardLayout && event.code) {
+  if (context.ignoreKeyboardLayout && event.code) {
     const code = event.code;
     if (code.startsWith("Key")) return Option.some(code.slice(3).toLowerCase());
     // A shifted digit is the exception. The binding names the *character*, so
@@ -286,9 +385,12 @@ export const keyChar = (
     }
   }
 
-  // An Option chord on macOS reports a glyph. The physical key decides there,
-  // so `map <a-f> ...` still names the F key.
-  const raw = Option.getOrElse(appleAltKey(event), () => event.key);
+  // An Option chord on macOS reports a glyph. The character of the layout
+  // decides there, so `map <a-f> ...` still names the F key of the user.
+  const raw = Option.getOrElse(
+    appleAltKey(event, context.applePlatform),
+    () => event.key,
+  );
 
   const key = normaliseAppKitKey(raw);
   if (key.length === 0 || key === "Unidentified") return Option.none();
@@ -322,9 +424,9 @@ const isNamedChar = (char: string): boolean =>
  */
 export const keyNotation = (
   event: KeyEventLike,
-  ignoreKeyboardLayout = false,
+  context: KeyContext = PLAIN_KEY_CONTEXT,
 ): Option.Option<string> => {
-  const base = keyChar(event, ignoreKeyboardLayout);
+  const base = keyChar(event, context);
   if (Option.isNone(base)) return Option.none();
   let char = base.value;
 
@@ -337,8 +439,8 @@ export const keyNotation = (
   if (event.shiftKey && named) modifiers.push("s");
 
   if (!named && charCount(char) === 1 && event.shiftKey) {
-    // Under `ignoreKeyboardLayout` the platform did not apply shift to a
-    // character that comes from the layout. Apply it here.
+    // Under `ignoreKeyboardLayout`, and for an Option chord on an Apple
+    // platform, the character does not carry the shift. Apply it here.
     char = char.toUpperCase();
   }
 
