@@ -463,10 +463,32 @@ export interface CollectOptions {
    * find.
    */
   readonly maxCharacters?: number;
+  /** A second hard stop, in time. See `COLLECT_BUDGET_MS`. */
+  readonly deadline?: number;
 }
 
 /** About the text of one novel. Above this, nobody is reading the page. */
 export const DEFAULT_MAX_CHARACTERS = 2_000_000;
+
+/**
+ * The time budget for one walk of the page.
+ *
+ * The walk runs when find opens, and again for `*`, `#` and a repeat. A page
+ * with a very deep tree must not hold the main thread, because the user still
+ * has to be able to press Escape. A stop gives the text that is already
+ * collected, and the caller reports the stop.
+ */
+export const COLLECT_BUDGET_MS = 50;
+
+/** How many nodes the walk visits between two looks at the clock. */
+const CLOCK_INTERVAL = 512;
+
+/** What one walk of the page gave, and whether it read all of it. */
+export interface RunCollection {
+  readonly runs: ReadonlyArray<TextRun>;
+  /** True when the walk stopped before the end of the page. */
+  readonly stopped: boolean;
+}
 
 interface ElementFacts {
   /** Does the browser draw this element and its subtree? */
@@ -621,13 +643,17 @@ const startOfRoot = (root: Document | ShadowRoot): Node | null => {
  * one run, so `hemisphere` matches. The boundary is asked for only between two
  * pieces of text, so a subtree with no text costs no style read.
  *
- * `maxCharacters` is the whole text that one walk takes, so that one bad page
- * cannot block the keystroke that opened find.
+ * Two limits bound the work, and either one sets `stopped`:
+ *
+ * - `maxCharacters` is the whole text that one walk takes. Each text node is
+ *   **sliced** to what is left of it, so one node of many megabytes costs the
+ *   budget and not its length;
+ * - `deadline` stops the walk between two nodes, so the keystroke that opened
+ *   find still returns.
  */
-export const collectTextRuns = (
-  options: CollectOptions,
-): ReadonlyArray<TextRun> => {
+export const collectTextRuns = (options: CollectOptions): RunCollection => {
   const budget = options.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
+  const deadline = options.deadline ?? now() + COLLECT_BUDGET_MS;
   const facts = elementFacts(options.view, options.capabilities);
 
   const runs: TextRun[] = [];
@@ -681,8 +707,19 @@ export const collectTextRuns = (
   if (start !== null) stack.push({ kind: "visit", node: start });
 
   let remaining = budget;
+  let visited = 0;
+  let interrupted = false;
+  let truncated = false;
 
-  while (stack.length > 0 && remaining > 0) {
+  while (stack.length > 0) {
+    // The clock is read between two nodes, and not for each node: one read of
+    // the clock costs more than one step of the walk.
+    if (visited % CLOCK_INTERVAL === 0 && now() > deadline) {
+      interrupted = true;
+      break;
+    }
+    visited++;
+
     const task = stack.pop();
     if (task === undefined) break;
 
@@ -702,10 +739,25 @@ export const collectTextRuns = (
       gap = [];
       broken = false;
 
+      // The budget is enforced **inside** the node. A node that is longer than
+      // what is left gives its first `remaining` characters, and the walk
+      // stops. One `slice` of the part that is taken is the whole cost, so a
+      // text node of many megabytes cannot block the keystroke.
+      const take = Math.min(data.length, remaining);
+      if (take <= 0) {
+        truncated = true;
+        break;
+      }
       nodes.push(node as Text);
-      lengths.push(data.length);
-      parts.push(normaliseHaystack(data));
-      remaining -= data.length;
+      lengths.push(take);
+      parts.push(
+        normaliseHaystack(take === data.length ? data : data.slice(0, take)),
+      );
+      remaining -= take;
+      if (take < data.length) {
+        truncated = true;
+        break;
+      }
       continue;
     }
 
@@ -739,7 +791,9 @@ export const collectTextRuns = (
   }
 
   flush();
-  return runs;
+
+  const unread = stack.some((task) => task.kind === "visit");
+  return { runs, stopped: truncated || (interrupted && unread) };
 };
 
 // ---------------------------------------------------------------------------

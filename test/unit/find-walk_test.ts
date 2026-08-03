@@ -1,20 +1,21 @@
 /**
- * The find walk: composed order and the rendered boundary.
+ * The find walk: composed order, the rendered boundary and the budget.
  *
  * Unit tests run in Node, where there is no DOM. The walk is written for that:
  * it reads `nodeType`, `tagName`, `childNodes`, `shadowRoot` and
  * `assignedNodes`, and it asks the view for a computed style. A tree of plain
- * objects gives all of those, so the rules about composed order and about a
- * rendered boundary are tested here, and the browser tests in
- * `test/e2e/find.spec.ts` confirm the same rules against a real layout.
+ * objects gives all of those, so the rules about composed order, about a
+ * rendered boundary and about the character budget are tested here, and the
+ * browser tests in `test/e2e/find.spec.ts` confirm the same rules against a
+ * real layout.
  */
 
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Option } from "effect";
 import {
   collectTextRuns,
+  type RunCollection,
   type StyleSource,
-  type TextRun,
 } from "~/features/find/Engine.ts";
 
 // ---------------------------------------------------------------------------
@@ -95,9 +96,10 @@ const collect = (
   body: Element,
   options: {
     readonly maxCharacters?: number;
+    readonly deadline?: number;
     readonly checkVisibility?: boolean;
   } = {},
-): ReadonlyArray<TextRun> =>
+): RunCollection =>
   collectTextRuns({
     view,
     document: {
@@ -112,10 +114,11 @@ const collect = (
     ...(options.maxCharacters === undefined
       ? {}
       : { maxCharacters: options.maxCharacters }),
+    ...(options.deadline === undefined ? {} : { deadline: options.deadline }),
   });
 
-const haystacks = (runs: ReadonlyArray<TextRun>): ReadonlyArray<string> =>
-  runs.map((run) => run.haystack);
+const haystacks = (collection: RunCollection): ReadonlyArray<string> =>
+  collection.runs.map((run) => run.haystack);
 
 // ---------------------------------------------------------------------------
 // The rendered order and the rendered boundary
@@ -128,6 +131,7 @@ describe("the composed walk", () => {
         block([text("hemi"), span([text("sphere")]), text(" tilts")]),
       );
       assert.deepStrictEqual(haystacks(collection), ["hemisphere tilts"]);
+      assert.isFalse(collection.stopped);
     }));
 
   it.effect("ends a run where the browser draws a block boundary", () =>
@@ -285,10 +289,91 @@ describe("the composed walk", () => {
       const first = text("hemi");
       const second = text("sphere");
       const collection = collect(block([first, span([second])]));
-      const run = collection[0];
+      const run = collection.runs[0];
       assert.isDefined(run);
       assert.deepStrictEqual([...run.nodes], [first, second]);
       assert.deepStrictEqual([...run.lengths], [4, 6]);
       assert.deepStrictEqual([...run.starts], [0, 4]);
+    }));
+});
+
+// ---------------------------------------------------------------------------
+// The budget
+// ---------------------------------------------------------------------------
+
+describe("the walk budget", () => {
+  it.effect("slices one text node to what is left of the budget", () =>
+    Effect.sync(() => {
+      const collection = collect(block([text("a".repeat(1000))]), {
+        maxCharacters: 100,
+      });
+      const run = collection.runs[0];
+      assert.isDefined(run);
+      assert.strictEqual(run.haystack.length, 100);
+      assert.deepStrictEqual([...run.lengths], [100]);
+      // The count of the page is now partial, and the HUD must say so.
+      assert.isTrue(collection.stopped);
+    }));
+
+  it.effect("answers a text node of many megabytes inside a keystroke", () =>
+    Effect.sync(() => {
+      // The node is far larger than the budget. The cost of the walk is the
+      // budget, and not the length of the node: without the slice the whole
+      // node is copied, normalised and joined before anything is checked.
+      const huge = text("lorem ipsum ".repeat(500_000));
+      assert.isAbove(huge.data.length, 5_000_000);
+      const body = block([huge]);
+
+      const started = performance.now();
+      const collection = collect(body, { maxCharacters: 2_048 });
+      const elapsed = performance.now() - started;
+
+      const run = collection.runs[0];
+      assert.isDefined(run);
+      assert.strictEqual(run.haystack.length, 2_048);
+      assert.isTrue(collection.stopped);
+      assert.isBelow(elapsed, 25, `the walk cost ${elapsed}ms`);
+    }));
+
+  it.effect("spends the budget over the nodes that come first", () =>
+    Effect.sync(() => {
+      const collection = collect(
+        element([
+          block([text("aaaa")]),
+          block([text("bbbb")]),
+          block([text("cccc")]),
+        ]),
+        { maxCharacters: 6 },
+      );
+      assert.deepStrictEqual(haystacks(collection), ["aaaa", "bb"]);
+      assert.isTrue(collection.stopped);
+    }));
+
+  it.effect("reports no stop when the page fits in the budget", () =>
+    Effect.sync(() => {
+      const collection = collect(block([text("hemisphere")]), {
+        maxCharacters: 10,
+      });
+      assert.deepStrictEqual(haystacks(collection), ["hemisphere"]);
+      assert.isFalse(collection.stopped);
+    }));
+
+  it.effect("stops a deep page at the deadline, and says so", () =>
+    Effect.sync(() => {
+      const paragraphs: Element[] = [];
+      for (let index = 0; index < 20_000; index++) {
+        paragraphs.push(block([text(`line ${index}`)]));
+      }
+      const body = element(paragraphs);
+
+      const started = performance.now();
+      // A deadline that has already passed. The walk must give back what it
+      // has, and not read the page to its end.
+      const collection = collect(body, { deadline: performance.now() - 1 });
+      const elapsed = performance.now() - started;
+
+      assert.isTrue(collection.stopped);
+      assert.strictEqual(collection.runs.length, 0);
+      assert.isBelow(elapsed, 25, `the walk cost ${elapsed}ms`);
     }));
 });

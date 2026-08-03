@@ -65,6 +65,7 @@ import {
   firstMatchInView,
   indexAtSelection,
   matchesInRuns,
+  type RunCollection,
   type RunSearch,
   type TextRun,
   wordUnderCursor,
@@ -235,6 +236,13 @@ export class Find extends Context.Service<Find, {
        * partial.
        */
       const partial = yield* Ref.make(false);
+      /**
+       * Did the walk of the page stop before its end?
+       *
+       * The character budget and the time budget both stop it. Every search
+       * that reads those runs is then partial, however fast the match is.
+       */
+      const runsPartial = yield* Ref.make(false);
       const sessionFiber = yield* FiberHandle.make<void, never>();
 
       // -- the browser ---------------------------------------------------
@@ -313,6 +321,7 @@ export class Find extends Context.Service<Find, {
         yield* Ref.set(matches, []);
         yield* Ref.set(current, -1);
         yield* Ref.set(partial, false);
+        yield* Ref.set(runsPartial, false);
       });
 
       /**
@@ -337,7 +346,7 @@ export class Find extends Context.Service<Find, {
        * Once for each session, and not once for each keystroke.
        */
       const refreshRuns = Effect.fn("Find.refreshRuns")(function*() {
-        const collected = yield* dom.probeOr<ReadonlyArray<TextRun>>(
+        const collected = yield* dom.probeOr<RunCollection>(
           () =>
             collectTextRuns({
               view: win,
@@ -345,9 +354,10 @@ export class Find extends Context.Service<Find, {
               capabilities,
               excludeHost: Option.some(ui.shadow.host),
             }),
-          [],
+          { runs: [], stopped: false },
         );
-        yield* Ref.set(runs, collected);
+        yield* Ref.set(runs, collected.runs);
+        yield* Ref.set(runsPartial, collected.stopped);
       });
 
       /**
@@ -389,9 +399,13 @@ export class Find extends Context.Service<Find, {
               { matches: [], stopped: false },
             );
           const found = search.matches;
+          // The walk of the page is the other half of the count. A search that
+          // read every run of a page that was only half collected is still a
+          // partial answer, and the HUD must say so.
+          const stopped = search.stopped || (yield* Ref.get(runsPartial));
 
           yield* Ref.set(matches, found);
-          yield* Ref.set(partial, search.stopped);
+          yield* Ref.set(partial, stopped);
           yield* Ref.set(
             current,
             found.length === 0 ? -1 : clampIndex(
@@ -406,7 +420,7 @@ export class Find extends Context.Service<Find, {
             index: yield* Ref.get(current),
             empty: false,
             error: Option.none<string>(),
-            stopped: search.stopped,
+            stopped,
           };
         },
       );
