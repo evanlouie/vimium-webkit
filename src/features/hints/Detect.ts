@@ -112,6 +112,8 @@ export interface DetectOptions {
 
 export interface DetectionResult {
   readonly hints: readonly LocalHint[];
+  /** True when the safety limit stopped discovery before the tree ended. */
+  readonly truncated: boolean;
   /**
    * How many elements look like the host of a closed shadow root.
    *
@@ -497,14 +499,15 @@ const parseCoords = (area: HTMLAreaElement): readonly number[] =>
   area.coords.split(",").map((coord) => Number.parseInt(coord.trim(), 10));
 
 /**
- * The map name that a `usemap` attribute holds, without the leading `#`.
+ * Parse a `usemap` value as an HTML hash-name reference.
  *
- * An empty name names no map. The HTML standard says the same, so an
- * `<img usemap="#">` gets no hint, and the pass goes on.
+ * The first `#` is the separator. An absent or final separator names no map.
+ * The suffix stays exact. The parser folds no case and normalizes no Unicode.
  */
 export const mapNameOf = (usemap: string): Option.Option<string> => {
-  const name = usemap.startsWith("#") ? usemap.slice(1) : usemap;
-  return name.length === 0 ? Option.none() : Option.some(name);
+  const separator = usemap.indexOf("#");
+  if (separator < 0 || separator === usemap.length - 1) return Option.none();
+  return Option.some(usemap.slice(separator + 1));
 };
 
 /**
@@ -519,23 +522,29 @@ export const mapNameOf = (usemap: string): Option.Option<string> => {
  *
  * `CSS.escape` exists in every engine that this application supports, and it
  * would repair the escaping. A selector is still not necessary here.
- * Iteration and one string comparison work in an engine that has no
- * `CSS.escape`, they need no capability probe, and they cannot throw. No name
- * from the page ever becomes a selector.
+ * Iteration and two exact comparisons work in an engine without `CSS.escape`.
+ * They need no capability probe, and they cannot throw. Page text never becomes
+ * a selector.
  *
- * The first map in tree order wins, as `querySelector` did. The comparison is
- * exact, as an attribute selector is. A name that matches no map gives
- * `Option.none()`, the image gets no hint, and every other element on the page
- * keeps its own.
+ * The search uses the document or shadow tree that contains the image. The
+ * first map with an equal `id` or `name` wins. A missing map gives
+ * `Option.none()`. The image gets no hint, and other elements keep their hints.
  */
 export const findImageMap = (
-  document: Document,
+  context: Element,
   usemap: string,
 ): Option.Option<Element> => {
   const name = mapNameOf(usemap);
   if (Option.isNone(name)) return Option.none();
-  for (const map of document.getElementsByTagName("map")) {
-    if (map.getAttribute("name") === name.value) return Option.some(map);
+
+  // An element root is a document or a shadow root. The fixed selector does
+  // not contain page text, so malformed names cannot change or break it.
+  const root = context.getRootNode() as Document | ShadowRoot;
+  for (const map of root.querySelectorAll("map")) {
+    if (
+      map.getAttribute("id") === name.value ||
+      map.getAttribute("name") === name.value
+    ) return Option.some(map);
   }
   return Option.none();
 };
@@ -564,7 +573,7 @@ const imageMapHints = (
   const imageRect = element.getClientRects()[0];
   if (imageRect === undefined) return Option.some([]);
 
-  const map = findImageMap(options.document, rawName);
+  const map = findImageMap(element, rawName);
   if (Option.isNone(map)) return Option.some([]);
   if (!isRendered(element, options.capabilities, options.window)) {
     return Option.some([]);
@@ -714,6 +723,8 @@ const looksLikeClosedShadowHost = (element: Element): boolean => {
 export interface Collected {
   readonly elements: Element[];
   unreachableHosts: number;
+  /** True when the work limit stopped this walk. */
+  truncated: boolean;
 }
 
 /**
@@ -724,10 +735,10 @@ export interface Collected {
  * the user waited for that walk, and Escape arrived only after it.
  *
  * **How the work is divided.** The walk is a state machine, and not a
- * recursion. `ElementWalk` holds a stack of the elements that are not yet
- * visited. `stepWalk` visits at most `count` of them and gives back. The
- * caller reads the clock after each step, and it starts a new slice when the
- * budget of 8 ms is gone.
+ * recursion. Each stack frame holds one next sibling and one final sibling.
+ * `stepWalk` examines at most `count` elements. It never enumerates one whole
+ * sibling list. The caller reads the clock after each step. It starts a new
+ * slice when the budget of 8 ms is gone.
  *
  * **Where the thread goes back.** `Dom.yieldToBrowser` runs between two
  * slices. It posts through a `MessageChannel`, so the browser runs its own
@@ -743,70 +754,112 @@ export interface Collected {
  * garbage collector takes that array with the fiber. It draws no marker,
  * because a marker is drawn only from the result that it never returns.
  *
- * **The result does not change.** A divided walk finds the same elements, in
- * the same order, as the walk that it replaces. `test/unit/hint-detect_test.ts`
- * compares the two on a large tree, and it compares slice sizes of 1, 7 and
- * 5000 against each other.
+ * **The result on a static tree.** A divided walk finds the same elements, in
+ * the same order, as the old walk. The unit test compares several step sizes.
  *
- * **The measurement.** Playwright WebKit, one machine, five rounds. On
- * `test/fixtures/link-dense.html` (2414 elements) the walk took 0–1 ms before
- * the change, and it takes 0–1 ms after it, in one slice. On
- * `test/fixtures/dom-huge.html` (120 036 elements) the walk took 6–19 ms
- * before, in one block that nothing could interrupt. It now takes 6–24 ms in
- * one to four slices, and the longest single piece of work is 8 ms. The gain
- * is not the total. The gain is that the longest piece no longer grows with
- * the document.
+ * **The result on a changing tree.** Each parent captures its final child when
+ * the parent is visited. Children appended after that point are excluded.
+ * Children inserted before that boundary can appear. A removed next child stays
+ * pending. A later removed sibling can disappear. Moved elements appear once.
+ *
+ * **The completion limit.** The walk examines at most 250,000 elements. This
+ * includes elements that a mutation makes it examine again. The result reports
+ * truncation, and detection writes a warning. Thus, page growth cannot keep a
+ * walk alive without end.
+ *
+ * **The measurement.** Playwright WebKit, one machine, ten warm rounds. On
+ * `test/fixtures/link-dense.html` (2,415 elements), both walks took 0–1 ms. On
+ * `test/fixtures/dom-huge.html` (120,037 elements), the old walk took 7 ms.
+ * The divided walk took 11–27 ms. Its longest slice stays near 8 ms.
+ *
+ * One 64-element step took less than 1 ms with one million siblings. Each step
+ * now reads at most 64 siblings, so document width cannot enlarge one step.
  */
-export interface ElementWalk {
-  /** The elements that are not visited yet. The last entry is visited next. */
-  readonly pending: Element[];
-  readonly collected: Collected;
+interface WalkFrame {
+  next: Element | null;
+  readonly boundary: Element;
 }
 
-/** Stack the element children of `parent`, so that the first one pops first. */
-const pushChildren = (pending: Element[], parent: ParentNode): void => {
-  // The sibling pointers, and not `parent.children`. A collection costs one
-  // allocation for each element that the walk visits, and that is measurable:
-  // on a document of 120 000 elements the collection walk takes 15 ms, and
-  // this one takes 6 ms, which is the time of the walk that it replaces.
-  let child = parent.lastElementChild;
-  while (child !== null) {
-    pending.push(child);
-    child = child.previousElementSibling;
-  }
+export interface ElementWalk {
+  /** The child lists that still have elements. The last frame runs next. */
+  readonly pending: WalkFrame[];
+  readonly collected: Collected;
+  /** Elements already produced. A moved element cannot be produced again. */
+  readonly produced: Set<Element>;
+  /** Work includes duplicate elements that mutations put in the walk again. */
+  examined: number;
+  readonly limit: number;
+}
+
+/** The maximum examined elements of one hint discovery walk. */
+export const WALK_ELEMENT_LIMIT = 250_000;
+
+/** Capture the current first and final child of one parent. */
+const childFrame = (parent: ParentNode): WalkFrame | undefined => {
+  const first = parent.firstElementChild;
+  const boundary = parent.lastElementChild;
+  return first === null || boundary === null ? undefined : {
+    next: first,
+    boundary,
+  };
 };
 
 /** A walk of `root` that has visited nothing yet. */
-export const startWalk = (root: ParentNode): ElementWalk => {
-  const walk: ElementWalk = {
-    pending: [],
-    collected: { elements: [], unreachableHosts: 0 },
+export const startWalk = (
+  root: ParentNode,
+  limit = WALK_ELEMENT_LIMIT,
+): ElementWalk => {
+  const first = childFrame(root);
+  return {
+    pending: first === undefined ? [] : [first],
+    collected: { elements: [], unreachableHosts: 0, truncated: false },
+    produced: new Set(),
+    examined: 0,
+    limit,
   };
-  pushChildren(walk.pending, root);
-  return walk;
 };
 
 /**
- * Visit at most `count` elements. It gives `true` while work is left.
+ * Examine at most `count` elements. It gives `true` while work is left.
  *
- * The order is document order, and it goes down into every *open* shadow root.
- * A slotted light-DOM child is already under its host, so it is not visited two
- * times.
+ * The order is document order, and it enters every open shadow root. A slotted
+ * light-DOM child is under its host, so the walk does not visit it two times.
  */
 export const stepWalk = (walk: ElementWalk, count: number): boolean => {
-  for (let visited = 0; visited < count; visited += 1) {
-    const element = walk.pending.pop();
-    if (element === undefined) break;
+  for (let examined = 0; examined < count; examined += 1) {
+    const frame = walk.pending[walk.pending.length - 1];
+    if (frame === undefined) break;
+    const element = frame.next;
+    if (element === null) {
+      walk.pending.pop();
+      examined -= 1;
+      continue;
+    }
+
+    if (walk.examined >= walk.limit) {
+      walk.collected.truncated = true;
+      walk.pending.length = 0;
+      break;
+    }
+    frame.next = element === frame.boundary ? null : element.nextElementSibling;
+    walk.examined += 1;
+    if (walk.produced.has(element)) continue;
+
+    walk.produced.add(element);
     walk.collected.elements.push(element);
     const shadow = element.shadowRoot;
-    // The light children go on the stack first, so the shadow children pop
-    // before them. The order is the host, then its whole shadow tree, then its
-    // light tree. That is the order of the recursive walk that this replaces.
-    pushChildren(walk.pending, element);
-    if (shadow !== null) pushChildren(walk.pending, shadow);
-    else if (looksLikeClosedShadowHost(element)) {
+    // Push light children first. Shadow children then run before light children.
+    const lightChildren = childFrame(element);
+    if (lightChildren !== undefined) walk.pending.push(lightChildren);
+    if (shadow !== null) {
+      const shadowChildren = childFrame(shadow);
+      if (shadowChildren !== undefined) walk.pending.push(shadowChildren);
+    } else if (looksLikeClosedShadowHost(element)) {
       walk.collected.unreachableHosts += 1;
     }
+  }
+  while (walk.pending[walk.pending.length - 1]?.next === null) {
+    walk.pending.pop();
   }
   return walk.pending.length > 0;
 };
@@ -843,6 +896,11 @@ export const collectElements = (
       if (more) yield* dom.yieldToBrowser;
     }
 
+    if (walk.collected.truncated) {
+      yield* Effect.logWarning(
+        `hint discovery stopped after ${walk.limit} examined elements`,
+      );
+    }
     return walk.collected;
   });
 
@@ -1067,5 +1125,9 @@ export const detectHints = (
       ...inOrder.filter((hint) => hint.secondary),
     ];
 
-    return { hints, unreachableHosts: collected.unreachableHosts };
+    return {
+      hints,
+      unreachableHosts: collected.unreachableHosts,
+      truncated: collected.truncated,
+    };
   });

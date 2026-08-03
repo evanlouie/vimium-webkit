@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Image-map standard rules</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+      img,
+      .shadow-host {
+        display: inline-block;
+        width: 80px;
+        height: 80px;
+        margin: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Image-map standard rules</h1>
+
+    <img src="assets/map.svg" usemap="missing-hash" alt="Missing hash image" />
+    <map name="missing-hash">
+      <area shape="rect" coords="0,0,80,80" href="#missing-hash" aria-label="Missing hash area" />
+    </map>
+
+    <img src="assets/map.svg" usemap="prefix#suffix" alt="Prefix image" />
+    <map name="suffix">
+      <area shape="rect" coords="0,0,80,80" href="#prefix" aria-label="Prefix area" />
+    </map>
+
+    <img src="assets/map.svg" usemap="#id-only" alt="ID image" />
+    <map id="id-only">
+      <area shape="rect" coords="0,0,80,80" href="#id-only" aria-label="ID area" />
+    </map>
+
+    <map name="nav">
+      <area shape="rect" coords="0,0,80,80" href="#document-nav" aria-label="Document nav area" />
+    </map>
+    <map name="document-only">
+      <area shape="rect" coords="0,0,80,80" href="#document-only" aria-label="Document-only area" />
+    </map>
+
+    <div id="shadow-valid" class="shadow-host"></div>
+    <div id="shadow-isolated" class="shadow-host"></div>
+
+    <script>
+      const valid = document.querySelector("#shadow-valid").attachShadow({ mode: "open" });
+      valid.innerHTML = `
+        <style>img { width: 80px; height: 80px; }</style>
+        <img src="assets/map.svg" usemap="#nav" alt="Shadow image" />
+        <map name="nav">
+          <area shape="rect" coords="0,0,80,80" href="#shadow-nav" aria-label="Shadow nav area" />
+        </map>`;
+
+      const isolated = document.querySelector("#shadow-isolated").attachShadow({ mode: "open" });
+      isolated.innerHTML = `
+        <style>img { width: 80px; height: 80px; }</style>
+        <img src="assets/map.svg" usemap="#document-only" alt="Isolated image" />`;
+    </script>
+  </body>
+</html>

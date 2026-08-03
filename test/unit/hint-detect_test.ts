@@ -39,29 +39,33 @@ import {
 // Image maps
 // ---------------------------------------------------------------------------
 
-/** A `<map>` that answers `getAttribute("name")`, and nothing else. */
-const mapElement = (name: string | null): Element =>
+/** A `<map>` that answers the two attributes used by the standard. */
+const mapElement = (name: string | null, id: string | null = null): Element =>
   ({
     getAttribute: (attribute: string): string | null =>
-      attribute === "name" ? name : null,
+      attribute === "name" ? name : attribute === "id" ? id : null,
   }) as unknown as Element;
 
-/**
- * A document that holds `maps`, and that refuses every selector.
- *
- * `querySelector` throws here because a unit test has no CSS parser, and
- * because the rule under test is exactly that: the lookup takes no selector
- * from a page value. A browser throws a `SyntaxError` for several of the names
- * below, and it matches the wrong element for several more.
- */
-const documentWith = (maps: readonly Element[]): Document =>
+/** A document or shadow root that accepts only the fixed `map` selector. */
+const rootWith = (maps: readonly Element[]): Document | ShadowRoot =>
   ({
-    getElementsByTagName: (tag: string): readonly Element[] =>
-      tag === "map" ? maps : [],
-    querySelector: (selector: string): never => {
-      throw new SyntaxError(`the lookup built a selector: ${selector}`);
+    querySelectorAll: (selector: string): readonly Element[] => {
+      if (selector !== "map") {
+        throw new SyntaxError(`the lookup built a selector: ${selector}`);
+      }
+      return maps;
     },
-  }) as unknown as Document;
+  }) as unknown as Document | ShadowRoot;
+
+/** An image context inside `root`, with its owning document. */
+const contextIn = (
+  root: Document | ShadowRoot,
+  ownerDocument: Document = root as Document,
+): Element =>
+  ({
+    ownerDocument,
+    getRootNode: (): Document | ShadowRoot => root,
+  }) as unknown as Element;
 
 /** Names that a page may use, and that a joined selector cannot carry. */
 const AWKWARD_NAMES: ReadonlyArray<readonly [string, string]> = [
@@ -83,9 +87,9 @@ describe("the image-map lookup", () => {
     it.effect(`finds the map whose name holds ${label}`, () =>
       Effect.sync(() => {
         const target = mapElement(name);
-        const document = documentWith([mapElement("other"), target]);
+        const context = contextIn(rootWith([mapElement("other"), target]));
 
-        const found = findImageMap(document, `#${name}`);
+        const found = findImageMap(context, `#${name}`);
 
         assert.isTrue(
           Option.isSome(found),
@@ -97,11 +101,11 @@ describe("the image-map lookup", () => {
 
   it.effect("gives no map for an empty name", () =>
     Effect.sync(() => {
-      const document = documentWith([mapElement(""), mapElement("nav")]);
+      const context = contextIn(rootWith([mapElement(""), mapElement("nav")]));
       // The image then gets no hint of its own, and every other element on the
       // page keeps its hint.
-      assert.isTrue(Option.isNone(findImageMap(document, "#")));
-      assert.isTrue(Option.isNone(findImageMap(document, "")));
+      assert.isTrue(Option.isNone(findImageMap(context, "#")));
+      assert.isTrue(Option.isNone(findImageMap(context, "")));
       assert.isTrue(Option.isNone(mapNameOf("#")));
       assert.isTrue(Option.isNone(mapNameOf("")));
     }));
@@ -110,38 +114,78 @@ describe("the image-map lookup", () => {
     Effect.sync(() => {
       const first = mapElement("nav");
       const second = mapElement("nav");
-      const document = documentWith([first, second]);
+      const context = contextIn(rootWith([first, second]));
 
       assert.strictEqual(
-        Option.getOrNull(findImageMap(document, "#nav")),
+        Option.getOrNull(findImageMap(context, "#nav")),
         first,
       );
     }));
 
   it.effect("gives no map for a name that is not on the page", () =>
     Effect.sync(() => {
-      const document = documentWith([mapElement("nav")]);
-      assert.isTrue(Option.isNone(findImageMap(document, "#missing")));
+      const context = contextIn(rootWith([mapElement("nav")]));
+      assert.isTrue(Option.isNone(findImageMap(context, "#missing")));
     }));
 
   it.effect("compares the name exactly", () =>
     Effect.sync(() => {
-      const document = documentWith([mapElement("nav")]);
-      assert.isTrue(Option.isNone(findImageMap(document, "#NAV")));
-      assert.isTrue(Option.isNone(findImageMap(document, "#nav ")));
-      assert.isTrue(Option.isSome(findImageMap(document, "nav")));
+      const context = contextIn(rootWith([mapElement("nav")]));
+      assert.isTrue(Option.isNone(findImageMap(context, "#NAV")));
+      assert.isTrue(Option.isNone(findImageMap(context, "#nav ")));
+      assert.isTrue(Option.isNone(findImageMap(context, "nav")));
       assert.strictEqual(Option.getOrNull(mapNameOf("#nav")), "nav");
     }));
 
   it.effect("keeps a name that already holds a hash", () =>
     Effect.sync(() => {
       const target = mapElement("#nav");
-      const document = documentWith([mapElement("nav"), target]);
+      const context = contextIn(rootWith([mapElement("nav"), target]));
       // Only the first `#` is the separator, as `usemap` defines it.
       assert.strictEqual(
-        Option.getOrNull(findImageMap(document, "##nav")),
+        Option.getOrNull(findImageMap(context, "##nav")),
         target,
       );
+    }));
+
+  it.effect("uses the text after the first hash", () =>
+    Effect.sync(() => {
+      const target = mapElement("nav");
+      const context = contextIn(rootWith([target]));
+      assert.strictEqual(
+        Option.getOrNull(findImageMap(context, "prefix#nav")),
+        target,
+      );
+    }));
+
+  it.effect("matches an id when a map has no name", () =>
+    Effect.sync(() => {
+      const target = mapElement(null, "nav");
+      const context = contextIn(rootWith([target]));
+      assert.strictEqual(
+        Option.getOrNull(findImageMap(context, "#nav")),
+        target,
+      );
+    }));
+
+  it.effect("searches only the image context tree", () =>
+    Effect.sync(() => {
+      const documentMap = mapElement("nav");
+      const shadowMap = mapElement("nav");
+      const documentRoot = rootWith([documentMap]) as Document;
+      const documentContext = contextIn(documentRoot);
+      const shadowContext = contextIn(rootWith([shadowMap]), documentRoot);
+      const emptyShadowContext = contextIn(rootWith([]), documentRoot);
+
+      assert.strictEqual(
+        Option.getOrNull(findImageMap(shadowContext, "#nav")),
+        shadowMap,
+      );
+      assert.strictEqual(
+        Option.getOrNull(findImageMap(documentContext, "#nav")),
+        documentMap,
+      );
+      assert.isTrue(Option.isNone(findImageMap(emptyShadowContext, "#nav")));
     }));
 });
 
@@ -160,19 +204,23 @@ interface FakeNode {
   shadowRoot: FakeRoot | null;
   parent: FakeParent | null;
   index: number;
+  readonly firstElementChild: FakeNode | null;
   readonly lastElementChild: FakeNode | null;
+  readonly nextElementSibling: FakeNode | null;
   readonly previousElementSibling: FakeNode | null;
   readonly getBoundingClientRect: () => { width: number; height: number };
 }
 
 interface FakeRoot {
   readonly children: FakeNode[];
+  readonly firstElementChild: FakeNode | null;
   readonly lastElementChild: FakeNode | null;
 }
 
 type FakeParent = FakeNode | FakeRoot;
 
 let nextId = 0;
+let siblingReads = 0;
 
 const node = (localName = "div"): FakeNode => {
   nextId += 1;
@@ -184,10 +232,18 @@ const node = (localName = "div"): FakeNode => {
     shadowRoot: null,
     parent: null,
     index: 0,
+    get firstElementChild(): FakeNode | null {
+      return self.children[0] ?? null;
+    },
     get lastElementChild(): FakeNode | null {
       return self.children[self.children.length - 1] ?? null;
     },
+    get nextElementSibling(): FakeNode | null {
+      siblingReads += 1;
+      return self.parent?.children[self.index + 1] ?? null;
+    },
     get previousElementSibling(): FakeNode | null {
+      siblingReads += 1;
       return self.parent?.children[self.index - 1] ?? null;
     },
     // A box, so that a childless custom element counts as a closed host.
@@ -199,6 +255,9 @@ const node = (localName = "div"): FakeNode => {
 const root = (): FakeRoot => {
   const self: FakeRoot = {
     children: [],
+    get firstElementChild(): FakeNode | null {
+      return self.children[0] ?? null;
+    },
     get lastElementChild(): FakeNode | null {
       return self.children[self.children.length - 1] ?? null;
     },
@@ -206,11 +265,29 @@ const root = (): FakeRoot => {
   return self;
 };
 
-/** Put `child` last under `parent`, and link it to its earlier sibling. */
+/** Put `child` last under `parent`, and link it to its siblings. */
 const append = (parent: FakeParent, child: FakeNode): void => {
   child.parent = parent;
   child.index = parent.children.length;
   parent.children.push(child);
+};
+
+/** Remove `child` and repair the sibling indexes. */
+const remove = (child: FakeNode): void => {
+  const parent = child.parent;
+  if (parent === null) return;
+  parent.children.splice(child.index, 1);
+  for (const [index, sibling] of parent.children.entries()) {
+    sibling.index = index;
+  }
+  child.parent = null;
+  child.index = 0;
+};
+
+/** Move `child` to the end of `parent`. */
+const move = (child: FakeNode, parent: FakeParent): void => {
+  remove(child);
+  append(parent, child);
 };
 
 /** Every descendant of `where`, in document order, as `querySelectorAll` gives. */
@@ -367,6 +444,117 @@ describe("the walk of the tree", () => {
       assert.isFalse(stepWalk(walk, 32));
       assert.strictEqual(walk.collected.elements.length, 0);
     }));
+
+  it.effect("bounds sibling reads in one step", () =>
+    Effect.sync(() => {
+      const tree = root();
+      for (let index = 0; index < 10_000; index += 1) append(tree, node());
+      siblingReads = 0;
+
+      const walk = startWalk(tree as unknown as ParentNode);
+      assert.isTrue(stepWalk(walk, 7));
+
+      assert.strictEqual(walk.collected.elements.length, 7);
+      assert.isAtMost(siblingReads, 7);
+    }));
+
+  it.effect("excludes a child appended after its parent was visited", () =>
+    Effect.sync(() => {
+      const parent = node();
+      const tree = root();
+      append(tree, parent);
+      const walk = startWalk(tree as unknown as ParentNode);
+      assert.isFalse(stepWalk(walk, 1));
+
+      const added = node();
+      append(parent, added);
+
+      assert.isFalse(stepWalk(walk, 10));
+      assert.deepStrictEqual(
+        walk.collected.elements as unknown as FakeNode[],
+        [parent],
+      );
+    }));
+
+  it.effect("includes a child added before its parent is visited", () =>
+    Effect.sync(() => {
+      const parent = node();
+      const future = node();
+      append(parent, future);
+      const tree = root();
+      append(tree, parent);
+      const walk = startWalk(tree as unknown as ParentNode);
+      assert.isTrue(stepWalk(walk, 1));
+
+      const added = node();
+      append(future, added);
+      while (stepWalk(walk, 1));
+
+      assert.deepStrictEqual(
+        walk.collected.elements as unknown as FakeNode[],
+        [parent, future, added],
+      );
+    }));
+
+  it.effect("keeps a pending element that the page removes", () =>
+    Effect.sync(() => {
+      const first = node();
+      const removed = node();
+      const tree = root();
+      append(tree, first);
+      append(tree, removed);
+      const walk = startWalk(tree as unknown as ParentNode);
+      assert.isTrue(stepWalk(walk, 1));
+
+      remove(removed);
+      while (stepWalk(walk, 1));
+
+      assert.deepStrictEqual(
+        walk.collected.elements as unknown as FakeNode[],
+        [first, removed],
+      );
+    }));
+
+  it.effect("does not produce a moved element two times", () =>
+    Effect.sync(() => {
+      const first = node();
+      const second = node();
+      const tree = root();
+      append(tree, first);
+      append(tree, second);
+      const walk = startWalk(tree as unknown as ParentNode);
+      assert.isTrue(stepWalk(walk, 1));
+
+      move(first, second);
+      while (stepWalk(walk, 1));
+
+      assert.deepStrictEqual(
+        walk.collected.elements as unknown as FakeNode[],
+        [first, second],
+      );
+    }));
+
+  it.effect("stops continuous growth at the element limit", () =>
+    Effect.sync(() => {
+      const first = node();
+      let future = node();
+      append(first, future);
+      const tree = root();
+      append(tree, first);
+      const walk = startWalk(tree as unknown as ParentNode, 12);
+      assert.isTrue(stepWalk(walk, 1));
+
+      while (!walk.collected.truncated) {
+        const added = node();
+        append(future, added);
+        future = added;
+        stepWalk(walk, 1);
+      }
+
+      assert.strictEqual(walk.collected.elements.length, 12);
+      assert.strictEqual(walk.examined, 12);
+      assert.isFalse(stepWalk(walk, 1));
+    }));
 });
 
 // ---------------------------------------------------------------------------
@@ -429,14 +617,14 @@ describe("discovery in slices", () => {
       const tree = buildTree(6, 5) as unknown as ParentNode;
 
       const collected = yield* Effect.provide(
-        collectElements(tree, { budgetMs: 8, checkEvery: 64 }),
+        collectElements(tree, { checkEvery: 64 }),
         countingDom(turns),
       );
 
       const count = yield* Ref.get(turns.count);
-      // The walk before this change gave no turn at all: it visited every
-      // element of the document in one synchronous call.
-      assert.isAbove(count, 4);
+      // This exact result enforces the default eight-millisecond budget. The
+      // deterministic clock makes a larger budget use fewer browser turns.
+      assert.strictEqual(count, 54);
       assert.isAbove(collected.elements.length, 4_000);
     }));
 
