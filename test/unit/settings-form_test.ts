@@ -143,6 +143,7 @@ describe("the settings form", () => {
         "Scroll step size (px)",
       ]);
       assert.deepEqual(notes.clamped, []);
+      assert.deepEqual(notes.truncated, []);
     }));
 
   it.effect("says that it brought a number into range", () =>
@@ -178,7 +179,55 @@ describe("the settings form", () => {
           ? String(one.read(base))
           : one.read(base),
       }));
-      assert.deepEqual(formNotes(offered), { refused: [], clamped: [] });
+      assert.deepEqual(formNotes(offered), {
+        refused: [],
+        clamped: [],
+        truncated: [],
+      });
+    }));
+
+  it.effect("says that it dropped the decimals of a number", () =>
+    Effect.sync(() => {
+      // A control of type `number` gives back `50.7`, because that text is a
+      // valid floating-point number. `Number.parseInt` then reads 50. The
+      // value is neither refused nor out of range, so this input fell into no
+      // report at all and the user saw 50 with no reason for it.
+      const base = defaultSettings();
+      const notes = formNotes([
+        { field: field("scrollStepSize"), text: "50.7" },
+      ]);
+      assert.deepEqual(notes.refused, []);
+      assert.deepEqual(notes.clamped, []);
+      assert.deepEqual(notes.truncated, ["Scroll step size (px)"]);
+
+      // What the message claims must be what the write function does.
+      const control = field("scrollStepSize");
+      assert.notStrictEqual(control.kind, "toggle");
+      if (control.kind === "toggle") return;
+      assert.strictEqual(control.read(control.write(base, "50.7")), "50");
+    }));
+
+  it.effect("lets every number control report a truncation", () =>
+    Effect.sync(() => {
+      for (const one of SETTINGS_FIELDS) {
+        if (one.kind !== "number") continue;
+        assert.isDefined(
+          one.truncates,
+          `the field for ${String(one.key)} cannot report a truncation`,
+        );
+        assert.isTrue(
+          one.truncates?.("50.7") ?? false,
+          `the field for ${String(one.key)} said nothing about decimals`,
+        );
+        assert.isFalse(
+          one.truncates?.("50") ?? true,
+          `the field for ${String(one.key)} reported a whole number`,
+        );
+        assert.isFalse(
+          one.truncates?.("not a number") ?? true,
+          `the field for ${String(one.key)} called a refusal a truncation`,
+        );
+      }
     }));
 
   it.effect("lets every number control say what it refuses", () =>

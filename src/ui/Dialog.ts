@@ -171,6 +171,15 @@ export interface ValueField extends FieldBase {
    * range declares it.
    */
   readonly clamps?: (text: string) => boolean;
+  /**
+   * Does the control drop the decimals of this text?
+   *
+   * An `input` of type `number` gives back `50.7`, because that text is a
+   * valid floating-point number. `clampNumber` then stores 50. The value is
+   * neither refused nor out of range, so the two reports above say nothing,
+   * and the user sees another number with no reason for it.
+   */
+  readonly truncates?: (text: string) => boolean;
   readonly read: (settings: SettingsData) => string;
   readonly write: (settings: SettingsData, value: string) => SettingsData;
 }
@@ -206,6 +215,18 @@ const outsideRange = (min: number, max: number) => (text: string): boolean => {
 
 /** A hint alphabet needs two characters, or it can label one hint only. */
 const shorterThanTwo = (text: string): boolean => text.length < 2;
+
+/**
+ * Text that holds a number with decimals. `clampNumber` truncates it.
+ *
+ * `Number.parseFloat` reads the whole number, and `Number.parseInt` reads the
+ * part before the point. The two differ exactly when the control truncated
+ * what the user typed.
+ */
+const notWhole = (text: string): boolean => {
+  const full = Number.parseFloat(text);
+  return Number.isFinite(full) && !Number.isInteger(full);
+};
 
 /** One entry for each line. An empty line is not an entry. */
 export const parseLines = (text: string): ReadonlyArray<string> =>
@@ -273,6 +294,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         label: "Scroll step size (px)",
         refuses: notANumber,
         clamps: outsideRange(1, 10_000),
+        truncates: notWhole,
         read: (settings) => String(settings.scrollStepSize),
         write: (settings, value) => ({
           ...settings,
@@ -538,6 +560,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         note: "0 stops the recording.",
         refuses: notANumber,
         clamps: outsideRange(0, 50_000),
+        truncates: notWhole,
         read: (settings) => String(settings.historyIndexLimit),
         write: (settings, value) => ({
           ...settings,
@@ -632,16 +655,27 @@ const clampsText = (field: SettingsField, text: string): boolean =>
   field.kind !== "toggle" && field.clamps !== undefined &&
   field.clamps(text);
 
+/** Does this field drop the decimals of this text? A toggle never does. */
+const truncatesText = (field: SettingsField, text: string): boolean =>
+  field.kind !== "toggle" && field.truncates !== undefined &&
+  field.truncates(text);
+
 /** What the controls did with the text of the user, before the save. */
 export interface FormNotes {
   /** The fields that keep their stored value, because `write` read nothing. */
   readonly refused: ReadonlyArray<string>;
   /** The fields whose number `write` brought into range. */
   readonly clamped: ReadonlyArray<string>;
+  /** The fields whose decimals `write` dropped. */
+  readonly truncated: ReadonlyArray<string>;
 }
 
 /** Nothing to report: the reset button offers the defaults. */
-export const NO_FORM_NOTES: FormNotes = { refused: [], clamped: [] };
+export const NO_FORM_NOTES: FormNotes = {
+  refused: [],
+  clamped: [],
+  truncated: [],
+};
 
 /**
  * What the dialog must tell the user about the text that it read.
@@ -650,8 +684,8 @@ export const NO_FORM_NOTES: FormNotes = { refused: [], clamped: [] };
  * nothing: a refused field keeps its stored value, so `adjustedFields` finds
  * no difference, and a clamped field stores the bound, so `adjustedFields`
  * finds no difference either. The user typed, pressed Save, saw another value
- * and got no reason. This names each field, and it separates the two results,
- * because a clamped field does **not** keep its stored value.
+ * and got no reason. This names each field, and it separates the three
+ * results, because each one does something else to the value.
  */
 export const formNotes = (
   offered: ReadonlyArray<OfferedText>,
@@ -661,6 +695,9 @@ export const formNotes = (
     .map((entry) => entry.field.label),
   clamped: offered
     .filter((entry) => clampsText(entry.field, entry.text))
+    .map((entry) => entry.field.label),
+  truncated: offered
+    .filter((entry) => truncatesText(entry.field, entry.text))
     .map((entry) => entry.field.label),
 });
 
@@ -1059,8 +1096,9 @@ export class Dialog extends Context.Service<Dialog, {
        *
        * The dialog stays open when the mapping source still has an error, when
        * a control refused what the user typed, when a control brought a number
-       * into range, and when storage repaired a field. In each case the dialog
-       * is the only place where the user can see what happened.
+       * into range, when a control dropped the decimals of a number, and when
+       * storage repaired a field. In each case the dialog is the only place
+       * where the user can see what happened.
        */
       const store = Effect.fn("Dialog.store")(
         function*(
@@ -1113,6 +1151,14 @@ export class Dialog extends Context.Service<Dialog, {
             lines.push(
               `These fields were brought into range: ` +
                 `${notes.clamped.join(", ")}.`,
+            );
+          }
+          if (notes.truncated.length > 0) {
+            // A control of type `number` accepts `50.7`, and the setting holds
+            // a whole number. Neither of the two lines above covers that.
+            lines.push(
+              `These fields keep a whole number only: ` +
+                `${notes.truncated.join(", ")}.`,
             );
           }
           if (changed.length > 0) {
