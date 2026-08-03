@@ -335,6 +335,58 @@ describe("HintString", () => {
       }));
   }
 
+  /** The four grapheme cases from the review. */
+  const GRAPHEME_CASES: readonly {
+    readonly name: string;
+    readonly input: string;
+    readonly alphabet: string;
+    readonly labels: readonly string[];
+  }[] = [
+    {
+      name: "a family loses its zero width joiners",
+      input: "\u{1f468}\u200d\u{1f469}\u200d\u{1f467}",
+      alphabet: "\u{1f468}\u{1f469}\u{1f467}",
+      labels: [
+        "\u{1f467}",
+        "\u{1f468}\u{1f468}",
+        "\u{1f469}",
+        "\u{1f468}\u{1f469}",
+      ],
+    },
+    {
+      name: "a flag loses its two regional indicators",
+      input: "\u{1f1e9}\u{1f1ea}",
+      alphabet: "xy",
+      labels: ["xx", "yx", "xy", "yy"],
+    },
+    {
+      name: "a thumb loses its skin tone modifier",
+      input: "\u{1f44d}\u{1f3fd}ab",
+      alphabet: "\u{1f44d}ab",
+      labels: [
+        "a",
+        "\u{1f44d}a",
+        "b",
+        "\u{1f44d}\u{1f44d}",
+      ],
+    },
+    {
+      name: "a combining acute composes with its letter",
+      input: "e\u0301x",
+      alphabet: "\u00e9x",
+      labels: ["xx", "\u00e9x", "x\u00e9", "\u00e9\u00e9"],
+    },
+  ];
+
+  for (const row of GRAPHEME_CASES) {
+    it.effect(`keeps grapheme boundaries: ${row.name}`, () =>
+      Effect.sync(() => {
+        const alphabet = normaliseHintCharacters(row.input, "xy");
+        assert.strictEqual(alphabet, row.alphabet);
+        assert.deepEqual(hintStrings(4, alphabet), row.labels);
+      }));
+  }
+
   it.effect("gives visible and distinct labels for a heart and a face", () =>
     Effect.sync(() => {
       // The reviewer's case. The set holds three code points, and the middle
@@ -362,6 +414,14 @@ describe("HintString", () => {
       assert.strictEqual(refuseHintCharacter("\u200d"), "invisible");
       assert.strictEqual(refuseHintCharacter("\u0301"), "invisible");
       assert.strictEqual(refuseHintCharacter(" "), "invisible");
+      assert.strictEqual(
+        refuseHintCharacter("\u{1f1e9}"),
+        "emoji-joiner",
+      );
+      assert.strictEqual(
+        refuseHintCharacter("\u{1f3fd}"),
+        "emoji-joiner",
+      );
       assert.strictEqual(refuseHintCharacter("\u00df"), "case-fold");
       assert.strictEqual(refuseHintCharacter("\ud83d"), "half-character");
       assert.strictEqual(
@@ -373,6 +433,7 @@ describe("HintString", () => {
         const refusal of [
           "half-character",
           "invisible",
+          "emoji-joiner",
           "case-fold",
           "duplicate",
         ] as const

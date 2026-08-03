@@ -196,10 +196,11 @@ export const isComposing = (event: KeyEventLike): boolean =>
 /**
  * The character that a Windows virtual key code names.
  *
- * WebKit on macOS builds `event.keyCode` from `charactersIgnoringModifiers`,
- * which is the character of the key under the active layout with no Option and
- * no Command. A letter gives 65 to 90, a digit gives 48 to 57, and the eleven
- * punctuation keys give the OEM codes below.
+ * WebKit on macOS builds `event.keyCode` from `charactersIgnoringModifiers`.
+ * This is the character of the active layout with no Option and no Command.
+ *
+ * WebKit's `windowsKeyCodeForKeyEvent` first maps the character code. It then
+ * uses the US position table when that mapping gives no code.
  *
  * Measured in a real WebKit view, one row for each entry. See the table in
  * `test/unit/key_test.ts`.
@@ -288,15 +289,15 @@ const codeCharacter = (code: string | undefined): string | null => {
  *
  * The sources, in order, and the cost of each one:
  *
- * 1. `event.keyCode`. The character of the layout for a Latin layout. For a
- *    layout that is not Latin, WebKit falls back to the US position, so a
- *    Cyrillic or a Greek key gives the letter of the position. That character
- *    is not the letter of the user, but it is stable and it can be written in
- *    a mapping file.
- * 2. `event.code`, when the event carries no `keyCode`. It is the US position
+ * 1. `event.key` for `IntlBackslash`. Its `keyCode` aliases Backquote on an ISO
+ *    keyboard, so the event character prevents two keys from colliding.
+ * 2. `event.keyCode`. The character of the layout for a Latin layout. For a
+ *    layout that is not Latin, WebKit falls back to the US position. A
+ *    Cyrillic or a Greek key therefore gives the letter of the position.
+ * 3. `event.code`, when the event carries no `keyCode`. It is the US position
  *    always, so it is wrong on Dvorak, AZERTY and QWERTZ.
- * 3. `event.key`, through `Option.none()`. It is the Option glyph, which the
- *    user cannot write in a mapping file.
+ * 4. `event.key`, through `Option.none()`. It is usually the Option glyph,
+ *    which the user cannot write in a mapping file.
  *
  * Three guards hold:
  *
@@ -315,6 +316,7 @@ const appleAltKey = (
   applePlatform: boolean,
 ): Option.Option<string> => {
   if (!applePlatform || !event.altKey || event.ctrlKey) return Option.none();
+  if (event.code === "IntlBackslash") return Option.none();
 
   const char = keyCodeCharacter(event.keyCode) ?? codeCharacter(event.code);
   if (char === null) return Option.none();
@@ -347,6 +349,12 @@ export const PLAIN_KEY_CONTEXT: KeyContext = {
   applePlatform: false,
 };
 
+/** Keep the old layout flag for callers that do not read platform data. */
+const readKeyContext = (context: KeyContext | boolean): KeyContext =>
+  typeof context === "boolean"
+    ? { ignoreKeyboardLayout: context, applePlatform: false }
+    : context;
+
 /**
  * Give the base character. The active keyboard layout can be ignored.
  *
@@ -360,9 +368,10 @@ export const PLAIN_KEY_CONTEXT: KeyContext = {
  */
 export const keyChar = (
   event: KeyEventLike,
-  context: KeyContext,
+  offeredContext: KeyContext | boolean,
 ): Option.Option<string> => {
   if (isModifierKey(event)) return Option.none();
+  const context = readKeyContext(offeredContext);
 
   if (context.ignoreKeyboardLayout && event.code) {
     const code = event.code;
@@ -424,7 +433,7 @@ const isNamedChar = (char: string): boolean =>
  */
 export const keyNotation = (
   event: KeyEventLike,
-  context: KeyContext = PLAIN_KEY_CONTEXT,
+  context: KeyContext | boolean = PLAIN_KEY_CONTEXT,
 ): Option.Option<string> => {
   const base = keyChar(event, context);
   if (Option.isNone(base)) return Option.none();

@@ -132,46 +132,7 @@ const firstIssue = (
     (issues) => Option.fromNullishOr(issues[0] ?? null),
   );
 
-/** The first notice that storage gives, without waiting for a second. */
-const firstNotice = (
-  storage: Storage["Service"],
-): Effect.Effect<Option.Option<string>> =>
-  Effect.map(
-    Stream.runCollect(Stream.take(storage.notices, 1)),
-    (notices) => Option.fromNullishOr(notices[0] ?? null),
-  );
-
 describe("Storage", () => {
-  it.effect("tells the user about a stored alphabet that it repaired", () =>
-    Effect.gen(function*() {
-      const backend = yield* makeBackend;
-
-      yield* Effect.gen(function*() {
-        const storage = yield* Storage;
-        // A German user stored this before the hint character rule changed.
-        yield* backend.seed(
-          SETTINGS_KEY,
-          envelope(1, {
-            ...defaultSettings(),
-            linkHintCharacters: "asdfghjkl\u00df",
-          }),
-        );
-
-        const collecting = yield* Effect.forkChild(firstNotice(storage), {
-          startImmediately: true,
-        });
-        const value = yield* storage.settings.hydrate;
-        // The letters of the user survive. Only the sharp s is gone.
-        assert.strictEqual(value.linkHintCharacters, "asdfghjkl");
-
-        const notice = yield* Fiber.join(collecting);
-        assert.isTrue(Option.isSome(notice));
-        if (Option.isNone(notice)) return;
-        assert.include(notice.value, "Link hint characters");
-        assert.include(notice.value, "U+00DF");
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
-    }));
-
   it.effect("gives the defaults and one issue for a value that is not JSON", () =>
     Effect.gen(function*() {
       const backend = yield* makeBackend;
@@ -424,8 +385,8 @@ describe("Storage", () => {
 
       yield* Effect.gen(function*() {
         const storage = yield* Storage;
-        // The store repairs a bad field, so the stored value differs from the
-        // value that was offered. Memory must hold what storage holds.
+        // The schema removes duplicate characters, so the stored value differs
+        // from the offered value. Memory must hold what storage holds.
         const updating = yield* Effect.forkChild(
           storage.settings.update((current) => ({
             ...current,
@@ -437,8 +398,6 @@ describe("Storage", () => {
         const stored = yield* Fiber.join(updating);
         assert.strictEqual(stored.linkHintCharacters, "aabb");
 
-        // The repair keeps the letters that the user chose, and drops the
-        // repeats only.
         const inMemory = yield* storage.settings.current;
         assert.strictEqual(inMemory.linkHintCharacters, "ab");
       }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));

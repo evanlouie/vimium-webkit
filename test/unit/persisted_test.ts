@@ -19,7 +19,6 @@ import {
   type Marks,
   marksGroup,
   pruneMarks,
-  repairSettings,
   sessionGroup,
   settingsGroup,
   settingsSchema,
@@ -120,7 +119,7 @@ describe("Persisted", () => {
       assert.isFalse("somethingFromTheFuture" in parsed.success);
     }));
 
-  it.effect("demands distinct hint characters", () =>
+  it.effect("removes duplicate hint characters during decoding", () =>
     Effect.sync(() => {
       // A duplicate makes two hints answer to the same string.
       const parsed = decodeSettings({
@@ -129,7 +128,7 @@ describe("Persisted", () => {
       });
       assert.isTrue(Result.isSuccess(parsed));
       if (Result.isFailure(parsed)) return;
-      assert.strictEqual(parsed.success.linkHintCharacters, "sadfjklewcmpgh");
+      assert.strictEqual(parsed.success.linkHintCharacters, "abc");
     }));
 
   /**
@@ -146,17 +145,17 @@ describe("Persisted", () => {
     {
       name: "the Turkish dotted capital I expands to i plus a dot",
       stored: "ab\u0130",
-      expected: null,
+      expected: "ab",
     },
     {
       name: "the Turkish dotless i has the case fold of the Latin i",
       stored: "abi\u0131",
-      expected: null,
+      expected: "abi",
     },
     {
       name: "the German sharp s expands to SS",
       stored: "ab\u00df",
-      expected: null,
+      expected: "ab",
     },
     {
       name: "the Greek final sigma has the case fold of the sigma",
@@ -164,9 +163,9 @@ describe("Persisted", () => {
       expected: null,
     },
     {
-      name: "a plain duplicate is refused",
+      name: "a plain duplicate is removed",
       stored: "aab",
-      expected: null,
+      expected: "ab",
     },
     {
       name: "a Greek alphabet is kept",
@@ -189,9 +188,9 @@ describe("Persisted", () => {
       expected: null,
     },
     {
-      name: "half of a surrogate pair is not a character",
+      name: "half of a surrogate pair is removed",
       stored: "ab\ud83d",
-      expected: null,
+      expected: "ab",
     },
     {
       name: "an ASCII alphabet is kept",
@@ -201,19 +200,29 @@ describe("Persisted", () => {
     {
       // The reviewer's case. The variation selector draws nothing, so one
       // label was invisible and two looked the same.
-      name: "a heart with a variation selector is refused",
+      name: "a heart loses its variation selector",
       stored: "\u2764\ufe0f\u{1f600}",
-      expected: null,
+      expected: "\u2764\u{1f600}",
     },
     {
-      name: "a family emoji with a zero width joiner is refused",
+      name: "a family emoji loses its zero width joiner",
       stored: "\u{1f468}\u200d\u{1f469}",
+      expected: "\u{1f468}\u{1f469}",
+    },
+    {
+      name: "a flag loses its regional indicators",
+      stored: "\u{1f1e9}\u{1f1ea}",
       expected: null,
     },
     {
-      name: "a letter with a combining accent is refused",
+      name: "a thumb loses its skin tone modifier",
+      stored: "\u{1f44d}\u{1f3fd}ab",
+      expected: "\u{1f44d}ab",
+    },
+    {
+      name: "a letter with a combining accent is composed",
       stored: "e\u0301x",
-      expected: null,
+      expected: "\u00e9x",
     },
     {
       name: "a letter that is already composed is kept",
@@ -238,116 +247,15 @@ describe("Persisted", () => {
       }));
   }
 
-  /**
-   * The repair of a stored hint alphabet.
-   *
-   * A stored value can become invalid after an upgrade, and the user can edit
-   * it in the storage viewer of the manager. The repair keeps the characters
-   * that work, and it gives one line that the user reads in the HUD.
-   */
-  const REPAIRS: readonly {
-    readonly name: string;
-    readonly stored: string;
-    readonly repaired: string;
-    readonly says: readonly string[];
-  }[] = [
-    {
-      name: "a German alphabet loses the sharp s only",
-      stored: "asdfghjkl\u00df",
-      repaired: "asdfghjkl",
-      says: ["U+00DF", "case fold", "asdfghjkl"],
-    },
-    {
-      name: "a heart loses its variation selector",
-      stored: "\u2764\ufe0f\u{1f600}",
-      repaired: "\u2764\u{1f600}",
-      says: ["U+FE0F", "letter, a number"],
-    },
-    {
-      name: "a repeated letter is dropped once",
-      stored: "aAsdf",
-      repaired: "asdf",
-      says: ["repeats an earlier character"],
-    },
-    {
-      name: "a combining accent joins the letter before it",
-      stored: "e\u0301x",
-      repaired: "\u00e9x",
-      says: ["composed"],
-    },
-    {
-      name: "a set that keeps one character is left to the schema",
-      stored: "a\u00df",
-      repaired: "a\u00df",
-      says: ["Fewer than two characters"],
-    },
-  ];
-
-  for (const row of REPAIRS) {
-    it.effect(`repairs a stored alphabet: ${row.name}`, () =>
-      Effect.sync(() => {
-        const outcome = repairSettings({ linkHintCharacters: row.stored });
-        const value = outcome.value as { linkHintCharacters: string };
-        assert.strictEqual(value.linkHintCharacters, row.repaired);
-        assert.lengthOf(outcome.notices, 1);
-        const notice = outcome.notices[0] ?? "";
-        for (const part of row.says) {
-          assert.include(notice, part, `the message must name "${part}"`);
-        }
-      }));
-  }
-
-  it.effect("says nothing about a set that it does not change", () =>
+  it.effect("repairs hint number characters during decoding", () =>
     Effect.sync(() => {
-      const outcome = repairSettings({
-        linkHintCharacters: "sadfjklewcmpgh",
-        linkHintNumbers: "0123456789",
+      const parsed = decodeSettings({
+        ...defaultSettings(),
+        linkHintNumbers: "012\ufe0f3",
       });
-      assert.deepEqual(outcome.notices, []);
-    }));
-
-  it.effect("repairs a set of hint numbers as well", () =>
-    Effect.sync(() => {
-      const outcome = repairSettings({ linkHintNumbers: "012\ufe0f3" });
-      const value = outcome.value as { linkHintNumbers: string };
-      assert.strictEqual(value.linkHintNumbers, "0123");
-      assert.include(outcome.notices[0] ?? "", "Hint number characters");
-    }));
-
-  it.effect("repairs a value to itself the second time", () =>
-    Effect.sync(() => {
-      const once = repairSettings({ linkHintCharacters: "asdfghjkl\u00df" });
-      const twice = repairSettings(once.value);
-      assert.deepEqual(twice.value, once.value);
-      assert.deepEqual(twice.notices, []);
-    }));
-
-  it.effect("leaves data that is not an object alone", () =>
-    Effect.sync(() => {
-      for (const data of [null, 7, "text", [1, 2]]) {
-        const outcome = repairSettings(data);
-        assert.deepEqual(outcome.value, data);
-        assert.deepEqual(outcome.notices, []);
-      }
-    }));
-
-  it.effect("accepts the repaired value that it gives", () =>
-    Effect.sync(() => {
-      // The repair and the schema must agree. A repaired value that the schema
-      // then refuses would still drop the whole field.
-      for (const row of REPAIRS) {
-        const outcome = repairSettings({
-          ...defaultSettings(),
-          linkHintCharacters: row.stored,
-        });
-        const parsed = decodeSettings(outcome.value);
-        assert.isTrue(Result.isSuccess(parsed));
-        if (Result.isFailure(parsed)) return;
-        const expected = row.repaired === row.stored
-          ? "sadfjklewcmpgh"
-          : row.repaired;
-        assert.strictEqual(parsed.success.linkHintCharacters, expected);
-      }
+      assert.isTrue(Result.isSuccess(parsed));
+      if (Result.isFailure(parsed)) return;
+      assert.strictEqual(parsed.success.linkHintNumbers, "0123");
     }));
 
   it.effect("falls back on a search URL that has no %s", () =>

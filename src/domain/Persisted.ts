@@ -23,14 +23,8 @@
  * `*_SCHEMA_VERSION` of its group.
  */
 
-import { Effect, Option, Schema } from "effect";
-import {
-  describeHintRefusal,
-  hintCharacterCount,
-  hintCharacterKey,
-  isUsableHintCharacter,
-  readHintCharacters,
-} from "~/domain/HintString.ts";
+import { Effect, Option, Schema, SchemaTransformation } from "effect";
+import { hintCharacterCount, readHintCharacters } from "~/domain/HintString.ts";
 
 // ---------------------------------------------------------------------------
 // Group specifications
@@ -44,19 +38,6 @@ export interface Migration {
   readonly migrate: (data: unknown) => unknown;
 }
 
-/**
- * A value that a repair changed, and what the user must be told about it.
- *
- * A repair keeps what the user chose. The schema alone can only refuse a whole
- * field, and a refused field takes every character with it.
- */
-export interface Repair {
-  /** The data that the schema then reads. */
-  readonly value: unknown;
-  /** One line for each field that changed. Empty when nothing changed. */
-  readonly notices: readonly string[];
-}
-
 /** Everything that `platform/Storage.ts` needs to hold one group. */
 export interface GroupSpec<A> {
   readonly name: string;
@@ -64,13 +45,6 @@ export interface GroupSpec<A> {
   readonly defaults: () => A;
   readonly schemaVersion: number;
   readonly migrations?: readonly Migration[];
-  /**
-   * Repair the data before the schema reads it, and say what changed.
-   *
-   * Storage calls it on the way in and on the way out. It must be pure, and it
-   * must be idempotent: a repaired value repairs to itself, with no notice.
-   */
-  readonly repair?: (data: unknown) => Repair;
   /** Join rapid writes. `0` writes at once. */
   readonly writeDebounceMs?: number;
 }
@@ -119,39 +93,24 @@ const field = <S extends Schema.Top>(schema: S, fallback: S["Type"]) => {
   )(recovered);
 };
 
-/** The code points of a string. A hint character can be outside the BMP. */
-// oxlint-disable-next-line typescript/no-misused-spread
-const codePoints = (value: string): readonly string[] => [...value];
-
 /**
- * Characters for hint labels must be distinct, or two hints collide.
+ * Repair a hint alphabet as the schema decodes it.
  *
- * The comparison uses the case fold, and not the code point. The Greek final
- * sigma and the Greek sigma become the same label, and so do the Turkish
- * dotless i and the Latin i.
+ * The transformation composes the value, removes invalid characters and
+ * removes duplicates. Encoding keeps the repaired value.
  */
-const distinctCharacters = (value: string): boolean =>
-  new Set(codePoints(value).map(hintCharacterKey)).size ===
-    codePoints(value).length;
-
-/**
- * Each character must stay one code point through a case fold.
- *
- * The German sharp s becomes SS, and the Turkish dotted capital I becomes the
- * Latin i plus a combining dot. Such a character gives a label of two
- * characters, which the user cannot type.
- */
-const usableCharacters = (value: string): boolean =>
-  codePoints(value).every(isUsableHintCharacter);
-
-/**
- * At least two characters, counted by code point.
- *
- * `isMinLength` counts UTF-16 units. One emoji has two units, so a set of one
- * emoji passed the check and then gave no prefix-free code at all.
- */
-const atLeastTwoCharacters = (value: string): boolean =>
-  hintCharacterCount(value) >= 2;
+const hintCharactersSchema = Schema.String.pipe(
+  Schema.decode(
+    SchemaTransformation.transform({
+      decode: (value) => readHintCharacters(value).characters.join(""),
+      encode: (value) => value,
+    }),
+  ),
+).check(
+  Schema.makeFilter((value) => hintCharacterCount(value) >= 2, {
+    message: "at least two hint characters are needed",
+  }),
+);
 
 /** A search template without `%s` silently discards whatever the user typed. */
 const hasQueryPlaceholder = (value: string): boolean => value.includes("%s");
@@ -168,34 +127,8 @@ export const settingsSchema = Schema.Struct({
   smoothScroll: field(Schema.Boolean, true),
 
   // --- Link hints ---
-  linkHintCharacters: field(
-    Schema.String.check(
-      Schema.makeFilter(atLeastTwoCharacters, {
-        message: "at least two hint characters are needed",
-      }),
-      Schema.makeFilter(usableCharacters, {
-        message: "a hint character must stay one character in both cases",
-      }),
-      Schema.makeFilter(distinctCharacters, {
-        message: "hint characters must all be different",
-      }),
-    ),
-    "sadfjklewcmpgh",
-  ),
-  linkHintNumbers: field(
-    Schema.String.check(
-      Schema.makeFilter(atLeastTwoCharacters, {
-        message: "at least two hint number characters are needed",
-      }),
-      Schema.makeFilter(usableCharacters, {
-        message: "a hint number must stay one character in both cases",
-      }),
-      Schema.makeFilter(distinctCharacters, {
-        message: "hint number characters must all be different",
-      }),
-    ),
-    "0123456789",
-  ),
+  linkHintCharacters: field(hintCharactersSchema, "sadfjklewcmpgh"),
+  linkHintNumbers: field(hintCharactersSchema, "0123456789"),
   filterLinkHints: field(Schema.Boolean, false),
   waitForEnterForFilteredHints: field(Schema.Boolean, true),
   /** Extra CSS applied inside our shadow root; never injected into the page. */
@@ -311,91 +244,12 @@ export const defaultSettings = (): Settings =>
 
 export const SETTINGS_SCHEMA_VERSION = 1;
 
-// ---------------------------------------------------------------------------
-// The repair of a hint character set
-// ---------------------------------------------------------------------------
-
-/** The name that the user reads for a field of hint characters. */
-const HINT_FIELDS: ReadonlyMap<string, string> = new Map([
-  ["linkHintCharacters", "Link hint characters"],
-  ["linkHintNumbers", "Hint number characters"],
-]);
-
-/**
- * Name one character for the user.
- *
- * The code point is always given. A character that has no shape cannot be
- * shown at all, so the message would name nothing without it.
- */
-const showCharacter = (char: string): string => {
-  const code = char.codePointAt(0) ?? 0;
-  const point = `U+${code.toString(16).toUpperCase().padStart(4, "0")}`;
-  return isUsableHintCharacter(char) ? `${char} (${point})` : point;
-};
-
-/**
- * Repair the two hint character fields of a stored settings object.
- *
- * A stored value can become invalid after an upgrade, and a user can edit the
- * value in the storage viewer of the manager. Without this step the whole
- * field falls back to the shipped set, and nothing tells the user.
- *
- * The repair keeps every character that can be a hint, drops the others, and
- * gives one line for each field that it changed. A field that keeps fewer than
- * two characters is left alone: the schema then refuses it, and the line says
- * that the shipped set is in use.
- */
-export const repairSettings = (data: unknown): Repair => {
-  if (typeof data !== "object" || data === null || Array.isArray(data)) {
-    return { value: data, notices: [] };
-  }
-
-  const source = data as Record<string, unknown>;
-  const next: Record<string, unknown> = { ...source };
-  const notices: string[] = [];
-
-  for (const [key, label] of HINT_FIELDS) {
-    const offered = source[key];
-    if (typeof offered !== "string") continue;
-
-    const { characters, dropped } = readHintCharacters(offered);
-    const repaired = characters.join("");
-    if (repaired === offered) continue;
-
-    const reasons = dropped
-      .map((drop) =>
-        `${showCharacter(drop.char)} was removed, because ${
-          describeHintRefusal(drop.refusal)
-        }`
-      )
-      .join("; ");
-    // A set can change with no character removed. NFC joins a letter and the
-    // accent that follows it into one character.
-    const detail = reasons.length > 0
-      ? reasons
-      : "each character was composed to one code point";
-
-    if (characters.length >= 2) {
-      next[key] = repaired;
-      notices.push(`${label}: ${detail}. The set in use is "${repaired}".`);
-      continue;
-    }
-    notices.push(
-      `${label}: ${detail}. Fewer than two characters are left, so the ` +
-        "shipped set is in use.",
-    );
-  }
-
-  return { value: next, notices };
-};
-
 export const settingsGroup: GroupSpec<Settings> = {
   name: "settings",
   schema: settingsSchema,
   defaults: defaultSettings,
   schemaVersion: SETTINGS_SCHEMA_VERSION,
   migrations: [],
-  repair: repairSettings,
   writeDebounceMs: 250,
 };
 

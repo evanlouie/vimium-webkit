@@ -62,8 +62,8 @@ const isSurrogateHalf = (char: string): boolean => {
 /**
  * A hint character must be a letter, a number, a punctuation mark or a symbol.
  *
- * The four categories are the characters that have a shape of their own. Every
- * other category breaks a label:
+ * These categories usually have a shape of their own. The checks below remove
+ * symbols that join another emoji into one grapheme.
  *
  * - A mark (`\p{M}`) draws on the character before it. A combining acute alone
  *   is not a label.
@@ -74,15 +74,21 @@ const isSurrogateHalf = (char: string): boolean => {
  *   (`\p{C}`) have no agreed shape.
  * - A space (`\p{Z}`) gives a label that looks empty.
  *
- * With this filter each character of an alphabet is also one grapheme, so the
- * prefix match can stay a comparison of code points.
+ * Each accepted character is one visible NFC code point. It also stays one
+ * code point through its case fold. This is the invariant that matching needs.
+ * Some scripts can draw adjacent letters as one grapheme, so no grapheme count
+ * is claimed here.
  */
 const VISIBLE_CATEGORIES = /^[\p{L}\p{N}\p{P}\p{S}]$/u;
+
+/** Symbols that join an adjacent emoji instead of staying separate. */
+const EMOJI_JOINERS = /^[\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}]$/u;
 
 /** Why a character cannot be a hint character. */
 export type HintRefusal =
   | "half-character"
   | "invisible"
+  | "emoji-joiner"
   | "case-fold"
   | "duplicate";
 
@@ -93,6 +99,8 @@ export const describeHintRefusal = (refusal: HintRefusal): string => {
       return "it is half of a character";
     case "invisible":
       return "it is not a letter, a number, a punctuation mark or a symbol";
+    case "emoji-joiner":
+      return "it joins an adjacent emoji into one grapheme";
     case "case-fold":
       return "a case fold makes it two characters";
     case "duplicate":
@@ -112,6 +120,8 @@ export const describeHintRefusal = (refusal: HintRefusal): string => {
  * - An invisible character gives a label that the user cannot see. The
  *   variation selector U+FE0F is the one that a user meets, because it hides
  *   inside a copied emoji.
+ * - A regional indicator or an emoji modifier joins an adjacent emoji. It does
+ *   not stay one displayed character in a longer label.
  * - The Turkish dotted capital I becomes the Latin i plus a combining dot.
  *   The alphabet then holds a second Latin i, and two hints show the same
  *   label.
@@ -128,6 +138,7 @@ export const refuseHintCharacter = (char: string): HintRefusal | null => {
   if (codePoints(char).length !== 1) return "half-character";
   if (isSurrogateHalf(char)) return "half-character";
   if (!VISIBLE_CATEGORIES.test(char)) return "invisible";
+  if (EMOJI_JOINERS.test(char)) return "emoji-joiner";
   if (codePoints(char.toLowerCase()).length !== 1) return "case-fold";
   if (codePoints(hintCharacterKey(char)).length !== 1) return "case-fold";
   return null;

@@ -195,7 +195,6 @@ export const makeGroup = <A>(
   spec: GroupSpec<A>,
   kv: KeyValueStore["Service"],
   issues: Queue.Queue<StorageError>,
-  notices: Queue.Queue<string>,
 ): Effect.Effect<ValueGroup<A>, never, Scope.Scope> =>
   Effect.gen(function*() {
     const key = `${STORAGE_PREFIX}${spec.name}`;
@@ -242,27 +241,6 @@ export const makeGroup = <A>(
     };
 
     // -- decoding ----------------------------------------------------------
-
-    /**
-     * Repair the data before the schema reads it.
-     *
-     * The schema can only refuse a whole field, and a refused field falls back
-     * to the shipped value. The repair keeps what the user chose, and each
-     * line that it gives becomes one message for the user.
-     *
-     * `announce` is false on the write path. The dialog already reports a
-     * change that the user made in it, so a second line would repeat it.
-     */
-    const repair = (data: unknown, announce: boolean): unknown => {
-      if (spec.repair === undefined) return data;
-      const outcome = spec.repair(data);
-      if (announce) {
-        for (const notice of outcome.notices) {
-          Queue.offerUnsafe(notices, notice);
-        }
-      }
-      return outcome.value;
-    };
 
     const runMigrations = (
       data: unknown,
@@ -321,7 +299,7 @@ export const makeGroup = <A>(
         return spec.defaults();
       }
 
-      const decoded = decodeUnknown(spec.schema)(repair(data, true));
+      const decoded = decodeUnknown(spec.schema)(data);
       if (Result.isFailure(decoded)) {
         raise(
           "invalid",
@@ -345,7 +323,7 @@ export const makeGroup = <A>(
      */
     const commit = (next: A): Effect.Effect<void, StorageError> =>
       Effect.gen(function*() {
-        const validated = decodeUnknown(spec.schema)(repair(next, false));
+        const validated = decodeUnknown(spec.schema)(next);
         if (Result.isFailure(validated)) {
           return yield* raise(
             "invalid",
@@ -438,7 +416,7 @@ export const makeGroup = <A>(
         // the two differ. Publishing the raw value would leave memory holding a
         // value that storage does not have, and the setting would appear to
         // revert on the next page load.
-        const validated = decodeUnknown(spec.schema)(repair(next, false));
+        const validated = decodeUnknown(spec.schema)(next);
         if (Result.isFailure(validated)) {
           yield* Deferred.fail(
             reply,
@@ -640,15 +618,6 @@ export class Storage extends Context.Service<Storage, {
    */
   readonly issues: Stream.Stream<StorageError>;
 
-  /**
-   * Every value that a read repaired, in words that the user can read.
-   *
-   * A repair is not a failure: the value is in use, and it is not the value
-   * that was stored. The user must still learn about it, because nothing else
-   * can tell them that a character of their alphabet is gone.
-   */
-  readonly notices: Stream.Stream<string>;
-
   /** Read every group. This is the only correct way to start. */
   readonly hydrateAll: Effect.Effect<void>;
 
@@ -661,18 +630,12 @@ export class Storage extends Context.Service<Storage, {
       Effect.gen(function*() {
         const kv = yield* KeyValueStore;
         const issues = yield* Queue.unbounded<StorageError>();
-        const notices = yield* Queue.unbounded<string>();
 
-        const settings = yield* makeGroup(settingsGroup, kv, issues, notices);
-        const marks = yield* makeGroup(marksGroup, kv, issues, notices);
-        const findHistory = yield* makeGroup(
-          findHistoryGroup,
-          kv,
-          issues,
-          notices,
-        );
-        const history = yield* makeGroup(historyGroup, kv, issues, notices);
-        const session = yield* makeGroup(sessionGroup, kv, issues, notices);
+        const settings = yield* makeGroup(settingsGroup, kv, issues);
+        const marks = yield* makeGroup(marksGroup, kv, issues);
+        const findHistory = yield* makeGroup(findHistoryGroup, kv, issues);
+        const history = yield* makeGroup(historyGroup, kv, issues);
+        const session = yield* makeGroup(sessionGroup, kv, issues);
 
         const groups: ReadonlyArray<ValueGroup<unknown>> = [
           settings,
@@ -693,7 +656,6 @@ export class Storage extends Context.Service<Storage, {
           history,
           session,
           issues: Stream.fromQueue(issues),
-          notices: Stream.fromQueue(notices),
           hydrateAll: Effect.forEach(groups, (group) => group.hydrate, {
             concurrency: "unbounded",
             discard: true,

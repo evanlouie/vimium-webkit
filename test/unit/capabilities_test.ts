@@ -12,13 +12,16 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Layer } from "effect";
 import {
   type CapabilityReport,
   degradationWarnings,
   isApplePlatform,
+  probeCapabilities,
 } from "~/platform/Capabilities.ts";
-
+import { Dom } from "~/platform/Dom.ts";
+import { Gm } from "~/platform/Gm.ts";
+import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 /** A report in which everything works, so one test changes one field. */
 const healthy: CapabilityReport = {
   manager: "unknown",
@@ -136,12 +139,43 @@ const AGENTS: readonly {
     apple: false,
   },
   {
+    name: "the platform identifies macOS when the user agent says nothing",
+    userAgent: "",
+    platform: "MacIntel",
+    apple: true,
+  },
+  {
+    name: "Playwright WebKit on Linux reports a Macintosh user agent",
+    userAgent:
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 " +
+      "(KHTML, like Gecko) Version/18.5 Safari/605.1.15",
+    platform: "Linux x86_64",
+    // This is a known false positive. No feature test can identify Option.
+    apple: true,
+  },
+  {
     name: "a browser that says nothing",
     userAgent: "",
     platform: "",
     apple: false,
   },
 ];
+
+/** Supply a navigator without a change to the global test window. */
+const domWithNavigator = (
+  userAgent: string,
+  platform: string,
+): Layer.Layer<Dom> =>
+  Layer.effect(
+    Dom,
+    Effect.map(Dom, (dom) => {
+      const win = Object.create(dom.window) as Window & typeof globalThis;
+      Object.defineProperty(win, "navigator", {
+        value: { userAgent, platform },
+      });
+      return Dom.of({ ...dom, window: win });
+    }),
+  ).pipe(Layer.provide(Dom.layer));
 
 describe("Capabilities", () => {
   for (const row of AGENTS) {
@@ -153,4 +187,17 @@ describe("Capabilities", () => {
         );
       }));
   }
+
+  it.effect("reads the Apple platform flag from the navigator probe", () => {
+    const dom = domWithNavigator("", "MacIntel");
+    const support = Layer.mergeAll(
+      dom,
+      Layer.provide(Gm.layer, dom),
+      KeyValueStore.layerMemory,
+    );
+    return Effect.gen(function*() {
+      const report = yield* probeCapabilities;
+      assert.isTrue(report.applePlatform);
+    }).pipe(Effect.provide(support));
+  });
 });
