@@ -247,6 +247,19 @@ describe("HintString", () => {
       assert.strictEqual(hintCharacterKey("\u0131"), hintCharacterKey("I"));
     }));
 
+  it.effect("refuses half of an astral character", () =>
+    Effect.sync(() => {
+      // A value that was cut at a UTF-16 boundary carries such a half.
+      assert.isFalse(isUsableHintCharacter("\ud83d"));
+      assert.isFalse(isUsableHintCharacter("\ude00"));
+      assert.strictEqual(normaliseHintCharacters("ab\ud83d", "xy"), "ab");
+      // A whole astral character is one hint character.
+      assert.strictEqual(
+        normaliseHintCharacters("ab\u{1f600}", "xy"),
+        "ab\u{1f600}",
+      );
+    }));
+
   it.effect("is decimal for the default digit set", () =>
     Effect.sync(() => {
       const digits = "0123456789";

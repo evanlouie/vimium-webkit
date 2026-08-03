@@ -173,6 +173,26 @@ describe("Persisted", () => {
       expected: "\u03b1\u03b2\u03b3",
     },
     {
+      name: "an emoji alphabet is kept",
+      stored: "\u{1f600}\u{1f601}",
+      expected: "\u{1f600}\u{1f601}",
+    },
+    {
+      name: "a mathematical alphabet is kept",
+      stored: "\u{1d41a}\u{1d41b}\u{1d41c}",
+      expected: "\u{1d41a}\u{1d41b}\u{1d41c}",
+    },
+    {
+      name: "one emoji is one character, and one is too few",
+      stored: "\u{1f600}",
+      expected: null,
+    },
+    {
+      name: "half of a surrogate pair is not a character",
+      stored: "ab\ud83d",
+      expected: null,
+    },
+    {
       name: "an ASCII alphabet is kept",
       stored: "asdfg",
       expected: "asdfg",

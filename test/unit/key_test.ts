@@ -206,6 +206,104 @@ describe("Key", () => {
       assert.deepEqual(sequence("<a-f>"), [notation(optionF) ?? ""]);
     }));
 
+  /**
+   * Characters outside the Basic Multilingual Plane.
+   *
+   * Each row gives a key sequence from a mapping line and the keys that it
+   * holds. A walk over UTF-16 units cuts such a character into two halves.
+   */
+  const ASTRAL_SEQUENCES: readonly {
+    readonly name: string;
+    readonly input: string;
+    readonly expected: readonly string[] | null;
+  }[] = [
+    {
+      name: "an emoji alone is one key",
+      input: "\u{1f600}",
+      expected: ["\u{1f600}"],
+    },
+    {
+      name: "an emoji after a letter is one key",
+      input: "a\u{1f600}",
+      expected: ["a", "\u{1f600}"],
+    },
+    {
+      name: "two emoji are two keys",
+      input: "\u{1f600}\u{1f601}",
+      expected: ["\u{1f600}", "\u{1f601}"],
+    },
+    {
+      name: "a mathematical letter is one key",
+      input: "\u{1d41a}",
+      expected: ["\u{1d41a}"],
+    },
+    {
+      name: "an emoji takes a modifier",
+      input: "<a-\u{1f600}>",
+      expected: ["<a-\u{1f600}>"],
+    },
+    {
+      name: "an emoji in angle brackets is the plain key",
+      input: "<\u{1f600}>",
+      expected: ["\u{1f600}"],
+    },
+    {
+      name: "an unterminated angle key after an emoji is still an error",
+      input: "\u{1f600}<c-a",
+      expected: null,
+    },
+  ];
+
+  for (const row of ASTRAL_SEQUENCES) {
+    it.effect(`parses an astral sequence: ${row.name}`, () =>
+      Effect.sync(() => {
+        assert.deepEqual(sequence(row.input), row.expected);
+      }));
+  }
+
+  /**
+   * The notation of an astral key press.
+   *
+   * The notation must be the same string that the mapping parser gives, or the
+   * binding can never fire.
+   */
+  const ASTRAL_EVENTS: readonly {
+    readonly name: string;
+    readonly event: KeyEventLike;
+    readonly expected: string;
+  }[] = [
+    {
+      name: "an emoji key",
+      event: event({ key: "\u{1f600}" }),
+      expected: "\u{1f600}",
+    },
+    {
+      name: "a mathematical letter key",
+      event: event({ key: "\u{1d41a}" }),
+      expected: "\u{1d41a}",
+    },
+    {
+      name: "an emoji key with Ctrl",
+      event: event({ key: "\u{1f600}", ctrlKey: true }),
+      expected: "<c-\u{1f600}>",
+    },
+  ];
+
+  for (const row of ASTRAL_EVENTS) {
+    it.effect(`writes an astral key: ${row.name}`, () =>
+      Effect.sync(() => {
+        assert.strictEqual(notation(row.event), row.expected);
+        // The mapping and the press must meet.
+        assert.deepEqual(sequence(row.expected), [row.expected]);
+      }));
+  }
+
+  it.effect("does not take half of an astral character as a count digit", () =>
+    Effect.sync(() => {
+      assert.isFalse(isCountDigit("\u{1f600}", true));
+      assert.isFalse(isCountDigit("\u{1f600}", false));
+    }));
+
   it.effect("reads both composition signals", () =>
     Effect.sync(() => {
       assert.isTrue(isComposing(event({ key: "a", isComposing: true })));
