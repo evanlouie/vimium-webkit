@@ -7,7 +7,14 @@
  * function.
  */
 
-import { Context, Effect, Layer, Option, Stream } from "effect";
+import {
+  Context,
+  Effect,
+  Layer,
+  type ManagedRuntime,
+  Option,
+  Stream,
+} from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Exclusions } from "~/core/Exclusions.ts";
 import { HandlerStack } from "~/core/HandlerStack.ts";
@@ -39,12 +46,31 @@ export class Boot extends Context.Service<Boot, BootSignal>()(
     Layer.succeed(Boot, Boot.of(signal));
 }
 
+/**
+ * Who owns the runtime of this frame.
+ *
+ * A runtime cannot close its own scope from inside itself. `src/main.ts` builds
+ * the runtime, so `src/main.ts` gives this service. The application asks for the
+ * release, and it never decides how the release happens.
+ */
+export class RuntimeOwner extends Context.Service<RuntimeOwner, {
+  /** Release everything that this frame's runtime holds. */
+  readonly release: Effect.Effect<void>;
+}>()("vimium/boot/RuntimeOwner") {
+  static readonly layerFrom = (
+    release: Effect.Effect<void>,
+  ): Layer.Layer<RuntimeOwner> =>
+    Layer.succeed(RuntimeOwner, RuntimeOwner.of({ release }));
+}
+
 /** What the exit hook below needs. Named, so that a test can build it. */
 export interface ExitParts {
   /** Forget a key that was suppressed but never used. */
   readonly forgetSuppressed: Effect.Effect<void>;
   /** Write every value that is still inside its debounce window. */
   readonly flushAll: Effect.Effect<void>;
+  /** Release everything that this frame's runtime holds. */
+  readonly release: Effect.Effect<void>;
 }
 
 /**
@@ -58,12 +84,63 @@ export interface ExitParts {
  * 2. Give every held value to storage. Marks wait 100 ms, settings 250 ms and
  *    the history index two seconds. A navigation inside any of those windows
  *    used to lose the write.
+ * 3. Release the runtime, but only on a final exit, and only after the writes
+ *    reached the backend. A release closes the scope that the storage actor
+ *    lives in, so a release before the flush would drop the write that this
+ *    hook exists to save. A page that comes back from the back/forward cache
+ *    keeps its runtime: it never runs its scripts again, so nothing would build
+ *    the runtime a second time.
  */
-export const onPageExit = (parts: ExitParts): ExitHook => () =>
+export const onPageExit = (parts: ExitParts): ExitHook => (exit) =>
   Effect.gen(function*() {
     yield* parts.forgetSuppressed;
     yield* parts.flushAll;
+    if (!exit.final) return;
+    yield* parts.release;
   });
+
+/** A runtime, and the one effect that closes it. */
+export interface OwnedRuntime<R, ER> {
+  readonly runtime: ManagedRuntime.ManagedRuntime<R, ER>;
+  /** Close the runtime scope. It is safe to run it more than once. */
+  readonly release: Effect.Effect<void>;
+}
+
+/**
+ * Build a runtime that can ask to be released.
+ *
+ * The two needs make a circle: the layer needs a way to release the runtime,
+ * and the runtime does not exist until the layer is built. The holder below
+ * breaks the circle, because `Effect.suspend` reads it when the release runs.
+ *
+ * `dispose` closes the scope that the layer owns, so every listener, port,
+ * stylesheet, manager callback and fiber goes with it. It also replaces the
+ * context of the runtime with a defect: a runtime that was released cannot run
+ * anything again. The caller must therefore ask for the release only when this
+ * document will not run again.
+ */
+export const makeOwnedRuntime = <R, ER>(
+  build: (
+    owner: Layer.Layer<RuntimeOwner>,
+  ) => ManagedRuntime.ManagedRuntime<R, ER>,
+): OwnedRuntime<R, ER> => {
+  let live: ManagedRuntime.ManagedRuntime<R, ER> | undefined;
+
+  const release = Effect.suspend(() => {
+    const current = live;
+    live = undefined;
+    if (current === undefined) return Effect.void;
+    return Effect.promise(() =>
+      current.dispose().catch((cause: unknown) => {
+        console.error("[vimium-webkit] failed to release", cause);
+      })
+    );
+  });
+
+  const runtime = build(RuntimeOwner.layerFrom(release));
+  live = runtime;
+  return { runtime, release };
+};
 
 /**
  * Say what a storage failure means to the user.
@@ -97,6 +174,7 @@ export const BootstrapLayer: Layer.Layer<
   | Omnibar
   | Realm
   | Report
+  | RuntimeOwner
   | Settings
   | Storage
 > = Layer.effectDiscard(Effect.gen(function*() {
@@ -109,6 +187,7 @@ export const BootstrapLayer: Layer.Layer<
   const link = yield* FrameLink;
   const lifecycle = yield* Lifecycle;
   const modes = yield* Modes;
+  const owner = yield* RuntimeOwner;
   const realm = yield* Realm;
   const report = yield* Report;
   const settings = yield* Settings;
@@ -177,6 +256,7 @@ export const BootstrapLayer: Layer.Layer<
   yield* lifecycle.onExit(onPageExit({
     forgetSuppressed: keyboard.forgetSuppressed,
     flushAll: storage.flushAll,
+    release: owner.release,
   }));
 
   yield* Effect.forkScoped(

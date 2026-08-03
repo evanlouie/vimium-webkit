@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Page lifecycle</title>
+    <link rel="stylesheet" href="assets/base.css" />
+  </head>
+  <body>
+    <h1>Page lifecycle</h1>
+    <p class="note">
+      Leaves the page and comes back. A page that the browser keeps never runs
+      its scripts again, so the application must survive
+      <code>pagehide</code> with <code>persisted === true</code>. A child frame
+      that goes away must take nothing from the top frame.
+    </p>
+
+    <p>
+      <a id="leave" href="long-text.html">Leave this page</a>
+      <button id="drop-child" type="button">Send the child away</button>
+    </p>
+    <p class="note">
+      document: <span id="document-id"></span>, restored:
+      <span id="restored"></span>
+    </p>
+
+    <iframe
+      id="child"
+      src="frames/level2.html"
+      width="440"
+      height="180"
+      title="child frame"
+    ></iframe>
+
+    <div class="tall"></div>
+
+    <script src="assets/lifecycle.js"></script>
+  </body>
+</html>

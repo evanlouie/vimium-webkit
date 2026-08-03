@@ -6,11 +6,12 @@
  * exactly what a page's content security policy stops. "Lazy" here therefore
  * means lazily *run*, and not lazily fetched.
  *
- * This file runs in every frame of every page, and it does three things:
+ * This file runs in every frame of every page, and it does four things:
  *
  * 1. It claims the realm, so that a second injection does nothing.
  * 2. It waits until something says that the user wants us.
  * 3. It builds the application, and gives it the keyboard.
+ * 4. It releases the application when this frame's page goes away for good.
  *
  * Step 2 is what keeps a page with twenty frames cheap. A frame that never
  * receives a key builds the guard, and nothing else.
@@ -26,7 +27,7 @@ import {
   Schema,
 } from "effect";
 import { AppLayer } from "~/App.ts";
-import { Boot, BootstrapLayer } from "~/boot/Bootstrap.ts";
+import { Boot, BootstrapLayer, makeOwnedRuntime } from "~/boot/Bootstrap.ts";
 import { awaitActivation, claimRealm } from "~/boot/Guard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Realm } from "~/platform/Realm.ts";
@@ -65,11 +66,26 @@ const start = Effect.gen(function*() {
   yield* Effect.scoped(Effect.gen(function*() {
     const signal = yield* awaitActivation;
 
-    const runtime = ManagedRuntime.make(
-      BootstrapLayer.pipe(
-        Layer.provide(AppLayer),
-        Layer.provide(Boot.layerFrom(signal)),
-      ),
+    /**
+     * The runtime of this frame, and the effect that closes it.
+     *
+     * The application asks for the release on a final page exit, and only after
+     * the last writes reached storage. A page that goes into the back/forward
+     * cache keeps its runtime, because a restored page never runs its scripts
+     * again and nothing here would build a second one.
+     *
+     * This holder belongs to one realm. The script runs again in every frame,
+     * so a child frame that goes away releases the runtime that the child
+     * built. It cannot touch the runtime of any other frame.
+     */
+    const { runtime, release } = makeOwnedRuntime((owner) =>
+      ManagedRuntime.make(
+        BootstrapLayer.pipe(
+          Layer.provide(AppLayer),
+          Layer.provide(Boot.layerFrom(signal)),
+          Layer.provide(owner),
+        ),
+      )
     );
 
     // A failure to start must never break the page. Report it once, and stay
@@ -83,11 +99,15 @@ const start = Effect.gen(function*() {
         }),
     }).pipe(
       Effect.catchCause((cause) =>
-        Effect.sync(() => {
+        Effect.gen(function*() {
           console.error(
             "[vimium-webkit] failed to start",
             Cause.pretty(cause),
           );
+          // A part of the graph may have been built before the failure, and
+          // that part holds listeners of this page. Nothing else will release
+          // them, because nothing else knows about this runtime.
+          yield* release;
         })
       ),
     );
