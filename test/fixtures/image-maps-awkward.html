@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Image maps with awkward names</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+    .maps img {
+      width: 60px;
+      height: 60px;
+      margin-right: 12px;
+      vertical-align: top;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>Image maps with awkward names</h1>
+    <p class="note">
+      A <code>usemap</code> name belongs to the page. Each name below has a
+      character with a meaning inside a CSS selector. A selector that is built
+      by joining strings throws, or it matches the wrong map, and one bad name
+      used to take every hint on the page with it.
+    </p>
+
+    <p><a id="ordinary" href="#ordinary-target">Ordinary link</a></p>
+
+    <div class="maps">
+      <img src="assets/map.svg" usemap='#nav"quote' alt="Quote map" />
+      <img src="assets/map.svg" usemap="#nav\" alt="Backslash map" />
+      <img src="assets/map.svg" usemap="#main\nav" alt="Escape map" />
+      <img src="assets/map.svg" usemap="#nav space" alt="Space map" />
+      <img src="assets/map.svg" usemap="#nav[0]" alt="Bracket map" />
+      <img src="assets/map.svg" usemap="#nav:hover" alt="Colon map" />
+      <img src="assets/map.svg" usemap="#🗺" alt="Emoji map" />
+      <img src="assets/map.svg" usemap="#na&#10;v" alt="Newline map" />
+      <img src="assets/map.svg" usemap="#" alt="Empty map" />
+      <img src="assets/map.svg" usemap="#dupe" alt="Repeated map" />
+    </div>
+
+    <map name='nav"quote'>
+      <area shape="rect" coords="0,0,60,60" href="#quote-target" aria-label="Quote area" />
+    </map>
+    <map name="nav\">
+      <area shape="rect" coords="0,0,60,60" href="#backslash-target" aria-label="Backslash area" />
+    </map>
+    <!-- A selector reads the backslash as an escape, and then it finds the
+         decoy below instead of this map. -->
+    <map name="main\nav">
+      <area shape="rect" coords="0,0,60,60" href="#escape-target" aria-label="Escape area" />
+    </map>
+    <map name="mainnav">
+      <area shape="rect" coords="0,0,60,60" href="#decoy-target" aria-label="Decoy area" />
+    </map>
+    <map name="nav space">
+      <area shape="rect" coords="0,0,60,60" href="#space-target" aria-label="Space area" />
+    </map>
+    <map name="nav[0]">
+      <area shape="rect" coords="0,0,60,60" href="#bracket-target" aria-label="Bracket area" />
+    </map>
+    <map name="nav:hover">
+      <area shape="rect" coords="0,0,60,60" href="#colon-target" aria-label="Colon area" />
+    </map>
+    <map name="🗺">
+      <area shape="rect" coords="0,0,60,60" href="#emoji-target" aria-label="Emoji area" />
+    </map>
+    <map name="na&#10;v">
+      <area shape="rect" coords="0,0,60,60" href="#newline-target" aria-label="Newline area" />
+    </map>
+    <!-- No map has an empty name for the browser, so the image beside it gets
+         no hint at all. -->
+    <map name="">
+      <area shape="rect" coords="0,0,60,60" href="#empty-target" aria-label="Empty area" />
+    </map>
+    <map name="dupe">
+      <area shape="rect" coords="0,0,60,60" href="#dupe-first-target" aria-label="Dupe first area" />
+    </map>
+    <map name="dupe">
+      <area shape="rect" coords="0,0,60,60" href="#dupe-second-target" aria-label="Dupe second area" />
+    </map>
+
+    <div class="tall"></div>
+  </body>
+</html>
