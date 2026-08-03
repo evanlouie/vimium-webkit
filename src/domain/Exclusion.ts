@@ -15,7 +15,7 @@
 import { Option } from "effect";
 import { exclusionRuleSchema } from "~/domain/Persisted.ts";
 import type { ExclusionRule } from "~/domain/Persisted.ts";
-import { isLinearRegex } from "~/domain/RegexSafety.ts";
+import { isLinearRegex, regexSafetyError } from "~/domain/RegexSafety.ts";
 
 /**
  * The rule as it is stored, given again here.
@@ -38,14 +38,29 @@ const escapeRegExp = (input: string): string =>
   input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
- * The longest URL that we test a pattern against.
+ * The longest URL that we test a glob against.
  *
  * The page controls its URLs, and a URL can be some megabytes long. Examples
  * are a `data:` URL in an anchor, and a router that keeps its state in the
- * fragment. Nothing correct comes near this limit, and each matcher below is
- * linear in the length of the input. This is the second lock on the same door.
+ * fragment. Nothing correct comes near this limit, and the glob matcher is
+ * linear in the length of the input.
  */
 const MAX_URL_LENGTH = 4096;
+
+/**
+ * The longest URL that we test a raw regular expression against.
+ *
+ * This is the second line of defence, and it is the one that holds. The static
+ * check in `~/domain/RegexSafety.ts` refuses the shapes that it can prove
+ * ambiguous, but it does not promise a linear match. `[a-z]*x` is linear at one
+ * start position, and a search over all positions is quadratic.
+ *
+ * The cap turns that class into a fixed cost. The slowest expression that the
+ * check accepts is a quadratic one, and 512 characters of it cost about 2 ms.
+ * A rule with a raw expression does not match a URL that is longer than the
+ * cap, and `~/core/Exclusions.ts` writes a warning when that happens.
+ */
+export const MAX_REGEX_URL_LENGTH = 512;
 
 /** The longest regular expression from the user that we compile. */
 const MAX_PATTERN_LENGTH = 1024;
@@ -92,52 +107,100 @@ const globMatcher = (pattern: string): UrlMatcher => {
   };
 };
 
+/** Is this pattern a raw regular expression, and not a glob? */
+export const isRawPattern = (pattern: string): boolean => {
+  const trimmed = pattern.trim();
+  return trimmed.length > 1 && trimmed.startsWith("/") &&
+    trimmed.endsWith("/");
+};
+
+/** What one pattern gave: a matcher, or the reason that we dropped it. */
+type Compiled =
+  | { readonly ok: true; readonly matches: UrlMatcher }
+  | { readonly ok: false; readonly reason: string };
+
 /**
  * Compile a Vimium URL pattern.
  *
  * `*` is the only wildcard. A pattern between two `/` characters is a raw
- * regular expression, which is the escape of upstream. The result is
- * `Option.none()` for an empty, a bad or an unsafe pattern. A bad rule must
- * cost the user that rule, and no other rule.
+ * regular expression, which is the escape of upstream. A bad rule costs the
+ * user that rule, and no other rule, so every failure comes back as a reason
+ * and never as an exception.
  */
-export const compilePattern = (pattern: string): Option.Option<UrlMatcher> => {
+const compile = (pattern: string): Compiled => {
   const trimmed = pattern.trim();
-  if (trimmed.length === 0) return Option.none();
-  if (trimmed.length > MAX_PATTERN_LENGTH) return Option.none();
+  if (trimmed.length === 0) return { ok: false, reason: "the rule is empty" };
+  if (trimmed.length > MAX_PATTERN_LENGTH) {
+    return {
+      ok: false,
+      reason: `the pattern is longer than ${MAX_PATTERN_LENGTH} characters`,
+    };
+  }
 
-  if (trimmed.length > 1 && trimmed.startsWith("/") && trimmed.endsWith("/")) {
+  if (isRawPattern(trimmed)) {
     const source = `^${trimmed.slice(1, -1)}$`;
     let regexp: RegExp;
     try {
       regexp = new RegExp(source);
-    } catch {
-      // A bad regular expression must not disable every other rule.
-      return Option.none();
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      return {
+        ok: false,
+        reason: `the expression does not compile: ${detail}`,
+      };
     }
     // The page chooses the URL, and the rules run on every navigation. An
-    // expression that backtracks turns one crafted URL into a frozen tab, and
-    // a limit on the length of the input does not stop it: `(a+)+$` against
-    // forty characters already takes minutes. Only the shapes that match in
-    // linear time are allowed. A glob has no such limit, and it stays the
-    // format that we ask users for.
-    if (!isLinearRegex(source, "")) return Option.none();
-    return Option.some((url: string): boolean =>
-      url.length <= MAX_URL_LENGTH && regexp.test(url)
-    );
+    // expression that backtracks turns one crafted URL into a tab that does
+    // not answer: `(a+)+$` against forty characters already takes minutes.
+    // The check refuses the shapes that it can prove ambiguous, and the cap
+    // below bounds the work of every shape that it accepts.
+    const problem = regexSafetyError(source, "");
+    if (Option.isSome(problem)) return { ok: false, reason: problem.value };
+    return {
+      ok: true,
+      matches: (url: string): boolean =>
+        url.length <= MAX_REGEX_URL_LENGTH && regexp.test(url),
+    };
   }
 
   const match = globMatcher(trimmed);
-  return Option.some((url: string): boolean =>
-    url.length <= MAX_URL_LENGTH && match(url)
-  );
+  return {
+    ok: true,
+    matches: (url: string): boolean =>
+      url.length <= MAX_URL_LENGTH && match(url),
+  };
+};
+
+/**
+ * The matcher for one pattern, or `Option.none()` when we drop the rule.
+ *
+ * Use `patternProblem` when the caller must tell the user why.
+ */
+export const compilePattern = (pattern: string): Option.Option<UrlMatcher> => {
+  const outcome = compile(pattern);
+  return outcome.ok ? Option.some(outcome.matches) : Option.none();
+};
+
+/**
+ * Why did this pattern give no matcher?
+ *
+ * A `None` means that the pattern compiled. A `Some` carries a reason that a
+ * user can read, so that a dropped rule is never silent.
+ */
+export const patternProblem = (pattern: string): Option.Option<string> => {
+  const outcome = compile(pattern);
+  return outcome.ok ? Option.none() : Option.some(outcome.reason);
 };
 
 /**
  * The regular expression that a glob is *equivalent* to.
  *
  * Kept for the tests, and for a view that shows the user what a pattern means.
- * It is not used to match. See `UrlMatcher`. It refuses the same patterns as
- * `compilePattern`, so the two functions cannot disagree.
+ * It is not used to match. See `UrlMatcher`.
+ *
+ * The safety check runs on a raw expression only. A glob cannot backtrack,
+ * because `globMatcher` reads it greedily, and a run of `*` in a glob becomes
+ * one `.*` here. The two functions therefore accept the same patterns.
  */
 export const patternToRegExp = (pattern: string): Option.Option<RegExp> => {
   const trimmed = pattern.trim();
@@ -145,13 +208,15 @@ export const patternToRegExp = (pattern: string): Option.Option<RegExp> => {
     return Option.none();
   }
 
-  const body =
-    trimmed.length > 1 && trimmed.startsWith("/") && trimmed.endsWith("/")
-      ? trimmed.slice(1, -1)
-      : trimmed.split("*").map(escapeRegExp).join(".*");
+  const raw = isRawPattern(trimmed);
+  const body = raw
+    ? trimmed.slice(1, -1)
+    // A run of `*` means what one `*` means, and `.*.*` is a shape that the
+    // safety check refuses. Collapse the run before the translation.
+    : trimmed.replace(/\*+/g, "*").split("*").map(escapeRegExp).join(".*");
   const source = `^${body}$`;
 
-  if (!isLinearRegex(source, "")) return Option.none();
+  if (raw && !isLinearRegex(source, "")) return Option.none();
 
   try {
     return Option.some(new RegExp(source));
@@ -165,10 +230,24 @@ interface CompiledRule {
   readonly passKeys: string;
 }
 
+/** A rule that did not compile, with the reason that the user must read. */
+export interface DroppedRule {
+  readonly pattern: string;
+  readonly reason: string;
+}
+
 /** A compiled set of exclusion rules. Every method is pure. */
 export interface ExclusionSet {
   /** How many rules compiled. A bad pattern is not counted. */
   readonly size: number;
+  /**
+   * The rules that did not compile, in the order that the user wrote them.
+   *
+   * A dropped rule stops protecting the page, so the caller must tell the
+   * user. `~/core/Exclusions.ts` writes one warning for each entry, and the
+   * settings dialog marks the line.
+   */
+  readonly dropped: ReadonlyArray<DroppedRule>;
   /**
    * Resolve the rule for a URL.
    *
@@ -193,10 +272,13 @@ export const makeExclusionSet = (
   rules: readonly ExclusionRule[],
 ): ExclusionSet => {
   const compiled: CompiledRule[] = [];
+  const dropped: DroppedRule[] = [];
   for (const rule of rules) {
-    const matches = compilePattern(rule.pattern);
-    if (Option.isSome(matches)) {
-      compiled.push({ matches: matches.value, passKeys: rule.passKeys });
+    const outcome = compile(rule.pattern);
+    if (outcome.ok) {
+      compiled.push({ matches: outcome.matches, passKeys: rule.passKeys });
+    } else {
+      dropped.push({ pattern: rule.pattern, reason: outcome.reason });
     }
   }
 
@@ -227,7 +309,7 @@ export const makeExclusionSet = (
     return result;
   };
 
-  return Object.freeze({ size: compiled.length, match });
+  return Object.freeze({ size: compiled.length, dropped, match });
 };
 
 /**
