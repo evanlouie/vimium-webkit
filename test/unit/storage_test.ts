@@ -554,13 +554,21 @@ describe("Storage", () => {
         const storage = yield* Storage;
         yield* storage.session.write({
           knownTabs: [],
+          acknowledged: ["one"],
+          zoomByOrigin: {},
+        });
+        const stored = yield* backend.read(SESSION_KEY);
+        assert.isTrue(Option.isSome(stored));
+        if (Option.isNone(stored)) return;
+        assert.include(stored.value, '"acknowledged":["one"]');
+
+        const defaults = yield* storage.session.reset;
+        assert.deepEqual(defaults, {
+          knownTabs: [],
           acknowledged: [],
           zoomByOrigin: {},
         });
-        assert.isTrue(Option.isSome(yield* backend.read(SESSION_KEY)));
-
-        const defaults = yield* storage.session.reset;
-        assert.deepEqual(defaults.acknowledged, []);
+        assert.deepEqual(storage.session.currentUnsafe(), defaults);
         assert.isTrue(Option.isNone(yield* backend.read(SESSION_KEY)));
       }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
     }));

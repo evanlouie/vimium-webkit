@@ -77,12 +77,8 @@ const OVERLAY_CHECK_MS = 500;
 /**
  * Where the settings in this dialog are kept.
  *
- * Said out loud, and said truthfully, because it changes what the user must
- * expect. The old text claimed that settings never go to `localStorage`, while
- * the store falls back to exactly that on a manager with no value API, and
- * `Capabilities` warns about it in the same session. Two parts of the interface
- * that disagree about where the data of the user lives are worse than either
- * message alone.
+ * The explanation identifies the selected storage surface because it changes
+ * persistence. It must agree with `Capabilities`.
  */
 const storageExplanation = (backend: KeyValueKind): string => {
   const preamble = "There is no options page for a userscript, so settings " +
