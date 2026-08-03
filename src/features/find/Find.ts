@@ -65,6 +65,7 @@ import {
   firstMatchInView,
   indexAtSelection,
   matchesInRuns,
+  type RunSearch,
   type TextRun,
   wordUnderCursor,
 } from "./Engine.ts";
@@ -89,6 +90,13 @@ export interface SearchOutcome {
   readonly index: number;
   readonly empty: boolean;
   readonly error: Option.Option<string>;
+  /**
+   * True when the search stopped at its time budget.
+   *
+   * The counts are then the counts of the text that was read, and not of the
+   * page. The HUD says so, because a wrong `3/17` is worse than no number.
+   */
+  readonly stopped: boolean;
 }
 
 const NO_QUERY: SearchOutcome = {
@@ -96,6 +104,7 @@ const NO_QUERY: SearchOutcome = {
   index: -1,
   empty: true,
   error: Option.none(),
+  stopped: false,
 };
 
 /** `"3/17"`, `"No matches"`, or the message of the bad pattern. */
@@ -104,8 +113,9 @@ export const statusText = (outcome: SearchOutcome): string => {
     return `Bad pattern: ${outcome.error.value}`;
   }
   if (outcome.empty) return "";
-  if (outcome.count === 0) return "No matches";
-  return `${outcome.index + 1}/${outcome.count}`;
+  const late = outcome.stopped ? "  (stopped at the time limit)" : "";
+  if (outcome.count === 0) return `No matches${late}`;
+  return `${outcome.index + 1}/${outcome.count}${late}`;
 };
 
 /** Newest first, without a repeat, and capped. Pure, so the cap is testable. */
@@ -354,17 +364,19 @@ export class Find extends Context.Service<Find, {
               index: -1,
               empty: false,
               error: parsed.error,
+              stopped: false,
             };
           }
 
           const pattern = toRegExp(parsed);
           const collected = yield* Ref.get(runs);
-          const found = Option.isNone(pattern)
-            ? []
-            : yield* dom.probeOr<ReadonlyArray<FindMatch>>(
+          const search = Option.isNone(pattern)
+            ? { matches: [] as ReadonlyArray<FindMatch>, stopped: false }
+            : yield* dom.probeOr<RunSearch>(
               () => matchesInRuns(doc, collected, pattern.value),
-              [],
+              { matches: [], stopped: false },
             );
+          const found = search.matches;
 
           yield* Ref.set(matches, found);
           yield* Ref.set(
@@ -381,6 +393,7 @@ export class Find extends Context.Service<Find, {
             index: yield* Ref.get(current),
             empty: false,
             error: Option.none<string>(),
+            stopped: search.stopped,
           };
         },
       );
@@ -490,7 +503,13 @@ export class Find extends Context.Service<Find, {
         const found = yield* Ref.get(matches);
         const count = found.length;
         if (count === 0) {
-          return { count: 0, index: -1, empty: false, error: Option.none() };
+          return {
+            count: 0,
+            index: -1,
+            empty: false,
+            error: Option.none(),
+            stopped: false,
+          };
         }
 
         const index = yield* Ref.get(current);
@@ -500,7 +519,13 @@ export class Find extends Context.Service<Find, {
         yield* draw();
         yield* scrollToCurrent();
 
-        return { count, index: next, empty: false, error: Option.none() };
+        return {
+          count,
+          index: next,
+          empty: false,
+          error: Option.none(),
+          stopped: false,
+        };
       });
 
       // -- the mode that lives on after Enter -----------------------------
@@ -545,7 +570,10 @@ export class Find extends Context.Service<Find, {
           Scope.Scope,
           scope,
         );
-        yield* handle.onExit(() => clearState);
+        // The scope owns the mode, and the mode now owns the scope. An exit
+        // for any reason therefore closes the scope, and a defect exit leaves
+        // no scope that only the next `closePost` would release.
+        yield* handle.onExit(() => Effect.andThen(clearState, closePost));
         yield* Ref.set(postScope, Option.some(scope));
       });
 

@@ -58,15 +58,38 @@ export interface MatchSpan {
 export const DEFAULT_MATCH_LIMIT = 500;
 
 /**
- * The time budget for one `collectSpans` pass.
+ * The time budget for one `matchesInRuns` pass.
  *
  * A pattern from the user in `regexFindMode` runs against the whole page on
- * every keystroke. A pattern that backtracks badly, such as `(a+)+$` against a
- * long line, freezes the tab with no way out, because find mode owns the
- * keyboard. A stop at the budget gives the matches that are already found,
- * which is what an incremental find wants.
+ * every keystroke. `~/domain/FindQuery.ts` refuses the shapes that it can prove
+ * ambiguous, but that check does not promise a linear match: `[a-z]*x` costs
+ * about 2.3 s in one `exec` against 40 000 characters.
+ *
+ * The search therefore reads the text in windows, and looks at the clock
+ * between two of them. A stop gives the matches that are already found, which
+ * is what an incremental find wants, and the caller reports the stop.
  */
-const MATCH_BUDGET_MS = 50;
+export const MATCH_BUDGET_MS = 50;
+
+/**
+ * The most characters that one `exec` reads.
+ *
+ * This is the work between two looks at the clock. One `exec` cannot be stopped
+ * from JavaScript, so the window is the true limit on how long find can hold
+ * the main thread. The slowest expression that the safety check accepts is
+ * quadratic at one start position, and 1024 characters of it cost about 2 ms.
+ */
+export const SEARCH_WINDOW = 1024;
+
+/**
+ * The text that each window keeps on both sides.
+ *
+ * A window is a slice of the haystack, so `\b`, a lookbehind and a lookahead
+ * need the text beside it. A match that is longer than this, or a lookaround
+ * that reads further than this, is not found at the edge of a window. A find
+ * query is far shorter than this in every normal use.
+ */
+const WINDOW_CONTEXT = 256;
 
 /**
  * The clock for the budget.
@@ -76,50 +99,89 @@ const MATCH_BUDGET_MS = 50;
 const now = (): number =>
   typeof performance !== "undefined" ? performance.now() : Date.now();
 
+/** What one search of a haystack gave, and whether it read all of it. */
+export interface SpanSearch {
+  readonly spans: ReadonlyArray<MatchSpan>;
+  /** True when the deadline stopped the search before the end of the text. */
+  readonly stopped: boolean;
+}
+
 /**
  * Every match of `pattern` in `haystack`, up to `limit`.
  *
  * The expression is copied, and not used as it is. `lastIndex` on a `g`
  * expression is state that changes, and a caller that used one expression for
  * two searches would lose the first half of the second search.
+ *
+ * The text is read in windows of `SEARCH_WINDOW` characters. Each window also
+ * holds `WINDOW_CONTEXT` characters of the text on both sides, so that a word
+ * boundary and a lookaround still see what is beside them. A match belongs to
+ * the window that holds its first character, so no match is counted twice.
  */
 export const collectSpans = (
   haystack: string,
   pattern: RegExp,
   limit: number = DEFAULT_MATCH_LIMIT,
-): ReadonlyArray<MatchSpan> => {
-  if (limit <= 0 || haystack.length === 0) return [];
+  deadline: number = now() + MATCH_BUDGET_MS,
+): SpanSearch => {
+  if (limit <= 0 || haystack.length === 0) return { spans: [], stopped: false };
 
   const flags = pattern.flags.includes("g")
     ? pattern.flags
     : `${pattern.flags}g`;
   const regex = new RegExp(pattern.source, flags);
   const spans: MatchSpan[] = [];
-  const deadline = now() + MATCH_BUDGET_MS;
+  // Where the next match may begin. A match can end after the window that
+  // holds its first character, and the text that it covers is then taken.
+  let cursor = 0;
 
-  for (;;) {
-    const match = regex.exec(haystack);
-    if (match === null) break;
+  for (let from = 0; from < haystack.length; from += SEARCH_WINDOW) {
+    // The clock is read between two windows. One `exec` cannot be stopped, so
+    // the window is the work that one look at the clock cannot prevent.
+    if (now() > deadline) return { spans, stopped: true };
 
-    const text = match[0];
-    if (text.length === 0) {
-      // A zero-width pattern such as `^` or `x*` never moves `lastIndex` by
-      // itself, so the loop would never end. Such a match also cannot be
-      // drawn, so it is stepped over and not recorded.
-      regex.lastIndex = match.index + 1;
-      if (regex.lastIndex > haystack.length) break;
-      continue;
+    const windowEnd = Math.min(from + SEARCH_WINDOW, haystack.length);
+    if (cursor >= windowEnd) continue;
+
+    const sliceStart = Math.max(0, from - WINDOW_CONTEXT);
+    const sliceEnd = Math.min(
+      haystack.length,
+      from + SEARCH_WINDOW + WINDOW_CONTEXT,
+    );
+    const isTail = sliceEnd === haystack.length;
+    const slice = haystack.slice(sliceStart, sliceEnd);
+    regex.lastIndex = Math.max(from, cursor) - sliceStart;
+
+    for (;;) {
+      const match = regex.exec(slice);
+      if (match === null) break;
+
+      const text = match[0];
+      if (text.length === 0) {
+        // A zero-width pattern such as `^` or `x*` never moves `lastIndex` by
+        // itself, so the loop would never end. Such a match also cannot be
+        // drawn, so it is stepped over and not recorded.
+        regex.lastIndex = match.index + 1;
+        if (regex.lastIndex > slice.length) break;
+        continue;
+      }
+
+      const start = sliceStart + match.index;
+      // The next window owns this match, and it begins its search there.
+      if (start >= windowEnd) break;
+      const end = start + text.length;
+      // A window that is not the end of the text cannot trust a match that
+      // touches the end of the window: `$` matches there, and a longer match
+      // would be cut there.
+      if (!isTail && end >= sliceEnd) break;
+
+      spans.push({ start, end });
+      cursor = end;
+      if (spans.length >= limit) return { spans, stopped: false };
     }
-
-    spans.push({ start: match.index, end: match.index + text.length });
-    if (spans.length >= limit) break;
-    // Read between two matches, which bounds the *loop*. One `exec` that
-    // backtracks badly cannot be stopped from JavaScript at all.
-    // `~/domain/FindQuery.ts` refuses those patterns before they arrive here.
-    if (now() > deadline) break;
   }
 
-  return spans;
+  return { spans, stopped: false };
 };
 
 // ---------------------------------------------------------------------------
@@ -525,25 +587,47 @@ export const rangeForSpan = (
   }
 };
 
+/** What one walk of the runs gave, and whether it read all of them. */
+export interface RunSearch {
+  readonly matches: ReadonlyArray<FindMatch>;
+  /** True when the deadline stopped the search before the end of the text. */
+  readonly stopped: boolean;
+}
+
 /**
  * Every match of `pattern` across `runs`, in the order of the runs.
  *
  * A range with no client rectangle is dropped. Such a range is inside a subtree
  * that stopped being drawn after the walk, and counting it would make the
  * `3/17` of the HUD a false statement.
+ *
+ * One deadline covers the whole call. A page with many runs must not pay the
+ * budget again for each run.
  */
 export const matchesInRuns = (
   document: Document,
   runs: ReadonlyArray<TextRun>,
   pattern: RegExp,
   limit: number = DEFAULT_MATCH_LIMIT,
-): ReadonlyArray<FindMatch> => {
+  deadline: number = now() + MATCH_BUDGET_MS,
+): RunSearch => {
   const matches: FindMatch[] = [];
+  let stopped = false;
 
   for (const run of runs) {
     if (matches.length >= limit) break;
-    const spans = collectSpans(run.haystack, pattern, limit - matches.length);
-    for (const span of spans) {
+    if (now() > deadline) {
+      stopped = true;
+      break;
+    }
+    const found = collectSpans(
+      run.haystack,
+      pattern,
+      limit - matches.length,
+      deadline,
+    );
+    if (found.stopped) stopped = true;
+    for (const span of found.spans) {
       const range = rangeForSpan(document, run, span);
       if (Option.isNone(range)) continue;
       const measured = measure(range.value);
@@ -556,7 +640,7 @@ export const matchesInRuns = (
     }
   }
 
-  return matches;
+  return { matches, stopped };
 };
 
 /** The bounding rectangle of a range that the browser still draws. */
