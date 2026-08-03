@@ -97,6 +97,47 @@ test.describe("nested same-origin frames", () => {
     }).toContain("#level1-target");
   });
 
+  test("shows a remote refusal in the origin frame", async ({ vw, page }) => {
+    await vw.open("/nested-frames.html");
+    await vw.bootAllFrames();
+    await vw.startHints();
+
+    const frame = page.frames().find((candidate) =>
+      candidate.url().includes("level2.html")
+    );
+    expect(frame).toBeDefined();
+    await expect.poll(() => vw.hintLabelFor("Level two link"))
+      .not.toBeNull();
+    const label = await vw.hintLabelFor("Level two link");
+    await frame?.evaluate(() => {
+      const link = document.getElementById("level2-link");
+      if (link !== null) {
+        link.style.display = "inline-block";
+        link.style.transform = "translateY(140px)";
+      }
+    });
+
+    await vw.type(label ?? "");
+    await vw.waitForHud("Nothing was activated");
+    expect(frame?.url()).not.toContain("#level2-target");
+  });
+
+  test("cancels a round that stops during collection", async ({ vw, page }) => {
+    await vw.open("/nested-frames.html");
+    await vw.bootAllFrames();
+
+    await page.keyboard.press("f");
+    await page.keyboard.press("Escape");
+    // Time is the signal here. No request can remain after both deadlines.
+    await page.waitForTimeout(4_500);
+    await expect.poll(() => markerCount(page)).toBe(0);
+
+    await vw.startHints();
+    await vw.press("Escape");
+    await vw.waitForHintsGone();
+    await expect.poll(() => markerCount(page)).toBe(0);
+  });
+
   test("the top frame's own hints still work", async ({ vw, page }) => {
     await vw.open("/nested-frames.html");
     await vw.bootAllFrames();

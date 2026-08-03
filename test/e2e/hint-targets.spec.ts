@@ -77,6 +77,24 @@ test.describe("a marker follows its target", () => {
 });
 
 test.describe("a hint that moved is not activated", () => {
+  test("when pointerover moves the link during dispatch", async ({ vw, page }) => {
+    await vw.open("/hint-drift.html");
+    const before = page.url();
+    await vw.startHints();
+
+    const label = await vw.hintLabelFor("Shifty link");
+    expect(label, "the shifty link took no hint").not.toBeNull();
+    await page.evaluate(() => {
+      (globalThis as unknown as {
+        moveShiftyOnPointerover: () => void;
+      }).moveShiftyOnPointerover();
+    });
+
+    await vw.type(label ?? "");
+    await vw.waitForHud("Nothing was activated");
+    expect(page.url()).toBe(before);
+  });
+
   test("when the page moves the link after the draw", async ({ vw, page }) => {
     await vw.open("/hint-drift.html");
     const before = page.url();
@@ -115,11 +133,48 @@ test.describe("a hint that moved is not activated", () => {
     expect(page.url()).toBe(before);
   });
 
+  test("when an area is replaced at the same position", async ({ vw, page }) => {
+    await vw.open("/image-maps.html");
+    const before = page.url();
+    await vw.startHints();
+
+    const label = await vw.hintLabelFor("Left area");
+    expect(label, "the area took no hint").not.toBeNull();
+    await page.evaluate(() => {
+      const area = document.querySelector<HTMLAreaElement>(
+        'area[aria-label="Left area"]',
+      );
+      if (area !== null) area.replaceWith(area.cloneNode(true));
+    });
+
+    await vw.type(label ?? "");
+    await vw.waitForHud("Nothing was activated");
+    expect(page.url()).toBe(before);
+  });
+
   test("an untouched link still activates", async ({ vw, page }) => {
     await vw.open("/hint-drift.html");
     await vw.startHints();
 
     await vw.activateHint("Steady link");
     await expect(page).toHaveURL(/#steady-target$/);
+  });
+});
+
+test.describe("a completed font load", () => {
+  test("moves the marker before activation", async ({ vw, page }) => {
+    await vw.open("/hint-drift.html");
+    await vw.startHints();
+
+    const label = await vw.hintLabelFor("Font shifted link");
+    expect(label, "the font link took no hint").not.toBeNull();
+    await page.evaluate(() => {
+      (globalThis as unknown as { finishFontReflow: () => void })
+        .finishFontReflow();
+    });
+
+    await waitForMarkerOn(page, label ?? "", "font-shifty");
+    await vw.type(label ?? "");
+    await expect(page).toHaveURL(/#font-target$/);
   });
 });

@@ -83,7 +83,7 @@ const capturePorts = (waitMs: number): Promise<CaptureResult> =>
       // has just read, so every check that is not cryptographic passes.
       port.postMessage({
         magic: MAGIC,
-        v: 2,
+        v: 3,
         kind: "WELCOME",
         nonce: "0123456789abcdef",
         frameId: message["frameId"],
@@ -94,12 +94,14 @@ const capturePorts = (waitMs: number): Promise<CaptureResult> =>
       // With the session in hand, ask the frame for its hints.
       port.postMessage({
         magic: MAGIC,
-        v: 2,
+        v: 3,
         nonce: "0123456789abcdef",
         from: "0000000000000000",
         to: message["frameId"],
         requestId: "",
         kind: "COLLECT_HINTS",
+        roundId: "captured-round",
+        originFrameId: "0000000000000000",
         mode: "activate",
       });
     };

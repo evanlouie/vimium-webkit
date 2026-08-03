@@ -20,8 +20,10 @@ import {
   joinProofPayload,
   limitDescriptors,
   linkKeyPayload,
+  MAX_DESCRIPTOR_PAYLOAD_BYTES,
   MAX_FRAME_DESCRIPTORS,
   MAX_SEAL_SEQUENCE,
+  MAX_SEALED_LENGTH,
   MAX_SESSION_DESCRIPTORS,
   NO_REQUEST_ID,
   parseSealed,
@@ -40,6 +42,7 @@ import {
 } from "~/domain/FrameMessage.ts";
 
 const NONCE = "abcdef0123456789";
+const ROUND_ID = "round-1";
 
 const envelope = {
   nonce: NONCE,
@@ -92,6 +95,7 @@ describe("FrameMessage", () => {
       const parsed = parseWire(
         wire({
           kind: "ACTIVATE",
+          roundId: ROUND_ID,
           originFrameId: "1111111111111111",
           mode: "activate",
           descriptors: [descriptor("1111111111111111", 0)],
@@ -168,6 +172,7 @@ describe("FrameMessage", () => {
         ...ENVELOPE,
         ...envelope,
         kind: "ACTIVATE_HINT",
+        roundId: ROUND_ID,
         localIndex: -1,
         mode: "activate",
       };
@@ -367,7 +372,12 @@ describe("FrameMessage", () => {
     Effect.sync(() => {
       for (const mode of hintModeSchema.literals) {
         const parsed = parseWire(
-          wire({ kind: "COLLECT_HINTS", mode }),
+          wire({
+            kind: "COLLECT_HINTS",
+            roundId: ROUND_ID,
+            originFrameId: "1111111111111111",
+            mode,
+          }),
           Option.some(NONCE),
         );
         assert.isTrue(Option.isSome(parsed), `${mode} did not survive`);
@@ -416,17 +426,27 @@ describe("the descriptors of a round", () => {
       // valid. The merged message must be valid as well.
       for (const frameId of ["1111111111111111", "2222222222222222"]) {
         assert.isTrue(Option.isSome(parseWire(
-          wire({ kind: "HINTS", descriptors: listFor(frameId, 2000) }),
+          wire({
+            kind: "HINTS",
+            roundId: ROUND_ID,
+            descriptors: listFor(frameId, 2000),
+          }),
           Option.some(NONCE),
         )));
       }
       assert.isTrue(Option.isSome(parseWire(
-        wire({ kind: "HINTS_RESULT", descriptors: merged }),
+        wire({
+          kind: "HINTS_RESULT",
+          roundId: ROUND_ID,
+          droppedDescriptors: 0,
+          descriptors: merged,
+        }),
         Option.some(NONCE),
       )));
       assert.isTrue(Option.isSome(parseWire(
         wire({
           kind: "ACTIVATE",
+          roundId: ROUND_ID,
           originFrameId: "1111111111111111",
           mode: "activate",
           descriptors: merged,
@@ -439,7 +459,11 @@ describe("the descriptors of a round", () => {
     Effect.sync(() => {
       const tooMany = listFor("1111111111111111", MAX_FRAME_DESCRIPTORS + 1);
       assert.isTrue(Option.isNone(parseWire(
-        wire({ kind: "HINTS", descriptors: tooMany }),
+        wire({
+          kind: "HINTS",
+          roundId: ROUND_ID,
+          descriptors: tooMany,
+        }),
         Option.some(NONCE),
       )));
     }));
@@ -491,6 +515,43 @@ describe("the descriptors of a round", () => {
         kept.get("2222222222222222"),
         MAX_SESSION_DESCRIPTORS - 10,
       );
+    }));
+
+  it.effect("keeps multibyte and escaped labels inside the sealed limit", () =>
+    Effect.sync(() => {
+      const costly = Array.from(
+        { length: MAX_SESSION_DESCRIPTORS },
+        (_, index) => ({
+          ...descriptor("1111111111111111", index),
+          linkText: index % 2 === 0
+            ? "😀".repeat(128)
+            : "\\\n\t".repeat(64),
+        }),
+      );
+      const kept = limitDescriptors(
+        costly,
+        MAX_SESSION_DESCRIPTORS,
+        MAX_DESCRIPTOR_PAYLOAD_BYTES,
+      );
+      assert.isBelow(kept.length, costly.length);
+
+      const message = wire({
+        kind: "HINTS_RESULT",
+        roundId: ROUND_ID,
+        droppedDescriptors: costly.length - kept.length,
+        descriptors: kept,
+      });
+      const plainBytes = new TextEncoder().encode(JSON.stringify(message))
+        .byteLength;
+      const sealedLength = Math.ceil((plainBytes + 16) * 4 / 3);
+      assert.isAtMost(sealedLength, MAX_SEALED_LENGTH);
+      assert.isTrue(Option.isSome(parseSealed({
+        ...ENVELOPE,
+        kind: "SEALED",
+        seq: 0,
+        data: "A".repeat(sealedLength),
+      })));
+      assert.isTrue(Option.isSome(parseWire(message, Option.some(NONCE))));
     }));
 
   it.effect("gives every frame the same list of the round", () =>

@@ -60,10 +60,8 @@
  * ## What the hints service must do
  *
  * The transport does not know what a hint round is. It checks the envelope, the
- * session and the sender, and it stops there. `REQUEST_HINTS`,
- * `COLLECT_HINTS`, `HINTS`, `HINTS_RESULT`, `ACTIVATE`, `ACTIVATE_HINT` and
- * `KEYSTROKE` are therefore answered by the hints service, with
- * `FrameBus.serve`. That service owns the rules that the round needs:
+ * session and the sender, and it stops there. The hints service answers all
+ * hint messages with `FrameBus.serve`. It also owns these round rules:
  *
  * - One live round for the whole page, with a limit on its age. An admitted
  *   frame could otherwise start detection passes without a limit.
@@ -91,7 +89,7 @@ export const PROTOCOL_MAGIC = "vimium-webkit/frames";
  * does not match must therefore be a clean drop, and not a parse failure
  * somewhere deeper.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** The number of Vimium, for the reason of Vimium: a dead frame must not hold a mode. */
 export const REQUEST_DEADLINE_MS = 3000;
@@ -143,14 +141,21 @@ export const MAX_SEAL_SEQUENCE = 1_000_000;
 /**
  * The greatest length of a sealed payload, in base64 characters.
  *
- * The largest payload that we send is a merged set of hint descriptors. That
- * set is bounded by `MAX_SESSION_DESCRIPTORS`, and a descriptor whose link text
- * is at its own ceiling costs about 330 bytes of JSON. Eight thousand of them
- * are about 2.7 MB of text, and about 3.6 MB of base64. This ceiling holds
- * that, and it stops a peer from making us decode more.
+ * The largest payload contains merged hint descriptors. Descriptor count does
+ * not bound UTF-8 bytes because labels can contain multibyte text.
+ * `MAX_DESCRIPTOR_PAYLOAD_BYTES` bounds the plaintext before encryption.
+ * This ceiling stops a peer from making us decode more.
  */
-const MAX_SEALED_LENGTH = 4_000_000;
+export const MAX_SEALED_LENGTH = 4_000_000;
 const MAX_LOCAL_INDEX = 100_000;
+
+/**
+ * The byte budget for the descriptor array in one sealed message.
+ *
+ * AES-GCM adds 16 bytes. Base64 adds at most four characters for three bytes.
+ * This budget also leaves space for the routed envelope and message fields.
+ */
+export const MAX_DESCRIPTOR_PAYLOAD_BYTES = 2_900_000;
 
 /**
  * The ceiling on the descriptors of one frame.
@@ -168,9 +173,8 @@ export const MAX_FRAME_DESCRIPTORS = 5_000;
  * each answer inside their own limit build one message that the receiver
  * refuses, and the whole page loses its hints.
  *
- * The value is the largest merged set that certainly fits inside
- * `MAX_SEALED_LENGTH`. `limitDescriptors` shares it between the frames when a
- * round asks for more.
+ * `limitDescriptors` shares this count between frames. It then applies the
+ * separate UTF-8 byte limit before the message is sealed.
  */
 export const MAX_SESSION_DESCRIPTORS = 8_000;
 const MAX_NOTATION_LENGTH = 64;
@@ -289,12 +293,42 @@ export const sortDescriptors = (
  * one large document and twenty small frames would otherwise lose most of the
  * hints of the document.
  */
+const encoder = new TextEncoder();
+
+/** The JSON byte cost of one descriptor inside an array. */
+const descriptorBytes = (descriptor: HintDescriptor): number =>
+  encoder.encode(JSON.stringify(descriptor)).byteLength + 1;
+
+/**
+ * Keep a canonical prefix that fits in one sealed message.
+ *
+ * Every receiver gets this complete list. No receiver reconstructs a removed
+ * share, so this byte decision stays the same in every frame.
+ */
+export const limitDescriptorBytes = (
+  descriptors: readonly HintDescriptor[],
+  byteLimit: number = MAX_DESCRIPTOR_PAYLOAD_BYTES,
+): readonly HintDescriptor[] => {
+  const kept: HintDescriptor[] = [];
+  // The opening bracket costs one byte. Each descriptor cost includes its
+  // comma, or the closing bracket for the last descriptor.
+  let used = 1;
+  for (const descriptor of descriptors) {
+    const cost = descriptorBytes(descriptor);
+    if (used + cost > byteLimit) break;
+    kept.push(descriptor);
+    used += cost;
+  }
+  return kept;
+};
+
 export const limitDescriptors = (
   descriptors: readonly HintDescriptor[],
   total: number = MAX_SESSION_DESCRIPTORS,
+  byteLimit: number = MAX_DESCRIPTOR_PAYLOAD_BYTES,
 ): readonly HintDescriptor[] => {
   const sorted = sortDescriptors(descriptors);
-  if (sorted.length <= total) return sorted;
+  if (sorted.length <= total) return limitDescriptorBytes(sorted, byteLimit);
 
   /** How many each frame asks for, in the canonical order of the frame ids. */
   const wanted = new Map<string, number>();
@@ -335,12 +369,13 @@ export const limitDescriptors = (
   }
 
   const kept = new Map<string, number>();
-  return sorted.filter((descriptor) => {
+  const withinCount = sorted.filter((descriptor) => {
     const taken = kept.get(descriptor.frameId) ?? 0;
     if (taken >= (quota.get(descriptor.frameId) ?? 0)) return false;
     kept.set(descriptor.frameId, taken + 1);
     return true;
   });
+  return limitDescriptorBytes(withinCount, byteLimit);
 };
 
 // ---------------------------------------------------------------------------
@@ -591,18 +626,22 @@ const roster = define({
 /** Origin frame to top: "run a cross-frame hint round for me". */
 const requestHints = define({
   kind: Schema.Literal("REQUEST_HINTS"),
+  roundId: idSchema,
   mode: hintModeSchema,
 });
 
 /** Top to every frame. */
 const collectHints = define({
   kind: Schema.Literal("COLLECT_HINTS"),
+  roundId: idSchema,
+  originFrameId: idSchema,
   mode: hintModeSchema,
 });
 
 /** Frame to top, in answer to `COLLECT_HINTS`. */
 const hints = define({
   kind: Schema.Literal("HINTS"),
+  roundId: idSchema,
   descriptors: frameDescriptorsSchema,
 });
 
@@ -624,6 +663,10 @@ const hints = define({
  */
 const hintsResult = define({
   kind: Schema.Literal("HINTS_RESULT"),
+  roundId: idSchema,
+  droppedDescriptors: Schema.Int.check(
+    Schema.isBetween({ minimum: 0, maximum: 1_000_000 }),
+  ),
   descriptors: sessionDescriptorsSchema,
 });
 
@@ -633,6 +676,7 @@ const hintsResult = define({
  */
 const activate = define({
   kind: Schema.Literal("ACTIVATE"),
+  roundId: idSchema,
   originFrameId: idSchema,
   mode: hintModeSchema,
   descriptors: sessionDescriptorsSchema,
@@ -651,8 +695,22 @@ const activate = define({
  */
 const activateHint = define({
   kind: Schema.Literal("ACTIVATE_HINT"),
+  roundId: idSchema,
   localIndex: localIndexSchema,
   mode: hintModeSchema,
+});
+
+/** Any frame to every participant: stop one round and remove its state. */
+const cancelHints = define({
+  kind: Schema.Literal("CANCEL_HINTS"),
+  roundId: idSchema,
+});
+
+/** The owning frame tells the origin why it refused an activation. */
+const activationResult = define({
+  kind: Schema.Literal("ACTIVATION_RESULT"),
+  roundId: idSchema,
+  detail: Schema.String.check(Schema.isMaxLength(512)),
 });
 
 /**
@@ -663,6 +721,7 @@ const activateHint = define({
  */
 const keystroke = define({
   kind: Schema.Literal("KEYSTROKE"),
+  roundId: idSchema,
   notation: Schema.String.check(Schema.isMaxLength(MAX_NOTATION_LENGTH)),
 });
 
@@ -721,6 +780,8 @@ export const frameMessageSchema = Schema.Union([
   hintsResult.payload,
   activate.payload,
   activateHint.payload,
+  cancelHints.payload,
+  activationResult.payload,
   keystroke.payload,
   focusFrame.payload,
   takeFocus.payload,
@@ -740,6 +801,8 @@ export const frameWireSchema = Schema.Union([
   hintsResult.wire,
   activate.wire,
   activateHint.wire,
+  cancelHints.wire,
+  activationResult.wire,
   keystroke.wire,
   focusFrame.wire,
   takeFocus.wire,

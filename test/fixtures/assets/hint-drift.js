@@ -25,6 +25,22 @@ globalThis.moveShifty = () => {
   if (shifty !== null) shifty.style.transform = "translateY(140px)";
 };
 
+/** Move the target from a page handler inside synthetic dispatch. */
+globalThis.moveShiftyOnPointerover = () => {
+  const shifty = document.getElementById("shifty");
+  shifty?.addEventListener("pointerover", () => {
+    shifty.style.transform = "translateY(140px)";
+  }, { once: true });
+};
+
+/** Imitate the fractional reflow that follows a completed font load. */
+globalThis.finishFontReflow = () => {
+  const link = document.getElementById("font-shifty");
+  if (link === null) return;
+  link.style.transform = "translateX(123.977px)";
+  document.fonts.dispatchEvent(new Event("loadingdone"));
+};
+
 /** Put an opaque box over the steady link, where its marker is drawn. */
 globalThis.coverSteady = () => {
   const steady = document.getElementById("steady");
