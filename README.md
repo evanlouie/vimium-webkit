@@ -185,26 +185,6 @@ YouTube binds them too.
 Move the focus anywhere else — click a comment, press `Escape` — and they scroll
 again. Set `passMediaKeys` to `false` to always scroll with them.
 
-### An Option chord on macOS names your own key
-
-macOS applies Option to the character: `Option+F` reports the character `ƒ`, and
-`Option+E` reports `Dead`. No mapping file can name those. On macOS, iOS and
-iPadOS a chord with Option is therefore read as **the character that the key
-makes with no modifier**, so `<a-f>` is the F key of _your_ layout — the Y
-position on Dvorak, and the A position of an AZERTY keyboard for `<a-a>`.
-
-Three limits:
-
-- The rule applies on Apple platforms only. On Windows and on Linux, Alt leaves
-  the character alone, so `Alt+ф` stays `<a-ф>`.
-- On a macOS layout that is not Latin, no field of this Option event carries the
-  unmodified letter. The application can read the letter from a separate plain
-  event, but it does not remember it. The same key is `ф` alone and `<a-a>` with
-  Option. Issue [#64](https://github.com/evanlouie/vimium-webkit/issues/64)
-  tracks a learned session map.
-- With Shift, only a letter is translated. `Option+Shift+1` keeps the character
-  that it makes, because a fold to `<a-1>` would take the binding of `Option+1`.
-
 ---
 
 ## Configuration
@@ -239,37 +219,59 @@ read the credential that admits a frame to the cross-frame session.
 All of these are editable in the settings overlay. There is no hidden
 configuration and no config file.
 
-| Setting                        | Default                | What it does                                                                   |
-| ------------------------------ | ---------------------- | ------------------------------------------------------------------------------ |
-| `scrollStepSize`               | `60`                   | Pixels one `j`/`k` moves. 1–10000.                                             |
-| `smoothScroll`                 | `true`                 | Animate scrolling. Ignored when `prefers-reduced-motion` is set.               |
-| `linkHintCharacters`           | `sadfjklewcmpgh`       | Alphabet for hint labels. Characters must be distinct and visible.             |
-| `linkHintNumbers`              | `0123456789`           | Digits used to select among filtered hints.                                    |
-| `filterLinkHints`              | `false`                | Match hints by link text instead of by hint string.                            |
-| `waitForEnterForFilteredHints` | `true`                 | In filter mode, require Enter rather than activating on a pause.               |
-| `userDefinedLinkHintCss`       | empty                  | Extra CSS for hint markers, inside our shadow root. No `@import` or `url()`.   |
-| `regexFindMode`                | `false`                | Treat a bare find query as a regular expression.                               |
-| `ignoreKeyboardLayout`         | `false`                | Bind physical key positions, so Dvorak and Cyrillic drive QWERTY bindings.     |
-| `shadowNativeFind`             | `false`                | Shadow the browser's own ⌘F. Off because it may be unpreventable on iOS.       |
-| `previousPatterns`             | `prev,previous,back,…` | Link text `[` looks for.                                                       |
-| `nextPatterns`                 | `next,more,newer,…`    | Link text `]` looks for.                                                       |
-| `searchUrl`                    | Google                 | Default search template. Must contain `%s`.                                    |
-| `searchEngines`                | 5 engines              | One `keyword: url-with-%s Description` per line. Templates must be `http(s)`.  |
-| `newTabUrl`                    | `about:blank`          | What `t` opens.                                                                |
-| `enableSearchSuggestions`      | **`false`**            | Send omnibar searches to your engine as you type. See [Privacy](./PRIVACY.md). |
-| `hideHud`                      | `false`                | Suppress the corner HUD entirely.                                              |
-| `followPageColorScheme`        | `true`                 | Match the overlay to the page's theme rather than your system appearance.      |
-| `grabBackFocus`                | `false`                | Blur a field the page autofocused on load — unless you have already typed.     |
-| `passMediaKeys`                | `true`                 | Leave the arrow keys and space to a focused `<video>`/`<audio>` player.        |
-| `enableCssZoom`                | `false`                | Enable `zi`/`zo`. CSS zoom, not browser zoom; breaks `position: fixed` sites.  |
-| `enableHistoryIndex`           | **`false`**            | Build a local frecency index for the omnibar. See [Privacy](./PRIVACY.md).     |
-| `historyIndexDenylist`         | empty                  | URL globs never recorded in that index.                                        |
-| `historyIndexLimit`            | `5000`                 | Entries kept before LRU eviction. `0` disables recording.                      |
-| `exclusionRules`               | empty                  | URL glob → pass-key set. An empty pass-key set disables us on matching pages.  |
-| `keyMappings`                  | empty                  | Your `map`/`unmap`/`unmapAll`/`mapkey` lines, applied over the defaults.       |
+| Setting                        | Default                | What it does                                                                                                                                     |
+| ------------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `scrollStepSize`               | `60`                   | Pixels one `j`/`k` moves. 1–10000.                                                                                                               |
+| `smoothScroll`                 | `true`                 | Animate scrolling. Ignored when `prefers-reduced-motion` is set.                                                                                 |
+| `linkHintCharacters`           | `sadfjklewcmpgh`       | Alphabet for hint labels. Characters must be distinct and visible.                                                                               |
+| `linkHintNumbers`              | `0123456789`           | Digits used to select among filtered hints.                                                                                                      |
+| `filterLinkHints`              | `false`                | Match hints by link text instead of by hint string.                                                                                              |
+| `waitForEnterForFilteredHints` | `true`                 | In filter mode, require Enter rather than activating on a pause.                                                                                 |
+| `userDefinedLinkHintCss`       | empty                  | Extra CSS for hint markers, inside our shadow root. No `@import` or `url()`.                                                                     |
+| `regexFindMode`                | `false`                | Treat a bare find query as a regular expression. See the note below.                                                                             |
+| `ignoreKeyboardLayout`         | `false`                | Bind physical key positions, so Dvorak and Cyrillic drive QWERTY bindings.                                                                       |
+| `shadowNativeFind`             | `false`                | Shadow the browser's own ⌘F. Off because it may be unpreventable on iOS.                                                                         |
+| `previousPatterns`             | `prev,previous,back,…` | Link text `[` looks for.                                                                                                                         |
+| `nextPatterns`                 | `next,more,newer,…`    | Link text `]` looks for.                                                                                                                         |
+| `searchUrl`                    | Google                 | Default search template. Must contain `%s`.                                                                                                      |
+| `searchEngines`                | 5 engines              | One `keyword: url-with-%s Description` per line. Templates must be `http(s)`.                                                                    |
+| `newTabUrl`                    | `about:blank`          | What `t` opens.                                                                                                                                  |
+| `enableSearchSuggestions`      | **`false`**            | Send omnibar searches to your engine as you type. See [Privacy](./PRIVACY.md).                                                                   |
+| `hideHud`                      | `false`                | Suppress the corner HUD entirely.                                                                                                                |
+| `followPageColorScheme`        | `true`                 | Match the overlay to the page's theme rather than your system appearance.                                                                        |
+| `grabBackFocus`                | `false`                | Blur a field the page autofocused on load — unless you have already typed.                                                                       |
+| `passMediaKeys`                | `true`                 | Leave the arrow keys and space to a focused `<video>`/`<audio>` player.                                                                          |
+| `enableCssZoom`                | `false`                | Enable `zi`/`zo`. CSS zoom, not browser zoom; breaks `position: fixed` sites.                                                                    |
+| `enableHistoryIndex`           | **`false`**            | Build a local frecency index for the omnibar. See [Privacy](./PRIVACY.md).                                                                       |
+| `historyIndexDenylist`         | empty                  | URL globs never recorded in that index.                                                                                                          |
+| `historyIndexLimit`            | `5000`                 | Entries kept before LRU eviction. `0` disables recording.                                                                                        |
+| `exclusionRules`               | empty                  | URL glob → pass-key set. An empty pass-key set disables us on matching pages. A pattern between two `/` is a raw expression. See the note below. |
+| `keyMappings`                  | empty                  | Your `map`/`unmap`/`unmapAll`/`mapkey` lines, applied over the defaults.                                                                         |
 
 A value the script cannot make sense of falls back to its own default — that one
 setting, not the whole configuration.
+
+### An Option chord on macOS names your own key
+
+macOS applies Option to the character: `Option+F` reports the character `ƒ`, and
+`Option+E` reports `Dead`. No mapping file can name those. On macOS, iOS and
+iPadOS a chord with Option is therefore read as **the character that the key
+makes with no modifier**, so `<a-f>` is the F key of _your_ layout — the Y
+position on Dvorak, and the A position of an AZERTY keyboard for `<a-a>`.
+
+Three limits:
+
+- The rule applies on Apple platforms only. On Windows and on Linux, Alt leaves
+  the character alone, so `Alt+ф` stays `<a-ф>`.
+- On a macOS layout that is not Latin, no field of this Option event carries the
+  unmodified letter. The application can read the letter from a separate plain
+  event, but it does not remember it. The same key is `ф` alone and `<a-a>` with
+  Option. Issue [#64](https://github.com/evanlouie/vimium-webkit/issues/64)
+  tracks a learned session map.
+- With Shift, only a letter is translated. `Option+Shift+1` keeps the character
+  that it makes, because a fold to `<a-1>` would take the binding of `Option+1`.
+
+---
 
 ### What can be a hint character
 
@@ -311,6 +313,37 @@ One consequence: a Turkish user cannot use the whole Turkish alphabet for hints.
 `İ` grows to two characters in the fold, and `ı` has the fold of `i`. The case
 fold is the invariant one, and not the one of your locale, so one setting gives
 the same labels on every machine.
+
+#### An expression that a user writes
+
+A find query in regex mode, and an exclusion pattern between two `/` characters,
+are read by a safety check first. The check refuses an expression when it can
+prove that the expression is ambiguous, because such an expression can make the
+tab stop answering. `\s+\s+\s+` and `(a+)+$` are refused. `(cat|car)+` and
+`^https?://([a-z0-9-]+\.)*example\.com/.*$` are accepted.
+
+The check reads inside a lookahead and a lookbehind as well.
+`^(?=.*foo)(?=.*bar)` is accepted, because nothing before the two assertions can
+vary. `.*(?=.*x)` is refused, because the body of the assertion runs again for
+each way that the `.*` before it can match. An expression may hold at most eight
+assertions.
+
+The check does not promise a linear match, so a budget holds the limit as well:
+
+- An exclusion rule with a raw expression reads at most 512 characters of the
+  URL. It does not match a URL that is longer than that. A page can make its own
+  URL longer than 512 characters, and it then escapes the rule. Write the rule
+  as a glob for such a page: a glob reads 4096 characters.
+- Find reads the page text in windows, measures each window, and makes the next
+  window smaller when a window costs too much. It stops at a time limit, and at
+  a match that is longer than 65 536 characters. The HUD then says
+  `stopped before the end of the page`, and the counts are the counts of the
+  text that was read.
+
+The script drops a rule that the check refuses. It writes a warning to the
+console, it says so in the HUD when you save, and it marks the line in the
+settings dialog. A glob is never refused, and it stays the format that we ask
+for.
 
 ### Omnibar-lite
 
