@@ -13,6 +13,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect } from "effect";
 import {
+  allHostProperties,
   comparableHostProperties,
   HOST_STYLE,
   hostDeclarations,
@@ -217,6 +218,34 @@ describe("the properties that the viewport sync owns", () => {
         OWNED,
       );
       assert.deepEqual(stale, ["transform"]);
+    }));
+});
+
+describe("the fallback of the guarded set", () => {
+  it.effect("names every property that the host style writes", () =>
+    Effect.sync(() => {
+      // A guard that cannot derive its set must do more work, and not less.
+      // An empty fallback answered "nothing is stale" for every property, so
+      // one refused read turned the whole protection off in silence.
+      const fallback = allHostProperties();
+      for (const [property] of HOST_STYLE) {
+        assert.isTrue(fallback.has(property), `${property} is not in the set`);
+      }
+    }));
+
+  it.effect("still finds a property that the page removed", () =>
+    Effect.sync(() => {
+      const removed = (name: string): readonly [string, string] =>
+        name === "display" ? ["", ""] : asBrowser(name);
+      assert.include(
+        outOfDateHostProperties(allHostProperties(), removed, NO_OWNED),
+        "display",
+      );
+      // The old fallback, for the comparison: it reports nothing at all.
+      assert.deepEqual(
+        outOfDateHostProperties(new Set<string>(), removed, NO_OWNED),
+        [],
+      );
     }));
 });
 

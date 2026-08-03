@@ -217,6 +217,18 @@ export const comparableHostProperties = (
   );
 
 /**
+ * Every property that `HOST_STYLE` writes.
+ *
+ * This is the fallback of the guarded set. A guard that cannot derive its set
+ * must do more work, and not less: an empty set answers "nothing is stale" for
+ * every property, so one refused read would turn the whole protection off in
+ * silence. A property that this engine cannot compare costs one extra write
+ * for each check, and that is the safe direction.
+ */
+export const allHostProperties = (): ReadonlySet<string> =>
+  new Set(HOST_STYLE.map(([property]) => property));
+
+/**
  * Must the guard put the host back?
  *
  * A connection test is not enough. Page script can move the host into a
@@ -349,8 +361,9 @@ export class Ui extends Context.Service<Ui, {
   /**
    * Put the host back in the document, with the style that we gave it.
    *
-   * Call this before an action that makes something visible. It is two cheap
-   * reads, and it never suspends, so the key path may reach it.
+   * Call this before an action that makes something visible. It is a small
+   * number of cheap reads, and it never suspends, so the key path may reach
+   * it.
    */
   readonly ensureAttached: Effect.Effect<void>;
   /**
@@ -429,9 +442,23 @@ export class Ui extends Context.Service<Ui, {
         // Which properties this engine can compare, asked once and asked of
         // the engine itself. Page script cannot have run between the write
         // above and this read, because both are in the same task.
-        const guardedProperties = yield* dom.probeOr(
-          () => comparableHostProperties(readHostProperty),
-          new Set<string>(),
+        const derivedProperties = yield* dom.probeOr(
+          () => Option.some(comparableHostProperties(readHostProperty)),
+          Option.none<ReadonlySet<string>>(),
+        );
+        // A safety mechanism must fail closed. An empty set would answer
+        // "nothing is stale" for every property, so one refused read would
+        // turn the whole protection off in silence. Compare everything
+        // instead, and say so.
+        if (Option.isNone(derivedProperties)) {
+          yield* Effect.logWarning(
+            "the overlay guard could not read the host style; " +
+              "it now compares every property",
+          );
+        }
+        const guardedProperties = Option.getOrElse(
+          derivedProperties,
+          allHostProperties,
         );
 
         // The values that the visual-viewport sync last wrote. The guard
