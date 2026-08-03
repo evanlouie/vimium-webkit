@@ -219,37 +219,58 @@ read the credential that admits a frame to the cross-frame session.
 All of these are editable in the settings overlay. There is no hidden
 configuration and no config file.
 
-| Setting                        | Default                | What it does                                                                   |
-| ------------------------------ | ---------------------- | ------------------------------------------------------------------------------ |
-| `scrollStepSize`               | `60`                   | Pixels one `j`/`k` moves. 1–10000.                                             |
-| `smoothScroll`                 | `true`                 | Animate scrolling. Ignored when `prefers-reduced-motion` is set.               |
-| `linkHintCharacters`           | `sadfjklewcmpgh`       | Alphabet for hint labels. Characters must be distinct.                         |
-| `linkHintNumbers`              | `0123456789`           | Digits used to select among filtered hints.                                    |
-| `filterLinkHints`              | `false`                | Match hints by link text instead of by hint string.                            |
-| `waitForEnterForFilteredHints` | `true`                 | In filter mode, require Enter rather than activating on a pause.               |
-| `userDefinedLinkHintCss`       | empty                  | Extra CSS for hint markers, inside our shadow root. No `@import` or `url()`.   |
-| `regexFindMode`                | `false`                | Treat a bare find query as a regular expression.                               |
-| `ignoreKeyboardLayout`         | `false`                | Bind physical key positions, so Dvorak and Cyrillic drive QWERTY bindings.     |
-| `shadowNativeFind`             | `false`                | Shadow the browser's own ⌘F. Off because it may be unpreventable on iOS.       |
-| `previousPatterns`             | `prev,previous,back,…` | Link text `[` looks for.                                                       |
-| `nextPatterns`                 | `next,more,newer,…`    | Link text `]` looks for.                                                       |
-| `searchUrl`                    | Google                 | Default search template. Must contain `%s`.                                    |
-| `searchEngines`                | 5 engines              | One `keyword: url-with-%s Description` per line. Templates must be `http(s)`.  |
-| `newTabUrl`                    | `about:blank`          | What `t` opens.                                                                |
-| `enableSearchSuggestions`      | **`false`**            | Send omnibar searches to your engine as you type. See [Privacy](./PRIVACY.md). |
-| `hideHud`                      | `false`                | Suppress the corner HUD entirely.                                              |
-| `followPageColorScheme`        | `true`                 | Match the overlay to the page's theme rather than your system appearance.      |
-| `grabBackFocus`                | `false`                | Blur a field the page autofocused on load — unless you have already typed.     |
-| `passMediaKeys`                | `true`                 | Leave the arrow keys and space to a focused `<video>`/`<audio>` player.        |
-| `enableCssZoom`                | `false`                | Enable `zi`/`zo`. CSS zoom, not browser zoom; breaks `position: fixed` sites.  |
-| `enableHistoryIndex`           | **`false`**            | Build a local frecency index for the omnibar. See [Privacy](./PRIVACY.md).     |
-| `historyIndexDenylist`         | empty                  | URL globs never recorded in that index.                                        |
-| `historyIndexLimit`            | `5000`                 | Entries kept before LRU eviction. `0` disables recording.                      |
-| `exclusionRules`               | empty                  | URL glob → pass-key set. An empty pass-key set disables us on matching pages.  |
-| `keyMappings`                  | empty                  | Your `map`/`unmap`/`unmapAll`/`mapkey` lines, applied over the defaults.       |
+| Setting                        | Default                | What it does                                                                                                                                     |
+| ------------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `scrollStepSize`               | `60`                   | Pixels one `j`/`k` moves. 1–10000.                                                                                                               |
+| `smoothScroll`                 | `true`                 | Animate scrolling. Ignored when `prefers-reduced-motion` is set.                                                                                 |
+| `linkHintCharacters`           | `sadfjklewcmpgh`       | Alphabet for hint labels. Characters must be distinct.                                                                                           |
+| `linkHintNumbers`              | `0123456789`           | Digits used to select among filtered hints.                                                                                                      |
+| `filterLinkHints`              | `false`                | Match hints by link text instead of by hint string.                                                                                              |
+| `waitForEnterForFilteredHints` | `true`                 | In filter mode, require Enter rather than activating on a pause.                                                                                 |
+| `userDefinedLinkHintCss`       | empty                  | Extra CSS for hint markers, inside our shadow root. No `@import` or `url()`.                                                                     |
+| `regexFindMode`                | `false`                | Treat a bare find query as a regular expression. See the note below.                                                                             |
+| `ignoreKeyboardLayout`         | `false`                | Bind physical key positions, so Dvorak and Cyrillic drive QWERTY bindings.                                                                       |
+| `shadowNativeFind`             | `false`                | Shadow the browser's own ⌘F. Off because it may be unpreventable on iOS.                                                                         |
+| `previousPatterns`             | `prev,previous,back,…` | Link text `[` looks for.                                                                                                                         |
+| `nextPatterns`                 | `next,more,newer,…`    | Link text `]` looks for.                                                                                                                         |
+| `searchUrl`                    | Google                 | Default search template. Must contain `%s`.                                                                                                      |
+| `searchEngines`                | 5 engines              | One `keyword: url-with-%s Description` per line. Templates must be `http(s)`.                                                                    |
+| `newTabUrl`                    | `about:blank`          | What `t` opens.                                                                                                                                  |
+| `enableSearchSuggestions`      | **`false`**            | Send omnibar searches to your engine as you type. See [Privacy](./PRIVACY.md).                                                                   |
+| `hideHud`                      | `false`                | Suppress the corner HUD entirely.                                                                                                                |
+| `followPageColorScheme`        | `true`                 | Match the overlay to the page's theme rather than your system appearance.                                                                        |
+| `grabBackFocus`                | `false`                | Blur a field the page autofocused on load — unless you have already typed.                                                                       |
+| `passMediaKeys`                | `true`                 | Leave the arrow keys and space to a focused `<video>`/`<audio>` player.                                                                          |
+| `enableCssZoom`                | `false`                | Enable `zi`/`zo`. CSS zoom, not browser zoom; breaks `position: fixed` sites.                                                                    |
+| `enableHistoryIndex`           | **`false`**            | Build a local frecency index for the omnibar. See [Privacy](./PRIVACY.md).                                                                       |
+| `historyIndexDenylist`         | empty                  | URL globs never recorded in that index.                                                                                                          |
+| `historyIndexLimit`            | `5000`                 | Entries kept before LRU eviction. `0` disables recording.                                                                                        |
+| `exclusionRules`               | empty                  | URL glob → pass-key set. An empty pass-key set disables us on matching pages. A pattern between two `/` is a raw expression. See the note below. |
+| `keyMappings`                  | empty                  | Your `map`/`unmap`/`unmapAll`/`mapkey` lines, applied over the defaults.                                                                         |
 
 A value the script cannot make sense of falls back to its own default — that one
 setting, not the whole configuration.
+
+#### An expression that a user writes
+
+A find query in regex mode, and an exclusion pattern between two `/` characters,
+are read by a safety check first. The check refuses an expression when it can
+prove that the expression is ambiguous, because such an expression can make the
+tab stop answering. `\s+\s+\s+` and `(a+)+$` are refused. `(cat|car)+` and
+`^https?://([a-z0-9-]+\.)*example\.com/.*$` are accepted.
+
+The check does not promise a linear match, so a budget holds the limit as well:
+
+- An exclusion rule with a raw expression reads at most 512 characters of the
+  URL. It does not match a URL that is longer than that.
+- Find reads the page text in windows and stops at a time limit. The HUD then
+  says `stopped at the time limit`, and the counts are the counts of the text
+  that was read.
+
+The script drops a rule that the check refuses. It writes a warning to the
+console, it says so in the HUD when you save, and it marks the line in the
+settings dialog. A glob is never refused, and it stays the format that we ask
+for.
 
 ### Omnibar-lite
 
