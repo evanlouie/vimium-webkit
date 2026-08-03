@@ -122,30 +122,35 @@ export const detectPageScheme = (
 export const BASE_CSS: string = `
 :host {
   all: initial;
-  --vw-fg: #1b1b1b;
-  --vw-bg: #f5f5f4;
-  --vw-bg-raised: #ffffff;
-  --vw-border: rgba(0, 0, 0, 0.22);
-  --vw-shadow: 0 6px 24px rgba(0, 0, 0, 0.24);
-  --vw-accent: #1a5fb4;
-  --vw-accent-fg: #ffffff;
-  --vw-muted: #6a6a6a;
-  --vw-danger: #b3261e;
-  --vw-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  --vw-radius: 6px;
+  /*
+   * Important declarations reverse the cascade order between the page and
+   * this shadow tree. Page rules can address the host, but they cannot replace
+   * these values. The all property does not reset custom properties.
+   */
+  --vw-fg: #1b1b1b !important;
+  --vw-bg: #f5f5f4 !important;
+  --vw-bg-raised: #ffffff !important;
+  --vw-border: rgba(0, 0, 0, 0.22) !important;
+  --vw-shadow: 0 6px 24px rgba(0, 0, 0, 0.24) !important;
+  --vw-accent: #1a5fb4 !important;
+  --vw-accent-fg: #ffffff !important;
+  --vw-muted: #6a6a6a !important;
+  --vw-danger: #b3261e !important;
+  --vw-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace !important;
+  --vw-radius: 6px !important;
 }
 
 @media (prefers-color-scheme: dark) {
   :host {
-    --vw-fg: #ececec;
-    --vw-bg: #23232a;
-    --vw-bg-raised: #2e2e37;
-    --vw-border: rgba(255, 255, 255, 0.18);
-    --vw-shadow: 0 6px 24px rgba(0, 0, 0, 0.55);
-    --vw-accent: #7aa2f7;
-    --vw-accent-fg: #16161e;
-    --vw-muted: #9a9aa5;
-    --vw-danger: #f28b82;
+    --vw-fg: #ececec !important;
+    --vw-bg: #23232a !important;
+    --vw-bg-raised: #2e2e37 !important;
+    --vw-border: rgba(255, 255, 255, 0.18) !important;
+    --vw-shadow: 0 6px 24px rgba(0, 0, 0, 0.55) !important;
+    --vw-accent: #7aa2f7 !important;
+    --vw-accent-fg: #16161e !important;
+    --vw-muted: #9a9aa5 !important;
+    --vw-danger: #f28b82 !important;
   }
 }
 
@@ -159,27 +164,27 @@ export const BASE_CSS: string = `
  * sheets are adopted in.
  */
 :host([data-scheme="light"]) {
-  --vw-fg: #1b1b1b;
-  --vw-bg: #f5f5f4;
-  --vw-bg-raised: #ffffff;
-  --vw-border: rgba(0, 0, 0, 0.22);
-  --vw-shadow: 0 6px 24px rgba(0, 0, 0, 0.24);
-  --vw-accent: #1a5fb4;
-  --vw-accent-fg: #ffffff;
-  --vw-muted: #6a6a6a;
-  --vw-danger: #b3261e;
+  --vw-fg: #1b1b1b !important;
+  --vw-bg: #f5f5f4 !important;
+  --vw-bg-raised: #ffffff !important;
+  --vw-border: rgba(0, 0, 0, 0.22) !important;
+  --vw-shadow: 0 6px 24px rgba(0, 0, 0, 0.24) !important;
+  --vw-accent: #1a5fb4 !important;
+  --vw-accent-fg: #ffffff !important;
+  --vw-muted: #6a6a6a !important;
+  --vw-danger: #b3261e !important;
 }
 
 :host([data-scheme="dark"]) {
-  --vw-fg: #ececec;
-  --vw-bg: #23232a;
-  --vw-bg-raised: #2e2e37;
-  --vw-border: rgba(255, 255, 255, 0.18);
-  --vw-shadow: 0 6px 24px rgba(0, 0, 0, 0.55);
-  --vw-accent: #7aa2f7;
-  --vw-accent-fg: #16161e;
-  --vw-muted: #9a9aa5;
-  --vw-danger: #f28b82;
+  --vw-fg: #ececec !important;
+  --vw-bg: #23232a !important;
+  --vw-bg-raised: #2e2e37 !important;
+  --vw-border: rgba(255, 255, 255, 0.18) !important;
+  --vw-shadow: 0 6px 24px rgba(0, 0, 0, 0.55) !important;
+  --vw-accent: #7aa2f7 !important;
+  --vw-accent-fg: #16161e !important;
+  --vw-muted: #9a9aa5 !important;
+  --vw-danger: #f28b82 !important;
 }
 
 .vw-layer {
