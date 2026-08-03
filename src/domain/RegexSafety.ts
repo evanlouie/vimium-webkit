@@ -3,31 +3,55 @@
  *
  * The platform gives one regular expression engine, and that engine
  * backtracks. A pattern such as `(a|a|a|a)*$` against twenty characters takes
- * minutes, and no code in JavaScript can stop an `exec` that is inside such a
- * pattern. The tab is lost.
+ * minutes. No code in JavaScript can stop an `exec` that is already inside
+ * such a pattern, so the tab stops answering.
  *
- * A measurement cannot protect the page, because the measurement is the hang:
- * the time is known only after the expression returns. This module therefore
- * decides on the *text* of the pattern, before any input touches it. It parses
- * the source and permits only the syntax whose match is linear in the length
- * of the input:
+ * A measurement cannot protect the page. The measurement cannot end before the
+ * match ends. This module therefore decides on the *text* of the pattern,
+ * before any input touches it.
  *
- * - a quantifier never contains another quantifier;
- * - a quantifier never repeats an expression that can match nothing;
- * - a quantifier repeats an expression of one fixed length;
- * - two alternatives inside a quantifier never start with the same character;
- * - two quantifiers that can match the same characters never stand together;
- * - a backreference is refused;
- * - a lookaround holds no quantifier.
+ * # What the check promises
  *
- * Each rule removes one way to make a position ambiguous. With no ambiguity
- * the engine has one path through the pattern at each position, so the work is
- * proportional to the input.
+ * The check refuses a pattern only when it can *prove* that the pattern is
+ * ambiguous. An ambiguous pattern gives the engine more than one way to match
+ * one text. Each extra way is another path that the engine walks after a
+ * failure. These are the shapes that the check proves:
  *
- * The check refuses more than it must. That direction is the safe one: a
- * refused pattern costs the user one search, and an accepted bad pattern costs
- * the user the tab. The refusal comes with a reason, so the HUD can say what
- * is wrong while the user still types.
+ * - a quantifier over an expression that matches nothing, as in `(a*)*`;
+ * - a quantifier whose body can grow past its own end, as in `(a+)+`. One
+ *   text then has two divisions into iterations;
+ * - two alternatives that match the same text, as in `(a|a)*`;
+ * - two neighbouring quantifiers that compete for the same characters, as in
+ *   `\s+\s+`;
+ * - more than one unbounded quantifier that competes with the text after it,
+ *   as in `a.*b.*c`;
+ * - a backreference.
+ *
+ * The check compares the character sets of the two parts that compete. A part
+ * that cannot take the first character of the next part cannot compete with
+ * it. `([a-z0-9-]+\.)*` is therefore safe, because the inner loop cannot take
+ * the dot that ends each iteration.
+ *
+ * # What the check does not promise
+ *
+ * The check does not promise a linear match. It promises only that the shapes
+ * above are absent. Two limits stay:
+ *
+ * - A search tries every start position. A pattern that is linear at one
+ *   position is quadratic over a whole search. `[a-z]*x` costs about 2.3 s in
+ *   one `exec` against 40 000 characters, and the check accepts it.
+ * - The check reads a small model of the pattern. It accepts a shape that the
+ *   model cannot describe, because it cannot prove a fault there.
+ *
+ * Each caller must therefore hold a budget of its own. `~/domain/Exclusion.ts`
+ * caps the length of the URL that a raw expression reads.
+ * `~/features/find/Engine.ts` searches the page text in pieces and stops at a
+ * deadline. Read those two modules with this one. This check is the first
+ * line, and the budget is the second.
+ *
+ * The check prefers to accept when it is not sure. A refused pattern costs the
+ * user a rule that they must write again, and the budget of the caller holds
+ * the limit for a pattern that this check accepts by mistake.
  *
  * Everything here is a pure function of the pattern text. Nothing throws.
  */
@@ -40,17 +64,19 @@ import { Option } from "effect";
 
 const UNSUPPORTED_SYNTAX =
   "this pattern uses syntax that the safety check does not know";
+const TOO_LONG = "this pattern is too long for the safety check";
 const BACKREFERENCE = "a backreference can hang the page";
-const NESTED_LOOP = "a quantifier inside another quantifier can hang the page";
 const EMPTY_LOOP =
   "a quantifier over an expression that matches nothing can hang the page";
-const VARIABLE_LOOP =
-  "a quantifier over an expression of two lengths can hang the page";
+const AMBIGUOUS_LOOP =
+  "a quantifier whose body can grow past its own end can hang the page";
 const AMBIGUOUS_BRANCHES =
-  "a quantifier over two alternatives with the same start can hang the page";
+  "two alternatives that match the same text can hang the page";
 const COMPETING_LOOPS =
   "two quantifiers that match the same characters can hang the page";
-const LOOKAROUND_LOOP = "a quantifier inside a lookaround can hang the page";
+const MANY_LOOPS =
+  "more than one unbounded quantifier competes with the text after it, " +
+  "and that can hang the page";
 
 // ---------------------------------------------------------------------------
 // Character sets
@@ -182,6 +208,12 @@ const holds = (set: CharSet, code: number, ignoreCase: boolean): boolean => {
 /** The most members that this module lists for one set. */
 const MEMBER_LIMIT = 256;
 
+/** The lists that `members` already made. One set never changes. */
+const memberCache = new WeakMap<
+  CharSet,
+  Option.Option<ReadonlyArray<number>>
+>();
+
 /**
  * List the members of `set`, when there are few enough of them.
  *
@@ -189,6 +221,14 @@ const MEMBER_LIMIT = 256;
  * `\W` and `\S` are unlimited.
  */
 const members = (set: CharSet): Option.Option<ReadonlyArray<number>> => {
+  const found = memberCache.get(set);
+  if (found !== undefined) return found;
+  const made = listMembers(set);
+  memberCache.set(set, made);
+  return made;
+};
+
+const listMembers = (set: CharSet): Option.Option<ReadonlyArray<number>> => {
   if (set.negated) return Option.none();
   const found = new Set<number>(set.chars);
   for (const [low, high] of set.ranges) {
@@ -303,7 +343,11 @@ const readHex = (text: string): Option.Option<number> =>
  * valid. Syntax that this parser does not know is therefore not a fault of the
  * user: it is a limit of the check, and the pattern is refused.
  */
-const parse = (source: string, dotAll: boolean): ParseOutcome => {
+const parse = (
+  source: string,
+  dotAll: boolean,
+  unicode: boolean,
+): ParseOutcome => {
   let index = 0;
   let failure: string | null = null;
 
@@ -348,6 +392,13 @@ const parse = (source: string, dotAll: boolean): ParseOutcome => {
       }
       case "u": {
         if (source[index] === "{") {
+          // `\u{41}` is one character with the `u` flag, and the five literal
+          // characters `u{41}` without it. Refuse the second reading: a model
+          // that does not match the engine is not a safe model.
+          if (!unicode) {
+            fail(UNSUPPORTED_SYNTAX);
+            return OPEN_ITEM;
+          }
           const close = source.indexOf("}", index);
           if (close === -1) {
             fail(UNSUPPORTED_SYNTAX);
@@ -375,7 +426,14 @@ const parse = (source: string, dotAll: boolean): ParseOutcome => {
       }
       case "p":
       case "P": {
-        // A property escape such as `\p{L}`. We cannot list its members.
+        // A property escape such as `\p{L}`. It is one character with the `u`
+        // flag, and the four literal characters `p{L}` without it. Refuse the
+        // second reading, so that the model always says what the engine does.
+        if (!unicode) {
+          fail(UNSUPPORTED_SYNTAX);
+          return OPEN_ITEM;
+        }
+        // We cannot list the members of the property.
         if (source[index] === "{") {
           const close = source.indexOf("}", index);
           index = close === -1 ? source.length : close + 1;
@@ -609,167 +667,535 @@ const parse = (source: string, dotAll: boolean): ParseOutcome => {
 // The attributes of a tree
 // ---------------------------------------------------------------------------
 
-/** Can this expression match an empty string? */
-const isNullable = (node: Node): boolean => {
-  switch (node.kind) {
-    case "empty":
-    case "anchor":
-    case "look":
-      return true;
-    case "char":
-      return false;
-    case "concat":
-      return node.parts.every(isNullable);
-    case "alt":
-      return node.branches.some(isNullable);
-    case "repeat":
-      return node.min === 0 || isNullable(node.body);
-  }
-};
-
 interface Span {
   readonly min: number;
   readonly max: number;
 }
 
-/** The shortest and the longest string that this expression matches. */
-const spanOf = (node: Node): Span => {
-  switch (node.kind) {
-    case "empty":
-    case "anchor":
-    case "look":
-      return { min: 0, max: 0 };
-    case "char":
-      return { min: 1, max: 1 };
-    case "concat": {
-      let min = 0;
-      let max = 0;
-      for (const part of node.parts) {
-        const span = spanOf(part);
-        min += span.min;
-        max += span.max;
-      }
-      return { min, max };
-    }
-    case "alt": {
-      let min = Number.POSITIVE_INFINITY;
-      let max = 0;
-      for (const branch of node.branches) {
-        const span = spanOf(branch);
-        min = Math.min(min, span.min);
-        max = Math.max(max, span.max);
-      }
-      return node.branches.length === 0 ? { min: 0, max: 0 } : { min, max };
-    }
-    case "repeat": {
-      const span = spanOf(node.body);
-      const max = span.max === 0
-        ? 0
-        : node.max === Number.POSITIVE_INFINITY
-        ? Number.POSITIVE_INFINITY
-        : span.max * node.max;
-      return { min: span.min * node.min, max };
-    }
-  }
-};
+/** The most character sets that one fixed shape holds. */
+const SEQUENCE_LIMIT = 64;
 
-/** The characters that this expression can start with. */
-const firstOf = (node: Node): CharSet => {
-  switch (node.kind) {
-    case "empty":
-    case "anchor":
-    case "look":
-      return EMPTY_SET;
-    case "char":
-      return node.set;
-    case "concat": {
-      let set = EMPTY_SET;
-      for (const part of node.parts) {
-        set = unionSets(set, firstOf(part));
-        if (!isNullable(part)) break;
+/** How many unbounded quantifiers may compete with the text after them. */
+const SLIDE_LIMIT = 1;
+
+/**
+ * Every answer that the rules ask about one tree.
+ *
+ * The answers depend on the `i` flag, so one analysis belongs to one call. Each
+ * answer is kept in a map, because a rule asks the same question about the same
+ * node many times.
+ */
+interface Analysis {
+  /** Can this expression match an empty string? */
+  readonly nullable: (node: Node) => boolean;
+  /** The shortest and the longest string that this expression matches. */
+  readonly span: (node: Node) => Span;
+  /** Can this expression match two strings of different lengths? */
+  readonly flexible: (node: Node) => boolean;
+  /** The characters that a match can start with. */
+  readonly first: (node: Node) => CharSet;
+  /** The characters that a match can end with. */
+  readonly last: (node: Node) => CharSet;
+  /** Every character that a match can hold, at any position. */
+  readonly anywhere: (node: Node) => CharSet;
+  /**
+   * The characters that can make a match longer.
+   *
+   * A member `c` means: this expression matches some text `u`, and it also
+   * matches `u` followed by `c` and more. `a+` gives `a`, because `a` matches
+   * and `aa` matches. `\w+\.` gives nothing, because every match ends at the
+   * one dot that it holds.
+   */
+  readonly extend: (node: Node) => CharSet;
+  /** The fixed shape of this expression, when it has one. */
+  readonly sequence: (node: Node) => Option.Option<ReadonlyArray<CharSet>>;
+  /** Can the boundary between `left` and the parts from `from` move? */
+  readonly slidesInto: (
+    left: Node,
+    parts: ReadonlyArray<Node>,
+    from: number,
+  ) => boolean;
+  /** Can one character belong to both sets? */
+  readonly intersect: (left: CharSet, right: CharSet) => boolean;
+}
+
+const makeAnalysis = (ignoreCase: boolean): Analysis => {
+  const nullableCache = new Map<Node, boolean>();
+  const spanCache = new Map<Node, Span>();
+  const firstCache = new Map<Node, CharSet>();
+  const lastCache = new Map<Node, CharSet>();
+  const anywhereCache = new Map<Node, CharSet>();
+  const extendCache = new Map<Node, CharSet>();
+  const sequenceCache = new Map<
+    Node,
+    Option.Option<ReadonlyArray<CharSet>>
+  >();
+
+  const memo = <T>(
+    cache: Map<Node, T>,
+    node: Node,
+    make: (node: Node) => T,
+  ): T => {
+    const found = cache.get(node);
+    if (found !== undefined) return found;
+    const value = make(node);
+    cache.set(node, value);
+    return value;
+  };
+
+  const intersect = (left: CharSet, right: CharSet): boolean =>
+    setsIntersect(left, right, ignoreCase);
+
+  const nullable = (node: Node): boolean =>
+    memo(nullableCache, node, (target) => {
+      switch (target.kind) {
+        case "empty":
+        case "anchor":
+        case "look":
+          return true;
+        case "char":
+          return false;
+        case "concat":
+          return target.parts.every(nullable);
+        case "alt":
+          return target.branches.some(nullable);
+        case "repeat":
+          return target.min === 0 || nullable(target.body);
       }
-      return set;
+    });
+
+  const span = (node: Node): Span =>
+    memo(spanCache, node, (target) => {
+      switch (target.kind) {
+        case "empty":
+        case "anchor":
+        case "look":
+          return { min: 0, max: 0 };
+        case "char":
+          return { min: 1, max: 1 };
+        case "concat":
+          return spanOfParts(target.parts, 0);
+        case "alt": {
+          if (target.branches.length === 0) return { min: 0, max: 0 };
+          let min = Number.POSITIVE_INFINITY;
+          let max = 0;
+          for (const branch of target.branches) {
+            const reach = span(branch);
+            min = Math.min(min, reach.min);
+            max = Math.max(max, reach.max);
+          }
+          return { min, max };
+        }
+        case "repeat": {
+          const reach = span(target.body);
+          const max = reach.max === 0
+            ? 0
+            : target.max === Number.POSITIVE_INFINITY
+            ? Number.POSITIVE_INFINITY
+            : reach.max * target.max;
+          return { min: reach.min * target.min, max };
+        }
+      }
+    });
+
+  const spanOfParts = (
+    parts: ReadonlyArray<Node>,
+    from: number,
+  ): Span => {
+    let min = 0;
+    let max = 0;
+    for (let index = from; index < parts.length; index++) {
+      const part = parts[index];
+      if (part === undefined) continue;
+      const reach = span(part);
+      min += reach.min;
+      max += reach.max;
     }
-    case "alt":
-      return node.branches.reduce(
-        (set, branch) => unionSets(set, firstOf(branch)),
-        EMPTY_SET,
-      );
-    case "repeat":
-      return node.max === 0 ? EMPTY_SET : firstOf(node.body);
-  }
-};
+    return { min, max };
+  };
 
-/** Does this expression hold a quantifier that can repeat? */
-const hasLoop = (node: Node): boolean => {
-  switch (node.kind) {
-    case "empty":
-    case "anchor":
-    case "char":
-      return false;
-    case "look":
-      return hasLoop(node.body);
-    case "concat":
-      return node.parts.some(hasLoop);
-    case "alt":
-      return node.branches.some(hasLoop);
-    case "repeat":
-      return node.max > 1 || hasLoop(node.body);
-  }
-};
+  const flexible = (node: Node): boolean => {
+    const reach = span(node);
+    return reach.min !== reach.max;
+  };
 
-/** Can this expression match nothing *and* something? */
-const isOptional = (node: Node): boolean =>
-  isNullable(node) && spanOf(node).max > 0;
+  const first = (node: Node): CharSet =>
+    memo(firstCache, node, (target) => {
+      switch (target.kind) {
+        case "empty":
+        case "anchor":
+        case "look":
+          return EMPTY_SET;
+        case "char":
+          return target.set;
+        case "concat":
+          return firstOfParts(target.parts, 0);
+        case "alt":
+          return target.branches.reduce(
+            (set, branch) => unionSets(set, first(branch)),
+            EMPTY_SET,
+          );
+        case "repeat":
+          return target.max === 0 ? EMPTY_SET : first(target.body);
+      }
+    });
+
+  const firstOfParts = (
+    parts: ReadonlyArray<Node>,
+    from: number,
+  ): CharSet => {
+    let set = EMPTY_SET;
+    for (let index = from; index < parts.length; index++) {
+      const part = parts[index];
+      if (part === undefined) continue;
+      set = unionSets(set, first(part));
+      if (!nullable(part)) break;
+    }
+    return set;
+  };
+
+  const last = (node: Node): CharSet =>
+    memo(lastCache, node, (target) => {
+      switch (target.kind) {
+        case "empty":
+        case "anchor":
+        case "look":
+          return EMPTY_SET;
+        case "char":
+          return target.set;
+        case "concat": {
+          let set = EMPTY_SET;
+          for (let index = target.parts.length - 1; index >= 0; index--) {
+            const part = target.parts[index];
+            if (part === undefined) continue;
+            set = unionSets(set, last(part));
+            if (!nullable(part)) break;
+          }
+          return set;
+        }
+        case "alt":
+          return target.branches.reduce(
+            (set, branch) => unionSets(set, last(branch)),
+            EMPTY_SET,
+          );
+        case "repeat":
+          return target.max === 0 ? EMPTY_SET : last(target.body);
+      }
+    });
+
+  const anywhere = (node: Node): CharSet =>
+    memo(anywhereCache, node, (target) => {
+      switch (target.kind) {
+        case "empty":
+        case "anchor":
+        case "look":
+          return EMPTY_SET;
+        case "char":
+          return target.set;
+        case "concat":
+          return anywhereOfParts(target.parts, 0);
+        case "alt":
+          return target.branches.reduce(
+            (set, branch) => unionSets(set, anywhere(branch)),
+            EMPTY_SET,
+          );
+        case "repeat":
+          return target.max === 0 ? EMPTY_SET : anywhere(target.body);
+      }
+    });
+
+  const anywhereOfParts = (
+    parts: ReadonlyArray<Node>,
+    from: number,
+  ): CharSet => {
+    let set = EMPTY_SET;
+    for (let index = from; index < parts.length; index++) {
+      const part = parts[index];
+      if (part === undefined) continue;
+      set = unionSets(set, anywhere(part));
+    }
+    return set;
+  };
+
+  const sequence = (
+    node: Node,
+  ): Option.Option<ReadonlyArray<CharSet>> =>
+    memo(sequenceCache, node, (target) => {
+      switch (target.kind) {
+        case "empty":
+        case "anchor":
+          return Option.some([]);
+        // A lookaround adds a condition that a list of sets cannot hold.
+        case "look":
+          return Option.none();
+        case "char":
+          return Option.some([target.set]);
+        case "concat": {
+          const sets: CharSet[] = [];
+          for (const part of target.parts) {
+            const shape = sequence(part);
+            if (Option.isNone(shape)) return Option.none();
+            if (sets.length + shape.value.length > SEQUENCE_LIMIT) {
+              return Option.none();
+            }
+            sets.push(...shape.value);
+          }
+          return Option.some(sets);
+        }
+        case "alt": {
+          const shapes: ReadonlyArray<CharSet>[] = [];
+          for (const branch of target.branches) {
+            const shape = sequence(branch);
+            if (Option.isNone(shape)) return Option.none();
+            shapes.push([...shape.value]);
+          }
+          const head = shapes[0];
+          if (head === undefined) return Option.none();
+          if (shapes.some((shape) => shape.length !== head.length)) {
+            return Option.none();
+          }
+          // The union loses which branch gave which set, so the shape holds
+          // more strings than the alternation does. That direction refuses
+          // more, and never fewer.
+          return Option.some(
+            head.map((_, position) =>
+              shapes.reduce(
+                (set, shape) => unionSets(set, shape[position] ?? EMPTY_SET),
+                EMPTY_SET,
+              )
+            ),
+          );
+        }
+        case "repeat": {
+          if (target.min !== target.max) return Option.none();
+          const shape = sequence(target.body);
+          if (Option.isNone(shape)) return Option.none();
+          if (shape.value.length * target.min > SEQUENCE_LIMIT) {
+            return Option.none();
+          }
+          const sets: CharSet[] = [];
+          for (let round = 0; round < target.min; round++) {
+            sets.push(...shape.value);
+          }
+          return Option.some(sets);
+        }
+      }
+    });
+
+  /**
+   * The characters that branch `left` can be followed by inside branch
+   * `right`.
+   *
+   * `a|aa` gives `a`: the first branch matches `a`, and the second matches
+   * `aa`, so a match of the alternation can grow. `a|ab` gives `b`, and
+   * `cat|car` gives nothing, because neither shape starts the other one.
+   */
+  const crossExtend = (left: Node, right: Node): CharSet => {
+    let set = EMPTY_SET;
+    if (nullable(left) && span(right).max > 0) {
+      set = unionSets(set, first(right));
+    }
+    const shapeLeft = sequence(left);
+    const shapeRight = sequence(right);
+    if (Option.isSome(shapeLeft) && Option.isSome(shapeRight)) {
+      const short = shapeLeft.value;
+      const long = shapeRight.value;
+      if (short.length >= long.length) return set;
+      for (let position = 0; position < short.length; position++) {
+        const one = short[position];
+        const other = long[position];
+        if (one === undefined || other === undefined) return set;
+        if (!intersect(one, other)) return set;
+      }
+      return unionSets(set, long[short.length] ?? EMPTY_SET);
+    }
+    // One of the two shapes is unknown. Say that any character can follow,
+    // unless the two branches cannot even start with one character.
+    return intersect(first(left), first(right)) ? ANY_SET : set;
+  };
+
+  const extend = (node: Node): CharSet =>
+    memo(extendCache, node, (target) => {
+      switch (target.kind) {
+        case "empty":
+        case "anchor":
+        case "look":
+        case "char":
+          return EMPTY_SET;
+        case "concat": {
+          let set = EMPTY_SET;
+          // A match ends inside the last part that is not empty. That part can
+          // grow, and every part after it can stop being empty.
+          for (let index = target.parts.length - 1; index >= 0; index--) {
+            const part = target.parts[index];
+            if (part === undefined) continue;
+            set = unionSets(set, extend(part));
+            set = unionSets(set, firstOfParts(target.parts, index + 1));
+            if (!nullable(part)) break;
+          }
+          // A part in the middle can also grow, when the parts after it can
+          // start one character later. The match then ends one character
+          // later, and this module cannot say with which character.
+          for (let index = 0; index < target.parts.length - 1; index++) {
+            const part = target.parts[index];
+            if (part === undefined) continue;
+            if (slidesInto(part, target.parts, index + 1)) return ANY_SET;
+          }
+          return set;
+        }
+        case "alt": {
+          let set = EMPTY_SET;
+          for (const branch of target.branches) {
+            set = unionSets(set, extend(branch));
+          }
+          for (const left of target.branches) {
+            for (const right of target.branches) {
+              if (left === right) continue;
+              set = unionSets(set, crossExtend(left, right));
+            }
+          }
+          return set;
+        }
+        case "repeat": {
+          if (target.max === 0) return EMPTY_SET;
+          const set = extend(target.body);
+          // One more iteration can follow a complete match, unless the count
+          // is fixed.
+          return target.max > target.min
+            ? unionSets(set, first(target.body))
+            : set;
+        }
+      }
+    });
+
+  /**
+   * Can the boundary between `left` and the parts from `from` move?
+   *
+   * Two conditions must hold. `left` must be able to take the character that
+   * the parts after it would start with. Those parts must also be able to hold
+   * the character that `left` ends with, because the text that `left` takes is
+   * text that they gave back.
+   *
+   * `\w+\.` and `\w+` do not slide: the first ends at a dot, and the second
+   * holds no dot. `[a-z]*` and `x` do slide.
+   */
+  const slidesInto = (
+    left: Node,
+    parts: ReadonlyArray<Node>,
+    from: number,
+  ): boolean =>
+    intersect(extend(left), firstOfParts(parts, from)) &&
+    intersect(last(left), anywhereOfParts(parts, from));
+
+  return {
+    nullable,
+    span,
+    flexible,
+    first,
+    last,
+    anywhere,
+    extend,
+    sequence,
+    slidesInto,
+    intersect,
+  };
+};
 
 // ---------------------------------------------------------------------------
 // The rules
 // ---------------------------------------------------------------------------
 
 /**
- * Two neighbours that both may match nothing and may start with the same
- * character.
+ * Two neighbours that both flex, and that compete for the same characters.
  *
- * `a*a*b` and `a?a?a?…` are the shape. Each split of the input between the two
- * neighbours is a path that the engine tries, so the work grows with a power
- * of the length. Only nullable expressions stand between the pair, because a
- * part that must match a character separates them.
+ * `\s+\s+`, `a*a*b` and `a?a?a?…` are the shape. Each division of the input
+ * between the two neighbours is a path that the engine tries, so the work grows
+ * with a power of the length. The walk to the right stops after the first
+ * neighbour that must match a character, because that neighbour separates the
+ * pair.
  */
 const hasCompetingNeighbours = (
   parts: ReadonlyArray<Node>,
-  ignoreCase: boolean,
+  analysis: Analysis,
 ): boolean => {
   for (let left = 0; left < parts.length; left++) {
-    const first = parts[left];
-    if (first === undefined || !isOptional(first)) continue;
+    const one = parts[left];
+    if (one === undefined || !analysis.flexible(one)) continue;
     for (let right = left + 1; right < parts.length; right++) {
-      const second = parts[right];
-      if (second === undefined || !isNullable(second)) break;
+      const other = parts[right];
+      if (other === undefined) continue;
       if (
-        isOptional(second) &&
-        setsIntersect(firstOf(first), firstOf(second), ignoreCase)
+        analysis.flexible(other) &&
+        analysis.intersect(analysis.extend(one), analysis.first(other)) &&
+        analysis.intersect(analysis.last(one), analysis.anywhere(other))
       ) {
         return true;
       }
+      if (!analysis.nullable(other)) break;
     }
   }
   return false;
 };
 
-/** Two alternatives that can start with the same character. */
+/**
+ * How many unbounded quantifiers compete with the text after them.
+ *
+ * `[a-z]*x` holds one: the loop can take the `x`, so the engine tries every
+ * end for the loop. One such quantifier costs a search that grows with the
+ * square of the input, which the budget of the caller can pay. Two of them cost
+ * a cube: `a.*b.*c` against 4096 characters takes about 8.8 s.
+ */
+const countSlides = (
+  parts: ReadonlyArray<Node>,
+  analysis: Analysis,
+): number => {
+  let count = 0;
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index];
+    if (part === undefined) continue;
+    if (analysis.span(part).max !== Number.POSITIVE_INFINITY) continue;
+    if (analysis.slidesInto(part, parts, index + 1)) count++;
+  }
+  return count;
+};
+
+/**
+ * Two alternatives that can match one text.
+ *
+ * Then the engine has two paths through one alternation, and a loop around it
+ * doubles the number of paths with every iteration. `cat|car` is safe, because
+ * the third character keeps the two apart. `a|a` is not.
+ *
+ * Inside a loop the rule also refuses a pair whose shape this module cannot
+ * read, when the two can start with the same character. Outside a loop such a
+ * pair costs one extra step, so the rule lets it pass.
+ */
 const hasAmbiguousBranches = (
   branches: ReadonlyArray<Node>,
-  ignoreCase: boolean,
+  inLoop: boolean,
+  analysis: Analysis,
 ): boolean => {
+  const share = (left: Node, right: Node): boolean => {
+    const shapeLeft = analysis.sequence(left);
+    const shapeRight = analysis.sequence(right);
+    if (Option.isSome(shapeLeft) && Option.isSome(shapeRight)) {
+      if (shapeLeft.value.length !== shapeRight.value.length) return false;
+      return shapeLeft.value.every((set, position) => {
+        const other = shapeRight.value[position];
+        return other !== undefined && analysis.intersect(set, other);
+      });
+    }
+    return inLoop &&
+      analysis.intersect(analysis.first(left), analysis.first(right));
+  };
+
   for (let left = 0; left < branches.length; left++) {
-    const first = branches[left];
-    if (first === undefined) continue;
+    const one = branches[left];
+    if (one === undefined) continue;
     for (let right = left + 1; right < branches.length; right++) {
-      const second = branches[right];
-      if (second === undefined) continue;
-      if (setsIntersect(firstOf(first), firstOf(second), ignoreCase)) {
-        return true;
-      }
+      const other = branches[right];
+      if (other === undefined) continue;
+      if (share(one, other)) return true;
     }
   }
   return false;
@@ -778,7 +1204,7 @@ const hasAmbiguousBranches = (
 const check = (
   node: Node,
   inLoop: boolean,
-  ignoreCase: boolean,
+  analysis: Analysis,
 ): Option.Option<string> => {
   switch (node.kind) {
     case "empty":
@@ -787,43 +1213,51 @@ const check = (
       return Option.none();
 
     case "look":
-      // A lookaround runs at every position, so its own cost multiplies the
-      // cost of the walk. A body with no quantifier costs a constant.
-      return hasLoop(node.body)
-        ? Option.some(LOOKAROUND_LOOP)
-        : check(node.body, inLoop, ignoreCase);
+      // A lookaround runs at a position and gives back no text, so its cost
+      // adds to the cost of the walk. It does not multiply it. The body is
+      // therefore held to the same rules as any other expression.
+      return check(node.body, inLoop, analysis);
 
     case "concat": {
-      if (hasCompetingNeighbours(node.parts, ignoreCase)) {
+      if (hasCompetingNeighbours(node.parts, analysis)) {
         return Option.some(COMPETING_LOOPS);
       }
+      if (countSlides(node.parts, analysis) > SLIDE_LIMIT) {
+        return Option.some(MANY_LOOPS);
+      }
       for (const part of node.parts) {
-        const problem = check(part, inLoop, ignoreCase);
+        const problem = check(part, inLoop, analysis);
         if (Option.isSome(problem)) return problem;
       }
       return Option.none();
     }
 
     case "alt": {
-      // Two alternatives with the same start are two paths through one
-      // iteration, and the number of paths doubles with every iteration.
-      if (inLoop && hasAmbiguousBranches(node.branches, ignoreCase)) {
+      if (hasAmbiguousBranches(node.branches, inLoop, analysis)) {
         return Option.some(AMBIGUOUS_BRANCHES);
       }
       for (const branch of node.branches) {
-        const problem = check(branch, inLoop, ignoreCase);
+        const problem = check(branch, inLoop, analysis);
         if (Option.isSome(problem)) return problem;
       }
       return Option.none();
     }
 
     case "repeat": {
-      if (node.max <= 1) return check(node.body, inLoop, ignoreCase);
-      if (isNullable(node.body)) return Option.some(EMPTY_LOOP);
-      if (hasLoop(node.body)) return Option.some(NESTED_LOOP);
-      const span = spanOf(node.body);
-      if (span.min !== span.max) return Option.some(VARIABLE_LOOP);
-      return check(node.body, true, ignoreCase);
+      if (node.max <= 1) return check(node.body, inLoop, analysis);
+      // A body that matches nothing can iterate for ever at one position.
+      if (analysis.nullable(node.body)) return Option.some(EMPTY_LOOP);
+      // A body that can grow past its own end divides one text into
+      // iterations in more than one way. `(a+)+` is the known shape.
+      if (
+        analysis.intersect(
+          analysis.extend(node.body),
+          analysis.first(node.body),
+        )
+      ) {
+        return Option.some(AMBIGUOUS_LOOP);
+      }
+      return check(node.body, true, analysis);
     }
   }
 };
@@ -833,10 +1267,20 @@ const check = (
 // ---------------------------------------------------------------------------
 
 /**
+ * The longest pattern that this module reads.
+ *
+ * The work of the check grows with the size of the tree. Both callers already
+ * cap the pattern below this limit, so the limit is the third lock on the same
+ * door.
+ */
+export const MAX_PATTERN_LENGTH = 2048;
+
+/**
  * Why is this expression unsafe to run against text that a page controls?
  *
- * A `None` means that the match takes time proportional to the length of the
- * input. A `Some` carries a reason that a user can read.
+ * A `Some` carries a reason that a user can read. A `None` means that the check
+ * found no proof of ambiguity. Read the head of this module for what that does,
+ * and does not, promise. The caller must still hold a budget.
  *
  * `source` and `flags` are the two arguments of `new RegExp`. Compile the
  * expression first: a source that does not compile gives a reason here that
@@ -846,12 +1290,13 @@ export const regexSafetyError = (
   source: string,
   flags: string,
 ): Option.Option<string> => {
-  const outcome = parse(source, flags.includes("s"));
+  if (source.length > MAX_PATTERN_LENGTH) return Option.some(TOO_LONG);
+  const outcome = parse(source, flags.includes("s"), flags.includes("u"));
   return outcome.ok
-    ? check(outcome.node, false, flags.includes("i"))
+    ? check(outcome.node, false, makeAnalysis(flags.includes("i")))
     : Option.some(outcome.reason);
 };
 
-/** Is this expression safe to run against text that a page controls? */
+/** Is this expression free of the ambiguity that this module can prove? */
 export const isLinearRegex = (source: string, flags: string): boolean =>
   Option.isNone(regexSafetyError(source, flags));

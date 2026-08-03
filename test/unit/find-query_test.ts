@@ -216,8 +216,8 @@ describe("FindQuery", () => {
   it.effect("refuses a pattern that backtracks catastrophically", () =>
     Effect.sync(() => {
       // `(a+)+$` against a long line backtracks exponentially, and find mode
-      // owns the keyboard, so the tab is lost. The pattern runs again on every
-      // keystroke, so one character becomes a freeze.
+      // owns the keyboard, so the tab stops answering. The pattern runs again
+      // on every keystroke, so one more character stops the tab.
       for (const source of ["(a+)+$", "(a*)*b", "(\\d+)+$", "(a|a)*$"]) {
         const query = parseFindQuery(source, regexMode);
         assert.isTrue(
@@ -232,25 +232,28 @@ describe("FindQuery", () => {
     Effect.sync(() => {
       // Each of these defeated the timed probe that stood here before.
       //
-      // `(a|a|a|a)*$` is the probe bomb: twenty characters of `a` take more
-      // than a minute, so the probe *was* the freeze that it looked for.
+      // `(a|a|a|a)*$` was the worst one: twenty characters of `a` take more
+      // than a minute, so the probe could not end before the wait that it
+      // looked for.
       //
-      // The two `\s*` patterns pass a twenty-character probe in some
-      // milliseconds, and then grow with a power of the length: eighty
-      // characters cost 1.5 seconds, and a paragraph costs minutes.
+      // The two `\s` patterns pass a twenty-character probe in some
+      // milliseconds, and then grow with a power of the length. `\s+\s+\s+`
+      // costs 2.3 s against fifty characters.
       //
       // The check now reads the text and never runs it, so the whole set is
       // decided in well under one frame.
-      const bombs = [
+      const slow = [
         "(a|a|a|a)*$",
         "\\s*\\s*\\s*\\s*\\s*\\s*$",
+        "\\s+\\s+\\s+\\s+\\s+\\s+$",
+        "x+x+y",
+        "a+a+a+a+a+a+$",
         "^ *a* *a* *$",
-        "(?:a|ab)*$",
         "(a?){10}a{10}$",
       ];
 
       const started = performance.now();
-      for (const source of bombs) {
+      for (const source of slow) {
         const query = parseFindQuery(source, regexMode);
         assert.isTrue(
           Option.isSome(query.error),
@@ -272,6 +275,12 @@ describe("FindQuery", () => {
           "[a-z]*x",
           "colou?r",
           "^https://(mail|inbox)\\.example\\.com/.*$",
+          // The shapes that the review of pull request 55 asked for.
+          "^https?://([a-z0-9-]+\\.)*example\\.com/.*$",
+          "(?:\\w+\\.)+\\w+",
+          "(cat|car)+",
+          '"(?:[^"\\\\]|\\\\.)*"',
+          "^(?=.*foo)(?=.*bar)",
         ]
       ) {
         const query = parseFindQuery(source, regexMode);
