@@ -13,6 +13,12 @@
  * `Deferred` that the fiber completes, so a debounced write still reports the
  * outcome of the write that reaches the backend.
  *
+ * There is one path around the fiber, and it exists for one moment: the page
+ * exit. `flushUnsafe` writes the held value with a direct call to the backend.
+ * A `pagehide` handler gets one synchronous run. The Effect scheduler is a
+ * macrotask in a page, so a value that waits for the fiber is lost. Read the
+ * note above `flushUnsafe` before you use it.
+ *
  * Storage is untrusted input. The user can edit it in the manager's interface,
  * an older build may have written it, and a newer build in another tab may have
  * written it. Every read is decoded against the group schema, and every failure
@@ -129,6 +135,14 @@ export interface ValueGroup<A> {
 
   /** Write a value that is still inside its debounce window. */
   readonly flush: Effect.Effect<void, StorageError>;
+
+  /**
+   * Write the held value to the backend now, with no suspension.
+   *
+   * For the page exit only. Every other caller uses `flush`. Read the note
+   * above the implementation before you call it.
+   */
+  readonly flushUnsafe: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -315,52 +329,113 @@ export const makeGroup = <A>(
     // -- the backend -------------------------------------------------------
 
     /**
-     * Write one value to the backend.
+     * The bytes for one value, or the failure that stops the write.
      *
      * The value is validated on the way out as well as on the way in. A bad
-     * value is then caught where it was made, and not on the next page load,
-     * where it would reset the group and take every other field with it.
+     * value is then caught where it was made, and not on the next page load. A
+     * bad value that reached the disk would reset the group on the next read,
+     * and it would take every other field with it.
+     *
+     * One function for the actor path and for the exit path. The two must give
+     * the same bytes, and one function is the only way to be sure of that.
+     * `report` is false on the exit path, so that one failure gives one
+     * message: the actor writes the same value again and reports it there.
      */
+    const encode = (
+      next: A,
+      report: boolean,
+    ): Result.Result<string, StorageError> => {
+      const validated = decodeUnknown(spec.schema)(next);
+      if (Result.isFailure(validated)) {
+        return Result.fail(raise(
+          "invalid",
+          "write",
+          "refusing to persist a value that fails its own schema",
+          describeSchemaError(validated.failure),
+          report,
+        ));
+      }
+      try {
+        const envelope: Envelope = {
+          schemaVersion: spec.schemaVersion,
+          data: validated.success,
+        };
+        return Result.succeed(JSON.stringify(envelope));
+      } catch (cause) {
+        return Result.fail(raise(
+          "malformed",
+          "write",
+          "the value cannot be serialised",
+          cause,
+          report,
+        ));
+      }
+    };
+
+    /** Write one value to the backend. */
     const commit = (next: A): Effect.Effect<void, StorageError> =>
       Effect.gen(function*() {
-        const validated = decodeUnknown(spec.schema)(next);
-        if (Result.isFailure(validated)) {
-          return yield* raise(
-            "invalid",
-            "write",
-            "refusing to persist a value that fails its own schema",
-            describeSchemaError(validated.failure),
-          );
+        const encoded = encode(next, true);
+        if (Result.isFailure(encoded)) {
+          return yield* encoded.failure;
         }
-
-        const encoded = yield* Effect.try({
-          try: () => {
-            const envelope: Envelope = {
-              schemaVersion: spec.schemaVersion,
-              data: validated.success,
-            };
-            return JSON.stringify(envelope);
-          },
-          catch: (cause) =>
-            raise(
-              "malformed",
-              "write",
-              "the value cannot be serialised",
-              cause,
-            ),
-        });
 
         // Not interruptible. A promise inside the backend keeps running after
         // its fiber is interrupted, so an interrupted `set` could still land
         // after a later `remove`.
         yield* Effect.uninterruptible(
           Effect.mapError(
-            kv.set(key, encoded),
+            kv.set(key, encoded.success),
             (cause) => raise("backend", "write", cause.detail, cause),
           ),
         );
         readFailure = null;
       });
+
+    /**
+     * Write the held value to the backend now, with no suspension.
+     *
+     * This is the exit path, and it exists because the actor path cannot save
+     * a dying page. A caller of `flush` waits on a `Deferred`, and the actor
+     * fiber resumes through the Effect scheduler. That scheduler is
+     * `setTimeout(f, 0)` in a page, and a macrotask that starts inside
+     * `pagehide` never runs. `GM_setValue` and `localStorage.setItem` are both
+     * synchronous, so the last hop can be a direct call instead.
+     *
+     * Four rules hold this path together:
+     *
+     * 1. **One value goes, and it is the newest one.** `pending` holds the
+     *    last write of the debounce window. The order of two writes to one key
+     *    is therefore the order that the backend sees.
+     * 2. **Nothing is written twice.** `pending` is cleared after the write, so
+     *    the flush that the actor runs later finds nothing to do.
+     * 3. **A value that the actor is writing is left alone.** The actor clears
+     *    `pending` before it commits, and it runs one command at a time. An
+     *    empty `pending` therefore means that nothing is owed.
+     * 4. **It never throws.** The `pagehide` handler must return, and a browser
+     *    swallows a throw from a listener. A failed write keeps `pending`, so
+     *    the actor writes it again if this page lives on.
+     *
+     * A command that is still in the mailbox is not covered. Only the actor may
+     * run one, and this path must not take its turn.
+     */
+    const flushUnsafe = (): void => {
+      const held = pending;
+      if (Option.isNone(held)) return;
+      try {
+        const encoded = encode(held.value, false);
+        // The value cannot be written at all. The actor reports it, and it
+        // fails the callers that wait for this write.
+        if (Result.isFailure(encoded)) return;
+        kv.setUnsafe(key, encoded.success);
+        pending = Option.none();
+        readFailure = null;
+      } catch (cause) {
+        // The value stays pending, so the actor tries again. A second message
+        // therefore means a second failed attempt, and not one failure twice.
+        raise("backend", "write", "the direct write failed", cause);
+      }
+    };
 
     const publish = (next: A): Effect.Effect<void> =>
       SubscriptionRef.set(value, next);
@@ -595,6 +670,7 @@ export const makeGroup = <A>(
         _tag: "Flush",
         reply: Option.some(reply),
       })),
+      flushUnsafe,
     };
   });
 
@@ -623,6 +699,16 @@ export class Storage extends Context.Service<Storage, {
 
   /** Write every value that is still inside a debounce window. */
   readonly flushAll: Effect.Effect<void>;
+
+  /**
+   * Write every held value to the backend now, with no suspension.
+   *
+   * For the page exit only. A `pagehide` handler gets one synchronous run, and
+   * the Effect scheduler is a macrotask in a page. A write that waits for a
+   * fiber therefore never reaches the backend. This call never throws, and a
+   * failed write becomes one message on the issue stream.
+   */
+  readonly flushAllUnsafe: () => void;
 }>()("vimium/platform/Storage") {
   static readonly layer: Layer.Layer<Storage, never, KeyValueStore> = Layer
     .effect(
@@ -665,6 +751,9 @@ export class Storage extends Context.Service<Storage, {
             (group) => Effect.ignore(group.flush),
             { concurrency: "unbounded", discard: true },
           ),
+          flushAllUnsafe: () => {
+            for (const group of groups) group.flushUnsafe();
+          },
         });
       }),
     );

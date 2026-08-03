@@ -58,6 +58,9 @@ const storedSettings = (
         Effect.sync(() => {
           map.delete(key);
         }),
+      setUnsafe: (key, value) => {
+        map.set(key, value);
+      },
       changes: () => Stream.empty,
     });
   });
