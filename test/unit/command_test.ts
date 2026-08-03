@@ -7,7 +7,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import {
   type CommandDef,
   type CommandGroup,
@@ -15,6 +15,7 @@ import {
   COMMANDS,
   DEFAULT_MAPPINGS,
 } from "~/domain/Command.ts";
+import { type KeyEventLike, keyNotation } from "~/domain/Key.ts";
 import { compileMappings } from "~/domain/Mapping.ts";
 
 const entries: readonly (readonly [string, CommandDef])[] = Object.entries(
@@ -128,4 +129,75 @@ describe("Command", () => {
       const name: CommandName = "scrollDown";
       assert.strictEqual(COMMANDS[name].name, name);
     }));
+
+  /**
+   * The shipped Option bindings, as macOS reports them.
+   *
+   * macOS applies Option to the character, so the physical key must decide.
+   * Each row gives the glyph of a US layout and the command that must run.
+   */
+  const OPTION_BINDINGS: readonly {
+    readonly name: string;
+    readonly key: string;
+    readonly code: string;
+    readonly command: string;
+  }[] = [
+    {
+      name: "Option+F opens a hint in a new foreground tab",
+      key: "\u0192",
+      code: "KeyF",
+      command: "LinkHints.activateModeToOpenInNewForegroundTab",
+    },
+    {
+      name: "Option+H hovers a hint",
+      key: "\u02d9",
+      code: "KeyH",
+      command: "LinkHints.activateModeToHover",
+    },
+    {
+      name: "Option+O opens the omnibar on a hint",
+      key: "\u00f8",
+      code: "KeyO",
+      command: "LinkHints.activateModeWithOmnibar",
+    },
+    {
+      name: "Option+M mutes the tab",
+      key: "\u00b5",
+      code: "KeyM",
+      command: "toggleMuteTab",
+    },
+    {
+      name: "Option+P pins the tab",
+      key: "\u03c0",
+      code: "KeyP",
+      command: "togglePinTab",
+    },
+  ];
+
+  for (const row of OPTION_BINDINGS) {
+    it.effect(`runs a default Option binding: ${row.name}`, () =>
+      Effect.sync(() => {
+        const event: KeyEventLike = {
+          key: row.key,
+          code: row.code,
+          altKey: true,
+          ctrlKey: false,
+          metaKey: false,
+          shiftKey: false,
+        };
+        const notation = Option.getOrNull(keyNotation(event));
+        const compiled = compileMappings(DEFAULT_MAPPINGS, {
+          knownCommands: names,
+          rejectReservedShortcuts: true,
+        });
+        const binding = compiled.bindings.find(
+          (entry) => entry.keys.length === 1 && entry.keys[0] === notation,
+        );
+        assert.strictEqual(
+          binding?.command,
+          row.command,
+          `${notation} runs no default binding`,
+        );
+      }));
+  }
 });

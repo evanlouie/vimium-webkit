@@ -657,6 +657,8 @@ map gf nextFrame
 map gF mainFrame
 
 # Link hints
+# An Option chord on macOS makes a glyph: Option+F reports "ƒ". The key path
+# reads the physical key for such a chord, so <a-f> stays the F key.
 map f LinkHints.activateMode
 map F LinkHints.activateModeToOpenInNewTab
 map <a-f> LinkHints.activateModeToOpenInNewForegroundTab
