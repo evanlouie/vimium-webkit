@@ -113,3 +113,204 @@ test.describe("find", () => {
     expect((await vw.selection()).text).toBe("");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Composed order, and the boundary that the reader sees
+// ---------------------------------------------------------------------------
+
+/**
+ * Does the current highlight sit on `selector`?
+ *
+ * Both boxes are read in one call, so a scroll between two calls cannot make
+ * the answer wrong. The test is a containment test: the highlight covers one
+ * word, and the element holds the whole line.
+ */
+const highlightSits = (
+  vw: Vimium,
+  selector: string,
+  shadowHost: string | null = null,
+): Promise<boolean | null> =>
+  vw.page.evaluate(
+    ([query, host]: readonly [string, string | null]): boolean | null => {
+      const harness = globalThis as unknown as {
+        __vimiumHarness?: { shadow: ShadowRoot | null };
+      };
+      const shadow = harness.__vimiumHarness?.shadow ?? null;
+      const drawn = shadow?.querySelector(".vw-find__rect--current") ?? null;
+      const root: Document | ShadowRoot | null = host === null
+        ? document
+        : document.querySelector(host)?.shadowRoot ?? null;
+      const target = root?.querySelector(query) ?? null;
+      if (drawn === null || target === null) return null;
+      const box = drawn.getBoundingClientRect();
+      const wanted = target.getBoundingClientRect();
+      const x = box.left + box.width / 2;
+      const y = box.top + box.height / 2;
+      return x >= wanted.left - 2 && x <= wanted.right + 2 &&
+        y >= wanted.top - 2 && y <= wanted.bottom + 2;
+    },
+    [selector, shadowHost] as const,
+  );
+
+/**
+ * Does the current highlight lie exactly on `word` inside `selector`?
+ *
+ * The rectangle of the word itself is measured, and not the box of the line,
+ * so an error of a few pixels in either direction is a failure. Both boxes are
+ * read in one call.
+ */
+const highlightOnWord = (
+  vw: Vimium,
+  selector: string,
+  word: string,
+): Promise<boolean | null> =>
+  vw.page.evaluate(
+    ([query, needle]: readonly [string, string]): boolean | null => {
+      const harness = globalThis as unknown as {
+        __vimiumHarness?: { shadow: ShadowRoot | null };
+      };
+      const shadow = harness.__vimiumHarness?.shadow ?? null;
+      const drawn = shadow?.querySelector(".vw-find__rect--current") ?? null;
+      const line = document.querySelector(query);
+      const text = line?.firstChild ?? null;
+      if (drawn === null || !(text instanceof Text)) return null;
+      const at = text.data.indexOf(needle);
+      if (at < 0) return null;
+      const range = document.createRange();
+      range.setStart(text, at);
+      range.setEnd(text, at + needle.length);
+      const wanted = range.getBoundingClientRect();
+      const box = drawn.getBoundingClientRect();
+      return Math.abs(box.left - wanted.left) <= 2 &&
+        Math.abs(box.top - wanted.top) <= 2;
+    },
+    [selector, word] as const,
+  );
+
+/** The top of one page element, in viewport coordinates. */
+const topOf = (vw: Vimium, selector: string): Promise<number | null> =>
+  vw.page.evaluate((query: string): number | null => {
+    const element = document.querySelector(query);
+    return element === null ? null : element.getBoundingClientRect().top;
+  }, selector);
+
+/** The left edge of one page element, in viewport coordinates. */
+const leftOf = (vw: Vimium, selector: string): Promise<number | null> =>
+  vw.page.evaluate((query: string): number | null => {
+    const element = document.querySelector(query);
+    return element === null ? null : element.getBoundingClientRect().left;
+  }, selector);
+
+test.describe("find in composed order", () => {
+  test("visits the matches in the order that the reader sees", async ({ vw }) => {
+    await vw.open("/find-composed.html");
+    await commitFind(vw, "widget");
+
+    // alpha is light DOM, beta is the shadow tree of the card, delta is the
+    // light child that the slot of the card draws, and gamma is light DOM
+    // again. Tree order would give alpha, delta, gamma, beta.
+    await vw.waitForHud("1/4");
+    await expect.poll(() => highlightSits(vw, "#alpha")).toBe(true);
+
+    await vw.press("n");
+    await vw.waitForHud("2/4");
+    await expect.poll(() => highlightSits(vw, "#head", "#card")).toBe(true);
+
+    await vw.press("n");
+    await vw.waitForHud("3/4");
+    await expect.poll(() => highlightSits(vw, "#delta")).toBe(true);
+
+    await vw.press("n");
+    await vw.waitForHud("4/4");
+    await expect.poll(() => highlightSits(vw, "#gamma")).toBe(true);
+  });
+
+  test("does not match across two blocks that the reader sees apart", async ({ vw }) => {
+    await vw.open("/find-composed.html");
+    // `<p>north</p><p>west</p>`, with nothing between the two blocks. The
+    // reader sees two lines, so `northwest` is not a word on this page.
+    await commitFind(vw, "northwest");
+
+    await vw.waitForHud("No matches");
+  });
+
+  test("still matches across inline markup on one line", async ({ vw }) => {
+    await vw.open("/long-text.html");
+    await commitFind(vw, QUERY);
+
+    await vw.waitForHud("1/4");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A container that scrolls on its own
+// ---------------------------------------------------------------------------
+
+test.describe("find inside a nested scroll container", () => {
+  test("Escape puts the panel back where the user left it", async ({ vw }) => {
+    await vw.open("/find-nested-scroll.html");
+    const before = await vw.scrollOffsets("#panel");
+    expect(before.y).toBe(0);
+
+    await vw.press("/");
+    await vw.type(QUERY);
+    // The match is far down inside the panel, so the incremental search has to
+    // scroll the panel to show it. Without this the test would prove nothing.
+    await expect.poll(async () => (await vw.scrollOffsets("#panel")).y)
+      .toBeGreaterThan(0);
+
+    await vw.press("Escape");
+
+    await expect.poll(async () => (await vw.scrollOffsets("#panel")).y)
+      .toBe(before.y);
+    await expect.poll(async () => (await vw.scrollOffsets()).y).toBe(0);
+  });
+
+  test("the highlight follows the text when the panel scrolls", async ({ vw }) => {
+    await vw.open("/find-nested-scroll.html");
+    await commitFind(vw, QUERY);
+    await expect.poll(() => highlightOnWord(vw, "#needle", QUERY)).toBe(true);
+
+    const before = await topOf(vw, "#needle");
+    await vw.page.evaluate(() => {
+      const panel = document.getElementById("panel");
+      if (panel !== null) panel.scrollTop = panel.scrollTop + 60;
+    });
+    // The text moved. A highlight that only follows the window scroll is now
+    // 60 pixels away from its match.
+    await expect.poll(() => topOf(vw, "#needle")).not.toBe(before);
+
+    await expect.poll(() => highlightOnWord(vw, "#needle", QUERY)).toBe(true);
+  });
+
+  test("the highlight follows the text after a reflow", async ({ vw }) => {
+    await vw.open("/find-nested-scroll.html");
+    await commitFind(vw, QUERY);
+    await expect.poll(() => highlightOnWord(vw, "#needle", QUERY)).toBe(true);
+
+    const before = await topOf(vw, "#needle");
+    // A block that arrives above the panel. Nothing scrolls, and the window is
+    // not resized, so only a measurement can find the new place of the match.
+    await vw.page.evaluate(() => {
+      const banner = document.createElement("div");
+      banner.style.height = "120px";
+      document.body.insertBefore(banner, document.body.firstChild);
+    });
+    await expect.poll(() => topOf(vw, "#needle")).not.toBe(before);
+
+    await expect.poll(() => highlightOnWord(vw, "#needle", QUERY)).toBe(true);
+  });
+
+  test("the highlight follows the text after a resize", async ({ vw }) => {
+    await vw.open("/find-nested-scroll.html");
+    await commitFind(vw, QUERY);
+    await expect.poll(() => highlightOnWord(vw, "#needle", QUERY)).toBe(true);
+
+    // The panel has a margin in percent, so a narrower window moves it.
+    const before = await leftOf(vw, "#needle");
+    await vw.page.setViewportSize({ width: 900, height: 700 });
+    await expect.poll(() => leftOf(vw, "#needle")).not.toBe(before);
+
+    await expect.poll(() => highlightOnWord(vw, "#needle", QUERY)).toBe(true);
+  });
+});

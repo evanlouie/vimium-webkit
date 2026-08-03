@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Composed order</title>
+    <link rel="stylesheet" href="assets/base.css" />
+    <style>
+    x-card {
+      display: block;
+      border: 1px dashed #06c;
+      padding: 8px;
+      margin: 12px 0;
+    }
+    #pair p {
+      margin: 0;
+    }
+    .tail {
+      margin: 0 0 640px;
+    }
+    </style>
+  </head>
+  <body>
+    <h1>Composed order</h1>
+    <p class="note">
+      The word under test appears four times. Two of them are inside an open
+      shadow root: one in the shadow tree itself, and one in the light DOM that
+      a slot draws. The reader sees alpha, beta, delta, gamma, and find has to
+      visit them in that order.
+    </p>
+
+    <p id="alpha" data-region="alpha">alpha widget one</p>
+
+    <x-card id="card"><span id="delta" slot="body">delta widget four</span></x-card>
+
+    <p id="gamma" data-region="gamma">gamma widget three</p>
+
+    <!--
+      Two blocks with nothing between them. The reader sees two lines, so
+      `northwest` is not a word on this page.
+    -->
+    <div id="pair"><p id="north">north</p><p id="west">west</p></div>
+
+    <p class="tail">
+      This paragraph keeps the document scrolling past the last match.
+    </p>
+
+    <script src="assets/find-composed.js"></script>
+  </body>
+</html>
