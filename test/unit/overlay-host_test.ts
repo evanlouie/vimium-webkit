@@ -16,6 +16,7 @@ import {
   comparableHostProperties,
   HOST_STYLE,
   hostDeclarations,
+  hostNeedsAttachment,
   outOfDateHostProperties,
 } from "~/ui/Ui.ts";
 
@@ -216,5 +217,39 @@ describe("the properties that the viewport sync owns", () => {
         OWNED,
       );
       assert.deepEqual(stale, ["transform"]);
+    }));
+});
+
+describe("the host that the page moved", () => {
+  /** A node that stands for an element in these pure tests. */
+  const node = (name: string): Node => ({ nodeName: name } as unknown as Node);
+
+  it.effect("puts the host back when the page holds it", () =>
+    Effect.sync(() => {
+      // The page builds a container of its own, gives it `opacity: 0` and
+      // puts the host inside it. The host stays connected, so a guard that
+      // asked `isConnected` reported nothing and the page owned the overlay.
+      const root = node("HTML");
+      const cage = node("DIV");
+      assert.isTrue(hostNeedsAttachment(root, cage));
+    }));
+
+  it.effect("puts the host back after a removal", () =>
+    Effect.sync(() => {
+      assert.isTrue(hostNeedsAttachment(node("HTML"), null));
+    }));
+
+  it.effect("does nothing while the host is in its place", () =>
+    Effect.sync(() => {
+      const root = node("HTML");
+      assert.isFalse(hostNeedsAttachment(root, root));
+    }));
+
+  it.effect("does nothing while the document has no element", () =>
+    Effect.sync(() => {
+      // At `document-start` there is no `documentElement`. The next `layer`
+      // call tries again.
+      assert.isFalse(hostNeedsAttachment(null, null));
+      assert.isFalse(hostNeedsAttachment(null, node("DIV")));
     }));
 });

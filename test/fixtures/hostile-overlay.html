@@ -31,8 +31,9 @@
   <body>
     <h1>Hostile page</h1>
     <p class="note">
-      The stylesheet of this page tries to hide the overlay. The button below
-      removes the host from the document.
+      The stylesheet of this page tries to hide the overlay. The first button
+      removes the host from the document. The second button moves the host
+      into a container of this page, and that container is invisible.
     </p>
 
     <p><a id="target" href="#hostile-target">Hostile page link</a></p>
@@ -40,6 +41,12 @@
     <p>
       <button id="remove-host" type="button">Remove the overlay host</button>
       <span class="note">removals: <span id="removals">0</span></span>
+    </p>
+
+    <p>
+      <button id="cage-host" type="button">Move the overlay host into a
+        hidden container</button>
+      <span class="note">moves: <span id="moves">0</span></span>
     </p>
 
     <div class="tall"></div>

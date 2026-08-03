@@ -2,23 +2,28 @@
  * The overlay host under a page that fights it.
  *
  * The host is a normal element of the light DOM with a name that anybody can
- * write in a selector. Two attacks follow from that, and `hostile-overlay.html`
- * performs both:
+ * write in a selector. Three attacks follow from that, and `hostile-overlay.html`
+ * performs all three:
  *
  * 1. The stylesheet of the page hides the host with important declarations.
  * 2. Page script removes the host from the document.
+ * 3. Page script moves the host into a container that the page hides.
  *
- * Either one leaves the user with keyboard modes that keep taking keys and an
- * interface that shows nothing. The answers are the important priority on every
- * inline declaration, a check before each visible action, and a mutation
- * observer that puts the host back.
+ * Any one of them leaves the user with keyboard modes that keep taking keys and
+ * an interface that shows nothing. The answers are the important priority on
+ * every inline declaration, a check before each visible action, and a mutation
+ * observer that puts the host back under `documentElement`.
  *
  * There is a limit, and it is written here because a test cannot hold it. The
- * host is a descendant of `documentElement`, and CSS gives a descendant no way
- * out of its ancestors. A page rule of `html { opacity: 0 }`,
- * `html { transform: scale(0) }` or `html { content-visibility: hidden }`
- * therefore hides the overlay. Such a page hides itself as well, so the user
- * sees a blank page. `SECURITY.md` names this limit.
+ * host is a child of `documentElement`, and CSS gives a descendant no way out
+ * of its ancestors. `documentElement` is the only ancestor that the host has.
+ * The removal guard keeps the host a child of it. A page that moves the host
+ * into a container of its own therefore loses it again at once. Five rules
+ * still win: `html { opacity: 0 }`, `html { transform: scale(0) }`,
+ * `html { filter: opacity(0) }`, `html { content-visibility: hidden }` and
+ * `html { display: none }`. Each one paints the page itself as nothing, so the
+ * user sees a blank page and not a hidden interface. `SECURITY.md` names this
+ * limit.
  */
 
 import type { Page } from "@playwright/test";
@@ -68,6 +73,23 @@ const stripHostProperty = (page: Page, property: string): Promise<boolean> =>
 
 const hostCount = (page: Page): Promise<number> =>
   page.locator("vimium-webkit-overlay").count();
+
+/** Move the host into a container of the page, as one line of script can. */
+const cageHost = (page: Page): Promise<boolean> =>
+  page.evaluate((): boolean => {
+    const cage = (globalThis as unknown as {
+      cageVimiumHost?: () => boolean;
+    }).cageVimiumHost;
+    return cage === undefined ? false : cage();
+  });
+
+/** The tag name of the element that holds the host now. */
+const hostParentTag = (page: Page): Promise<string | null> =>
+  page.evaluate((): string | null => {
+    const host = document.querySelector("vimium-webkit-overlay");
+    const parent = host?.parentElement ?? null;
+    return parent === null ? null : parent.tagName.toLowerCase();
+  });
 
 test.describe("the overlay host under hostile CSS", () => {
   test("keeps the properties that make it visible", async ({ vw, page }) => {
@@ -257,6 +279,51 @@ test.describe("the overlay host after a removal", () => {
     // 40 removals, which is more than the cap. The guard still answers.
     expect(await removeHost(page)).toBe(true);
     await expect.poll(() => hostCount(page)).toBe(1);
+
+    await openHelp(page);
+    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
+      .toBeGreaterThan(300);
+  });
+});
+
+test.describe("the overlay host after page script moves it", () => {
+  // A connection test is not enough. The page builds a container of its own,
+  // gives it `opacity: 0`, and puts the host inside it. The host stays
+  // connected, and the page keeps its own visibility, because it chose the
+  // container. The user then has an invisible interface that holds the
+  // keyboard, which is the failure that issue #51 names.
+  test("comes out of a container of the page on its own", async ({ vw, page }) => {
+    await vw.open("/hostile-overlay.html");
+    expect(await cageHost(page)).toBe(true);
+
+    // The mutation observer sees the move, because a move out of
+    // `documentElement` is a child-list change there.
+    await expect.poll(() => hostParentTag(page)).toBe("html");
+    expect(await hostCount(page)).toBe(1);
+  });
+
+  test("still draws a dialog that the user can see", async ({ vw, page }) => {
+    await vw.open("/hostile-overlay.html");
+    expect(await cageHost(page)).toBe(true);
+
+    // The guard also runs before each action that makes something visible.
+    await openHelp(page);
+    expect(await hostParentTag(page)).toBe("html");
+
+    const box = await overlayBox(page, ".vw-dialog");
+    expect(box?.width ?? 0).toBeGreaterThan(300);
+    expect(box?.height ?? 0).toBeGreaterThan(100);
+  });
+
+  test("comes back out of a container that the page builds again", async ({ vw, page }) => {
+    await vw.open("/hostile-overlay.html");
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      // oxlint-disable-next-line no-await-in-loop
+      expect(await cageHost(page)).toBe(true);
+      // oxlint-disable-next-line no-await-in-loop
+      await expect.poll(() => hostParentTag(page)).toBe("html");
+    }
 
     await openHelp(page);
     expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
