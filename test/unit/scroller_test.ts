@@ -525,6 +525,56 @@ describe("the right-to-left model", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Page-sized commands
+// ---------------------------------------------------------------------------
+
+describe("a page-sized command", () => {
+  const halfPage = (
+    world: World,
+  ): Effect.Effect<void> =>
+    withScroller(
+      world,
+      { smoothScroll: false },
+      (scroller) => scroller.scrollByViewport("y", 0.5, Option.none()),
+    );
+
+  it.effect("measures the visual viewport", () =>
+    Effect.gen(function*() {
+      const world = makeWorld({
+        innerHeight: 800,
+        visualViewport: { width: 1000, height: 400 },
+      });
+
+      yield* halfPage(world);
+
+      // Half of what the user sees, and not half of the window. A toolbar or
+      // an on-screen keyboard covers the difference.
+      assert.strictEqual(world.root.scrollTop, 200);
+    }));
+
+  it.effect("uses the window where there is no visual viewport", () =>
+    Effect.gen(function*() {
+      const world = makeWorld({ innerHeight: 800, visualViewport: null });
+
+      yield* halfPage(world);
+
+      assert.strictEqual(world.root.scrollTop, 400);
+    }));
+
+  it.effect("uses the window where the visual viewport cannot be read", () =>
+    Effect.gen(function*() {
+      const world = makeWorld({
+        innerHeight: 800,
+        poisonVisualViewport: true,
+      });
+
+      yield* halfPage(world);
+
+      assert.strictEqual(world.root.scrollTop, 400);
+    }));
+});
+
+// ---------------------------------------------------------------------------
 // A guard on the fake itself
 // ---------------------------------------------------------------------------
 

@@ -117,8 +117,12 @@ test.describe("scrolling", () => {
 
   test("`d` and `u` move by half a viewport", async ({ vw }) => {
     await vw.open("/scrollables.html");
+    // The visible page, and not the window. The two are the same size on a
+    // headless desktop engine; on iOS a toolbar covers the difference.
     const half = Math.round(
-      (await vw.page.evaluate(() => globalThis.innerHeight)) * 0.5,
+      (await vw.page.evaluate(() =>
+        globalThis.visualViewport?.height ?? globalThis.innerHeight
+      )) * 0.5,
     );
 
     await vw.press("d");
@@ -196,6 +200,38 @@ test.describe("scrolling", () => {
     await expect.poll(async () => (await vw.scrollOffsets("#outer")).y)
       .toBe(STEP - room);
     expect((await vw.scrollOffsets()).y).toBe(0);
+  });
+
+  test("a page command measures the visual viewport", async ({ vw }) => {
+    // The window size includes the band that an iOS toolbar or an on-screen
+    // keyboard covers, and it does not shrink under pinch zoom. A headless
+    // desktop engine reports the two sizes as equal, so the test makes them
+    // differ: it replaces `visualViewport` before the page loads, exactly as a
+    // zoomed page would report it.
+    const visualHeight = 300;
+    await vw.page.addInitScript((height: number) => {
+      Object.defineProperty(globalThis, "visualViewport", {
+        configurable: true,
+        get: () => ({
+          width: globalThis.innerWidth,
+          height,
+          scale: 1,
+          offsetLeft: 0,
+          offsetTop: 0,
+          addEventListener: () => {},
+          removeEventListener: () => {},
+        }),
+      });
+    }, visualHeight);
+
+    await vw.open("/scrollables.html");
+    expect(await vw.page.evaluate(() => globalThis.innerHeight))
+      .toBeGreaterThan(visualHeight);
+
+    await vw.press("d");
+
+    await expect.poll(async () => (await vw.scrollOffsets()).y)
+      .toBe(visualHeight / 2);
   });
 });
 

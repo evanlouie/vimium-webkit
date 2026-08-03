@@ -20,6 +20,9 @@
  * - A right-to-left container writes `scrollLeft` in two different ways across
  *   engines. Every offset here is normalised to one convention: zero at the
  *   left edge, and growth to the right. `RtlScrollModel` gives the detail.
+ * - A page-sized command measures `visualViewport`, and not `innerHeight`. The
+ *   window size includes the band that an iOS toolbar or an on-screen keyboard
+ *   covers.
  *
  * A command that one container cannot take in full goes on to the ancestors of
  * that container. `applyChain` does that walk.
@@ -79,11 +82,13 @@ const AXIS_PROPERTIES = {
     scrollSize: "scrollHeight",
     clientSize: "clientHeight",
     viewport: "innerHeight",
+    visual: "height",
   },
   x: {
     scrollSize: "scrollWidth",
     clientSize: "clientWidth",
     viewport: "innerWidth",
+    visual: "width",
   },
 } as const;
 
@@ -568,6 +573,34 @@ export class Scroller extends Context.Service<Scroller, {
         );
 
       /**
+       * The size of one page, for a page-sized command.
+       *
+       * `visualViewport` is what the user sees. `innerHeight` and `innerWidth`
+       * include the band that an iOS toolbar or an on-screen keyboard covers,
+       * and they do not shrink under pinch zoom, so a "half page" command moved
+       * more than half of the visible page.
+       *
+       * Where `visualViewport` is absent — an old engine, or a realm that hides
+       * it — the window size is the answer, as before. A size that is not a
+       * positive finite number is treated as absent.
+       */
+      const viewportSize = (axis: ScrollAxis): Effect.Effect<number> =>
+        Effect.gen(function*() {
+          const properties = AXIS_PROPERTIES[axis];
+          const visual = yield* dom.probeOr(() => {
+            const viewport = dom.window.visualViewport;
+            return viewport === null || viewport === undefined
+              ? 0
+              : viewport[properties.visual];
+          }, 0);
+          if (Number.isFinite(visual) && visual > 0) return visual;
+          return yield* dom.probeOr(
+            () => dom.window[properties.viewport],
+            0,
+          );
+        });
+
+      /**
        * Should this scroll be animated at all?
        *
        * `prefers-reduced-motion` is the user telling the platform that
@@ -882,7 +915,7 @@ export class Scroller extends Context.Service<Scroller, {
           const element = yield* target(axis, fraction, model);
           const properties = AXIS_PROPERTIES[axis];
           const size = element === rootElement()
-            ? dom.window[properties.viewport]
+            ? yield* viewportSize(axis)
             : element[properties.clientSize];
 
           const amount = Math.round(size * fraction);
