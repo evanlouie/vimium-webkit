@@ -91,10 +91,12 @@ export interface SearchOutcome {
   readonly empty: boolean;
   readonly error: Option.Option<string>;
   /**
-   * True when the search stopped at its time budget.
+   * True when the search stopped before the end of the page.
    *
-   * The counts are then the counts of the text that was read, and not of the
-   * page. The HUD says so, because a wrong `3/17` is worse than no number.
+   * The time budget stops it, and so does a match that is longer than the
+   * engine can read. The counts are then the counts of the text that was read,
+   * and not of the page. The HUD says so, because a wrong `3/17` is worse than
+   * no number.
    */
   readonly stopped: boolean;
 }
@@ -113,7 +115,7 @@ export const statusText = (outcome: SearchOutcome): string => {
     return `Bad pattern: ${outcome.error.value}`;
   }
   if (outcome.empty) return "";
-  const late = outcome.stopped ? "  (stopped at the time limit)" : "";
+  const late = outcome.stopped ? "  (stopped before the end of the page)" : "";
   if (outcome.count === 0) return `No matches${late}`;
   return `${outcome.index + 1}/${outcome.count}${late}`;
 };
@@ -225,6 +227,14 @@ export class Find extends Context.Service<Find, {
       const postScope = yield* Ref.make<Option.Option<Scope.Closeable>>(
         Option.none(),
       );
+      /**
+       * Did the last search stop before the end of the page?
+       *
+       * `n` and `N` do not search again, so they must report the stop of the
+       * search that gave them their matches. A count that is partial stays
+       * partial.
+       */
+      const partial = yield* Ref.make(false);
       const sessionFiber = yield* FiberHandle.make<void, never>();
 
       // -- the browser ---------------------------------------------------
@@ -302,6 +312,7 @@ export class Find extends Context.Service<Find, {
         yield* Ref.set(runs, []);
         yield* Ref.set(matches, []);
         yield* Ref.set(current, -1);
+        yield* Ref.set(partial, false);
       });
 
       /**
@@ -358,6 +369,7 @@ export class Find extends Context.Service<Find, {
           if (parsed.isEmpty || Option.isSome(parsed.error)) {
             yield* Ref.set(matches, []);
             yield* Ref.set(current, -1);
+            yield* Ref.set(partial, false);
             yield* draw();
             return parsed.isEmpty ? NO_QUERY : {
               count: 0,
@@ -379,6 +391,7 @@ export class Find extends Context.Service<Find, {
           const found = search.matches;
 
           yield* Ref.set(matches, found);
+          yield* Ref.set(partial, search.stopped);
           yield* Ref.set(
             current,
             found.length === 0 ? -1 : clampIndex(
@@ -508,7 +521,7 @@ export class Find extends Context.Service<Find, {
             index: -1,
             empty: false,
             error: Option.none(),
-            stopped: false,
+            stopped: yield* Ref.get(partial),
           };
         }
 
@@ -524,7 +537,7 @@ export class Find extends Context.Service<Find, {
           index: next,
           empty: false,
           error: Option.none(),
-          stopped: false,
+          stopped: yield* Ref.get(partial),
         };
       });
 
@@ -572,9 +585,11 @@ export class Find extends Context.Service<Find, {
         );
         // The scope owns the mode, and the mode now owns the scope. An exit
         // for any reason therefore closes the scope, and a defect exit leaves
-        // no scope that only the next `closePost` would release.
-        yield* handle.onExit(() => Effect.andThen(clearState, closePost));
+        // no scope that only the next `closePost` would release. The scope is
+        // stored first, because `onExit` runs its body at once when the mode
+        // already exited.
         yield* Ref.set(postScope, Option.some(scope));
+        yield* handle.onExit(() => Effect.andThen(clearState, closePost));
       });
 
       /** Open the mode again when nothing holds the highlights. */
