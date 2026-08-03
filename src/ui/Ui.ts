@@ -306,6 +306,23 @@ const REATTACH_LIMIT = 32;
  */
 const REATTACH_RESET_MS = 1000;
 
+/**
+ * May the guard give the focus back to the node that held it?
+ *
+ * Only while nothing else holds the focus. `shadowActive` is the focused node
+ * inside our closed root, and `documentActive` is the focused node of the
+ * page, which is our host while the overlay holds the focus. A user who moved
+ * the focus to the page keeps it, because the page then owns a node that is
+ * neither `null` nor the body.
+ */
+export const focusIsFree = (
+  shadowActive: Node | null,
+  documentActive: Node | null,
+  body: Node | null,
+): boolean =>
+  shadowActive === null &&
+  (documentActive === null || documentActive === body);
+
 // ---------------------------------------------------------------------------
 // Exposure to assistive technology
 // ---------------------------------------------------------------------------
@@ -674,17 +691,17 @@ export class Ui extends Context.Service<Ui, {
         /**
          * Give the focus back to the node that held it before a move.
          *
-         * Only when nothing else holds the focus. A user who moved the focus
-         * to the page in the meantime keeps it, because the root is closed and
-         * `doc.activeElement` is then a node of the page.
+         * Only while nothing else holds the focus. `focusIsFree` holds that
+         * rule, and it holds the promise of this comment: a user who moved the
+         * focus to the page in the meantime keeps it.
          */
         const restoreFocus = (previous: Option.Option<HTMLElement>): void => {
           if (Option.isNone(previous)) return;
           const element = previous.value;
           if (!element.isConnected) return;
-          if (shadow.activeElement !== null) return;
-          const active = doc.activeElement;
-          if (active !== null && active !== doc.body) return;
+          if (!focusIsFree(shadow.activeElement, doc.activeElement, doc.body)) {
+            return;
+          }
           // `preventScroll`, because this is a repair and not an action of the
           // user. Nothing on the page may move.
           element.focus({ preventScroll: true });
@@ -705,21 +722,30 @@ export class Ui extends Context.Service<Ui, {
         const ensureAttached: Effect.Effect<void> = Effect.gen(function*() {
           const owned = yield* Ref.get(viewportOwned);
           const focused = yield* Ref.get(lastFocused);
-          yield* dom.probeOr(() => {
+          const keep = yield* dom.probeOr(() => {
             restoreHostStyle(owned);
             // At `document-start` there may be no `documentElement` yet. Doing
             // nothing is correct, because the next `layer` call tries again.
             const parent: Element | null = doc.documentElement ?? doc.body ??
               null;
-            if (parent === null) return false;
-            if (!hostNeedsAttachment(parent, host.parentNode)) return false;
-            parent.appendChild(host);
-            // A move takes the focus off every node inside the host. An open
-            // dialog would otherwise keep the keyboard while the focus sits on
-            // the body of the page.
-            restoreFocus(focused);
-            return true;
-          }, false);
+            if (
+              parent !== null && hostNeedsAttachment(parent, host.parentNode)
+            ) {
+              parent.appendChild(host);
+              // A move takes the focus off every node inside the host. An open
+              // dialog would otherwise keep the keyboard while the focus sits
+              // on the body of the page.
+              restoreFocus(focused);
+            }
+            // A control that left the document holds its whole dialog, with
+            // every other control in it. Release it as soon as we see it.
+            return Option.isSome(focused) && !focused.value.isConnected
+              ? Option.none<HTMLElement>()
+              : focused;
+          }, focused);
+          if (Option.isNone(keep) && Option.isSome(focused)) {
+            yield* Ref.set(lastFocused, Option.none());
+          }
         });
 
         // Attached once here, so that the overlay exists before any feature

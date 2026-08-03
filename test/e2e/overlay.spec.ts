@@ -91,6 +91,15 @@ const hostParentTag = (page: Page): Promise<string | null> =>
     return parent === null ? null : parent.tagName.toLowerCase();
   });
 
+/** Let page script take the focus, as an autofocus or a script does. */
+const focusPageTarget = (page: Page): Promise<boolean> =>
+  page.evaluate((): boolean => {
+    const focus = (globalThis as unknown as {
+      focusVimiumTarget?: () => boolean;
+    }).focusVimiumTarget;
+    return focus === undefined ? false : focus();
+  });
+
 test.describe("the overlay host under hostile CSS", () => {
   test("keeps the properties that make it visible", async ({ vw, page }) => {
     await vw.open("/hostile-overlay.html");
@@ -345,5 +354,25 @@ test.describe("the focus after the guard puts the host back", () => {
     await expect.poll(() => hostCount(page)).toBe(1);
 
     await expect.poll(() => overlayFocusWithin(page, ".vw-dialog")).toBe(true);
+  });
+
+  test("leaves the focus that page script took", async ({ vw, page }) => {
+    await vw.open("/hostile-overlay.html");
+    await openHelp(page);
+    await vw.press("Tab");
+    expect(await overlayFocusWithin(page, ".vw-dialog")).toBe(true);
+
+    // Page script can focus one of its own controls at any moment, and it does
+    // that here while our dialog is open. The repair must then leave the focus
+    // where the page put it. `focusIsFree` holds that rule.
+    expect(await focusPageTarget(page)).toBe(true);
+    expect(await removeHost(page)).toBe(true);
+    await expect.poll(() => hostCount(page)).toBe(1);
+
+    // The root is closed, so a focus inside the overlay reads as the host,
+    // which carries no identifier. The link is the only value that proves that
+    // the guard did not take the focus.
+    await expect.poll(() => vw.focusedId()).toBe("target");
+    expect(await overlayFocusWithin(page, ".vw-dialog")).toBe(false);
   });
 });

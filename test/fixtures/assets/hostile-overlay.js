@@ -57,6 +57,20 @@ document.getElementById("cage-host")?.addEventListener("click", () => {
 globalThis.cageVimiumHost = cageHost;
 
 /*
+ * Give the focus to a link of this page.
+ *
+ * Page script can do this at any time, and it does it while our dialog is
+ * open. The guard must then leave the focus where the page put it, even when
+ * it puts the host back.
+ */
+globalThis.focusVimiumTarget = () => {
+  const target = document.getElementById("target");
+  if (target === null) return false;
+  target.focus();
+  return document.activeElement === target;
+};
+
+/*
  * Take one declaration off the host.
  *
  * One line of page script is enough. The important rule of the stylesheet
