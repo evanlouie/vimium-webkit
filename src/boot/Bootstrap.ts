@@ -65,7 +65,7 @@ export class RuntimeOwner extends Context.Service<RuntimeOwner, {
 
 /** What the exit hook below needs. Named, so that a test can build it. */
 export interface ExitParts {
-  /** Write every held value to the backend now, with no suspension. */
+  /** Write held values now when the selected backend is synchronous. */
   readonly flushAllUnsafe: () => void;
   /** Forget a key that was suppressed but never used. */
   readonly forgetSuppressed: Effect.Effect<void>;
@@ -82,15 +82,12 @@ export interface ExitParts {
  * `boot/Lifecycle.ts`: only the part before the first suspension is sure to
  * run, so the work that never suspends comes first.
  *
- * 1. Write every held value straight to the backend. Marks wait 100 ms,
- *    settings 250 ms and the history index two seconds. A navigation inside any
- *    of those windows used to lose the write. This call is a direct call to
- *    `GM_setValue` or to `localStorage.setItem`, and it takes no scheduler turn.
+ * 1. Write held values directly when the backend is synchronous. This call
+ *    takes no scheduler turn. Promise-backed managers do not use the debounce.
  * 2. Forget the suppressed key. It is in memory, and it costs nothing.
- * 3. Flush through the storage actor as well. The actor reports a failed write,
- *    it settles the callers that wait for one, and it takes any command that is
- *    still in its mailbox. This part completes only when the page lives on, as
- *    it does after `visibilitychange`.
+ * 3. Flush through the storage actor as well. The actor reports a failed write
+ *    and settles waiting callers. It also takes commands from its mailbox.
+ *    This part completes only when the page lives on.
  * 4. Release the runtime, but only on a final exit. A release closes the scope
  *    that the storage actor lives in. A release before the flush would drop the
  *    write that this hook exists to save. A page that comes back from the

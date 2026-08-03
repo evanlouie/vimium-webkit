@@ -14,10 +14,9 @@
  * outcome of the write that reaches the backend.
  *
  * There is one path around the fiber, and it exists for one moment: the page
- * exit. `flushUnsafe` writes the held value with a direct call to the backend.
- * A `pagehide` handler gets one synchronous run. The Effect scheduler is a
- * macrotask in a page, so a value that waits for the fiber is lost. Read the
- * note above `flushUnsafe` before you use it.
+ * exit. `flushUnsafe` writes a held value only when the backend is synchronous.
+ * A promise-backed manager does not use the debounce. Its actor starts each
+ * accepted write while the page is alive.
  *
  * Storage is untrusted input. The user can edit it in the manager's interface,
  * an older build may have written it, and a newer build in another tab may have
@@ -213,7 +212,10 @@ export const makeGroup = <A>(
   Effect.gen(function*() {
     const key = `${STORAGE_PREFIX}${spec.name}`;
     const debounce = Duration.millis(spec.writeDebounceMs ?? 0);
-    const debounced = Duration.toMillis(debounce) > 0;
+    // A promise is not a completed write. Send each accepted change through
+    // the actor while the page is alive. This keeps one serial write order.
+    const debounced = kv.kind !== "gm-async" &&
+      Duration.toMillis(debounce) > 0;
 
     const value = yield* SubscriptionRef.make(spec.defaults());
     const mailbox = yield* Queue.unbounded<Command<A>>();
@@ -395,12 +397,9 @@ export const makeGroup = <A>(
     /**
      * Write the held value to the backend now, with no suspension.
      *
-     * This is the exit path, and it exists because the actor path cannot save
-     * a dying page. A caller of `flush` waits on a `Deferred`, and the actor
-     * fiber resumes through the Effect scheduler. That scheduler is
-     * `setTimeout(f, 0)` in a page, and a macrotask that starts inside
-     * `pagehide` never runs. `GM_setValue` and `localStorage.setItem` are both
-     * synchronous, so the last hop can be a direct call instead.
+     * This exit path is only for a synchronous backend. A promise-backed
+     * manager writes each accepted change through the actor with no debounce.
+     * The actor waits for each promise before it starts the next write.
      *
      * Four rules hold this path together:
      *
@@ -416,10 +415,13 @@ export const makeGroup = <A>(
      *    swallows a throw from a listener. A failed write keeps `pending`, so
      *    the actor writes it again if this page lives on.
      *
-     * A command that is still in the mailbox is not covered. Only the actor may
-     * run one, and this path must not take its turn.
+     * A command that is still in the mailbox is not covered. The exit path
+     * cannot take it without breaking the actor order. A final exit can lose a
+     * command that the actor did not accept before the exit.
      */
     const flushUnsafe = (): void => {
+      const setUnsafe = kv.setUnsafe;
+      if (setUnsafe === null) return;
       const held = pending;
       if (Option.isNone(held)) return;
       try {
@@ -427,7 +429,7 @@ export const makeGroup = <A>(
         // The value cannot be written at all. The actor reports it, and it
         // fails the callers that wait for this write.
         if (Result.isFailure(encoded)) return;
-        kv.setUnsafe(key, encoded.success);
+        setUnsafe(key, encoded.success);
         pending = Option.none();
         readFailure = null;
       } catch (cause) {
@@ -703,10 +705,9 @@ export class Storage extends Context.Service<Storage, {
   /**
    * Write every held value to the backend now, with no suspension.
    *
-   * For the page exit only. A `pagehide` handler gets one synchronous run, and
-   * the Effect scheduler is a macrotask in a page. A write that waits for a
-   * fiber therefore never reaches the backend. This call never throws, and a
-   * failed write becomes one message on the issue stream.
+   * For the page exit only. This writes held values for synchronous backends.
+   * Promise-backed managers do not hold values in a debounce window. This call
+   * never throws. A failed direct write becomes one issue.
    */
   readonly flushAllUnsafe: () => void;
 }>()("vimium/platform/Storage") {

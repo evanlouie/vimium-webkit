@@ -35,8 +35,9 @@
  * Which manager surface to emulate.
  *
  * - `sync` — `GM_*` functions present (Tampermonkey, Violentmonkey, ScriptCat).
- * - `async` — only the promise-flavoured `GM.*` namespace (quoid's Userscripts,
- *   Stay). This is the floor every capability decision has to survive.
+ * - `async` — only the promise-flavoured `GM.*` namespace, like quoid's
+ *   Userscripts. Stay gives both API forms. This variant is the capability
+ *   floor that each decision must support.
  */
 export type GmVariant = "sync" | "async";
 

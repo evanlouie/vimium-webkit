@@ -28,11 +28,11 @@
  *    an asynchronous task. A promise that starts there can stay unsettled for
  *    ever. The Effect scheduler is `setTimeout(f, 0)` in a page, so a fiber
  *    that resumes inside `pagehide` never runs. Work that *must* finish before
- *    the handler returns is work that never suspends. `boot/Bootstrap.ts`
- *    therefore writes every held value straight to the backend, with a direct
- *    call. Work that *may be lost* is everything after the first suspension:
- *    the answer of the backend, and the message about a failed write. The page
- *    lives on after `visibilitychange`, so that exit loses nothing; see rule 3.
+ *    the handler returns is work that never suspends. A synchronous backend
+ *    gets a direct write. A promise-backed manager gets each write earlier,
+ *    through the actor and without a debounce. Work after the first suspension
+ *    can be lost. The page lives on after `visibilitychange`, so that exit
+ *    loses nothing. See rule 3.
  * 2. **A kept page is not an exit.** `pagehide` with `persisted === true` means
  *    that the page may come back from the back/forward cache. A restored page
  *    never runs its scripts again. The hook therefore gets `final: false`, and
