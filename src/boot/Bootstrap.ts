@@ -24,7 +24,7 @@ import { Insert } from "~/features/Insert.ts";
 import { Omnibar } from "~/features/omnibar/Omnibar.ts";
 import { attachKeyBridge, replayBufferedKeys } from "./KeyBridge.ts";
 import type { BootSignal } from "./Guard.ts";
-import { Lifecycle } from "./Lifecycle.ts";
+import { type ExitHook, Lifecycle } from "./Lifecycle.ts";
 
 /**
  * What the guard learned before the application existed.
@@ -38,6 +38,32 @@ export class Boot extends Context.Service<Boot, BootSignal>()(
   static readonly layerFrom = (signal: BootSignal): Layer.Layer<Boot> =>
     Layer.succeed(Boot, Boot.of(signal));
 }
+
+/** What the exit hook below needs. Named, so that a test can build it. */
+export interface ExitParts {
+  /** Forget a key that was suppressed but never used. */
+  readonly forgetSuppressed: Effect.Effect<void>;
+  /** Write every value that is still inside its debounce window. */
+  readonly flushAll: Effect.Effect<void>;
+}
+
+/**
+ * What this frame does when the page goes away.
+ *
+ * The order is the order of the time budget. Read rule 1 in
+ * `boot/Lifecycle.ts`: only the part before the first suspension is sure to
+ * run, so the two steps that never suspend come first.
+ *
+ * 1. Forget the suppressed key. It is in memory, and it costs nothing.
+ * 2. Give every held value to storage. Marks wait 100 ms, settings 250 ms and
+ *    the history index two seconds. A navigation inside any of those windows
+ *    used to lose the write.
+ */
+export const onPageExit = (parts: ExitParts): ExitHook => () =>
+  Effect.gen(function*() {
+    yield* parts.forgetSuppressed;
+    yield* parts.flushAll;
+  });
 
 /**
  * Say what a storage failure means to the user.
@@ -145,6 +171,14 @@ export const BootstrapLayer: Layer.Layer<
   yield* attachKeyBridge;
   yield* replayBufferedKeys(yield* boot.drain);
 
+  // A hook, and not a subscription. The work that a page exit needs must start
+  // inside the browser's dispatch, and a subscriber of the bus below runs on
+  // its own fiber, after the dispatch is over.
+  yield* lifecycle.onExit(onPageExit({
+    forgetSuppressed: keyboard.forgetSuppressed,
+    flushAll: storage.flushAll,
+  }));
+
   yield* Effect.forkScoped(
     Stream.runForEach(lifecycle.events, (event) =>
       Effect.gen(function*() {
@@ -163,14 +197,6 @@ export const BootstrapLayer: Layer.Layer<
             yield* resolveExclusion;
             yield* keyboard.syncExclusion;
             yield* insert.ensureEntered;
-            return;
-          }
-          case "Persist": {
-            // Marks wait 100 ms, settings 250 ms and the history index two
-            // seconds. A navigation inside any of those windows used to lose
-            // the write.
-            yield* storage.flushAll;
-            yield* keyboard.forgetSuppressed;
             return;
           }
           case "Visible": {
