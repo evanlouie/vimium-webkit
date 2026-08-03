@@ -51,6 +51,7 @@ const healthy: CapabilityReport = {
   visualViewport: true,
   secureContext: true,
   webkitLike: true,
+  applePlatform: false,
 };
 
 /** The one warning that the memory backend raises. */

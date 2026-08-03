@@ -205,9 +205,9 @@ describe("Persisted", () => {
       expected: "\u2764\u{1f600}",
     },
     {
-      name: "a family emoji loses its zero width joiner",
-      stored: "\u{1f468}\u200d\u{1f469}",
-      expected: "\u{1f468}\u{1f469}",
+      name: "a family emoji selects the shipped alphabet",
+      stored: "\u{1f468}\u200d\u{1f469}\u200d\u{1f467}",
+      expected: null,
     },
     {
       name: "a flag loses its regional indicators",
@@ -218,6 +218,21 @@ describe("Persisted", () => {
       name: "a thumb loses its skin tone modifier",
       stored: "\u{1f44d}\u{1f3fd}ab",
       expected: "\u{1f44d}ab",
+    },
+    {
+      name: "a Hangul choseong filler is removed",
+      stored: "\u115fx",
+      expected: null,
+    },
+    {
+      name: "Hangul jamo are removed before label generation",
+      stored: "\u1100x\u1161\uac00",
+      expected: "x\uac00",
+    },
+    {
+      name: "a Tangsa letter stays because font coverage is not available",
+      stored: "\u{16a70}x",
+      expected: "\u{16a70}x",
     },
     {
       name: "a letter with a combining accent is composed",

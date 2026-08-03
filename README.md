@@ -274,9 +274,11 @@ setting, not the whole configuration.
 ### What can be a hint character
 
 `linkHintCharacters` and `linkHintNumbers` hold characters, and each character
-is one label of one link. A character is accepted when it is a letter, a number,
-a punctuation mark or a symbol. The set is composed with NFC first, so `é` is
-one character however it was pasted.
+is one label of one link. Each accepted character is one independent NFC code
+point. Each ordered pair stays separate and has one unique matching key.
+
+A character must be a letter, a number, a punctuation mark or a symbol. The set
+is composed with NFC first, so `é` is one character however it was pasted.
 
 A character is refused when it is one of these:
 
@@ -285,6 +287,7 @@ A character is refused when it is one of these:
 | a variation selector               | the U+FE0F in `❤️`    | it draws nothing, so the label is invisible |
 | a zero width joiner                | the joiner in `👨‍👩` | the same                                    |
 | a combining mark                   | a combining acute    | it draws on the character before it         |
+| a Hangul jamo                      | `ᄀ` or `ᅡ`           | it can compose with an adjacent jamo        |
 | a regional indicator               | the letters in `🇩🇪`  | two indicators draw as one flag             |
 | an emoji modifier                  | the tone in `👍🏽`   | it joins the emoji before it                |
 | a control or format character      | a soft hyphen        | it has no shape                             |
@@ -293,10 +296,16 @@ A character is refused when it is one of these:
 | a character that a case fold grows | `ß`, `İ`, `ﬁ`        | the label would need two keystrokes         |
 | a repeat of an earlier character   | `a` and `A`          | two links would show one label              |
 
-A refused character is dropped, and the rest of your set stays in use. The
-shipped set is used when fewer than two characters remain. Issue
+A refused character is dropped, and the rest of your set stays in use. A joined
+symbol that uses a join control refuses the complete set. Thus, a family emoji
+selects the shipped set instead of becoming separate person emoji.
+
+The shipped set is also used when fewer than two characters remain. Issue
 [#63](https://github.com/evanlouie/vimium-webkit/issues/63) tracks a report that
 tells the user about this repair once per session.
+
+The script cannot read the fonts that CoreText selects. A code point with no
+installed font can still show the LastResort glyph.
 
 One consequence: a Turkish user cannot use the whole Turkish alphabet for hints.
 `İ` grows to two characters in the fold, and `ı` has the fold of `i`. The case
