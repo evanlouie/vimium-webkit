@@ -151,6 +151,55 @@ const highlightSits = (
     [selector, shadowHost] as const,
   );
 
+/**
+ * Does the current highlight lie exactly on `word` inside `selector`?
+ *
+ * The rectangle of the word itself is measured, and not the box of the line,
+ * so an error of a few pixels in either direction is a failure. Both boxes are
+ * read in one call.
+ */
+const highlightOnWord = (
+  vw: Vimium,
+  selector: string,
+  word: string,
+): Promise<boolean | null> =>
+  vw.page.evaluate(
+    ([query, needle]: readonly [string, string]): boolean | null => {
+      const harness = globalThis as unknown as {
+        __vimiumHarness?: { shadow: ShadowRoot | null };
+      };
+      const shadow = harness.__vimiumHarness?.shadow ?? null;
+      const drawn = shadow?.querySelector(".vw-find__rect--current") ?? null;
+      const line = document.querySelector(query);
+      const text = line?.firstChild ?? null;
+      if (drawn === null || !(text instanceof Text)) return null;
+      const at = text.data.indexOf(needle);
+      if (at < 0) return null;
+      const range = document.createRange();
+      range.setStart(text, at);
+      range.setEnd(text, at + needle.length);
+      const wanted = range.getBoundingClientRect();
+      const box = drawn.getBoundingClientRect();
+      return Math.abs(box.left - wanted.left) <= 2 &&
+        Math.abs(box.top - wanted.top) <= 2;
+    },
+    [selector, word] as const,
+  );
+
+/** The top of one page element, in viewport coordinates. */
+const topOf = (vw: Vimium, selector: string): Promise<number | null> =>
+  vw.page.evaluate((query: string): number | null => {
+    const element = document.querySelector(query);
+    return element === null ? null : element.getBoundingClientRect().top;
+  }, selector);
+
+/** The left edge of one page element, in viewport coordinates. */
+const leftOf = (vw: Vimium, selector: string): Promise<number | null> =>
+  vw.page.evaluate((query: string): number | null => {
+    const element = document.querySelector(query);
+    return element === null ? null : element.getBoundingClientRect().left;
+  }, selector);
+
 test.describe("find in composed order", () => {
   test("visits the matches in the order that the reader sees", async ({ vw }) => {
     await vw.open("/find-composed.html");
@@ -189,5 +238,59 @@ test.describe("find in composed order", () => {
     await commitFind(vw, QUERY);
 
     await vw.waitForHud("1/4");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A container that scrolls on its own
+// ---------------------------------------------------------------------------
+
+test.describe("find inside a nested scroll container", () => {
+  test("the highlight follows the text when the panel scrolls", async ({ vw }) => {
+    await vw.open("/find-nested-scroll.html");
+    await commitFind(vw, QUERY);
+    await expect.poll(() => highlightOnWord(vw, "#needle", QUERY)).toBe(true);
+
+    const before = await topOf(vw, "#needle");
+    await vw.page.evaluate(() => {
+      const panel = document.getElementById("panel");
+      if (panel !== null) panel.scrollTop = panel.scrollTop + 60;
+    });
+    // The text moved. A highlight that only follows the window scroll is now
+    // 60 pixels away from its match.
+    await expect.poll(() => topOf(vw, "#needle")).not.toBe(before);
+
+    await expect.poll(() => highlightOnWord(vw, "#needle", QUERY)).toBe(true);
+  });
+
+  test("the highlight follows the text after a reflow", async ({ vw }) => {
+    await vw.open("/find-nested-scroll.html");
+    await commitFind(vw, QUERY);
+    await expect.poll(() => highlightOnWord(vw, "#needle", QUERY)).toBe(true);
+
+    const before = await topOf(vw, "#needle");
+    // A block that arrives above the panel. Nothing scrolls, and the window is
+    // not resized, so only a measurement can find the new place of the match.
+    await vw.page.evaluate(() => {
+      const banner = document.createElement("div");
+      banner.style.height = "120px";
+      document.body.insertBefore(banner, document.body.firstChild);
+    });
+    await expect.poll(() => topOf(vw, "#needle")).not.toBe(before);
+
+    await expect.poll(() => highlightOnWord(vw, "#needle", QUERY)).toBe(true);
+  });
+
+  test("the highlight follows the text after a resize", async ({ vw }) => {
+    await vw.open("/find-nested-scroll.html");
+    await commitFind(vw, QUERY);
+    await expect.poll(() => highlightOnWord(vw, "#needle", QUERY)).toBe(true);
+
+    // The panel has a margin in percent, so a narrower window moves it.
+    const before = await leftOf(vw, "#needle");
+    await vw.page.setViewportSize({ width: 900, height: 700 });
+    await expect.poll(() => leftOf(vw, "#needle")).not.toBe(before);
+
+    await expect.poll(() => highlightOnWord(vw, "#needle", QUERY)).toBe(true);
   });
 });

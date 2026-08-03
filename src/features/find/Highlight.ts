@@ -7,19 +7,21 @@
  * that wraps over a line gives two rectangles and both must be drawn. One
  * `getBoundingClientRect` would paint a block over the text between them.
  *
- * A position is corrected for the scroll instead of measured again. The
- * rectangles are measured once against the layout viewport, and the container
- * is moved by the difference in the scroll afterwards. Measuring some hundreds
- * of ranges on every scroll frame costs far more. On iOS the offset of the
- * visual viewport is subtracted as well, because the host of the overlay is
- * moved by it to imitate `position: device-fixed`.
+ * A position is corrected for the scroll of the window instead of measured
+ * again, because that correction is one style write for any number of matches.
+ * The correction is not enough on its own: a nested container that scrolls, and
+ * a reflow, move some ranges and not others. The overlay therefore keeps the
+ * matches, and measures them again when it sees a change that the correction
+ * cannot describe. `reposition` says which event takes which path. On iOS the
+ * offset of the visual viewport is subtracted as well, because the host of the
+ * overlay is moved by it to imitate `position: device-fixed`.
  *
  * Every element and every listener here is a scoped resource. Close the scope
  * that built the highlighter, and the overlay goes with it. There is no
  * `dispose` method.
  */
 
-import { Effect, FiberHandle, Option, Ref, Scope } from "effect";
+import { Effect, Exit, FiberHandle, Option, Ref, Scope } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 import { Ui } from "~/ui/Ui.ts";
 import type { FindMatch } from "./Engine.ts";
@@ -124,6 +126,31 @@ interface Origin {
   readonly y: number;
 }
 
+/** What `render` drew, so that a later frame can draw it again. */
+interface Drawn {
+  readonly matches: ReadonlyArray<FindMatch>;
+  readonly currentIndex: number;
+}
+
+/**
+ * The measured place of the current match, at the last full measurement.
+ *
+ * It is the probe for a layout change that no event names. See `frame`.
+ */
+interface Anchor {
+  readonly index: number;
+  readonly left: number;
+  readonly top: number;
+}
+
+/**
+ * How far the anchor may move before the overlay measures again.
+ *
+ * One pixel, because a scroll offset can be fractional under a zoom, and a
+ * measurement that follows a fraction would run on every frame.
+ */
+const ANCHOR_TOLERANCE = 1;
+
 // ---------------------------------------------------------------------------
 // The highlighter
 // ---------------------------------------------------------------------------
@@ -184,6 +211,17 @@ export const makeHighlighter: Effect.Effect<
 
   const rects = yield* Ref.make<ReadonlyArray<HTMLElement>>([]);
   const origin = yield* Ref.make<Origin>({ x: 0, y: 0 });
+  /**
+   * The matches that are on the screen now.
+   *
+   * They are kept so that a frame which cannot use the scroll correction can
+   * measure them again. `clear` drops them, so a cleared overlay holds no
+   * `Range` and pins no node.
+   */
+  const drawn = yield* Ref.make<Drawn>({ matches: [], currentIndex: -1 });
+  const anchor = yield* Ref.make<Option.Option<Anchor>>(Option.none());
+  /** Does the frame that is already asked for need a full measurement? */
+  const remeasure = yield* Ref.make(false);
 
   const readScroll: Effect.Effect<Origin> = dom.probeOr(
     () => ({ x: win.scrollX, y: win.scrollY }),
@@ -205,6 +243,52 @@ export const makeHighlighter: Effect.Effect<
     yield* Effect.sync(() => {
       container.style.transform = `translate(${-dx}px, ${-dy}px)`;
     });
+  });
+
+  /**
+   * The place of the current match, for the probe of the next frame.
+   *
+   * One rectangle, and not one for each match: the probe must cost the same on
+   * a page with four matches and on a page with four hundred.
+   */
+  const measureAnchor = Effect.fn("Highlighter.measureAnchor")(
+    function*(matches: ReadonlyArray<FindMatch>, currentIndex: number) {
+      const match = matches[currentIndex];
+      if (match === undefined) return Option.none<Anchor>();
+      return yield* dom.probeOr<Option.Option<Anchor>>(() => {
+        const rect = match.range.getBoundingClientRect();
+        return Option.some({
+          index: currentIndex,
+          left: rect.left,
+          top: rect.top,
+        });
+      }, Option.none<Anchor>());
+    },
+  );
+
+  /**
+   * Did the current match move by more than the scroll of the window?
+   *
+   * A reflow gives no event that names it: an image that arrives, a font that
+   * loads and a panel that opens all move the text with no scroll and no
+   * resize. One measurement for each frame answers that, and its cost does not
+   * grow with the number of matches.
+   */
+  const anchorMoved = Effect.fn("Highlighter.anchorMoved")(function*() {
+    const mark = yield* Ref.get(anchor);
+    if (Option.isNone(mark)) return false;
+    const state = yield* Ref.get(drawn);
+    const match = state.matches[mark.value.index];
+    if (match === undefined) return false;
+    const start = yield* Ref.get(origin);
+    const scroll = yield* readScroll;
+    const dx = scroll.x - start.x;
+    const dy = scroll.y - start.y;
+    return yield* dom.probeOr(() => {
+      const rect = match.range.getBoundingClientRect();
+      return Math.abs(rect.left - (mark.value.left - dx)) > ANCHOR_TOLERANCE ||
+        Math.abs(rect.top - (mark.value.top - dy)) > ANCHOR_TOLERANCE;
+    }, false);
   });
 
   const measure = Effect.fn("Highlighter.measure")(
@@ -295,14 +379,25 @@ export const makeHighlighter: Effect.Effect<
     function*(matches: ReadonlyArray<FindMatch>, currentIndex: number) {
       // A new measurement sets the scroll baseline again. Everything after this
       // call is a difference from here.
+      yield* Ref.set(drawn, { matches, currentIndex });
       yield* Ref.set(origin, yield* readScroll);
       yield* paint(yield* measure(matches, currentIndex));
+      yield* Ref.set(anchor, yield* measureAnchor(matches, currentIndex));
       yield* applyOffset();
     },
   );
 
+  /** Measure and draw the same matches again, after the layout moved them. */
+  const redraw = Effect.fn("Highlighter.redraw")(function*() {
+    const state = yield* Ref.get(drawn);
+    if (state.matches.length === 0) return;
+    yield* render(state.matches, state.currentIndex);
+  });
+
   const clear = Effect.gen(function*() {
     const pool = yield* Ref.get(rects);
+    yield* Ref.set(drawn, { matches: [], currentIndex: -1 });
+    yield* Ref.set(anchor, Option.none());
     yield* Effect.sync(() => {
       for (const element of pool) {
         element.className = "vw-find__rect vw-find__rect--hidden";
@@ -311,31 +406,80 @@ export const makeHighlighter: Effect.Effect<
   });
 
   // ---------------------------------------------------------------------
-  // Following the scroll
+  // Following the page
   // ---------------------------------------------------------------------
 
   const repositionFiber = yield* FiberHandle.make<void, never>();
 
   /**
-   * One correction for each animation frame.
+   * The work of one animation frame.
+   *
+   * Two paths, and the events choose between them:
+   *
+   * - **The correction.** The window scrolled, so every rectangle moved by the
+   *   same amount. One style write answers that, whatever the number of
+   *   matches. The probe of one rectangle follows, so a reflow that no event
+   *   named is still seen.
+   * - **The measurement.** A nested container scrolled, the window was resized
+   *   or the document changed size. Each of those moves some ranges and not
+   *   others, so no single offset can describe it and every drawn rectangle is
+   *   measured again.
+   *
+   * The cost of the correction does not grow with the number of matches: two
+   * reads of the scroll, one rectangle, one style write. The measurement costs
+   * one `getClientRects` for each drawn match, and at most `MAX_RENDERED_RECTS`
+   * style writes.
+   */
+  const frame = Effect.gen(function*() {
+    if (yield* Ref.getAndSet(remeasure, false)) {
+      yield* redraw();
+      return;
+    }
+    yield* applyOffset();
+    if (yield* anchorMoved()) yield* redraw();
+  });
+
+  /**
+   * One pass for each animation frame.
    *
    * `onlyIfMissing` gives the behaviour of the old `rafCoalesce`: the first
-   * event of a frame asks for the correction, and every later event of the same
-   * frame is dropped instead of starting the wait again.
+   * event of a frame asks for the pass, and every later event of the same
+   * frame is dropped instead of starting the wait again. A later event can
+   * still raise the pass to a full measurement, because the flag is read when
+   * the frame arrives.
    */
   const reposition = Effect.asVoid(FiberHandle.run(
     repositionFiber,
-    Effect.andThen(dom.nextFrame, applyOffset()),
+    Effect.andThen(dom.nextFrame, frame),
     { onlyIfMissing: true },
   ));
 
+  /** Ask for a full measurement on the next frame. */
+  const repositionAll = Effect.andThen(Ref.set(remeasure, true), reposition);
+
+  /**
+   * Did the window scroll, or did an element inside the page scroll?
+   *
+   * The page scroll moves every match by one offset, and the correction
+   * answers it. A scroll of an element moves the text inside that element
+   * only, so the rectangles must be measured again.
+   */
+  const isPageScroll = (target: EventTarget | null): boolean =>
+    target === doc || target === win || target === doc.scrollingElement ||
+    target === doc.documentElement || target === doc.body;
+
   // The capture phase: `scroll` does not bubble out of an element that
   // scrolls, and a match inside an inner scroll container must follow it too.
-  yield* dom.listen("document", "scroll", () => reposition, {
-    capture: true,
+  yield* dom.listen(
+    "document",
+    "scroll",
+    (event) => isPageScroll(event.target) ? reposition : repositionAll,
+    { capture: true, passive: true },
+  );
+  // A resize reflows the page, so every range can move on its own.
+  yield* dom.listen("window", "resize", () => repositionAll, {
     passive: true,
   });
-  yield* dom.listen("window", "resize", () => reposition, { passive: true });
 
   const visualViewport = yield* dom.probeOr(
     () => Option.fromNullishOr(win.visualViewport),
@@ -343,9 +487,53 @@ export const makeHighlighter: Effect.Effect<
   );
   if (Option.isSome(visualViewport)) {
     const visual = visualViewport.value;
-    yield* dom.listenOn(visual, "resize", () => reposition, { passive: true });
+    // A change of the visible viewport can be a keyboard that opens, and that
+    // reflows the page. A pan or a pinch does not, and the correction with the
+    // probe answers it.
+    yield* dom.listenOn(visual, "resize", () => repositionAll, {
+      passive: true,
+    });
     yield* dom.listenOn(visual, "scroll", () => reposition, { passive: true });
   }
+
+  // The services of this layer, for the observer callback. The callback is an
+  // imperative caller, and `runSyncExitWith` is the bridge that
+  // `ARCHITECTURE.md` section 3 names. `platform/Dom.ts` uses the same helper
+  // for a listener.
+  const services = yield* Effect.context<never>();
+  const runObserver = Effect.runSyncExitWith(services);
+
+  /**
+   * Watch the page for a reflow that changes its size.
+   *
+   * An image that arrives, a panel that opens and a font that loads all move
+   * the text with no scroll and no resize of the window. The observer reports
+   * the change of the box, and the frame measures again. The observer watches
+   * the root and the body only, and not the subtree, so a busy page reports
+   * one box and not thousands.
+   */
+  yield* Effect.acquireRelease(
+    dom.probeOr(() => {
+      const observer = new ResizeObserver(() => {
+        const exit = runObserver(repositionAll);
+        // A defect here must not travel into the callback of the browser. The
+        // overlay is a decoration, and a throw from a page callback is worse
+        // than a highlight that is one frame late.
+        if (Exit.isFailure(exit)) {
+          runObserver(
+            Effect.logError("the find overlay could not follow a reflow", exit),
+          );
+        }
+      });
+      observer.observe(doc.documentElement);
+      if (doc.body !== null) observer.observe(doc.body);
+      return Option.some(observer);
+    }, Option.none<ResizeObserver>()),
+    (observer) =>
+      Effect.sync(() => {
+        if (Option.isSome(observer)) observer.value.disconnect();
+      }),
+  );
 
   yield* Ref.set(origin, yield* readScroll);
   yield* applyOffset();
