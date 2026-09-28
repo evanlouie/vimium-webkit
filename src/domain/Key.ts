@@ -743,7 +743,8 @@ const readToken =
         (group) => group.endsWith(">"),
         (group) => parseAngleKey(group.slice(1, -1), group),
       ),
-      // A position in a message is a character position, as the match is.
+      // `token.index` counts UTF-16 units. A position in a message counts
+      // characters, as the walk over the sequence does.
       Match.orElse(() =>
         Result.fail(
           notationError(

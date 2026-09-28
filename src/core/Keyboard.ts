@@ -102,7 +102,10 @@ type NoFields = Record.ReadonlyRecord<never, never>;
 
 /** What the branch walk reads from the key state. */
 interface Progress {
-  /** Every live branch, shallowest first. Empty means "at the root". */
+  /**
+   * Every live branch, shallowest first. Empty at the root, and while the user
+   * has typed only a count.
+   */
   readonly branches: ReadonlyArray<KeyBranch>;
   /** The count prefix. `0` means that the user typed none. */
   readonly count: number;
