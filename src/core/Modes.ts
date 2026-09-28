@@ -18,11 +18,12 @@ import {
   Context,
   Data,
   Effect,
+  Exit,
   Layer,
   Option,
   Record,
   Ref,
-  type Scope,
+  Scope,
   SubscriptionRef,
   flow,
   pipe,
@@ -94,7 +95,13 @@ export interface ModeOptions {
   readonly singleton: Option.Option<string>;
 }
 
-/** A live mode. Hold it to exit the mode, or to learn that it exited. */
+/**
+ * A live mode. Hold it to exit the mode, or to learn that it exited.
+ *
+ * The mode owns a scope of its own, inside the scope that entered it. The exit
+ * closes that scope, and the close of the outer scope exits the mode. A mode
+ * that ends therefore leaves nothing behind in the scope of its caller.
+ */
 export interface ModeHandle {
   readonly name: string;
   readonly isActive: Effect.Effect<boolean>;
@@ -217,7 +224,9 @@ export class Modes extends Context.Service<
      * Enter a mode. It stays until it exits, or until the scope closes.
      *
      * The scope makes teardown structural. A feature that opens a mode inside its
-     * own scope cannot leave the mode behind.
+     * own scope cannot leave the mode behind. A service that enters a mode again
+     * and again for as long as its layer lives gives the layer scope, and holds
+     * only the handle: each mode that ends takes its own scope with it.
      */
     readonly enter: <R>(
       options: ModeOptions,
@@ -255,6 +264,8 @@ export class Modes extends Context.Service<
         Effect.gen(function* () {
           const group = options.singleton;
           const life = yield* Ref.make<Life>(Life.Live({ handler: Option.none(), bodies: [] }));
+          const owner = yield* Scope.Scope;
+          const scope = yield* Scope.fork(owner);
 
           const close = Effect.fnUntraced(function* (
             handler: Option.Option<HandlerId>,
@@ -275,6 +286,9 @@ export class Modes extends Context.Service<
               ),
             );
             yield* refreshIndicator;
+            // The mode is gone, so its scope goes too, and the scope of the
+            // caller no longer holds it.
+            yield* Scope.close(scope, Exit.void);
           });
 
           const exit = (reason: ExitReason = "explicit"): Effect.Effect<void> =>
@@ -390,7 +404,7 @@ export class Modes extends Context.Service<
           yield* refreshIndicator;
 
           // The scope owns the mode. Nothing has to remember to exit it.
-          yield* Effect.addFinalizer(() => exit("navigation"));
+          yield* Scope.addFinalizer(scope, exit("navigation"));
 
           return handle;
         });

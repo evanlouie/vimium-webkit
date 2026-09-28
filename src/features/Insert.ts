@@ -19,7 +19,6 @@ import {
   Boolean,
   Context,
   Effect,
-  Exit,
   Layer,
   Option,
   Predicate,
@@ -188,12 +187,6 @@ const caretToEnd = (field: HTMLInputElement | HTMLTextAreaElement): void => {
   field.setSelectionRange(end, end);
 };
 
-/** A live mode frame, and the scope that owns it. */
-interface Frame {
-  readonly scope: Scope.Closeable;
-  readonly handle: ModeHandle;
-}
-
 interface InsertState {
   /** The element that has focus, when it is one that we gave the keys to. */
   readonly element: Option.Option<HTMLElement>;
@@ -239,44 +232,47 @@ export class Insert extends Context.Service<
         const settings = yield* Settings;
 
         const state = yield* Ref.make<InsertState>(IDLE);
-        const base = yield* Ref.make(Option.none<Frame>());
-        const badge = yield* Ref.make(Option.none<Frame>());
+        const base = yield* Ref.make(Option.none<ModeHandle>());
+        const badge = yield* Ref.make(Option.none<ModeHandle>());
 
-        const isOpen = (cell: Ref.Ref<Option.Option<Frame>>): Effect.Effect<boolean> =>
+        // Both frames belong to the layer scope, which exits them when the
+        // runtime stops. Each one owns a scope inside it, so a frame that
+        // `ensureEntered` replaces leaves nothing behind there.
+        const layerScope = yield* Scope.Scope;
+
+        const isOpen = (cell: Ref.Ref<Option.Option<ModeHandle>>): Effect.Effect<boolean> =>
           pipe(
             Ref.get(cell),
             Effect.flatMap(
               Option.match({
                 onNone: () => Effect.succeed(false),
-                onSome: (frame) => frame.handle.isActive,
+                onSome: (handle) => handle.isActive,
               }),
             ),
           );
 
-        const closeFrame: (cell: Ref.Ref<Option.Option<Frame>>) => Effect.Effect<void> = flow(
-          Ref.getAndSet(Option.none<Frame>()),
+        const closeFrame: (cell: Ref.Ref<Option.Option<ModeHandle>>) => Effect.Effect<void> = flow(
+          Ref.getAndSet(Option.none<ModeHandle>()),
           Effect.flatMap(
             Option.match({
               onNone: () => Effect.void,
-              onSome: (frame) => Scope.close(frame.scope, Exit.void),
+              onSome: (handle) => handle.exit("explicit"),
             }),
           ),
         );
 
-        /** Open a mode frame in a scope of its own, and keep it in the cell. */
+        /** Open a mode frame in the layer scope, and keep its handle in the cell. */
         const openFrame = Effect.fnUntraced(function* (
-          cell: Ref.Ref<Option.Option<Frame>>,
+          cell: Ref.Ref<Option.Option<ModeHandle>>,
           enter: Effect.Effect<ModeHandle, never, Scope.Scope>,
         ) {
-          yield* closeFrame(cell);
-          const scope = yield* Scope.make();
-          const handle = yield* pipe(enter, Scope.provide(scope));
-          yield* pipe(cell, Ref.set(Option.some({ scope, handle })));
+          const handle = yield* pipe(enter, Scope.provide(layerScope));
+          yield* pipe(cell, Ref.set(Option.some(handle)));
         });
 
         /** Open the frame again, unless the cell holds one that is still live. */
         const ensureFrame = Effect.fnUntraced(function* (
-          cell: Ref.Ref<Option.Option<Frame>>,
+          cell: Ref.Ref<Option.Option<ModeHandle>>,
           enter: Effect.Effect<ModeHandle, never, Scope.Scope>,
         ) {
           const open = yield* isOpen(cell);
@@ -566,11 +562,6 @@ export class Insert extends Context.Service<
         // The base frame belongs to the layer scope. A caller that survives a
         // navigation uses `ensureEntered` to open it again.
         yield* ensureEntered();
-
-        // Both frames live in a scope of their own, so that `ensureEntered` can
-        // replace one. This gives them back to the layer scope, which closes
-        // them when the runtime stops.
-        yield* Effect.addFinalizer(() => pipe(closeFrame(badge), Effect.andThen(closeFrame(base))));
 
         const service = Insert.of({
           enter: enterGlobal(),
