@@ -36,7 +36,8 @@ import {
   SUPPRESS_EVENT,
 } from "./HandlerStack.ts";
 
-export type ModeIndicator = string | null;
+/** The text that the HUD shows for the live modes. `None` shows nothing. */
+export type ModeIndicator = Option.Option<string>;
 
 export type ExitReason =
   | "explicit"
@@ -207,7 +208,6 @@ const innermostIndicator = ({ active }: ModeState): ModeIndicator =>
   pipe(
     active,
     Array.findLast((mode) => mode.indicator),
-    Option.getOrNull,
   );
 
 export class Modes extends Context.Service<
@@ -239,9 +239,9 @@ export class Modes extends Context.Service<
     Effect.gen(function* () {
       const stack = yield* HandlerStack;
       const state = yield* Ref.make<ModeState>({ active: [], singletons: Record.empty() });
-      const indicator = yield* SubscriptionRef.make<ModeIndicator>(null);
+      const indicator = yield* SubscriptionRef.make<ModeIndicator>(Option.none());
 
-      /** Show the innermost indicator that is not `null`. */
+      /** Show the innermost indicator that a live mode gives. */
       const refreshIndicator = pipe(
         Ref.get(state),
         Effect.map(innermostIndicator),

@@ -481,9 +481,7 @@ export class Hud extends Context.Service<
         yield* pipe(
           modes.indicator,
           SubscriptionRef.changes,
-          Stream.runForEach((value) =>
-            patch(Struct.assign({ indicator: Option.fromNullishOr(value) })),
-          ),
+          Stream.runForEach((indicator) => patch(Struct.assign({ indicator }))),
           Effect.forkScoped,
         );
 

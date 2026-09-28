@@ -284,25 +284,25 @@ describe("Modes", () => {
     ),
   );
 
-  it.effect("shows the innermost indicator that is not null", () =>
+  it.effect("shows the innermost indicator that a mode gives", () =>
     pipe(
       Effect.gen(function* () {
         const modes = yield* Modes;
 
         const outer = yield* modes.enter<never>(shown("outer", "OUTER"));
-        assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "OUTER");
+        assert.deepEqual(yield* SubscriptionRef.get(modes.indicator), Option.some("OUTER"));
 
         const silent = yield* modes.enter<never>(plain("silent"));
-        assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "OUTER");
+        assert.deepEqual(yield* SubscriptionRef.get(modes.indicator), Option.some("OUTER"));
 
         const inner = yield* modes.enter<never>(shown("inner", "INNER"));
-        assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "INNER");
+        assert.deepEqual(yield* SubscriptionRef.get(modes.indicator), Option.some("INNER"));
 
         yield* inner.exit();
-        assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "OUTER");
+        assert.deepEqual(yield* SubscriptionRef.get(modes.indicator), Option.some("OUTER"));
 
         yield* outer.exit();
-        assert.isNull(yield* SubscriptionRef.get(modes.indicator));
+        assert.deepEqual(yield* SubscriptionRef.get(modes.indicator), Option.none());
 
         yield* silent.exit();
       }),
@@ -350,7 +350,7 @@ describe("Modes", () => {
           keydown: () => Effect.die(new Error("boom")),
         });
         yield* mode.onExit((reason) => pipe(reasons, Ref.update(Array.append(reason))));
-        assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "DEFECTIVE");
+        assert.deepEqual(yield* SubscriptionRef.get(modes.indicator), Option.some("DEFECTIVE"));
 
         // The event still reaches the page, because a failed frame decides
         // nothing.
@@ -359,7 +359,7 @@ describe("Modes", () => {
         assert.isFalse(yield* mode.isActive);
         assert.deepEqual(yield* modes.activeNames, []);
         assert.strictEqual(yield* stack.depth, 0);
-        assert.isNull(yield* SubscriptionRef.get(modes.indicator));
+        assert.deepEqual(yield* SubscriptionRef.get(modes.indicator), Option.none());
         assert.deepEqual(yield* Ref.get(reasons), ["defect"]);
 
         // The singleton group is free again, so the feature can be used again.
