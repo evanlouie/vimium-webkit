@@ -107,7 +107,7 @@ const realmLayer = (isTop: boolean, frameId: string): Layer.Layer<Realm> =>
     Realm.of({
       frameId: FrameId.make(frameId),
       isTop,
-      isLive: true,
+      isLive: Effect.succeed(true),
       wakeDescendants: Effect.void,
       askDescendantsToAnnounce: Effect.void,
       isAncestor: () => Effect.succeed(false),

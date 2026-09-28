@@ -197,17 +197,16 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
     const typed = yield* Ref.make(false);
     const started = yield* Deferred.make<ActivationReason>();
 
+    /**
+     * Give the signal, when the realm is still there.
+     *
+     * The realm may have gone since we started, for example a frame that was
+     * removed while a timer was pending. Nothing that we build there could be
+     * seen or used. The check reads the realm when the signal is given, and
+     * not when the guard started.
+     */
     const activate = (reason: ActivationReason): Effect.Effect<void> =>
-      pipe(
-        realm.isLive,
-        Boolean.match({
-          // The realm may have gone since we started, for example a frame that
-          // was removed while a timer was pending. Nothing that we build there
-          // could be seen or used.
-          onFalse: () => Effect.void,
-          onTrue: () => pipe(started, Deferred.succeed(reason), Effect.asVoid),
-        }),
-      );
+      pipe(started, Deferred.succeed(reason), Effect.when(realm.isLive), Effect.asVoid);
 
     /**
      * Hold a key that starts the application, and start it.

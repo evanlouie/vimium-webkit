@@ -151,8 +151,13 @@ export class Realm extends Context.Service<
     readonly frameId: FrameId;
     /** True when this frame is the top document of its tab. */
     readonly isTop: boolean;
-    /** True when the realm has the globals that the application needs. */
-    readonly isLive: boolean;
+    /**
+     * True when the realm still has the globals that the application needs.
+     *
+     * It reads the globals each time it runs. A frame can go away after the
+     * layer was built, while a timer of the guard is still pending.
+     */
+    readonly isLive: Effect.Effect<boolean>;
 
     /** Send the wake message to every descendant frame, at every depth. */
     readonly wakeDescendants: Effect.Effect<void>;
@@ -169,7 +174,7 @@ export class Realm extends Context.Service<
     Effect.gen(function* () {
       const dom = yield* Dom;
 
-      const isLive = yield* dom.probeOr(
+      const isLive = dom.probeOr(
         () => dom.window.navigator !== undefined && dom.window.document !== undefined,
         false,
       );
