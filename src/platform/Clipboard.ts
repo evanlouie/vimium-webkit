@@ -69,7 +69,7 @@ export type ClipboardReader = () => Promise<string>;
  * synchronously from the key handler.
  *
  * This read can throw, because a userscript does not own its globals. Call it
- * inside `Dom.probeOr`.
+ * inside `Dom.probeOrElse`.
  */
 export const clipboardWriter = (
   window: Window & typeof globalThis,
@@ -212,15 +212,15 @@ export class Clipboard extends Context.Service<
 
       // The accessors are read once, when the layer is built. The key path
       // then holds plain values, and it does no global read of its own.
-      const writer = yield* dom.probeOr(() => clipboardWriter(dom.window), Option.none());
-      const reader = yield* dom.probeOr(() => clipboardReader(dom.window), Option.none());
-      const execDocument = yield* dom.probeOr(
+      const writer = yield* dom.probeOrElse(() => clipboardWriter(dom.window), Option.none);
+      const reader = yield* dom.probeOrElse(() => clipboardReader(dom.window), Option.none);
+      const execDocument = yield* dom.probeOrElse(
         () =>
           pipe(
             dom.document,
             Option.liftPredicate((doc) => Predicate.isFunction(Reflect.get(doc, "execCommand"))),
           ),
-        Option.none(),
+        Option.none,
       );
 
       /** The `document.execCommand("copy")` path. */

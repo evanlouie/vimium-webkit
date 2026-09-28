@@ -115,7 +115,18 @@ export class Dom extends Context.Service<
      */
     readonly probe: <A>(api: string, read: () => A) => Effect.Effect<A, DomError>;
 
-    /** The same read, with a value for "absent" and for "we could not tell". */
+    /**
+     * The same read, with a fallback for "absent" and for "we could not tell".
+     *
+     * The fallback runs only when the read throws, so it can do work of its own.
+     */
+    readonly probeOrElse: <A>(read: () => A, orElse: () => A) => Effect.Effect<A>;
+
+    /**
+     * `probeOrElse` with a fallback value, which the caller builds before the
+     * read. It stays for the callers that pass a value. New code uses
+     * `probeOrElse`.
+     */
     readonly probeOr: <A>(read: () => A, fallback: A) => Effect.Effect<A>;
 
     /** Run a synchronous DOM call, and name the failure if it throws. */
@@ -175,13 +186,8 @@ export class Dom extends Context.Service<
       const win = globalThis as Window & typeof globalThis;
       const doc = win.document;
 
-      const probeOr = <A>(read: () => A, fallback: A): Effect.Effect<A> =>
-        Effect.sync(() =>
-          pipe(
-            Result.try(read),
-            Result.getOrElse(() => fallback),
-          ),
-        );
+      const probeOrElse = <A>(read: () => A, orElse: () => A): Effect.Effect<A> =>
+        Effect.sync(() => pipe(Result.try(read), Result.getOrElse(orElse)));
 
       const probe = <A>(api: string, read: () => A): Effect.Effect<A, DomError> =>
         Effect.try({
@@ -250,7 +256,8 @@ export class Dom extends Context.Service<
         href: Effect.sync(() => win.location.href),
         visibility: Effect.sync(() => doc.visibilityState),
         probe,
-        probeOr,
+        probeOrElse,
+        probeOr: (read, fallback) => probeOrElse(read, () => fallback),
         attempt: probe,
 
         listen: (target, type, handler, options) =>

@@ -135,7 +135,7 @@ const surfaceScheme =
  *
  * The caller must protect this call. `getComputedStyle` belongs to the page,
  * and a page can replace it with an accessor that throws. `Ui.ts` therefore
- * calls this inside `dom.probeOr`.
+ * calls this inside `dom.probeOrElse`.
  */
 export const detectPageScheme = (doc: Document): Option.Option<ColorScheme> =>
   Option.gen(function* () {

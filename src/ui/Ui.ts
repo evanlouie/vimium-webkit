@@ -806,9 +806,9 @@ export class Ui extends Context.Service<
       // Which properties this engine can compare, asked once and asked of
       // the engine itself. Page script cannot have run between the write
       // above and this read, because both are in the same task.
-      const derivedProperties = yield* dom.probeOr(
+      const derivedProperties = yield* dom.probeOrElse(
         () => Option.some(comparableHostProperties(readHostProperty)),
-        Option.none<ReadonlySet<string>>(),
+        Option.none,
       );
       // A safety mechanism must fail closed. An empty set would answer
       // "nothing is stale" for every property, so one refused read would
@@ -886,11 +886,11 @@ export class Ui extends Context.Service<
           Boolean.match({
             onFalse: () => Effect.succeedNone,
             onTrue: () =>
-              dom.probeOr(() => {
+              dom.probeOrElse(() => {
                 const sheet = new CSSStyleSheet();
                 sheet.replaceSync(css);
                 return Option.some(sheet);
-              }, Option.none<CSSStyleSheet>()),
+              }, Option.none),
           }),
         );
 
@@ -964,10 +964,10 @@ export class Ui extends Context.Service<
                 return true;
               }),
             Sheet: ({ sheet }) =>
-              dom.probeOr(() => {
+              dom.probeOrElse(() => {
                 sheet.replaceSync(css);
                 return true;
-              }, false),
+              }, Function.constFalse),
           }),
         );
       });
@@ -1135,7 +1135,7 @@ export class Ui extends Context.Service<
       const repairHost: Effect.Effect<void> = Effect.gen(function* () {
         const owned = yield* Ref.get(viewportOwned);
         const focused = yield* Ref.get(lastFocused);
-        const departed = yield* dom.probeOr(() => {
+        const departed = yield* dom.probeOrElse(() => {
           restoreHostStyle(owned);
           // At `document-start` there may be no `documentElement` yet. Doing
           // nothing is correct, because the next `layer` call tries again.
@@ -1156,7 +1156,7 @@ export class Ui extends Context.Service<
             focused,
             Option.filter((element) => !element.isConnected),
           );
-        }, Option.none<HTMLElement>());
+        }, Option.none);
         // A control that left the document holds its whole dialog, with
         // every other control in it. Release it as soon as we see it.
         yield* pipe(
@@ -1283,13 +1283,13 @@ export class Ui extends Context.Service<
         Effect.gen(function* () {
           // A new `documentElement` is a different node, so the
           // registration is renewed on each report.
-          yield* dom.probeOr(() => watch(observer), undefined);
+          yield* dom.probeOrElse(() => watch(observer), Function.constVoid);
           // The parent, and not the connection. A host that the page moved
           // into a container of its own is still connected, and the page
           // then owns the visibility of the overlay.
-          const misplaced = yield* dom.probeOr(
+          const misplaced = yield* dom.probeOrElse(
             () => reattachTo(hostParent(), host.parentNode),
-            Option.none<Element>(),
+            Option.none,
           );
           yield* pipe(
             misplaced,
@@ -1308,7 +1308,7 @@ export class Ui extends Context.Service<
        * stack that holds the keyboard over an interface that nobody sees.
        */
       yield* Effect.acquireRelease(
-        dom.probeOr(() => {
+        dom.probeOrElse(() => {
           const observer = new MutationObserver(() =>
             pipe(
               runGuard(guardReport(observer)),
@@ -1323,7 +1323,7 @@ export class Ui extends Context.Service<
           );
           watch(observer);
           return Option.some(observer);
-        }, Option.none<MutationObserver>()),
+        }, Option.none),
         (observer) =>
           Effect.sync(() =>
             pipe(
@@ -1362,7 +1362,7 @@ export class Ui extends Context.Service<
        */
       const applyHolds = Effect.gen(function* () {
         const current = yield* Ref.get(holds);
-        yield* dom.probeOr(() => {
+        yield* dom.probeOrElse(() => {
           pipe(
             current,
             Iterable.forEach(([element, count]: readonly [HTMLElement, number]) =>
@@ -1370,7 +1370,7 @@ export class Ui extends Context.Service<
             ),
           );
           setHidden(host, !anyHeld(current));
-        }, undefined);
+        }, Function.constVoid);
       });
 
       const expose = Effect.fn("Ui.expose")(function* (layer: HTMLElement) {
@@ -1403,7 +1403,7 @@ export class Ui extends Context.Service<
       // The colour scheme
       // ---------------------------------------------------------------
 
-      const schemeQuery = yield* dom.probeOr(
+      const schemeQuery = yield* dom.probeOrElse(
         () =>
           pipe(
             win,
@@ -1412,7 +1412,7 @@ export class Ui extends Context.Service<
               Option.fromNullishOr(view.matchMedia("(prefers-color-scheme: dark)")),
             ),
           ),
-        Option.none<MediaQueryList>(),
+        Option.none,
       );
 
       /**
@@ -1424,18 +1424,18 @@ export class Ui extends Context.Service<
       const pageScheme: (follow: boolean) => Effect.Effect<Option.Option<ColorScheme>> =
         Boolean.match({
           onFalse: () => Effect.succeedNone,
-          onTrue: () => dom.probeOr(() => detectPageScheme(doc), Option.none<ColorScheme>()),
+          onTrue: () => dom.probeOrElse(() => detectPageScheme(doc), Option.none),
         });
 
       /** The scheme of the user agent. */
       const agentScheme: Effect.Effect<ColorScheme> = pipe(
-        dom.probeOr(
+        dom.probeOrElse(
           () =>
             pipe(
               schemeQuery,
               Option.exists((query) => query.matches),
             ),
-          false,
+          Function.constFalse,
         ),
         Effect.map(schemeOf),
       );
@@ -1500,16 +1500,16 @@ export class Ui extends Context.Service<
       // The visual viewport, and the place of the host in it
       // ---------------------------------------------------------------
 
-      const visualViewport = yield* dom.probeOr(
+      const visualViewport = yield* dom.probeOrElse(
         () => Option.fromNullishOr(win.visualViewport),
-        Option.none<VisualViewport>(),
+        Option.none,
       );
 
       const viewport: Effect.Effect<ViewportRect> = pipe(
         visualViewport,
         Option.match({
           onSome: (visual) =>
-            dom.probeOr(
+            dom.probeOrElse(
               () => ({
                 offsetLeft: visual.offsetLeft,
                 offsetTop: visual.offsetTop,
@@ -1517,10 +1517,10 @@ export class Ui extends Context.Service<
                 height: visual.height,
                 scale: visual.scale,
               }),
-              FALLBACK_VIEWPORT,
+              () => FALLBACK_VIEWPORT,
             ),
           onNone: () =>
-            dom.probeOr(
+            dom.probeOrElse(
               () => ({
                 offsetLeft: 0,
                 offsetTop: 0,
@@ -1528,13 +1528,13 @@ export class Ui extends Context.Service<
                 height: win.innerHeight,
                 scale: 1,
               }),
-              FALLBACK_VIEWPORT,
+              () => FALLBACK_VIEWPORT,
             ),
         }),
       );
 
       /** Where the host lies now, or `None` when the read is refused. */
-      const measureHost: Effect.Effect<Option.Option<HostBox>> = dom.probeOr(() => {
+      const measureHost: Effect.Effect<Option.Option<HostBox>> = dom.probeOrElse(() => {
         const rect = host.getBoundingClientRect();
         return Option.some<HostBox>({
           left: rect.left,
@@ -1542,7 +1542,7 @@ export class Ui extends Context.Service<
           width: rect.width,
           height: rect.height,
         });
-      }, Option.none<HostBox>());
+      }, Option.none);
 
       /** How far the host is from the viewport now. `None` when it lines up or the read is refused. */
       const hostError = (view: ViewportRect): Effect.Effect<Option.Option<HostShift>> =>
@@ -1568,7 +1568,10 @@ export class Ui extends Context.Service<
         // The important priority again, and for two reasons. Page CSS must
         // not move the overlay, and `all: initial !important` above wins
         // over a normal declaration in the same block whatever the order.
-        yield* dom.probeOr(() => writeImportant(host)(Record.toEntries(owned)), undefined);
+        yield* dom.probeOrElse(
+          () => writeImportant(host)(Record.toEntries(owned)),
+          Function.constVoid,
+        );
       });
 
       /**
@@ -1683,7 +1686,7 @@ export class Ui extends Context.Service<
        * The chain is walked lazily, so a page pays one computed style for
        * each element up to the first that hides the host.
        */
-      const hidingAncestor: Effect.Effect<Option.Option<Element>> = dom.probeOr(
+      const hidingAncestor: Effect.Effect<Option.Option<Element>> = dom.probeOrElse(
         () =>
           pipe(
             ancestry(host),
@@ -1691,7 +1694,7 @@ export class Ui extends Context.Service<
               preventsOverlayPaint(win.getComputedStyle(element)),
             ),
           ),
-        Option.none<Element>(),
+        Option.none,
       );
 
       /** The fault of a host box that the engine gave us. */
