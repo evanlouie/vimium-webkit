@@ -54,15 +54,13 @@ export class DomError extends Schema.TaggedError<DomError>()("DomError", {
 // ---------------------------------------------------------------------------
 
 /**
- * Maps a target type to the events that it can give.
+ * Maps a global of this frame to the events that it can give.
  *
- * The three maps cover every listener in this application. A target that is not
- * one of these uses `listenOn`, which gives a plain `Event`.
+ * Any other target uses `listenOn`, which gives a plain `Event`.
  */
 export interface TargetEventMap {
   readonly window: WindowEventMap;
   readonly document: DocumentEventMap;
-  readonly element: HTMLElementEventMap;
 }
 
 export interface ListenOptions {
@@ -133,7 +131,7 @@ export class Dom extends Context.Service<
     readonly attempt: <A>(api: string, run: () => A) => Effect.Effect<A, DomError>;
 
     /**
-     * Listen on `window`, `document` or an element, for the enclosing scope.
+     * Listen on `window` or `document`, for the enclosing scope.
      *
      * The handler runs synchronously, inside the browser's dispatch. That is what
      * lets a key handler call `preventDefault`.
@@ -205,7 +203,7 @@ export class Dom extends Context.Service<
         pipe(
           Match.value(name),
           Match.when("document", (): EventTarget => doc),
-          Match.whenOr("window", "element", (): EventTarget => win),
+          Match.when("window", (): EventTarget => win),
           Match.exhaustive,
         );
 
