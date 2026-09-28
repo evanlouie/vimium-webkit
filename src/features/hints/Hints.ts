@@ -1937,10 +1937,7 @@ export class Hints extends Context.Service<Hints, {
           cancelled: Deferred.Deferred<void>,
         ) {
           const collected = yield* raceUntilAbort(
-            Effect.map(
-              collectEveryFrame(origin, roundId, mode),
-              Option.some,
-            ),
+            Effect.asSome(collectEveryFrame(origin, roundId, mode)),
             cancelled,
           );
           if (Option.isNone(collected)) return Option.none();

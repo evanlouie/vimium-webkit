@@ -23,7 +23,7 @@
  * `*_SCHEMA_VERSION` of its group.
  */
 
-import { Effect, Option, Schema, SchemaTransformation } from "effect";
+import { Effect, Schema, SchemaTransformation } from "effect";
 import { hintCharacterCount, readHintCharacters } from "~/domain/HintString.ts";
 
 // ---------------------------------------------------------------------------
@@ -85,9 +85,9 @@ export type ExclusionRule = typeof exclusionRuleSchema.Type;
  * the fallback is never re-validated against its own checks.
  */
 const field = <S extends Schema.Top>(schema: S, fallback: S["Type"]) => {
-  const recovered = Schema.catchDecoding<S>(() =>
-    Effect.succeed(Option.some(fallback))
-  )(schema);
+  const recovered = Schema.catchDecoding<S>(() => Effect.succeedSome(fallback))(
+    schema,
+  );
   return Schema.withDecodingDefaultTypeKey<typeof recovered>(
     Effect.succeed(fallback),
   )(recovered);

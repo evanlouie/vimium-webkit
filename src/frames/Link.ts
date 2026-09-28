@@ -195,7 +195,7 @@ export class FrameLink extends Context.Service<FrameLink, {
           (message) =>
             message.message.kind === "FOCUS_FRAME"
               ? Effect.as(elect(message.message.direction), Option.none())
-              : Effect.succeed(Option.none()),
+              : Effect.succeedNone,
         );
 
         yield* bus.serve("FOCUSED", (message) =>
@@ -226,7 +226,7 @@ export class FrameLink extends Context.Service<FrameLink, {
                 ),
                 Option.none(),
               )
-              : Effect.succeed(Option.none()),
+              : Effect.succeedNone,
         );
 
         // Until this frame is welcomed it has no verdict. A frame that started

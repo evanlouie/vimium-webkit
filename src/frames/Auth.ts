@@ -280,15 +280,13 @@ export class FrameAuth extends Context.Service<FrameAuth, {
 
         /** Web Crypto, read again for each call, and never held. */
         const subtle: Effect.Effect<SubtleCrypto, FrameAuthError> = Effect
-          .suspend(() => {
-            const api = readSubtle();
-            return Option.isSome(api) ? Effect.succeed(api.value) : Effect.fail(
+          .suspend(() =>
+            Effect.fromOption(readSubtle(), () =>
               new FrameAuthError({
                 reason: "unavailable",
                 detail: "web crypto is not in this realm",
-              }),
-            );
-          });
+              }))
+          );
 
         /**
          * A store that the page can read is not a store for a credential.

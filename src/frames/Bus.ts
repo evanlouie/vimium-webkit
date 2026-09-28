@@ -627,13 +627,12 @@ export class FrameBus extends Context.Service<FrameBus, {
 
       const freshId: Effect.Effect<string, FrameError> = Effect.flatMap(
         randomId,
-        (id) =>
-          Option.isSome(id) ? Effect.succeed(id.value) : Effect.fail(
-            new FrameError({
-              reason: "failed",
-              detail: "this realm has no random source",
-            }),
-          ),
+        Effect.fromOption(() =>
+          new FrameError({
+            reason: "failed",
+            detail: "this realm has no random source",
+          })
+        ),
       );
 
       // ---------------------------------------------------------------------
