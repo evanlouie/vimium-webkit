@@ -8,7 +8,18 @@
  * other binding.
  */
 
-import { Option, Result, Record } from "effect";
+import {
+  Array,
+  Boolean,
+  Equivalence,
+  Match,
+  Option,
+  Record,
+  Result,
+  Struct,
+  flow,
+  pipe,
+} from "effect";
 import {
   isCountDigit,
   normaliseKeySequence,
@@ -18,9 +29,9 @@ import {
 
 export interface KeyBinding {
   /** The canonical notation of each key in the sequence. */
-  readonly keys: readonly string[];
+  readonly keys: Array.NonEmptyReadonlyArray<string>;
   readonly command: string;
-  readonly options: Readonly<Record<string, string | boolean>>;
+  readonly options: Record.ReadonlyRecord<string, string | boolean>;
   /** The source line, for the error message and for the help dialog. */
   readonly source: string;
   /** The raw line number in the compiled source. See `ParseOptions.lineOffset`. */
@@ -30,12 +41,12 @@ export interface KeyBinding {
 /**
  * One node of the compiled trie.
  *
- * The type is read-only. The compiler builds a mutable tree inside
- * `compileMappings` and gives it out as this type, so no caller can change a
- * trie that another service holds.
+ * The compiler builds each node once, from the bindings that pass through it,
+ * so no node changes after it exists and no caller can change a trie that
+ * another service holds.
  */
 export interface TrieNode {
-  readonly children: ReadonlyMap<string, TrieNode>;
+  readonly children: Record.ReadonlyRecord<string, TrieNode>;
   readonly binding: Option.Option<KeyBinding>;
 }
 
@@ -53,7 +64,7 @@ export interface CompiledMappings {
   readonly trie: TrieNode;
   readonly bindings: readonly KeyBinding[];
   /** The physical key remap from `mapkey`. It is applied before the trie walk. */
-  readonly keyRemap: ReadonlyMap<string, string>;
+  readonly keyRemap: Record.ReadonlyRecord<string, string>;
   readonly diagnostics: readonly MappingDiagnostic[];
 }
 
@@ -82,26 +93,18 @@ export interface ParseOptions {
   readonly lineOffset?: number;
 }
 
-/** The tree that the compiler builds. It becomes a `TrieNode` on the way out. */
-interface MutableTrieNode {
-  readonly children: Map<string, MutableTrieNode>;
-  binding: Option.Option<KeyBinding>;
-}
-
-const newNode = (): MutableTrieNode => ({
-  children: new Map(),
-  binding: Option.none(),
-});
-
 /**
- * The identity of a binding in the binding table.
+ * The identity of a binding in the binding table: its keys, compared one key
+ * at a time.
  *
  * `keys.join("")` is not injective. `["<", "c", "-", "a", ">"]` and `["<c-a>"]`
  * both give `"<c-a>"`, so one binding replaced the other without a message,
- * and `unmap` removed the one that stayed. A separator that cannot occur in a
- * canonical notation corrects this.
+ * and `unmap` removed the one that stayed.
  */
-const bindingKey = (keys: readonly string[]): string => keys.join("\u0000");
+const sameKeys = Array.makeEquivalence(Equivalence.String);
+
+/** The keys of a sequence as the user reads them, for a message. */
+const written = Array.join("");
 
 // ---------------------------------------------------------------------------
 // Tokens
@@ -112,6 +115,71 @@ export interface LogicalLine {
   readonly text: string;
 }
 
+/** A line that ends with `\`, and the text that it joined so far. */
+interface Continuation {
+  readonly start: number;
+  readonly text: string;
+}
+
+interface Joining {
+  readonly lines: ReadonlyArray<LogicalLine>;
+  readonly open: Option.Option<Continuation>;
+}
+
+const isCommentLine = (line: string): boolean => {
+  const trimmed = line.trimStart();
+  return trimmed.startsWith("#") || trimmed.startsWith('"');
+};
+
+/** The text of a line that continues on the next one, without its `\`. */
+const continued = (text: string): Option.Option<string> =>
+  pipe(
+    text.trimEnd(),
+    Option.liftPredicate((line) => line.endsWith("\\")),
+    Option.map((line) => line.slice(0, -1)),
+  );
+
+/** Add a logical line. A line with no text is not one. */
+const emit = (
+  lines: ReadonlyArray<LogicalLine>,
+  number: number,
+  text: string,
+): ReadonlyArray<LogicalLine> =>
+  pipe(
+    text.trim(),
+    Option.liftPredicate((trimmed) => trimmed.length > 0),
+    Option.match({
+      onNone: () => lines,
+      onSome: (trimmed) => pipe(lines, Array.append({ number, text: trimmed })),
+    }),
+  );
+
+const joinLine = ({ lines, open }: Joining, line: LogicalLine): Joining => {
+  const { start, text } = pipe(
+    open,
+    Option.getOrElse(() => ({ start: line.number, text: "" })),
+  );
+  return pipe(
+    continued(line.text),
+    Option.match({
+      onNone: () => ({ lines: emit(lines, start, `${text}${line.text}`), open: Option.none() }),
+      onSome: (part) => ({ lines, open: Option.some({ start, text: `${text}${part} ` }) }),
+    }),
+  );
+};
+
+/** A continuation at the end of the source still makes a line. */
+const flush = ({ lines, open }: Joining): ReadonlyArray<LogicalLine> =>
+  pipe(
+    open,
+    Option.match({
+      onNone: () => lines,
+      onSome: ({ start, text }) => emit(lines, start, text),
+    }),
+  );
+
+const NOT_JOINING: Joining = { lines: [], open: Option.none() };
+
 /**
  * Remove the comments and join the continuations.
  *
@@ -121,160 +189,398 @@ export interface LogicalLine {
  * both keys that a user can bind, so `map # searchWordBackwards` is a correct
  * line. There is no way to tell the two apart.
  */
-export const readLogicalLines = (source: string): readonly LogicalLine[] => {
-  const out: LogicalLine[] = [];
-  const raw = source.split(/\r?\n/);
-
-  let buffer = "";
-  let continuing = false;
-  let startLine = 0;
-
-  for (let index = 0; index < raw.length; index++) {
-    const line = raw[index] ?? "";
-    const isComment = isCommentLine(line);
-
+export const readLogicalLines = (source: string): readonly LogicalLine[] =>
+  pipe(
+    source.split(/\r?\n/),
+    Array.map((text, index) => ({ number: index + 1, text })),
     // A comment inside a continuation is a comment, and not an end. Treatment
     // as an end split `map j \` plus `# why` plus `scrollDown` into two false
     // lines, and gave two confusing errors for a correct construction.
-    if (isComment && continuing) continue;
+    Array.filter((line) => !isCommentLine(line.text)),
+    Array.reduce(NOT_JOINING, joinLine),
+    flush,
+  );
 
-    const stripped = isComment ? "" : line;
+const splitTokens = (text: string): ReadonlyArray<string> =>
+  pipe(
+    text.split(/\s+/),
+    Array.filter((token) => token.length > 0),
+  );
 
-    if (stripped.trimEnd().endsWith("\\")) {
-      if (!continuing) startLine = index + 1;
-      continuing = true;
-      buffer += `${stripped.trimEnd().slice(0, -1)} `;
-      continue;
-    }
-
-    const text = `${buffer}${stripped}`.trim();
-    if (text.length > 0) {
-      out.push({ number: continuing ? startLine : index + 1, text });
-    }
-    buffer = "";
-    continuing = false;
-  }
-
-  if (buffer.trim().length > 0) {
-    out.push({ number: startLine, text: buffer.trim() });
-  }
-  return out;
-};
-
-const isCommentLine = (line: string): boolean => {
-  const trimmed = line.trimStart();
-  return trimmed.startsWith("#") || trimmed.startsWith('"');
-};
-
-const splitTokens = (text: string): readonly string[] =>
-  text.split(/\s+/).filter((token) => token.length > 0);
+const optionValue = (value: string): string | boolean =>
+  pipe(
+    Match.value(value),
+    Match.when("true", () => true),
+    Match.when("false", () => false),
+    Match.orElse(() => value),
+  );
 
 /** `swap=true` gives `["swap", true]`. A bare `swap` gives `["swap", true]`. */
-const parseOption = (token: string): readonly [string, string | boolean] => {
-  const equals = token.indexOf("=");
-  if (equals === -1) return [token, true];
-  const key = token.slice(0, equals);
-  const value = token.slice(equals + 1);
-  if (value === "true") return [key, true];
-  if (value === "false") return [key, false];
-  return [key, value];
-};
+const parseOption = (token: string): readonly [string, string | boolean] =>
+  pipe(
+    token.indexOf("="),
+    Option.liftPredicate((equals) => equals >= 0),
+    Option.match({
+      onNone: () => [token, true] as const,
+      onSome: (equals) => [token.slice(0, equals), optionValue(token.slice(equals + 1))] as const,
+    }),
+  );
 
 // ---------------------------------------------------------------------------
 // Compilation
 // ---------------------------------------------------------------------------
 
-export const compileMappings = (source: string, options: ParseOptions): CompiledMappings => {
-  const diagnostics: MappingDiagnostic[] = [];
-  const bindings = new Map<string, KeyBinding>();
-  const keyRemap = new Map<string, string>();
-  const offset = options.lineOffset ?? 0;
+/** One diagnostic, before it knows its line. */
+interface Finding {
+  readonly severity: DiagnosticSeverity;
+  readonly message: string;
+}
 
-  const report = (line: LogicalLine, severity: DiagnosticSeverity, message: string): void => {
-    const relative = line.number - offset;
-    // The line belongs to the shipped defaults, which the user cannot edit.
-    if (relative < 1) return;
-    diagnostics.push({ line: relative, severity, message, text: line.text });
-  };
+const error = (message: string): Finding => ({ severity: "error", message });
+const warning = (message: string): Finding => ({ severity: "warning", message });
 
-  for (const line of readLogicalLines(source)) {
-    const tokens = splitTokens(line.text);
-    const directive = tokens[0];
-    if (directive === undefined) continue;
+/** What the compiler reads from `ParseOptions`, decided once. */
+interface Rules {
+  readonly knownCommands: ReadonlySet<string>;
+  /** The finding for a key that Safari never sends. */
+  readonly reserved: (key: string, reason: string) => Finding;
+}
 
-    switch (directive) {
-      case "map": {
-        const binding = parseMapLine(tokens, line, options, report);
-        if (Option.isSome(binding)) {
-          bindings.set(bindingKey(binding.value.keys), binding.value);
-        }
-        break;
-      }
+const reservedFinding = Boolean.match({
+  onFalse: () => (key: string, reason: string) =>
+    warning(`${key} is reserved on Safari (${reason}); this binding will not work there`),
+  onTrue: () => (key: string, reason: string) =>
+    error(
+      `${key} is reserved by the browser (${reason}) and never reaches the page, ` +
+        "so this binding can never fire",
+    ),
+});
 
-      case "unmap": {
-        const sequence = tokens[1];
-        if (sequence === undefined) {
-          report(line, "error", "unmap needs a key sequence");
-          break;
-        }
-        const keys = tryNormalise(sequence, line, report);
-        if (Option.isSome(keys) && !bindings.delete(bindingKey(keys.value))) {
-          report(line, "warning", `nothing was mapped to ${sequence}`);
-        }
-        break;
-      }
+const rulesOf = (options: ParseOptions): Rules => ({
+  knownCommands: options.knownCommands,
+  reserved: reservedFinding(options.rejectReservedShortcuts),
+});
 
-      case "unmapAll":
-        bindings.clear();
-        break;
+/** The compiler between two lines. A line number here is raw. */
+interface Compilation {
+  readonly bindings: ReadonlyArray<KeyBinding>;
+  readonly keyRemap: Record.ReadonlyRecord<string, string>;
+  readonly diagnostics: ReadonlyArray<MappingDiagnostic>;
+}
 
-      case "mapkey": {
-        const from = tokens[1];
-        const to = tokens[2];
-        if (from === undefined || to === undefined) {
-          report(line, "error", "mapkey needs two key arguments");
-          break;
-        }
-        const fromKeys = tryNormalise(from, line, report);
-        const toKeys = tryNormalise(to, line, report);
-        if (Option.isNone(fromKeys) || Option.isNone(toKeys)) break;
-        if (fromKeys.value.length !== 1 || toKeys.value.length !== 1) {
-          report(line, "error", "mapkey takes single keys, not sequences");
-          break;
-        }
-        const source0 = fromKeys.value[0];
-        const target0 = toKeys.value[0];
-        if (source0 !== undefined && target0 !== undefined) {
-          if (isCountDigit(target0, false)) {
-            // `1` to `9` at the start of a sequence are the count prefix. A
-            // remap onto one of them makes the source key a count digit, and
-            // not a binding. It does this without a message, and the user has
-            // no way to see it.
-            report(
-              line,
-              "warning",
-              `${target0} is a count digit, so ${source0} will start a count ` +
-                "rather than run a command",
-            );
-          }
-          keyRemap.set(source0, target0);
-        }
-        break;
-      }
-
-      default:
-        report(line, "error", `unknown directive "${directive}"`);
-    }
-  }
-
-  const trie = newNode();
-  const ordered = [...bindings.values()];
-  for (const binding of ordered) insert(trie, binding);
-
-  reportShadowedPrefixes(ordered, diagnostics, offset);
-
-  return { trie, bindings: ordered, keyRemap, diagnostics };
+const EMPTY_COMPILATION: Compilation = {
+  bindings: [],
+  keyRemap: Record.empty(),
+  diagnostics: [],
 };
+
+/**
+ * What a line does to the compilation, and what the parser says about it.
+ *
+ * A line that fails changes nothing, and only reports.
+ */
+interface Edit {
+  readonly apply: (compilation: Compilation) => Compilation;
+  readonly findings: ReadonlyArray<Finding>;
+}
+
+type LineStep = Result.Result<Edit, ReadonlyArray<Finding>>;
+
+const edit = (
+  apply: (compilation: Compilation) => Compilation,
+  findings: ReadonlyArray<Finding> = [],
+): Edit => ({ apply, findings });
+
+const note =
+  (line: LogicalLine, findings: ReadonlyArray<Finding>) =>
+  (compilation: Compilation): Compilation =>
+    pipe(
+      compilation,
+      Struct.assign({
+        diagnostics: pipe(
+          findings,
+          Array.map(({ severity, message }) => ({
+            line: line.number,
+            severity,
+            message,
+            text: line.text,
+          })),
+          Array.prependAll(compilation.diagnostics),
+        ),
+      }),
+    );
+
+/** Put a binding in the table. A binding on the same keys is replaced where it stands. */
+const bind =
+  (binding: KeyBinding) =>
+  (bindings: ReadonlyArray<KeyBinding>): ReadonlyArray<KeyBinding> =>
+    pipe(
+      bindings,
+      Array.findFirstIndex((entry) => sameKeys(entry.keys, binding.keys)),
+      Option.flatMap((index) => pipe(bindings, Array.replace(index, binding))),
+      Option.getOrElse(() => pipe(bindings, Array.append(binding))),
+    );
+
+/** Take a binding out of the table. `Option.none()` means that nothing was bound to the keys. */
+const unbind =
+  (keys: ReadonlyArray<string>) =>
+  (bindings: ReadonlyArray<KeyBinding>): Option.Option<ReadonlyArray<KeyBinding>> =>
+    pipe(
+      bindings,
+      Array.findFirstIndex((entry) => sameKeys(entry.keys, keys)),
+      Option.map((index) => pipe(bindings, Array.remove(index))),
+    );
+
+/**
+ * Normalise a key sequence, or give the failure as a finding.
+ *
+ * This is where a `KeyNotationError` value becomes a diagnostic with a line
+ * number. `Key.ts` does not know the line number, and this module does.
+ */
+const normalised = flow(
+  normaliseKeySequence,
+  Result.mapError(({ detail }) => [error(detail)]),
+);
+
+/** What one key of a `map` line says about the binding. */
+const keyFindings =
+  (rules: Rules) =>
+  (key: string): ReadonlyArray<Finding> =>
+    pipe(
+      [
+        pipe(
+          key,
+          Option.liftPredicate(shiftedNonLetter),
+          Option.map(() =>
+            warning(
+              `${key} names a shifted character that shift changes on most layouts ` +
+                "(Shift+1 arrives as !), so this binding is unlikely to ever fire",
+            ),
+          ),
+        ),
+        pipe(
+          reservedReason(key),
+          Option.map((reason) => rules.reserved(key, reason)),
+        ),
+      ],
+      Array.getSomes,
+    );
+
+/**
+ * Every finding for the keys of a `map` line.
+ *
+ * The first error ends the line, so the keys after it say nothing.
+ */
+const sequenceFindings = (
+  rules: Rules,
+  keys: ReadonlyArray<string>,
+): Result.Result<ReadonlyArray<Finding>, ReadonlyArray<Finding>> => {
+  const findings = pipe(keys, Array.flatMap(keyFindings(rules)));
+  return pipe(
+    findings,
+    Array.findFirstIndex((finding) => finding.severity === "error"),
+    Option.match({
+      onNone: () => Result.succeed(findings),
+      onSome: (index) => pipe(findings, Array.take(index + 1), Result.fail),
+    }),
+  );
+};
+
+const mapStep = (rules: Rules, line: LogicalLine, args: ReadonlyArray<string>): LineStep =>
+  Result.gen(function* () {
+    const [sequence, command] = yield* pipe(
+      Option.all([pipe(args, Array.get(0)), pipe(args, Array.get(1))]),
+      Result.fromOption(() => [error("map needs a key sequence and a command")]),
+    );
+    const keys = yield* normalised(sequence);
+    yield* pipe(
+      command,
+      Result.liftPredicate(
+        (name) => rules.knownCommands.has(name),
+        (name) => [error(`unknown command "${name}"`)],
+      ),
+    );
+    const findings = yield* sequenceFindings(rules, keys);
+    const binding: KeyBinding = {
+      keys,
+      command,
+      options: pipe(args, Array.drop(2), Array.map(parseOption), Record.fromEntries),
+      source: line.text,
+      line: line.number,
+    };
+    return edit(Struct.evolve({ bindings: bind(binding) }), findings);
+  });
+
+const unmapStep = (compilation: Compilation, args: ReadonlyArray<string>): LineStep =>
+  Result.gen(function* () {
+    const sequence = yield* pipe(
+      args,
+      Array.head,
+      Result.fromOption(() => [error("unmap needs a key sequence")]),
+    );
+    const keys = yield* normalised(sequence);
+    const bindings = yield* pipe(
+      compilation.bindings,
+      unbind(keys),
+      Result.fromOption(() => [warning(`nothing was mapped to ${sequence}`)]),
+    );
+    return edit(Struct.assign({ bindings }));
+  });
+
+/** The one key of a sequence that must hold one key. */
+const isSingleKey = (keys: Array.NonEmptyReadonlyArray<string>): boolean => keys.length === 1;
+
+const onlyKey = flow(Option.liftPredicate(isSingleKey), Option.map(Array.headNonEmpty));
+
+/** Both sequences of a `mapkey` line, or a finding for each one that is bad. */
+const remapSequences = (
+  from: string,
+  to: string,
+): Result.Result<
+  readonly [Array.NonEmptyReadonlyArray<string>, Array.NonEmptyReadonlyArray<string>],
+  ReadonlyArray<Finding>
+> => {
+  const sequences = [normaliseKeySequence(from), normaliseKeySequence(to)] as const;
+  return pipe(
+    Result.all(sequences),
+    Result.mapError(() =>
+      pipe(
+        sequences,
+        Array.getFailures,
+        Array.map(({ detail }) => error(detail)),
+      ),
+    ),
+  );
+};
+
+const mapKeyStep = (args: ReadonlyArray<string>): LineStep =>
+  Result.gen(function* () {
+    const [from, to] = yield* pipe(
+      Option.all([pipe(args, Array.get(0)), pipe(args, Array.get(1))]),
+      Result.fromOption(() => [error("mapkey needs two key arguments")]),
+    );
+    const [fromKeys, toKeys] = yield* remapSequences(from, to);
+    const [source, target] = yield* pipe(
+      Option.all([onlyKey(fromKeys), onlyKey(toKeys)]),
+      Result.fromOption(() => [error("mapkey takes single keys, not sequences")]),
+    );
+    // `1` to `9` at the start of a sequence are the count prefix. A remap onto
+    // one of them makes the source key a count digit, and not a binding. It
+    // does this without a message, and the user has no way to see it.
+    const findings = pipe(
+      target,
+      Option.liftPredicate((key) => isCountDigit(key, false)),
+      Option.map(() =>
+        warning(
+          `${target} is a count digit, so ${source} will start a count ` +
+            "rather than run a command",
+        ),
+      ),
+      Option.toArray,
+    );
+    return edit(
+      Struct.evolve({ keyRemap: (remap) => pipe(remap, Record.set(source, target)) }),
+      findings,
+    );
+  });
+
+const directiveStep = (
+  rules: Rules,
+  line: LogicalLine,
+  compilation: Compilation,
+  directive: string,
+  args: ReadonlyArray<string>,
+): LineStep =>
+  pipe(
+    Match.value(directive),
+    Match.withReturnType<LineStep>(),
+    Match.when("map", () => mapStep(rules, line, args)),
+    Match.when("unmap", () => unmapStep(compilation, args)),
+    Match.when("unmapAll", () =>
+      Result.succeed(edit(Struct.assign({ bindings: Array.empty<KeyBinding>() }))),
+    ),
+    Match.when("mapkey", () => mapKeyStep(args)),
+    Match.orElse(() => Result.fail([error(`unknown directive "${directive}"`)])),
+  );
+
+const compileLine =
+  (rules: Rules) =>
+  (compilation: Compilation, line: LogicalLine): Compilation =>
+    pipe(
+      splitTokens(line.text),
+      Array.matchLeft({
+        onEmpty: (): LineStep => Result.succeed(edit((unchanged) => unchanged)),
+        onNonEmpty: (directive, args) => directiveStep(rules, line, compilation, directive, args),
+      }),
+      Result.match({
+        onFailure: (findings) => pipe(compilation, note(line, findings)),
+        onSuccess: ({ apply, findings }) => pipe(compilation, apply, note(line, findings)),
+      }),
+    );
+
+/** A binding, and the keys that are left below the node that is being built. */
+interface Descent {
+  readonly rest: ReadonlyArray<string>;
+  readonly binding: KeyBinding;
+}
+
+/** The first key that is left, and the descent one level down. */
+const descend = ({
+  rest,
+  binding,
+}: Descent): ReadonlyArray<{ readonly key: string; readonly below: Descent }> =>
+  pipe(
+    rest,
+    Array.matchLeft({
+      onEmpty: () => [],
+      onNonEmpty: (key, tail) => [{ key, below: { rest: tail, binding } }],
+    }),
+  );
+
+/**
+ * The node that these descents meet at.
+ *
+ * The binding table holds one binding per key sequence, so at most one
+ * descent ends here.
+ */
+const nodeOf = (descents: ReadonlyArray<Descent>): TrieNode => ({
+  binding: pipe(
+    descents,
+    Array.findFirst(({ rest }) => Array.isReadonlyArrayEmpty(rest)),
+    Option.map(({ binding }) => binding),
+  ),
+  children: pipe(
+    descents,
+    Array.flatMap(descend),
+    Array.groupBy(({ key }) => key),
+    Record.map(
+      flow(
+        Array.map(({ below }) => below),
+        nodeOf,
+      ),
+    ),
+  ),
+});
+
+/** A binding at the root, with every one of its keys still to go. */
+const fromRoot = (binding: KeyBinding): Descent => ({ rest: binding.keys, binding });
+
+/** The bindings on a strict prefix of this binding, shortest first. */
+const boundPrefixes =
+  (bindings: ReadonlyArray<KeyBinding>) =>
+  (binding: KeyBinding): ReadonlyArray<KeyBinding> =>
+    pipe(
+      binding.keys,
+      Array.dropRight(1),
+      Array.map((_, index) => pipe(binding.keys, Array.take(index + 1))),
+      Array.map((prefix) =>
+        pipe(
+          bindings,
+          Array.findFirst((other) => sameKeys(other.keys, prefix)),
+        ),
+      ),
+      Array.getSomes,
+    );
 
 /**
  * Give a warning where one binding is a strict prefix of another one.
@@ -284,124 +590,44 @@ export const compileMappings = (source: string, options: ParseOptions): Compiled
  * presses a key that ends the sequence. That is a surprise, so the parser says
  * it. Before, it was silent in both directions.
  */
-const reportShadowedPrefixes = (
-  bindings: readonly KeyBinding[],
-  diagnostics: MappingDiagnostic[],
-  offset: number,
-): void => {
-  const byKey = new Map(bindings.map((b) => [bindingKey(b.keys), b]));
+const shadowedPrefixes = (bindings: ReadonlyArray<KeyBinding>): ReadonlyArray<MappingDiagnostic> =>
+  pipe(
+    bindings,
+    Array.flatMap((binding) =>
+      pipe(
+        binding,
+        boundPrefixes(bindings),
+        Array.map((prefix) => ({
+          line: binding.line,
+          severity: "warning" as const,
+          message:
+            `${written(prefix.keys)} is also bound, so it only runs once a key ` +
+            `that is not part of ${written(binding.keys)} follows it`,
+          text: binding.source,
+        })),
+      ),
+    ),
+  );
 
-  for (const binding of bindings) {
-    if (binding.keys.length < 2) continue;
-    for (let length = 1; length < binding.keys.length; length++) {
-      const prefix = byKey.get(bindingKey(binding.keys.slice(0, length)));
-      if (prefix === undefined) continue;
-      const line = binding.line - offset;
-      if (line < 1) continue;
-      diagnostics.push({
-        line,
-        severity: "warning",
-        message:
-          `${prefix.keys.join("")} is also bound, so it only runs once a key ` +
-          `that is not part of ${binding.keys.join("")} follows it`,
-        text: binding.source,
-      });
-    }
-  }
-};
-
-type Reporter = (line: LogicalLine, severity: DiagnosticSeverity, message: string) => void;
-
-/**
- * Normalise a key sequence, or report the failure on this line.
- *
- * This is where a `KeyNotationError` value becomes a diagnostic with a line
- * number. `Key.ts` does not know the line number, and this module does.
- */
-const tryNormalise = (
-  sequence: string,
-  line: LogicalLine,
-  report: Reporter,
-): Option.Option<readonly string[]> => {
-  const normalised = normaliseKeySequence(sequence);
-  if (Result.isFailure(normalised)) {
-    report(line, "error", normalised.failure.detail);
-    return Option.none();
-  }
-  return Option.some(normalised.success);
-};
-
-const parseMapLine = (
-  tokens: readonly string[],
-  line: LogicalLine,
-  options: ParseOptions,
-  report: Reporter,
-): Option.Option<KeyBinding> => {
-  const sequence = tokens[1];
-  const command = tokens[2];
-
-  if (sequence === undefined || command === undefined) {
-    report(line, "error", "map needs a key sequence and a command");
-    return Option.none();
-  }
-
-  const normalised = tryNormalise(sequence, line, report);
-  if (Option.isNone(normalised)) return Option.none();
-  const keys = normalised.value;
-
-  if (!options.knownCommands.has(command)) {
-    report(line, "error", `unknown command "${command}"`);
-    return Option.none();
-  }
-
-  for (const key of keys) {
-    if (shiftedNonLetter(key)) {
-      report(
-        line,
-        "warning",
-        `${key} names a shifted character that shift changes on most layouts ` +
-          "(Shift+1 arrives as !), so this binding is unlikely to ever fire",
-      );
-    }
-    const reason = reservedReason(key);
-    if (Option.isNone(reason)) continue;
-    if (options.rejectReservedShortcuts) {
-      report(
-        line,
-        "error",
-        `${key} is reserved by the browser (${reason.value}) and never ` +
-          `reaches the page, so this binding can never fire`,
-      );
-      return Option.none();
-    }
-    report(
-      line,
-      "warning",
-      `${key} is reserved on Safari (${reason.value}); this binding will not ` + `work there`,
-    );
-  }
-
-  const entries = tokens.slice(3).map(parseOption);
-  return Option.some({
-    keys,
-    command,
-    options: Record.fromEntries(entries),
-    source: line.text,
-    line: line.number,
-  });
-};
-
-const insert = (trie: MutableTrieNode, binding: KeyBinding): void => {
-  let node = trie;
-  for (const key of binding.keys) {
-    let next = node.children.get(key);
-    if (next === undefined) {
-      next = newNode();
-      node.children.set(key, next);
-    }
-    node = next;
-  }
-  node.binding = Option.some(binding);
+export const compileMappings = (source: string, options: ParseOptions): CompiledMappings => {
+  const offset = options.lineOffset ?? 0;
+  const { bindings, keyRemap, diagnostics } = pipe(
+    readLogicalLines(source),
+    Array.reduce(EMPTY_COMPILATION, compileLine(rulesOf(options))),
+  );
+  return {
+    trie: pipe(bindings, Array.map(fromRoot), nodeOf),
+    bindings,
+    keyRemap,
+    diagnostics: pipe(
+      diagnostics,
+      Array.appendAll(shadowedPrefixes(bindings)),
+      // A line at or below the offset belongs to the shipped defaults, which
+      // the user cannot edit.
+      Array.filter((entry) => entry.line > offset),
+      Array.map((entry) => pipe(entry, Struct.assign({ line: entry.line - offset }))),
+    ),
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -456,11 +682,28 @@ export type BranchCursor = readonly KeyBranch[];
  * The new branch accepts the binding of the child, and nothing else. `g` and
  * then `j` scrolls down, as upstream Vimium does, because `j` starts here.
  */
-export const openBranch = (root: TrieNode, key: string): Option.Option<KeyBranch> => {
-  const child = root.children.get(key);
-  if (child === undefined) return Option.none();
-  return Option.some({ node: child, accepted: child.binding });
-};
+export const openBranch = (root: TrieNode, key: string): Option.Option<KeyBranch> =>
+  pipe(
+    root.children,
+    Record.get(key),
+    Option.map((child) => ({ node: child, accepted: child.binding })),
+  );
+
+/** The branch one key deeper. `Option.none()` means that the branch dies at this key. */
+const extendBranch =
+  (key: string) =>
+  (branch: KeyBranch): Option.Option<KeyBranch> =>
+    pipe(
+      branch.node.children,
+      Record.get(key),
+      Option.map((child) => ({
+        node: child,
+        accepted: pipe(
+          child.binding,
+          Option.orElse(() => branch.accepted),
+        ),
+      })),
+    );
 
 /**
  * Take one key into every live branch.
@@ -472,18 +715,8 @@ export const openBranch = (root: TrieNode, key: string): Option.Option<KeyBranch
  *
  * An empty answer means that this key ends every live attempt.
  */
-export const extendBranches = (cursor: BranchCursor, key: string): readonly KeyBranch[] => {
-  const out: KeyBranch[] = [];
-  for (const branch of cursor) {
-    const child = branch.node.children.get(key);
-    if (child === undefined) continue;
-    out.push({
-      node: child,
-      accepted: Option.isSome(child.binding) ? child.binding : branch.accepted,
-    });
-  }
-  return out;
-};
+export const extendBranches = (cursor: BranchCursor, key: string): readonly KeyBranch[] =>
+  pipe(cursor, Array.map(extendBranch(key)), Array.getSomes);
 
 /**
  * The deepest branch, which is the branch that lived longest.
@@ -491,10 +724,7 @@ export const extendBranches = (cursor: BranchCursor, key: string): readonly KeyB
  * The cursor is shallowest first, so the last branch is the deepest one. That
  * branch decides, and the longest attempt therefore wins.
  */
-export const deepestBranch = (cursor: BranchCursor): Option.Option<KeyBranch> => {
-  const last = cursor[cursor.length - 1];
-  return last === undefined ? Option.none() : Option.some(last);
-};
+export const deepestBranch = (cursor: BranchCursor): Option.Option<KeyBranch> => Array.last(cursor);
 
 /**
  * Can this branch take another key?
@@ -502,27 +732,31 @@ export const deepestBranch = (cursor: BranchCursor): Option.Option<KeyBranch> =>
  * While it can, the attempt is not finished, and a binding on the node waits.
  * Firing it at once is what made `map gg` unreachable behind `map g`.
  */
-export const canExtend = (branch: KeyBranch): boolean => branch.node.children.size > 0;
+export const canExtend = (branch: KeyBranch): boolean =>
+  !Record.isEmptyReadonlyRecord(branch.node.children);
 
 // ---------------------------------------------------------------------------
 // Inspection (the help dialog and the tests)
 // ---------------------------------------------------------------------------
 
 /** Each command with the key sequences that are bound to it, in insertion order. */
-export const keysByCommand = (
-  mappings: CompiledMappings,
-): ReadonlyMap<string, readonly string[]> => {
-  const out = new Map<string, string[]>();
-  for (const binding of mappings.bindings) {
-    const list = out.get(binding.command) ?? [];
-    list.push(binding.keys.join(""));
-    out.set(binding.command, list);
-  }
-  return out;
-};
+export const keysByCommand = (mappings: CompiledMappings): ReadonlyMap<string, readonly string[]> =>
+  pipe(
+    mappings.bindings,
+    Array.groupBy((binding) => binding.command),
+    Record.map(Array.map((binding) => written(binding.keys))),
+    Record.toEntries,
+    (entries) => new Map(entries),
+  );
 
 export const hasErrors = (mappings: CompiledMappings): boolean =>
-  mappings.diagnostics.some((entry) => entry.severity === "error");
+  pipe(
+    mappings.diagnostics,
+    Array.some((entry) => entry.severity === "error"),
+  );
 
 export const formatDiagnostics = (mappings: CompiledMappings): readonly string[] =>
-  mappings.diagnostics.map((entry) => `line ${entry.line}: ${entry.severity}: ${entry.message}`);
+  pipe(
+    mappings.diagnostics,
+    Array.map((entry) => `line ${entry.line}: ${entry.severity}: ${entry.message}`),
+  );

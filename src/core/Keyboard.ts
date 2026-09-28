@@ -15,26 +15,41 @@
  */
 
 import {
+  Array,
+  Boolean,
   Context,
+  Data,
   Effect,
   Exit,
+  HashSet,
   Layer,
+  Match,
   Option,
+  Record,
   Ref,
   Scope,
   Stream,
   SubscriptionRef,
+  flow,
   pipe,
 } from "effect";
-import { isPassKey } from "~/domain/Exclusion.ts";
-import { appendCountDigit, isCountDigit } from "~/domain/Key.ts";
-import { isComposing, isModifierKey, keyNotation } from "~/domain/Key.ts";
+import { type EffectiveRule, isPassKey } from "~/domain/Exclusion.ts";
+import {
+  appendCountDigit,
+  isComposing,
+  isCountDigit,
+  isModifierKey,
+  type KeyContext,
+  keyNotation,
+} from "~/domain/Key.ts";
 import {
   canExtend,
   deepestBranch,
   extendBranches,
+  type KeyBinding,
   type KeyBranch,
   openBranch,
+  type TrieNode,
 } from "~/domain/Mapping.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
@@ -78,8 +93,31 @@ export const MEDIA_KEYS: ReadonlySet<string> = new Set([
  */
 export const isUserEvent = (event: Pick<Event, "isTrusted">): boolean => event.isTrusted === true;
 
+/** A variant that carries no data. */
+type NoFields = Record.ReadonlyRecord<never, never>;
+
+// ---------------------------------------------------------------------------
+// The key state
+// ---------------------------------------------------------------------------
+
+/** What the branch walk reads from the key state. */
+interface Progress {
+  /** Every live branch, shallowest first. Empty means "at the root". */
+  readonly branches: ReadonlyArray<KeyBranch>;
+  /** The count prefix. `0` means that the user typed none. */
+  readonly count: number;
+  /** The keys that the indicator shows. */
+  readonly pending: ReadonlyArray<string>;
+}
+
+/** A half-typed command: a count, some keys, or both. */
+interface HalfTyped extends Progress {
+  readonly pending: Array.NonEmptyReadonlyArray<string>;
+}
+
 /**
- * The key state, in the per-branch model.
+ * The key state, in the per-branch model. `Option.none()` means that nothing
+ * is half-typed.
  *
  * A branch is one live attempt at a mapping. It holds the trie node that the
  * keys of the attempt reached, and the binding that the attempt accepted.
@@ -99,16 +137,286 @@ export const isUserEvent = (event: Pick<Event, "isTrusted">): boolean => event.i
  *
  * With `map a`, `map abc` and `map b`, the key `b` after `a` opens two
  * branches. The branch `ab` carries on the attempt at `abc`, and the branch `b`
- * is new. The attempt at `abc` consumes the keystroke `b`: `advance` suppresses
- * the key, and the pending indicator shows it. The binding of `b` therefore
- * never runs, and a stray key after it runs the binding of `a`.
+ * is new. The attempt at `abc` consumes the keystroke `b`: the walk holds the
+ * key, and the pending indicator shows it. The binding of `b` therefore never
+ * runs, and a stray key after it runs the binding of `a`.
  */
-interface KeyState {
-  /** Every live branch, shallowest first. Empty means "at the root". */
-  readonly branches: ReadonlyArray<KeyBranch>;
-  readonly count: number;
-  readonly pending: ReadonlyArray<string>;
+type KeyState = Option.Option<HalfTyped>;
+
+const AT_ROOT: Progress = { branches: [], count: 0, pending: [] };
+
+/** The count that a binding runs with. No count means one. */
+const runCount = (count: number): number => Math.max(1, count);
+
+// ---------------------------------------------------------------------------
+// The rules before the walk
+// ---------------------------------------------------------------------------
+
+/** What normal mode does with a key before the branch walk. */
+type Arrival = Data.TaggedEnum<{
+  /** The key belongs to the page, and the key state stays. */
+  Page: NoFields;
+  /** `passNextKey` promised this key to the page. One pass is spent. */
+  Passed: NoFields;
+  /** Escape ends the half-typed command. */
+  Cancelled: NoFields;
+  /** A key that a focused media player owns, if a player has focus. */
+  Media: { readonly raw: string };
+  /** The key is ours. */
+  Ours: { readonly raw: string };
+}>;
+const Arrival = Data.taggedEnum<Arrival>();
+
+/** Everything that the rules before the walk read. */
+interface Intake {
+  readonly event: KeyboardEvent;
+  readonly state: KeyState;
+  /** The keys that `passNextKey` still owes the page. */
+  readonly passes: number;
+  readonly context: KeyContext;
+  readonly exclusion: EffectiveRule;
+  readonly passMediaKeys: boolean;
 }
+
+/**
+ * The rules for a key at the root.
+ *
+ * A pass key applies to a new sequence only. Once the user has committed to
+ * `g`, the next key is ours even if it is in the set. A count starts a
+ * sequence as well, so `3 j` runs our binding for `j` even when the user gave
+ * `j` to the page.
+ */
+const rootArrival = ({ exclusion, passMediaKeys }: Intake, raw: string): Arrival =>
+  pipe(
+    Match.value(raw),
+    Match.withReturnType<Arrival>(),
+    Match.when(
+      (key) => isPassKey(exclusion, key),
+      () => Arrival.Page(),
+    ),
+    // The same rule for the keys that a focused media player owns. The check
+    // of the focus walks the document, so the runner makes it only for a key
+    // that passes these cheap tests.
+    Match.when(
+      (key) => passMediaKeys && MEDIA_KEYS.has(key),
+      (key) => Arrival.Media({ raw: key }),
+    ),
+    Match.orElse((key) => Arrival.Ours({ raw: key })),
+  );
+
+/**
+ * The rules for a key that has a notation.
+ *
+ * Every pass-through rule reads the *raw* notation, and not the remapped one.
+ * The user gives a physical key to the page, and `mapkey` describes what the
+ * key does for us. A test against the remapped notation captured a key that
+ * the exclusion promised to the page. It also gave away a key that no rule
+ * named.
+ */
+const keyArrival = (intake: Intake, raw: string): Arrival =>
+  pipe(
+    Match.value({
+      owed: intake.passes > 0,
+      escape: isEscape(intake.event),
+      atRoot: Option.isNone(intake.state),
+    }),
+    Match.withReturnType<Arrival>(),
+    // The pass counter comes before every other rule, so Escape goes to the
+    // page and spends one pass. That is the point of the command: it gives any
+    // key to the page, and Escape is a key.
+    Match.when({ owed: true }, () => Arrival.Passed()),
+    Match.when({ escape: true, atRoot: true }, () => Arrival.Page()),
+    Match.when({ escape: true }, () => Arrival.Cancelled()),
+    Match.when({ atRoot: true }, () => rootArrival(intake, raw)),
+    Match.orElse(() => Arrival.Ours({ raw })),
+  );
+
+const arrivalOf = (intake: Intake): Arrival =>
+  pipe(
+    intake.event,
+    // A key that the page made. It gives no command, and it does not touch
+    // the pending sequence.
+    Option.liftPredicate(isUserEvent),
+    // Composition, from an input method or from a dead key. Without this
+    // guard we eat keystrokes in the middle of composition, which is the most
+    // damaging failure for a user of a CJK language, and one that the user
+    // cannot work around.
+    Option.filter((event) => !isComposing(event) && !isModifierKey(event)),
+    Option.flatMap((event) => keyNotation(event, intake.context)),
+    Option.match({
+      onNone: () => Arrival.Page(),
+      onSome: (raw) => keyArrival(intake, raw),
+    }),
+  );
+
+// ---------------------------------------------------------------------------
+// The branch walk
+// ---------------------------------------------------------------------------
+
+/** What the branch walk does with one key. */
+type Step = Data.TaggedEnum<{
+  /** The key extends the half-typed command, which waits for more keys. */
+  Hold: { readonly next: HalfTyped };
+  /** The deepest branch can take no other key, and it accepted a binding. */
+  Fire: { readonly binding: KeyBinding; readonly count: number };
+  /**
+   * The key ended every live attempt, and the attempt that lived longest
+   * accepted a binding. The binding runs, and the key starts again at the
+   * root.
+   */
+  Restart: { readonly binding: KeyBinding; readonly count: number };
+  /** A half-typed command ran out. The key is still ours. */
+  Drop: NoFields;
+  /** A key at the root that starts nothing. */
+  Miss: NoFields;
+}>;
+const Step = Data.taggedEnum<Step>();
+
+/**
+ * `0` is a count digit only once a count is under way. Otherwise it is a
+ * key that a user may bind, and upstream binds it to `scrollToLeft`.
+ *
+ * `1` to `9` give way to an explicit binding for the same reason. They
+ * used to be taken unconditionally, so `map 1 scrollDown` compiled with no
+ * diagnostic and could never fire — and it also ate the keystroke and held
+ * `1` in the HUD until the user pressed Escape.
+ */
+const isCountKey = (trie: TrieNode, { branches, count }: Progress, notation: string): boolean =>
+  Array.isReadonlyArrayEmpty(branches) &&
+  isCountDigit(notation, count > 0) &&
+  (count > 0 || !pipe(trie.children, Record.has(notation)));
+
+const countStep = (
+  trie: TrieNode,
+  progress: Progress,
+  notation: string,
+  typed: Array.NonEmptyReadonlyArray<string>,
+): Option.Option<Step> =>
+  pipe(
+    notation,
+    Option.liftPredicate((digit) => isCountKey(trie, progress, digit)),
+    Option.map((digit) =>
+      Step.Hold({
+        next: { branches: [], count: appendCountDigit(progress.count, digit), pending: typed },
+      }),
+    ),
+  );
+
+/**
+ * The key ended every live attempt, and the attempt that lived longest
+ * accepted a binding.
+ *
+ * The binding runs with the count that the user typed in front of it.
+ * Without this, `map g scrollUp` could never run while `map gg scrollToTop`
+ * also existed. The deepest dead branch decides even when it accepted
+ * nothing, and a shallower dead branch with a binding is then dropped in
+ * silence.
+ */
+const restartStep = (progress: Progress, extended: ReadonlyArray<KeyBranch>): Option.Option<Step> =>
+  pipe(
+    extended,
+    Array.match({
+      onEmpty: () =>
+        pipe(
+          deepestBranch(progress.branches),
+          Option.flatMap((branch) => branch.accepted),
+        ),
+      onNonEmpty: () => Option.none<KeyBinding>(),
+    }),
+    Option.map((binding) => Step.Restart({ binding, count: runCount(progress.count) })),
+  );
+
+/**
+ * The live branches decide.
+ *
+ * A new branch is one key deep, so it goes in front of the others. The
+ * cursor stays shallowest first, and the deepest branch stays last.
+ *
+ * The deepest branch decides, because it is the longest attempt. While its
+ * node can take another key, the attempt is not finished. Firing the shorter
+ * binding here is what made `map gg` unreachable behind `map g`.
+ */
+const branchStep = (
+  trie: TrieNode,
+  state: KeyState,
+  { count }: Progress,
+  extended: ReadonlyArray<KeyBranch>,
+  notation: string,
+  typed: Array.NonEmptyReadonlyArray<string>,
+): Step =>
+  pipe(
+    openBranch(trie, notation),
+    Option.toArray,
+    Array.appendAll(extended),
+    Array.match({
+      // A sequence that ran out is still ours. The user typed `g` on purpose,
+      // so giving the next key to the page would be a surprise. A key that
+      // never matched anything passes straight through.
+      onEmpty: () =>
+        pipe(
+          state,
+          Option.match({
+            onNone: () => Step.Miss(),
+            onSome: () => Step.Drop(),
+          }),
+        ),
+      onNonEmpty: (live) =>
+        pipe(
+          deepestBranch(live),
+          Option.filter((deepest) => !canExtend(deepest)),
+          Option.flatMap((deepest) => deepest.accepted),
+          Option.match({
+            onNone: () => Step.Hold({ next: { branches: live, count, pending: typed } }),
+            onSome: (binding) => Step.Fire({ binding, count: runCount(count) }),
+          }),
+        ),
+    }),
+  );
+
+/**
+ * Take one key into the branch walk.
+ *
+ * The key extends every live branch. A branch that has no child for the
+ * key dies, and its accepted binding dies with it. The root opens a new
+ * branch, which has accepted nothing that an earlier key typed.
+ *
+ * The count prefix comes first. A digit is a count only at the root, or
+ * behind another digit.
+ */
+const walk = (trie: TrieNode, state: KeyState, notation: string): Step => {
+  const progress = pipe(
+    state,
+    Option.getOrElse((): Progress => AT_ROOT),
+  );
+  // The keys that the indicator shows if this key holds.
+  const typed = pipe(progress.pending, Array.append(notation));
+  // Every live branch takes the key, or it dies here.
+  const extended = extendBranches(progress.branches, notation);
+  return pipe(
+    countStep(trie, progress, notation, typed),
+    Option.orElse(() => restartStep(progress, extended)),
+    Option.getOrElse(() => branchStep(trie, state, progress, extended, notation, typed)),
+  );
+};
+
+/** A hint command reaches into child frames, so they must be running. */
+const needsDescendants = (command: string): boolean => command.startsWith("LinkHints.");
+
+/**
+ * The release of a press that we took is ours as well. Any other release
+ * belongs to the page.
+ */
+const release =
+  (code: string) =>
+  (taken: HashSet.HashSet<string>): readonly [HandlerResult, HashSet.HashSet<string>] =>
+    pipe(
+      taken,
+      HashSet.has(code),
+      Boolean.match({
+        onFalse: () => [CONTINUE_BUBBLING, taken] as const,
+        onTrue: () => [SUPPRESS_EVENT, pipe(taken, HashSet.remove(code))] as const,
+      }),
+    );
 
 export class Keyboard extends Context.Service<
   Keyboard,
@@ -157,61 +465,49 @@ export class Keyboard extends Context.Service<
       const settings = yield* Settings;
 
       const pending = yield* SubscriptionRef.make<string | null>(null);
-      const state = yield* Ref.make<KeyState>({
-        branches: [],
-        count: 0,
-        pending: [],
-      });
+      const state = yield* Ref.make<KeyState>(Option.none());
       const passNext = yield* Ref.make(0);
       // The `event.code` values whose `keydown` we took. A page that listens
       // for `keyup` must not see a release for a press that it never saw. It is
       // keyed on `code` and not on `key`, because the modifier state can change
       // between the press and the release.
-      const suppressedCodes = yield* Ref.make<ReadonlySet<string>>(new Set());
+      const suppressedCodes = yield* Ref.make(HashSet.empty<string>());
 
-      const reset = Effect.gen(function* () {
-        const current = yield* Ref.get(state);
-        yield* Ref.set(state, { branches: [], count: 0, pending: [] });
-        if (current.pending.length > 0) {
-          yield* SubscriptionRef.set(pending, null);
-        }
-      });
+      /** Show the half-typed sequence in the HUD. `null` shows nothing. */
+      const show = (text: string | null): Effect.Effect<void> =>
+        pipe(pending, SubscriptionRef.set(text));
 
-      // A new trie must not leave a half-walked sequence behind it.
-      yield* Effect.forkScoped(
-        pipe(
-          mappings.changes,
-          Stream.drop(1),
-          Stream.runForEach(() => reset),
+      const showPending = flow(Array.join(""), show);
+
+      const reset = pipe(
+        state,
+        Ref.getAndSet(Option.none<HalfTyped>()),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: () => show(null),
+          }),
         ),
       );
 
+      // A new trie must not leave a half-walked sequence behind it.
+      yield* pipe(
+        mappings.changes,
+        Stream.drop(1),
+        Stream.runForEach(() => reset),
+        Effect.forkScoped,
+      );
+
       const suppress = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-        Effect.gen(function* () {
-          if (event.code) {
-            yield* Ref.update(suppressedCodes, (current) => new Set(current).add(event.code));
-          }
-          return SUPPRESS_EVENT;
-        });
-
-      const showPending = (keys: ReadonlyArray<string>): Effect.Effect<void> =>
-        SubscriptionRef.set(pending, keys.length === 0 ? null : keys.join(""));
-
-      /**
-       * `0` is a count digit only once a count is under way. Otherwise it is a
-       * key that a user may bind, and upstream binds it to `scrollToLeft`.
-       *
-       * `1` to `9` give way to an explicit binding for the same reason. They
-       * used to be taken unconditionally, so `map 1 scrollDown` compiled with no
-       * diagnostic and could never fire — and it also ate the keystroke and held
-       * `1` in the HUD until the user pressed Escape.
-       */
-      const isCountKey = (current: KeyState, notation: string): boolean => {
-        if (current.branches.length > 0) return false;
-        if (!isCountDigit(notation, current.count > 0)) return false;
-        if (current.count > 0) return true;
-        return !mappings.compiledUnsafe().trie.children.has(notation);
-      };
+        pipe(
+          event.code,
+          Option.liftPredicate((code) => code.length > 0),
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (code) => pipe(suppressedCodes, Ref.update(HashSet.add(code))),
+          }),
+          Effect.as(SUPPRESS_EVENT),
+        );
 
       /**
        * Run a command from inside the key task.
@@ -227,30 +523,29 @@ export class Keyboard extends Context.Service<
        * with `runSyncExit`, and a command that suspends would then fail as a
        * defect instead of running.
        */
-      const runCommand = (
-        name: string,
-        options: Readonly<Record<string, string | boolean>>,
+      const runCommand = Effect.fnUntraced(function* (
+        { command, options }: KeyBinding,
         count: number,
         event: KeyboardEvent,
-      ): Effect.Effect<void> =>
-        Effect.gen(function* () {
-          // Woken here, and not eagerly. A child frame must not be forced
-          // through a full start unless a cross-frame function needs it.
-          if (name.startsWith("LinkHints.")) yield* realm.wakeDescendants;
-          yield* Effect.forkDetach(
-            Effect.catch(commands.run(name, { count, options, event }), (error) =>
-              report.error(error.detail),
-            ),
-            { startImmediately: true },
-          );
-        });
+      ) {
+        // Woken here, and not eagerly. A child frame must not be forced
+        // through a full start unless a cross-frame function needs it.
+        yield* pipe(
+          needsDescendants(command),
+          Boolean.match({
+            onFalse: () => Effect.void,
+            onTrue: () => realm.wakeDescendants,
+          }),
+        );
+        yield* pipe(
+          commands.run(command, { count, options, event }),
+          Effect.catch((error) => report.error(error.detail)),
+          Effect.forkDetach({ startImmediately: true }),
+        );
+      });
 
       /**
-       * Take one key into the branch walk.
-       *
-       * The key extends every live branch. A branch that has no child for the
-       * key dies, and its accepted binding dies with it. The root opens a new
-       * branch, which has accepted nothing that an earlier key typed.
+       * Take one key that is ours into the branch walk.
        *
        * When the key ends every live branch, the accepted binding of the branch
        * that lived longest runs. The key then goes back to `onKeydown`, so it
@@ -260,183 +555,108 @@ export class Keyboard extends Context.Service<
        * The recursion is bounded at one call. `reset` clears every branch
        * before the key goes back, so no accepted binding can run twice.
        */
-      const advance = (notation: string, event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-        Effect.gen(function* () {
-          const current = yield* Ref.get(state);
-
-          if (isCountKey(current, notation)) {
-            const nextPending = [...current.pending, notation];
-            yield* Ref.set(state, {
-              branches: current.branches,
-              count: appendCountDigit(current.count, notation),
-              pending: nextPending,
-            });
-            yield* showPending(nextPending);
-            return yield* suppress(event);
-          }
-
-          // Every live branch takes the key, or it dies here.
-          const extended = extendBranches(current.branches, notation);
-          const deepestDead = deepestBranch(current.branches);
-
-          // The key ended every live attempt, and the attempt that lived
-          // longest accepted a binding. The binding runs now, with the count
-          // that the user typed in front of it. The key then starts again at
-          // the root. Without this, `map g scrollUp` could never run while
-          // `map gg scrollToTop` also existed. The deepest dead branch decides
-          // even when it accepted nothing, and a shallower dead branch with a
-          // binding is then dropped in silence.
-          if (
-            extended.length === 0 &&
-            Option.isSome(deepestDead) &&
-            Option.isSome(deepestDead.value.accepted)
-          ) {
-            const { command, options } = deepestDead.value.accepted.value;
-            const count = current.count === 0 ? 1 : current.count;
-            yield* reset;
-            yield* runCommand(command, options, count, event);
+      const advance = Effect.fnUntraced(function* (
+        raw: string,
+        event: KeyboardEvent,
+      ): Effect.fn.Return<HandlerResult> {
+        const compiled = mappings.compiledUnsafe();
+        // The key is ours. `mapkey` now says which binding it drives.
+        const notation = pipe(
+          compiled.keyRemap,
+          Record.get(raw),
+          Option.getOrElse(() => raw),
+        );
+        const current = yield* Ref.get(state);
+        return yield* pipe(
+          walk(compiled.trie, current, notation),
+          Step.$match({
+            Hold: ({ next }) =>
+              pipe(
+                state,
+                Ref.set(Option.some(next)),
+                Effect.andThen(showPending(next.pending)),
+                Effect.andThen(suppress(event)),
+              ),
+            // Reset first, so that a command which enters another mode finds a
+            // clean normal mode underneath it.
+            Fire: ({ binding, count }) =>
+              pipe(
+                reset,
+                Effect.andThen(runCommand(binding, count, event)),
+                Effect.andThen(suppress(event)),
+              ),
             // Back to the top of the rules, and not to the branch walk. A key
             // that the exclusion or a media player owns must go to the page,
             // and `passNextKey` may have just claimed this very key.
-            return yield* onKeydown(event);
-          }
+            Restart: ({ binding, count }) =>
+              pipe(
+                reset,
+                Effect.andThen(runCommand(binding, count, event)),
+                Effect.andThen(onKeydown(event)),
+              ),
+            Drop: () => pipe(reset, Effect.andThen(suppress(event))),
+            Miss: () => pipe(reset, Effect.as(CONTINUE_BUBBLING)),
+          }),
+        );
+      });
 
-          // A new branch is one key deep, so it goes in front of the others.
-          // The cursor stays shallowest first, and the deepest branch stays
-          // last.
-          const opened = openBranch(mappings.compiledUnsafe().trie, notation);
-          const branches = Option.isSome(opened) ? [opened.value, ...extended] : extended;
-
-          if (branches.length === 0) {
-            const wasPartial = current.branches.length > 0 || current.count > 0;
-            yield* reset;
-            // A sequence that ran out is still ours. The user typed `g` on
-            // purpose, so giving the next key to the page would be a surprise.
-            // A key that never matched anything passes straight through.
-            return wasPartial ? yield* suppress(event) : CONTINUE_BUBBLING;
-          }
-
-          // The deepest branch decides, because it is the longest attempt.
-          // While its node can take another key, the attempt is not finished.
-          // Firing the shorter binding here is what made `map gg` unreachable
-          // behind `map g`.
-          const deepest = deepestBranch(branches);
-
-          if (
-            Option.isSome(deepest) &&
-            !canExtend(deepest.value) &&
-            Option.isSome(deepest.value.accepted)
-          ) {
-            const { command, options } = deepest.value.accepted.value;
-            const count = current.count === 0 ? 1 : current.count;
-            // Reset first, so that a command which enters another mode finds a
-            // clean normal mode underneath it.
-            yield* reset;
-            yield* runCommand(command, options, count, event);
-            return yield* suppress(event);
-          }
-
-          const nextPending = [...current.pending, notation];
-          yield* Ref.set(state, {
-            branches,
-            count: current.count,
-            pending: nextPending,
-          });
-          yield* showPending(nextPending);
-          return yield* suppress(event);
-        });
-
-      const onKeydown = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-        Effect.gen(function* () {
-          // A key that the page made. It gives no command, and it does not
-          // touch the pending sequence.
-          if (!isUserEvent(event)) return CONTINUE_BUBBLING;
-
-          // Composition, from an input method or from a dead key. Without this
-          // guard we eat keystrokes in the middle of composition, which is the
-          // most damaging failure for a user of a CJK language, and one that
-          // the user cannot work around.
-          if (isComposing(event) || isModifierKey(event)) {
-            return CONTINUE_BUBBLING;
-          }
-
-          const current = yield* Ref.get(state);
-          const settingsNow = settings.currentUnsafe();
+      const onKeydown = Effect.fnUntraced(function* (
+        event: KeyboardEvent,
+      ): Effect.fn.Return<HandlerResult> {
+        const current = yield* Ref.get(state);
+        const passes = yield* Ref.get(passNext);
+        const settingsNow = settings.currentUnsafe();
+        const arrival = arrivalOf({
+          event,
+          state: current,
+          passes,
           // The platform is read once, at the build of this layer. The Option
           // rule of `keyNotation` needs it, and `domain/` may not read it.
-          const rawKey = keyNotation(event, {
+          context: {
             ignoreKeyboardLayout: settingsNow.ignoreKeyboardLayout,
             applePlatform: capabilities.applePlatform,
-          });
-          if (Option.isNone(rawKey)) return CONTINUE_BUBBLING;
-          const raw = rawKey.value;
-
-          // The pass counter comes before every other rule, so Escape goes to
-          // the page and spends one pass. That is the point of the command: it
-          // gives any key to the page, and Escape is a key.
-          const remaining = yield* Ref.get(passNext);
-          if (remaining > 0) {
-            yield* Ref.set(passNext, remaining - 1);
-            yield* reset;
-            return CONTINUE_BUBBLING;
-          }
-
-          const atRoot = current.branches.length === 0 && current.count === 0;
-
-          if (isEscape(event)) {
-            if (atRoot) return CONTINUE_BUBBLING;
-            yield* reset;
-            return yield* suppress(event);
-          }
-
-          // Every pass-through rule reads the *raw* notation, and not the
-          // remapped one. The user gives a physical key to the page, and
-          // `mapkey` describes what the key does for us. A test against the
-          // remapped notation captured a key that the exclusion promised to
-          // the page. It also gave away a key that no rule named.
-
-          // A pass key applies to a new sequence only. Once the user has
-          // committed to `g`, the next key is ours even if it is in the set.
-          // A count starts a sequence as well, so `3 j` runs our binding for
-          // `j` even when the user gave `j` to the page.
-          if (atRoot && isPassKey(exclusions.effectiveUnsafe(), raw)) {
-            return CONTINUE_BUBBLING;
-          }
-
-          // The same rule for the keys that a focused media player owns. The
-          // cheap set lookup goes first, because the check behind it walks the
-          // document.
-          if (
-            atRoot &&
-            MEDIA_KEYS.has(raw) &&
-            settingsNow.passMediaKeys &&
-            mediaPlayerHasFocus(dom.document)
-          ) {
-            return CONTINUE_BUBBLING;
-          }
-
-          // The key is ours. `mapkey` now says which binding it drives.
-          const notation = mappings.compiledUnsafe().keyRemap.get(raw) ?? raw;
-
-          // The count prefix and the trie walk both live in `advance`, which
-          // reads the state again. A binding that an earlier key accepted can
-          // run there first. The key then comes back to this function, where a
-          // digit is a count once more and every rule above applies again.
-          return yield* advance(notation, event);
+          },
+          exclusion: exclusions.effectiveUnsafe(),
+          passMediaKeys: settingsNow.passMediaKeys,
         });
+        return yield* pipe(
+          arrival,
+          Arrival.$match({
+            Page: () => Effect.succeed(CONTINUE_BUBBLING),
+            Passed: () =>
+              pipe(
+                passNext,
+                Ref.set(passes - 1),
+                Effect.andThen(reset),
+                Effect.as(CONTINUE_BUBBLING),
+              ),
+            Cancelled: () => pipe(reset, Effect.andThen(suppress(event))),
+            Media: ({ raw }) =>
+              pipe(
+                Effect.sync(() => mediaPlayerHasFocus(dom.document)),
+                Effect.flatMap(
+                  Boolean.match({
+                    onFalse: () => advance(raw, event),
+                    onTrue: () => Effect.succeed(CONTINUE_BUBBLING),
+                  }),
+                ),
+              ),
+            // The count prefix and the trie walk both live in `advance`, which
+            // reads the state again. A binding that an earlier key accepted can
+            // run there first. The key then comes back to this function, where a
+            // digit is a count once more and every rule above applies again.
+            Ours: ({ raw }) => advance(raw, event),
+          }),
+        );
+      });
 
-      const onKeyup = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-        Effect.gen(function* () {
-          if (!isUserEvent(event)) return CONTINUE_BUBBLING;
-          if (!event.code) return CONTINUE_BUBBLING;
-          const taken = yield* Ref.modify(suppressedCodes, (current) => {
-            if (!current.has(event.code)) return [false, current];
-            const next = new Set(current);
-            next.delete(event.code);
-            return [true, next as ReadonlySet<string>];
-          });
-          return taken ? SUPPRESS_EVENT : CONTINUE_BUBBLING;
-        });
+      const onKeyup = flow(
+        Option.liftPredicate((event: KeyboardEvent) => isUserEvent(event) && event.code.length > 0),
+        Option.match({
+          onNone: () => Effect.succeed(CONTINUE_BUBBLING),
+          onSome: ({ code }) => pipe(suppressedCodes, Ref.modify(release(code))),
+        }),
+      );
 
       /**
        * The focus moved, so a half-typed sequence is no longer live.
@@ -463,18 +683,23 @@ export class Keyboard extends Context.Service<
        * handler and every finalizer that the mode registered. Nothing has to
        * remember what to undo.
        */
-      const modeScope = yield* Ref.make<Option.Option<Scope.Closeable>>(Option.none());
+      const modeScope = yield* Ref.make(Option.none<Scope.Closeable>());
 
-      const exitNormal = Effect.gen(function* () {
-        const open = yield* Ref.getAndSet(modeScope, Option.none());
-        if (Option.isSome(open)) yield* Scope.close(open.value, Exit.void);
-      });
+      const exitNormal = pipe(
+        modeScope,
+        Ref.getAndSet(Option.none<Scope.Closeable>()),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (scope) => Scope.close(scope, Exit.void),
+          }),
+        ),
+      );
 
-      const enterNormal = Effect.gen(function* () {
-        if (Option.isSome(yield* Ref.get(modeScope))) return;
+      const openNormal = Effect.gen(function* () {
         const scope = yield* Scope.make();
         yield* reset;
-        const handle = yield* Effect.provideService(
+        const handle = yield* pipe(
           modes.enter(
             { name: "normal" },
             {
@@ -483,30 +708,47 @@ export class Keyboard extends Context.Service<
               focus: onFocus,
             },
           ),
-          Scope.Scope,
-          scope,
+          Scope.provide(scope),
         );
-        yield* Ref.set(modeScope, Option.some(scope));
+        yield* pipe(modeScope, Ref.set(Option.some(scope)));
         // The scope must go when the mode goes. `Modes.exitAll` ends every live
         // mode, and a soft navigation calls it, so normal mode can exit without
-        // this service. The scope would then stay, the test above would refuse
+        // this service. The scope would then stay, `enterNormal` would refuse
         // to build the mode again, and the page would keep no key bindings at
         // all after a `pushState`.
         yield* handle.onExit(() => exitNormal);
       });
 
+      const enterNormal = pipe(
+        Ref.get(modeScope),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => openNormal,
+            onSome: () => Effect.void,
+          }),
+        ),
+      );
+
+      const followExclusion = (rule: EffectiveRule): Effect.Effect<void> =>
+        pipe(
+          rule.enabled,
+          Boolean.match({
+            onFalse: () => exitNormal,
+            onTrue: () => enterNormal,
+          }),
+        );
+
       const syncExclusion = pipe(
         SubscriptionRef.get(exclusions.effective),
-        Effect.flatMap((rule) => (rule.enabled ? enterNormal : exitNormal)),
+        Effect.flatMap(followExclusion),
       );
 
       yield* syncExclusion;
-      yield* Effect.forkScoped(
-        pipe(
-          SubscriptionRef.changes(exclusions.effective),
-          Stream.drop(1),
-          Stream.runForEach((rule) => (rule.enabled ? enterNormal : exitNormal)),
-        ),
+      yield* pipe(
+        SubscriptionRef.changes(exclusions.effective),
+        Stream.drop(1),
+        Stream.runForEach(followExclusion),
+        Effect.forkScoped,
       );
 
       yield* Effect.addFinalizer(() => exitNormal);
@@ -514,8 +756,8 @@ export class Keyboard extends Context.Service<
       return Keyboard.of({
         pending,
         syncExclusion,
-        passNextKey: (count) => Ref.set(passNext, Math.max(1, count)),
-        forgetSuppressed: Ref.set(suppressedCodes, new Set()),
+        passNextKey: (count) => pipe(passNext, Ref.set(Math.max(1, count))),
+        forgetSuppressed: pipe(suppressedCodes, Ref.set(HashSet.empty<string>())),
       });
     }),
   );
