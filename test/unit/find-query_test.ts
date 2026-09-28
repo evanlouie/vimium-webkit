@@ -105,15 +105,13 @@ describe("FindQuery", () => {
   );
 
   it.effect("treats /pattern/ as a regex even with regexFindMode off", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const query = parseFindQuery("/a.c/", literal);
       assert.strictEqual(query.kind, "regex");
       assert.strictEqual(query.source, "a.c");
 
-      const compiled = toRegExp(query);
-      assert.isTrue(Option.isSome(compiled));
-      if (Option.isNone(compiled)) return;
-      assert.isTrue(compiled.value.test("abc"));
+      const compiled = yield* Effect.fromOption(toRegExp(query));
+      assert.isTrue(compiled.test("abc"));
     }),
   );
 
@@ -135,14 +133,12 @@ describe("FindQuery", () => {
   );
 
   it.effect("accepts collapsed whitespace in a literal query", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       // The engine folds every whitespace character to one space and keeps the
       // length, so a run of spaces stays and the pattern must allow it.
       assert.strictEqual(literalSource("sign in"), "sign +in");
-      const compiled = toRegExp(parseFindQuery("sign in", literal));
-      assert.isTrue(Option.isSome(compiled));
-      if (Option.isNone(compiled)) return;
-      assert.isTrue(compiled.value.test("sign  in"));
+      const compiled = yield* Effect.fromOption(toRegExp(parseFindQuery("sign in", literal)));
+      assert.isTrue(compiled.test("sign  in"));
       assert.notStrictEqual(literalSource("a.b c"), "a.b c");
     }),
   );
@@ -168,50 +164,43 @@ describe("FindQuery", () => {
   );
 
   it.effect("never treats a literal query as malformed", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const query = parseFindQuery("a(", literal);
       assert.isTrue(Option.isNone(query.error));
-      const compiled = toRegExp(query);
-      assert.isTrue(Option.isSome(compiled));
-      if (Option.isNone(compiled)) return;
-      assert.isTrue(compiled.value.test("a("));
+      const compiled = yield* Effect.fromOption(toRegExp(query));
+      assert.isTrue(compiled.test("a("));
     }),
   );
 
   it.effect("gives a new RegExp on every call", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       // `lastIndex` is state on a `g` expression. Two searches that share one
       // expression lose matches.
       const query = parseFindQuery("a", literal);
-      const first = toRegExp(query);
-      const second = toRegExp(query);
-      assert.isTrue(Option.isSome(first) && Option.isSome(second));
-      if (Option.isNone(first) || Option.isNone(second)) return;
-      assert.notStrictEqual(first.value, second.value);
-      first.value.exec("aaa");
-      assert.strictEqual(second.value.lastIndex, 0);
+      const [first, second] = yield* Effect.fromOption(
+        Option.all([toRegExp(query), toRegExp(query)]),
+      );
+      assert.notStrictEqual(first, second);
+      first.exec("aaa");
+      assert.strictEqual(second.lastIndex, 0);
     }),
   );
 
   it.effect("anchors a word query on word boundaries", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const query = wordQuery("find");
-      const compiled = toRegExp(query);
-      assert.isTrue(Option.isSome(compiled));
-      if (Option.isNone(compiled)) return;
-      assert.isTrue(compiled.value.test("please find it"));
+      const compiled = yield* Effect.fromOption(toRegExp(query));
+      assert.isTrue(compiled.test("please find it"));
       assert.isFalse(new RegExp(query.source, "i").test("refinance"));
     }),
   );
 
   it.effect("does not anchor a token that is not a word", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const query = wordQuery("->");
       assert.notInclude(query.source, "\\b");
-      const compiled = toRegExp(query);
-      assert.isTrue(Option.isSome(compiled));
-      if (Option.isNone(compiled)) return;
-      assert.isTrue(compiled.value.test("a -> b"));
+      const compiled = yield* Effect.fromOption(toRegExp(query));
+      assert.isTrue(compiled.test("a -> b"));
     }),
   );
 
@@ -222,85 +211,94 @@ describe("FindQuery", () => {
     }),
   );
 
-  it.effect("refuses a pattern that backtracks catastrophically", () =>
-    Effect.sync(() => {
-      // `(a+)+$` against a long line backtracks exponentially, and find mode
-      // owns the keyboard, so the tab stops answering. The pattern runs again
-      // on every keystroke, so one more character stops the tab.
-      for (const source of ["(a+)+$", "(a*)*b", "(\\d+)+$", "(a|a)*$"]) {
+  describe("refuses a pattern that backtracks catastrophically", () => {
+    // `(a+)+$` against a long line backtracks exponentially, and find mode
+    // owns the keyboard, so the tab stops answering. The pattern runs again
+    // on every keystroke, so one more character stops the tab.
+    it.effect.each(["(a+)+$", "(a*)*b", "(\\d+)+$", "(a|a)*$"])("%s", (source) =>
+      Effect.sync(() => {
         const query = parseFindQuery(source, regexMode);
         assert.isTrue(Option.isSome(query.error), `${source} compiled with no complaint`);
         assert.isTrue(Option.isNone(toRegExp(query)));
-      }
-    }),
-  );
+      }),
+    );
+  });
 
-  it.effect("decides without running the pattern", () =>
-    Effect.sync(() => {
-      // Each of these defeated the timed probe that stood here before.
-      //
-      // `(a|a|a|a)*$` was the worst one: twenty characters of `a` take more
-      // than a minute, so the probe could not end before the wait that it
-      // looked for.
-      //
-      // The two `\s` patterns pass a twenty-character probe in some
-      // milliseconds, and then grow with a power of the length. `\s+\s+\s+`
-      // costs 2.3 s against fifty characters.
-      //
-      // The check now reads the text and never runs it.
-      const slow = [
-        "(a|a|a|a)*$",
-        "\\s*\\s*\\s*\\s*\\s*\\s*$",
-        "\\s+\\s+\\s+\\s+\\s+\\s+$",
-        "x+x+y",
-        "a+a+a+a+a+a+$",
-        "^ *a* *a* *$",
-        "(a?){10}a{10}$",
-      ];
+  describe("decides without running the pattern", () => {
+    // Each of these defeated the timed probe that stood here before.
+    //
+    // `(a|a|a|a)*$` was the worst one: twenty characters of `a` take more
+    // than a minute, so the probe could not end before the wait that it
+    // looked for.
+    //
+    // The two `\s` patterns pass a twenty-character probe in some
+    // milliseconds, and then grow with a power of the length. `\s+\s+\s+`
+    // costs 2.3 s against fifty characters.
+    //
+    // The check now reads the text and never runs it.
+    const slow = [
+      "(a|a|a|a)*$",
+      "\\s*\\s*\\s*\\s*\\s*\\s*$",
+      "\\s+\\s+\\s+\\s+\\s+\\s+$",
+      "x+x+y",
+      "a+a+a+a+a+a+$",
+      "^ *a* *a* *$",
+      "(a?){10}a{10}$",
+    ];
 
-      for (const source of slow) {
+    it.effect.each(slow)("%s", (source) =>
+      Effect.sync(() => {
         const query = parseFindQuery(source, regexMode);
         assert.isTrue(Option.isSome(query.error), `${source} compiled with no complaint`);
         assert.isTrue(Option.isNone(toRegExp(query)));
-      }
-    }),
-  );
+      }),
+    );
+  });
 
-  it.effect("still allows an ordinary quantifier", () =>
-    Effect.sync(() => {
-      for (const source of [
-        "a+",
-        "\\d{2,4}",
-        "(?:foo|bar)+",
-        "[a-z]*x",
-        "colou?r",
-        "^https://(mail|inbox)\\.example\\.com/.*$",
-        // The shapes that the review of pull request 55 asked for.
-        "^https?://([a-z0-9-]+\\.)*example\\.com/.*$",
-        "(?:\\w+\\.)+\\w+",
-        "(cat|car)+",
-        '"(?:[^"\\\\]|\\\\.)*"',
-        "^(?=.*foo)(?=.*bar)",
-      ]) {
+  describe("still allows an ordinary quantifier", () => {
+    const ordinary = [
+      "a+",
+      "\\d{2,4}",
+      "(?:foo|bar)+",
+      "[a-z]*x",
+      "colou?r",
+      "^https://(mail|inbox)\\.example\\.com/.*$",
+      // The shapes that the review of pull request 55 asked for.
+      "^https?://([a-z0-9-]+\\.)*example\\.com/.*$",
+      "(?:\\w+\\.)+\\w+",
+      "(cat|car)+",
+      '"(?:[^"\\\\]|\\\\.)*"',
+      "^(?=.*foo)(?=.*bar)",
+    ];
+
+    it.effect.each(ordinary)("%s", (source) =>
+      Effect.sync(() => {
         const query = parseFindQuery(source, regexMode);
         assert.isTrue(Option.isNone(query.error), `${source} was refused`);
         assert.isTrue(Option.isSome(toRegExp(query)));
-      }
-    }),
-  );
+      }),
+    );
+  });
 
-  it.effect("never refuses a query that a user types as text", () =>
-    Effect.sync(() => {
-      // A literal query is escaped before it becomes an expression, so the
-      // safety check must never take a plain search away from a user.
-      for (const text of ["a+b", "(a*)*", "* * *", "sign   in", "c:\\\\windows", "ПРИВЕТ"]) {
-        const query = parseFindQuery(text, literal);
-        assert.isTrue(Option.isNone(query.error), `${text} was refused`);
-        assert.isTrue(Option.isSome(toRegExp(query)));
-      }
-      assert.isTrue(Option.isNone(wordQuery("a+b").error));
-    }),
-  );
+  describe("never refuses a query that a user types as text", () => {
+    // A literal query is escaped before it becomes an expression, so the
+    // safety check must never take a plain search away from a user.
+    it.effect.each(["a+b", "(a*)*", "* * *", "sign   in", "c:\\\\windows", "ПРИВЕТ"])(
+      "%s",
+      (text) =>
+        Effect.sync(() => {
+          const query = parseFindQuery(text, literal);
+          assert.isTrue(Option.isNone(query.error), `${text} was refused`);
+          assert.isTrue(Option.isSome(toRegExp(query)));
+        }),
+    );
+
+    it.effect("as a word query either", () =>
+      Effect.sync(() => {
+        assert.isTrue(Option.isNone(wordQuery("a+b").error));
+      }),
+    );
+  });
 
   it.effect("refuses an absurdly long pattern", () =>
     Effect.sync(() => {

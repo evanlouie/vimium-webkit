@@ -8,22 +8,27 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option } from "effect";
+import { Array, Effect, flow, Iterable, Option, pipe, String as Str } from "effect";
 import { compilePattern, MAX_REGEX_URL_LENGTH } from "~/domain/Exclusion.ts";
 import { collectSpans, MAX_MATCH_LENGTH, SEARCH_WINDOW } from "~/features/find/Engine.ts";
 
 /** A URL that no expression can match, and that every loop must walk. */
 const hostileUrl = (length: number): string => "a".repeat(length);
 
-const matcherFor = (pattern: string): ((url: string) => boolean) => {
-  const compiled = compilePattern(pattern);
-  assert.isTrue(Option.isSome(compiled), `${pattern} did not compile`);
-  return Option.isSome(compiled) ? compiled.value : () => false;
-};
+/** The matcher of a pattern that must compile. */
+const matcherFor = (pattern: string) =>
+  pipe(
+    compilePattern(pattern),
+    Effect.fromOption(() => `${pattern} did not compile`),
+  );
+
+/** Where the spans of a search start. */
+const startsOf: (spans: ReadonlyArray<{ readonly start: number }>) => ReadonlyArray<number> =
+  Array.map(({ start }) => start);
 
 describe("the exclusion budget", () => {
   it.effect("does not read a URL that is longer than the cap", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       // The cap is the budget, so the test holds its value. A cap that grows
       // in silence is a budget that stopped bounding the work.
       assert.isAtMost(MAX_REGEX_URL_LENGTH, 1024);
@@ -31,7 +36,7 @@ describe("the exclusion budget", () => {
       // The rule matches every string of lower-case letters. It still answers
       // `false` above the cap, and that is the whole point: the cost of one
       // raw expression is fixed, whatever URL the page makes.
-      const matches = matcherFor("/[a-z]*/");
+      const matches = yield* matcherFor("/[a-z]*/");
       assert.isTrue(matches(hostileUrl(MAX_REGEX_URL_LENGTH)));
       assert.isFalse(matches(hostileUrl(MAX_REGEX_URL_LENGTH + 1)));
     }),
@@ -48,20 +53,19 @@ describe("the find budget", () => {
       const haystack = `needle${filler}needle${filler}needle${filler}needle`;
       const passed = collectSpans(haystack, /needle/g);
 
-      const wanted: number[] = [];
-      for (
-        let at = haystack.indexOf("needle");
-        at !== -1;
-        at = haystack.indexOf("needle", at + 1)
-      ) {
-        wanted.push(at);
-      }
+      const wanted = pipe(
+        Iterable.unfold(
+          haystack.indexOf("needle"),
+          flow(
+            Option.liftPredicate((at: number) => at !== -1),
+            Option.map((at) => [at, haystack.indexOf("needle", at + 1)] as const),
+          ),
+        ),
+        Array.fromIterable,
+      );
 
       assert.isFalse(passed.stopped);
-      assert.deepEqual(
-        passed.spans.map((span) => span.start),
-        wanted,
-      );
+      assert.deepEqual(startsOf(passed.spans), wanted);
     }),
   );
 
@@ -76,49 +80,46 @@ describe("the find budget", () => {
 
       // `$` matches at the end of the text, and not at the end of a window.
       const tails = collectSpans(haystack, /a+tail$/g);
-      assert.strictEqual(tails.spans.length, 1);
-      assert.strictEqual(tails.spans[0]?.end, haystack.length);
+      const ends = pipe(
+        tails.spans,
+        Array.map(({ end }) => end),
+      );
+      assert.deepStrictEqual(ends, [haystack.length]);
 
       const nothing = collectSpans(haystack, /a$/g);
       assert.deepEqual(nothing.spans, []);
     }),
   );
 
-  it.effect("gives the spans of a search with no window", () =>
-    Effect.sync(() => {
-      // The reference is one `exec` loop over the whole text. The window must
-      // not change which matches a search finds, or where they are.
-      const naive = (text: string, pattern: RegExp): ReadonlyArray<number> => {
-        const regex = new RegExp(pattern.source, pattern.flags);
-        const starts: number[] = [];
-        for (;;) {
-          const match = regex.exec(text);
-          if (match === null) break;
-          if (match[0].length === 0) {
-            regex.lastIndex = match.index + 1;
-            if (regex.lastIndex > text.length) break;
-            continue;
-          }
-          starts.push(match.index);
-        }
-        return starts;
-      };
+  describe("gives the spans of a search with no window", () => {
+    // The reference is one `matchAll` over the whole text. It steps over a
+    // match of no width, as a search does. The window must not change which
+    // matches a search finds, or where they are.
+    const naive = (text: string, pattern: RegExp): ReadonlyArray<number> =>
+      pipe(
+        text.matchAll(pattern),
+        Array.fromIterable,
+        Array.filter(flow(Array.head, Option.exists(Str.isNonEmpty))),
+        Array.map(({ index }) => index),
+      );
 
-      const filler = "the quick brown fox jumps over the lazy dog. ";
-      const text = `${filler.repeat(120)}needle${filler.repeat(120)}needle`;
-      const patterns = [/needle/g, /\bfox\b/g, /qu[a-z]+/g, /o.e[rn]/g, /dog\. the/g];
+    const filler = "the quick brown fox jumps over the lazy dog. ";
+    const text = `${filler.repeat(120)}needle${filler.repeat(120)}needle`;
 
-      for (const pattern of patterns) {
-        const passed = collectSpans(text, pattern, 5000);
-        assert.isFalse(passed.stopped, `${pattern.source} stopped`);
-        assert.deepEqual(
-          passed.spans.map((span) => span.start),
-          naive(text, pattern),
-          `${pattern.source} gave other spans`,
-        );
-      }
-    }),
-  );
+    it.effect.each([/needle/g, /\bfox\b/g, /qu[a-z]+/g, /o.e[rn]/g, /dog\. the/g])(
+      "%s",
+      (pattern) =>
+        Effect.sync(() => {
+          const passed = collectSpans(text, pattern, 5000);
+          assert.isFalse(passed.stopped, `${pattern.source} stopped`);
+          assert.deepEqual(
+            startsOf(passed.spans),
+            naive(text, pattern),
+            `${pattern.source} gave other spans`,
+          );
+        }),
+    );
+  });
 
   it.effect("still steps over a match of no width", () =>
     Effect.sync(() => {
@@ -141,14 +142,15 @@ describe("the find budget", () => {
     }),
   );
 
-  it.effect("gives the whole span of a match of 400 characters", () =>
-    Effect.sync(() => {
-      // The window kept 256 characters of text on each side, and a match that
-      // reached the end of that text was dropped. The next window began after
-      // it, so the match was lost or moved, and nothing said so. A wrong span
-      // is worse than a stop.
-      const length = 400;
-      for (const at of [800, 1000, 1023, 1024]) {
+  describe("gives the whole span of a match of 400 characters", () => {
+    // The window kept 256 characters of text on each side, and a match that
+    // reached the end of that text was dropped. The next window began after
+    // it, so the match was lost or moved, and nothing said so. A wrong span
+    // is worse than a stop.
+    const length = 400;
+
+    it.effect.each([800, 1000, 1023, 1024])("at %i", (at) =>
+      Effect.sync(() => {
         const haystack = `${"a".repeat(at)}${"b".repeat(length)}${"a".repeat(4096)}`;
         const passed = collectSpans(haystack, new RegExp(`b{${length}}`, "g"));
         assert.isFalse(passed.stopped, `the search at ${at} stopped`);
@@ -157,9 +159,9 @@ describe("the find budget", () => {
           [{ start: at, end: at + length }],
           `the match at ${at} moved`,
         );
-      }
-    }),
-  );
+      }),
+    );
+  });
 
   it.effect("gives the whole span of a match of 4500 characters", () =>
     Effect.sync(() => {

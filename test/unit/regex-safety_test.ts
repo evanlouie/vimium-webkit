@@ -77,6 +77,13 @@ const LINEAR: readonly string[] = [
   "a(?=[a-z]*x)(?=[a-z]*y)b*",
 ];
 
+/** The reason that the check gives for `source`, or `""` when it gives none. */
+const reasonFor = (source: string): string =>
+  pipe(
+    regexSafetyError(source, ""),
+    Option.getOrElse(() => ""),
+  );
+
 const NESTED_FIXED_ASSERTIONS =
   "(?:(?=(?:(?=(?:(?=(?:(?=(?:(?=(?:(?=(?:(?=(?:(?=[a-z]*x)a){8})a){8})a){8})a){8})a){8})a){8})a){8})a){8}";
 
@@ -143,28 +150,25 @@ const SUPER_LINEAR: readonly string[] = [
 ];
 
 describe("RegexSafety", () => {
-  it.effect("accepts every pattern that a user writes", () =>
-    Effect.sync(() => {
-      for (const source of LINEAR) {
-        const problem = regexSafetyError(source, "");
-        assert.isTrue(
-          Option.isNone(problem),
-          `${source} was refused: ${pipe(
-            problem,
-            Option.getOrElse(() => ""),
-          )}`,
+  describe("accepts every pattern that a user writes", () => {
+    it.effect.each(LINEAR)("%s", (source) =>
+      Effect.sync(() => {
+        assert.deepStrictEqual(
+          regexSafetyError(source, ""),
+          Option.none(),
+          `${source} was refused`,
         );
-      }
-    }),
-  );
+      }),
+    );
+  });
 
-  it.effect("refuses every pattern that grows with a power", () =>
-    Effect.sync(() => {
-      for (const source of SUPER_LINEAR) {
+  describe("refuses every pattern that grows with a power", () => {
+    it.effect.each(SUPER_LINEAR)("%s", (source) =>
+      Effect.sync(() => {
         assert.isFalse(isLinearRegex(source, ""), `${source} passed the check`);
-      }
-    }),
-  );
+      }),
+    );
+  });
 
   it.effect("refuses eight nested fixed loops over assertions", () =>
     Effect.sync(() => {
@@ -194,15 +198,15 @@ describe("RegexSafety", () => {
     }),
   );
 
-  it.effect("refuses syntax that it cannot read", () =>
-    Effect.sync(() => {
-      // A limit of the check, and not a fault of the user. The pattern is
-      // refused, because an unread pattern cannot be called safe.
-      for (const source of ["[unclosed", "(unclosed", "a)b"]) {
+  describe("refuses syntax that it cannot read", () => {
+    // A limit of the check, and not a fault of the user. The pattern is
+    // refused, because an unread pattern cannot be called safe.
+    it.effect.each(["[unclosed", "(unclosed", "a)b"])("%s", (source) =>
+      Effect.sync(() => {
         assert.isFalse(isLinearRegex(source, ""), `${source} passed`);
-      }
-    }),
-  );
+      }),
+    );
+  });
 
   it.effect("refuses a property escape when the flags hold no `u`", () =>
     Effect.sync(() => {
@@ -217,10 +221,7 @@ describe("RegexSafety", () => {
 
       // The reason must tell the user what to write instead. "syntax that the
       // safety check does not know" is true and useless.
-      const reason = pipe(
-        regexSafetyError("\\p{L}+", ""),
-        Option.getOrElse(() => ""),
-      );
+      const reason = reasonFor("\\p{L}+");
       assert.include(reason, "`u` flag");
       assert.include(reason, "[a-zA-Z]");
     }),
@@ -246,20 +247,8 @@ describe("RegexSafety", () => {
       const chain = `${"(?=(?:(?=[a-z]{0,9999}a)a){1,9999})".repeat(14)}(?!)`;
       assert.isBelow(chain.length, 512);
       assert.isFalse(isLinearRegex(chain, ""));
-      assert.include(
-        pipe(
-          regexSafetyError(`${"(?=a)".repeat(9)}b`, ""),
-          Option.getOrElse(() => ""),
-        ),
-        "at most eight lookaheads",
-      );
-      assert.include(
-        pipe(
-          regexSafetyError("(?=(?=(?=(?=a))))", ""),
-          Option.getOrElse(() => ""),
-        ),
-        "at most three nested assertions",
-      );
+      assert.include(reasonFor(`${"(?=a)".repeat(9)}b`), "at most eight lookaheads");
+      assert.include(reasonFor("(?=(?=(?=(?=a))))"), "at most three nested assertions");
       // A pattern that a user writes holds a few assertions, and passes.
       assert.isTrue(isLinearRegex("^(?=.*foo)(?=.*bar)(?=.*baz)", ""));
     }),
