@@ -359,17 +359,6 @@ const opposite = (direction: SealDirection): SealDirection =>
     Match.exhaustive,
   );
 
-/**
- * The payload of a `message` event on a port.
- *
- * `listenOn` gives a plain `Event`. A read of the property says what it holds,
- * and it does not ask which realm made the event.
- */
-const messageData: (event: Event) => Option.Option<unknown> = flow(
-  Option.liftPredicate(Predicate.hasProperty("data")),
-  Option.map(({ data }) => data),
-);
-
 /** The `to` field of a message for one target. */
 const wireTarget: (target: FrameTarget) => string = FrameTarget.$match({
   Top: () => WIRE_TARGET_TOP,
@@ -736,11 +725,7 @@ export const makeSealedLink = Effect.fn("FrameBus.link")(function* (
 
   yield* host.listenOn(port, "message", (event) =>
     Effect.suspend(() =>
-      pipe(
-        messageData(event),
-        Option.flatMap(parseSealed),
-        Option.match({ onNone: () => Effect.void, onSome: deliver }),
-      ),
+      pipe(event.data, parseSealed, Option.match({ onNone: () => Effect.void, onSome: deliver })),
     ),
   );
 
