@@ -1,9 +1,8 @@
 /**
  * The build.
  *
- * A single unminified IIFE, per §9. Unminified is not laziness: Greasy Fork's
- * size ceiling is measured *unminified*, its reviewers read the source, and a
- * userscript that a user cannot audit is one they should not install.
+ * A single IIFE: minified for production, and readable, with an inline
+ * sourcemap, for development.
  *
  *   npm run build          production bundle
  *   npm run build:dev      dev bundle, sourcemap inline
@@ -134,10 +133,9 @@ const largestFirst: Order.Order<ModuleSize> = pipe(
 /**
  * Per-module contribution, largest first — *indicative, not a decomposition*.
  *
- * Rollup measures each module before Vite re-prints the chunk for `safari16`,
- * and that re-print drops about a third of the bytes. The figures therefore
- * sum to roughly 40% more than the artefact. They are useful for ranking what
- * is large.
+ * Rolldown measures each module before the chunk is minified, so in a
+ * production build the figures sum to several times the artefact. They are
+ * useful for ranking what is large.
  */
 const sizeReport = (chunk: Rolldown.OutputChunk): ReadonlyArray<ModuleSize> =>
   pipe(

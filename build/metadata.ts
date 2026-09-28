@@ -123,11 +123,9 @@ export const BANNER_NOTICE = `/*
  *   Copyright (c) 2010 Phil Crosby, Ilya Sukhar. Released under the MIT
  *   licence. Individual source files name the upstream file they derive from.
  *
- * This file also *contains* the following MIT-licensed libraries, bundled
- * verbatim. Their copyright notices travel with the code, which is the
- * condition under which the MIT licence permits distribution at all — and
- * without them this artefact could not be published to Greasy Fork or anywhere
- * else.
+ * This file also *contains* the following MIT-licensed libraries. Their
+ * copyright notices travel with the code, which is the condition under which
+ * the MIT licence permits distribution at all.
  *
  *   Effect (https://github.com/Effect-TS/effect)
  *     Copyright (c) 2023 Effectful Technologies Inc

@@ -8,13 +8,13 @@
  * the import style the Effect documentation uses, instead of a house rule
  * nobody would remember.
  *
- * The shipped artefact stays a single unminified IIFE. Unminified is not
- * laziness: Greasy Fork measures its size ceiling unminified, its reviewers
- * read the source, and a userscript a user cannot audit is one they should not
- * install.
+ * The shipped artefact is a single IIFE, minified by oxc: compressed, with
+ * mangled names and no comments. Every frame of every page parses it at
+ * `document-start`, so its size is paid on each page load. The dev bundle stays
+ * unminified, with an inline sourcemap, for debugging.
  */
 
-import { Boolean, Data, type Record, pipe } from "effect";
+import { Data, type Record, pipe } from "effect";
 import { fileURLToPath } from "node:url";
 import type { InlineConfig } from "vite";
 
@@ -43,8 +43,6 @@ export const BuildMode = Data.taggedEnum<BuildMode>();
 export interface BundleOptions {
   readonly entry: string;
   readonly mode: BuildMode;
-  /** Only for measurement; the shipped artefact is never minified. */
-  readonly minify?: boolean;
 }
 
 /** The `NODE_ENV` that the bundle sees. */
@@ -58,9 +56,14 @@ const sourcemap: (mode: BuildMode) => "inline" | false = BuildMode.$match({
   Production: () => false as const,
 });
 
-const minifier: (minify: boolean) => "esbuild" | false = Boolean.match({
-  onTrue: () => "esbuild" as const,
-  onFalse: () => false as const,
+/**
+ * oxc and not esbuild: oxc gives the smaller artefact (397 KB against 426 KB
+ * when measured). Treating property reads as pure saves 3 KB, and it can
+ * delete a DOM read that is there to force layout, so it stays off.
+ */
+const minifier: (mode: BuildMode) => "oxc" | false = BuildMode.$match({
+  Development: () => false as const,
+  Production: () => "oxc" as const,
 });
 
 export const bundleConfig = (options: BundleOptions): InlineConfig => ({
@@ -84,7 +87,7 @@ export const bundleConfig = (options: BundleOptions): InlineConfig => ({
   build: {
     write: false,
     target: BUILD_TARGET,
-    minify: pipe(options.minify === true, minifier),
+    minify: pipe(options.mode, minifier),
     sourcemap: pipe(options.mode, sourcemap),
     reportCompressedSize: false,
     modulePreload: false,
@@ -103,8 +106,8 @@ export const bundleConfig = (options: BundleOptions): InlineConfig => ({
         // Vite 8 disables code splitting for IIFE library builds. Its
         // `inlineDynamicImports` option is redundant and produces a warning.
         // Effect relies on module-level initialisation, so `moduleSideEffects`
-        // must stay at its default. Forcing it to `false` produced a bundle 60%
-        // smaller that threw on load.
+        // stays at its default. With the minifier on, forcing it to `false`
+        // no longer makes the artefact any smaller.
         generatedCode: { preset: "es2015", symbols: false },
       },
     },
