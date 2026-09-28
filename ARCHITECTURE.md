@@ -150,8 +150,8 @@ lock.
 
 `frames/Auth.ts` keeps the credential of the session in the value store of the
 userscript manager, and nowhere else. A manager that gives no value store leaves
-the application on the in-memory backend. `KeyValueStore.managerPrivate` is then
-`false`, every operation of `FrameAuth` fails with `unavailable`, and no frame
+the application on the in-memory backend. The kind of `KeyValueStore` is then
+`Memory`, every operation of `FrameAuth` fails with `unavailable`, and no frame
 joins the session. Link hints across frames, frame focus and the exclusion
 verdict of a child frame all stop. `platform/Capabilities.ts` warns the user
 about each of those losses, because a loss of function with no message is worse
