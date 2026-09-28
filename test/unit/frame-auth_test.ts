@@ -75,7 +75,7 @@ const makeStore = (managerPrivate: boolean): Store => {
   return {
     map,
     service: KeyValueStore.of({
-      setUnsafe: null,
+      setUnsafe: Option.none(),
       kind: pipe(
         managerPrivate,
         Boolean.match({
@@ -211,7 +211,7 @@ const makeRacingStore = (rival: string): Store => {
   return {
     map,
     service: KeyValueStore.of({
-      setUnsafe: null,
+      setUnsafe: Option.none(),
       kind: "gm-sync",
       durable: true,
       watchable: false,

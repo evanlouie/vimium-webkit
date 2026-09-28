@@ -52,10 +52,10 @@ export class KeyValueStore extends Context.Service<
     /**
      * Write now when the selected backend is synchronous.
      *
-     * The promise-backed manager API gives `null`. Storage sends those writes
+     * The promise-backed manager API gives `None`. Storage sends those writes
      * through its actor before the page exit.
      */
-    readonly setUnsafe: ((key: string, value: string) => void) | null;
+    readonly setUnsafe: Option.Option<(key: string, value: string) => void>;
     /** Values written by another tab. Empty when the backend cannot report them. */
     readonly changes: (key: string) => Stream.Stream<Option.Option<string>>;
   }
@@ -91,7 +91,7 @@ function managerStore(api: GmValueApi): KeyValueStore["Service"] {
           get,
           set,
           remove,
-          setUnsafe: null,
+          setUnsafe: Option.none(),
           changes: () => Stream.empty,
         }),
       Sync: ({ get, set, remove, setUnsafe, changes }) =>
@@ -103,7 +103,7 @@ function managerStore(api: GmValueApi): KeyValueStore["Service"] {
           get,
           set,
           remove,
-          setUnsafe,
+          setUnsafe: Option.some(setUnsafe),
           changes: (key) =>
             pipe(
               changes,
@@ -138,9 +138,9 @@ function memoryStore(): KeyValueStore["Service"] {
       Effect.sync(() => {
         pipe(values, MutableRef.update(Record.remove(key)));
       }),
-    setUnsafe: (key, value) => {
+    setUnsafe: Option.some((key, value) => {
       pipe(values, MutableRef.update(Record.set(key, value)));
-    },
+    }),
     changes: () => Stream.empty,
   });
 }

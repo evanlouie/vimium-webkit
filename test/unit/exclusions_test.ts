@@ -50,9 +50,9 @@ const storedSettings = (rules: readonly ExclusionRule[]): Layer.Layer<KeyValueSt
         Effect.sync(() => {
           map.delete(key);
         }),
-      setUnsafe: (key, value) => {
+      setUnsafe: Option.some((key, value) => {
         map.set(key, value);
-      },
+      }),
       changes: () => Stream.empty,
     });
   });

@@ -555,7 +555,7 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
   const flushUnsafe = (): void =>
     pipe(
       Option.all({
-        setUnsafe: Option.fromNullishOr(kv.setUnsafe),
+        setUnsafe: kv.setUnsafe,
         holding: holdingOf(MutableRef.get(held)),
       }),
       Option.match({

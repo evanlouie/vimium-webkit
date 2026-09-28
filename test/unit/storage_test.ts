@@ -165,8 +165,8 @@ const makeBackendFor = (kind: KeyValueStore["Service"]["kind"]): Effect.Effect<B
       setUnsafe: pipe(
         kind === "gm-async",
         Boolean.match({
-          onFalse: () => directWrite,
-          onTrue: () => null,
+          onFalse: () => Option.some(directWrite),
+          onTrue: () => Option.none(),
         }),
       ),
       changes: () => Stream.empty,
