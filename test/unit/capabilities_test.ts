@@ -5,7 +5,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import {
   type CapabilityReport,
   degradationWarnings,
@@ -15,8 +15,8 @@ import {
 /** A report in which everything works, so one test changes one field. */
 const healthy: CapabilityReport = {
   manager: "unknown",
-  managerVersion: null,
-  scriptVersion: null,
+  managerVersion: Option.none(),
+  scriptVersion: Option.none(),
   world: "unknown",
 
   value: "gm-sync",

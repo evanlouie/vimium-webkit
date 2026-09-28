@@ -43,7 +43,9 @@ export interface FindQueryOptions {
  * A find query, read once.
  *
  * Every state keeps `raw`, exactly what the user typed, for the history and
- * for the `n` and `N` repeat.
+ * for the messages of the `n` and `N` repeat. The repeat runs the parsed query
+ * again, and never a new parse of `raw`, so a `wordQuery` keeps its word
+ * boundaries.
  */
 export type ParsedFindQuery = Data.TaggedEnum<{
   /** Nothing is left to search for once the delimiters and the directives are gone. */

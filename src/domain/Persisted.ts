@@ -23,7 +23,17 @@
  * `*_SCHEMA_VERSION` of its group.
  */
 
-import { Array, Effect, Order, Record, Schema, SchemaTransformation, pipe } from "effect";
+import {
+  Array,
+  Effect,
+  Option,
+  Order,
+  Record,
+  Schema,
+  SchemaTransformation,
+  Struct,
+  pipe,
+} from "effect";
 import { hintCharacterCount, readHintCharacters } from "~/domain/HintString.ts";
 
 // ---------------------------------------------------------------------------
@@ -292,6 +302,32 @@ export type Marks = typeof marksSchema.Type;
 export type LocalMark = typeof localMarkSchema.Type;
 export type GlobalMark = typeof globalMarkSchema.Type;
 
+/** Set a global mark. */
+export const withGlobalMark =
+  (letter: string, mark: GlobalMark) =>
+  (marks: Marks): Marks => {
+    const global = pipe(marks.global, Record.set(letter, mark));
+    return pipe(marks, Struct.assign({ global }));
+  };
+
+/** Set one letter among the local marks of a page, and keep its other letters. */
+export const withLocalMark =
+  (key: string, letter: string, mark: LocalMark) =>
+  (marks: Marks): Marks => {
+    const letters = pipe(
+      marks.local,
+      Record.get(key),
+      Option.getOrElse(() => Record.empty<string, LocalMark>()),
+      Record.set(letter, mark),
+    );
+    const local = pipe(marks.local, Record.set(key, letters));
+    return pipe(marks, Struct.assign({ local }));
+  };
+
+/** The local mark of this letter on the page with this key. */
+export const localMark = (marks: Marks, key: string, letter: string): Option.Option<LocalMark> =>
+  pipe(marks.local, Record.get(key), Option.flatMap(Record.get(letter)));
+
 /**
  * How many distinct URLs may hold local marks.
  *
@@ -402,7 +438,7 @@ export const visitSchema = Schema.Struct({
 });
 
 export const historyIndexSchema = Schema.Struct({
-  visits: Schema.mutable(Schema.Array(visitSchema)),
+  visits: Schema.Array(visitSchema),
 });
 
 export type Visit = typeof visitSchema.Type;
@@ -425,14 +461,12 @@ export const historyGroup: GroupSpec<HistoryIndex> = {
 
 export const sessionSchema = Schema.Struct({
   /** Tabs we opened via `GM_openInTab`, heartbeated so Omnibar-lite can list them. */
-  knownTabs: Schema.mutable(
-    Schema.Array(
-      Schema.Struct({
-        url: Schema.String,
-        title: Schema.String,
-        heartbeat: Schema.Finite,
-      }),
-    ),
+  knownTabs: Schema.Array(
+    Schema.Struct({
+      url: Schema.String,
+      title: Schema.String,
+      heartbeat: Schema.Finite,
+    }),
   ),
   /** One-time warnings already shown, keyed by id. */
   acknowledged: Schema.mutable(Schema.Array(Schema.String)),
@@ -447,6 +481,14 @@ export const sessionSchema = Schema.Struct({
 });
 
 export type SessionState = typeof sessionSchema.Type;
+
+/** Remember the zoom of an origin. */
+export const withZoom =
+  (origin: string, zoom: number) =>
+  (state: SessionState): SessionState => {
+    const zoomByOrigin = pipe(state.zoomByOrigin, Record.set(origin, zoom));
+    return pipe(state, Struct.assign({ zoomByOrigin }));
+  };
 
 export const SESSION_SCHEMA_VERSION = 1;
 

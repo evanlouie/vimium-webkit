@@ -116,7 +116,6 @@ const promptOf = CompletionState.$match({
 const tabFailureText = (error: TabError): string =>
   pipe(
     error.nativeAlternative,
-    Option.fromNullishOr,
     Option.match({
       onNone: () => error.detail,
       onSome: (native) => `${error.detail} (${native})`,
@@ -273,7 +272,7 @@ const parseEngines = (source: string): EngineCache =>
  */
 const withOpenedTab =
   (opened: KnownTab) =>
-  (tabs: readonly KnownTab[]): KnownTab[] =>
+  (tabs: readonly KnownTab[]): readonly KnownTab[] =>
     pipe(
       liveTabs(tabs, opened.heartbeat),
       Array.filter((tab) => tab.url !== opened.url),
@@ -283,7 +282,7 @@ const withOpenedTab =
 /** A fresh signal for one tab, and every other tab that is still live at that time. */
 const withSignal =
   (signal: KnownTab) =>
-  (tabs: readonly KnownTab[]): KnownTab[] =>
+  (tabs: readonly KnownTab[]): readonly KnownTab[] =>
     pipe(
       liveTabs(tabs, signal.heartbeat),
       Array.map((tab) =>
@@ -549,7 +548,7 @@ export class Omnibar extends Context.Service<
           Command: ({ name }) =>
             pipe(
               close,
-              Effect.andThen(commands.run(name, { count: 1, options: {}, event: null })),
+              Effect.andThen(commands.run(name, { count: 1, options: {}, event: Option.none() })),
               Effect.catch((error) => report.error(error.detail)),
             ),
           Navigate: ({ url }) => pipe(close, Effect.andThen(goTo(url, newTab))),

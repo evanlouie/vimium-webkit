@@ -22,7 +22,7 @@
  */
 
 import { Array, Boolean, Data, Equal, Match, Number, Option, Order, pipe, String } from "effect";
-import type { CommandDef } from "~/domain/Command.ts";
+import { CommandAvailability, type CommandDef, type CommandName } from "~/domain/Command.ts";
 import type { SessionState, Visit } from "~/domain/Persisted.ts";
 import {
   buildSearchUrl,
@@ -49,7 +49,7 @@ export type CompletionKind =
 
 export type CompletionAction = Data.TaggedEnum<{
   Navigate: { readonly url: string };
-  Command: { readonly name: string };
+  Command: { readonly name: CommandName };
   /** Rewrite the input instead of acting. It adopts an engine keyword. */
   Fill: { readonly text: string };
   /** Nothing to do. To choose the row closes the omnibar. */
@@ -145,47 +145,50 @@ const pageTitle = (page: { readonly title: string; readonly url: string }): stri
  */
 const TIER_C_PENALTY = 0.5;
 
-/** How a command reads in the list, by its tier. */
+/** How a command reads in the list, by whether it works. */
 interface CommandPresentation {
   readonly badge: string;
   readonly detail: string;
   readonly weight: number;
   readonly muted: boolean;
+  readonly nativeAlternative: Option.Option<string>;
 }
 
 const presentationOf = (command: CommandDef): CommandPresentation =>
   pipe(
-    Match.value(command.tier),
-    Match.whenOr("A", "B", (): CommandPresentation => ({
-      badge: "Command",
-      detail: command.description,
-      weight: 1,
-      muted: false,
-    })),
-    Match.when("C", (): CommandPresentation => ({
-      badge: "Unavailable",
-      detail: pipe(
-        command.unavailableReason,
-        Option.fromNullishOr,
-        Option.getOrElse(() => command.description),
-      ),
-      weight: TIER_C_PENALTY,
-      muted: true,
-    })),
-    Match.exhaustive,
+    command.availability,
+    CommandAvailability.$match({
+      Available: (): CommandPresentation => ({
+        badge: "Command",
+        detail: command.description,
+        weight: 1,
+        muted: false,
+        nativeAlternative: Option.none(),
+      }),
+      Unavailable: ({ reason, nativeAlternative }): CommandPresentation => ({
+        badge: "Unavailable",
+        detail: reason,
+        weight: TIER_C_PENALTY,
+        muted: true,
+        nativeAlternative,
+      }),
+    }),
   );
 
 const commandRow = (command: CommandDef, relevancy: number): Completion =>
-  pipe(presentationOf(command), ({ badge, detail, weight, muted }): Completion => ({
-    kind: "command",
-    badge,
-    title: command.name,
-    detail,
-    action: CompletionAction.Command({ name: command.name }),
-    score: relevancy * weight,
-    muted,
-    nativeAlternative: Option.fromNullishOr(command.nativeAlternative),
-  }));
+  pipe(
+    presentationOf(command),
+    ({ badge, detail, weight, muted, nativeAlternative }): Completion => ({
+      kind: "command",
+      badge,
+      title: command.name,
+      detail,
+      action: CompletionAction.Command({ name: command.name }),
+      score: relevancy * weight,
+      muted,
+      nativeAlternative,
+    }),
+  );
 
 export const completeCommands = (
   commands: readonly CommandDef[],

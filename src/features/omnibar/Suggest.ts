@@ -48,7 +48,7 @@ import {
   SUGGEST_TIMEOUT_MS,
   suggestEndpointFor,
 } from "~/domain/SearchSuggest.ts";
-import type { GmError, GmXhrResponse } from "~/platform/Gm.ts";
+import type { GmError, XhrResponse } from "~/platform/Gm.ts";
 import { Gm } from "~/platform/Gm.ts";
 
 /** What a completed request gives back to the caller. */
@@ -117,16 +117,10 @@ const NO_SUGGESTIONS = Option.none<readonly string[]>();
  * Anything else is a non-event: the omnibar shows the rows that it already
  * has.
  */
-const isAnswer = (response: GmXhrResponse): boolean => response.status === 200;
+const isAnswer = (response: XhrResponse): boolean => response.status === 200;
 
-const suggestionsIn = (response: GmXhrResponse): readonly string[] =>
-  pipe(
-    response.responseText,
-    Option.fromNullishOr,
-    Option.getOrElse(() => ""),
-    parseSuggestResponse,
-    Array.take(SUGGEST_LIMIT),
-  );
+const suggestionsIn = (response: XhrResponse): readonly string[] =>
+  pipe(response.responseText, parseSuggestResponse, Array.take(SUGGEST_LIMIT));
 
 /**
  * Build the suggester for this frame.

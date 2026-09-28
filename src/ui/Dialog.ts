@@ -53,7 +53,12 @@ import { Mappings } from "~/core/Mappings.ts";
 import { ExitTrigger, KeyPolicy, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
-import { type CommandDef, type CommandGroup, DEFAULT_MAPPINGS } from "~/domain/Command.ts";
+import {
+  CommandAvailability,
+  type CommandDef,
+  type CommandGroup,
+  DEFAULT_MAPPINGS,
+} from "~/domain/Command.ts";
 import { exclusionProblems, type ExclusionRule, parseExclusionLines } from "~/domain/Exclusion.ts";
 import { type CompiledMappings, formatDiagnostics, keysByCommand } from "~/domain/Mapping.ts";
 import {
@@ -1024,10 +1029,19 @@ const offeredIn = SettingsControl.$match({
   Entry: ({ field, input }): OfferedText => ({ field, text: input.value }),
 });
 
-/** A command that a userscript cannot do. Tier A and tier B commands work. */
-const refusedCommand: (command: CommandDef) => Option.Option<CommandDef> = Option.liftPredicate(
-  (command: CommandDef) => command.tier === "C",
-);
+/** Why a userscript cannot do a command. Tier A and tier B commands work. */
+const refusalOf = (command: CommandDef) =>
+  pipe(command.availability, Option.liftPredicate(CommandAvailability.$is("Unavailable")));
+
+/** The tier letter of a command, which the style sheet reads. */
+const tierOf = (command: CommandDef): string =>
+  pipe(
+    command.availability,
+    CommandAvailability.$match({
+      Available: ({ tier }) => tier,
+      Unavailable: () => "C",
+    }),
+  );
 
 /** The key sequences that are bound to each command, as `keysByCommand` gives them. */
 type BoundKeys = Record.ReadonlyRecord<string, Array.NonEmptyReadonlyArray<string>>;
@@ -1360,10 +1374,10 @@ export class Dialog extends Context.Service<
         (command: CommandDef): ReadonlyArray<HTMLElement> => {
           const cell = (className: string, text: string): HTMLSpanElement => {
             const span = pipe(classEl("span", `${className} vw-cmd-row`), withText(text));
-            span.dataset["tier"] = command.tier;
+            span.dataset["tier"] = tierOf(command);
             return span;
           };
-          const refused = refusedCommand(command);
+          const refusal = refusalOf(command);
           const keys = pipe(
             bound,
             Record.get(command.name),
@@ -1371,17 +1385,16 @@ export class Dialog extends Context.Service<
             Option.getOrElse(() => "—"),
           );
           const native = pipe(
-            refused,
-            Option.flatMapNullishOr((one) => one.nativeAlternative),
+            refusal,
+            Option.flatMap(({ nativeAlternative }) => nativeAlternative),
             Option.getOrElse(() => ""),
           );
           const description = cell("vw-cmd-desc", command.description);
           pipe(
-            refused,
-            Option.flatMapNullishOr((one) => one.unavailableReason),
+            refusal,
             Option.match({
               onNone: Function.constVoid,
-              onSome: (reason) => {
+              onSome: ({ reason }) => {
                 description.title = reason;
               },
             }),

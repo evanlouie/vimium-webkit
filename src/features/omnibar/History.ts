@@ -433,7 +433,7 @@ export const makeHistoryIndex: Effect.Effect<
       const at = yield* Clock.currentTimeMillis;
       // The limit is applied here, on the write, and never on a timer.
       yield* storage.history.update((index): HistoryIndexData => ({
-        visits: [...mergeVisit(index.visits, { url, title, at }, limit)],
+        visits: mergeVisit(index.visits, { url, title, at }, limit),
       }));
     },
     // A gate that stops the recording records nothing, and says nothing. A

@@ -251,8 +251,7 @@ export interface OmnibarView {
 const OMNIBAR_NAME = "Vimium-WebKit omnibar";
 
 /** A click with Shift or Command opens a new tab, as Shift and Enter do. */
-const wantsNewTab = (event: Event): boolean =>
-  event instanceof MouseEvent && (event.shiftKey || event.metaKey);
+const wantsNewTab = (event: MouseEvent): boolean => event.shiftKey || event.metaKey;
 
 /** The index of the row that holds the target of an event. */
 const rowIndexOf =

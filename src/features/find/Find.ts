@@ -610,12 +610,26 @@ export class Find extends Context.Service<
         );
 
       /**
-       * Run `raw` against the runs that are already collected, and draw again.
+       * Run `parsed` against the runs that are already collected, remember it
+       * as the last search, and draw again.
        *
        * `anchor` is where the caller would like to land. It is used so that one
        * more character does not throw away the match that the user was already
        * looking at.
        */
+      const searchQuery = Effect.fn("Find.searchQuery")(function* (
+        parsed: ParsedFindQuery,
+        anchor: Option.Option<number>,
+      ) {
+        yield* pipe(query, Ref.set(Option.some(parsed)));
+        const found = yield* runQuery(parsed);
+        const latest = hitsOf(found, anchor);
+        yield* pipe(hits, Ref.set(latest));
+        yield* draw();
+        return outcomeOf(parsed, found, latest);
+      });
+
+      /** Read `raw` as the user typed it, and search for it. */
       const search = Effect.fn("Find.search")(function* (
         raw: string,
         anchor: Option.Option<number>,
@@ -625,19 +639,15 @@ export class Find extends Context.Service<
         const parsed = parseFindQuery(raw, {
           regexFindMode: settings.currentUnsafe().regexFindMode,
         });
-        yield* pipe(query, Ref.set(Option.some(parsed)));
-        const found = yield* runQuery(parsed);
-        const latest = hitsOf(found, anchor);
-        yield* pipe(hits, Ref.set(latest));
-        yield* draw();
-        return outcomeOf(parsed, found, latest);
+        return yield* searchQuery(parsed, anchor);
       });
 
       /**
        * The matches of the last search. With none, the document is walked
-       * again and searched again first, because it may have changed since.
+       * again and the same query runs again first, because the document may
+       * have changed since.
        */
-      const liveHits = (raw: string): Effect.Effect<Hits> =>
+      const liveHits = (last: ParsedFindQuery): Effect.Effect<Hits> =>
         pipe(
           Ref.get(hits),
           Effect.flatMap(
@@ -646,7 +656,7 @@ export class Find extends Context.Service<
               None: () =>
                 pipe(
                   refreshRuns(),
-                  Effect.andThen(search(raw, Option.none())),
+                  Effect.andThen(searchQuery(last, Option.none())),
                   Effect.andThen(Ref.get(hits)),
                 ),
             }),
@@ -1154,7 +1164,7 @@ export class Find extends Context.Service<
         // it is what makes a following `n` continue the way that the user
         // just went.
         yield* pipe(heading, Ref.set(headingOf(direction < 0)));
-        yield* search(parsed.raw, Option.none());
+        yield* searchQuery(parsed, Option.none());
         const latest = yield* Ref.get(hits);
         yield* pipe(
           latest,
@@ -1176,7 +1186,7 @@ export class Find extends Context.Service<
         // release clears the matches.
         yield* ensurePost();
         const { step: sign } = yield* Ref.get(heading);
-        const latest = yield* liveHits(last.raw);
+        const latest = yield* liveHits(last);
         yield* pipe(
           latest,
           Hits.$match({

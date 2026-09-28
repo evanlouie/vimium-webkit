@@ -20,8 +20,14 @@ export type TabFailureReason = typeof TabFailureReason.Type;
 export class TabError extends Schema.TaggedError<TabError>()("TabError", {
   reason: TabFailureReason,
   detail: Schema.String,
-  /** Shown in the HUD when the failure is a permanent gap in the manager. */
-  nativeAlternative: Schema.optional(Schema.String),
+  /**
+   * Shown in the HUD when the failure is a permanent gap in the manager. A
+   * failure that names none has none.
+   */
+  nativeAlternative: pipe(
+    Schema.OptionFromOptional(Schema.String),
+    Schema.withConstructorDefault(Effect.succeedNone),
+  ),
 }) {}
 
 /**
@@ -98,13 +104,18 @@ const closeFailure = (cause: GmError): TabError =>
         new TabError({
           reason: "unavailable",
           detail: "closing a tab needs Tampermonkey or Violentmonkey",
-          nativeAlternative: "⌘W",
+          nativeAlternative: Option.some("⌘W"),
         }),
     ),
     Match.whenOr(
       "failed",
       "invalid",
-      () => new TabError({ reason: "failed", detail: cause.detail, nativeAlternative: "⌘W" }),
+      () =>
+        new TabError({
+          reason: "failed",
+          detail: cause.detail,
+          nativeAlternative: Option.some("⌘W"),
+        }),
     ),
     Match.exhaustive,
   );
