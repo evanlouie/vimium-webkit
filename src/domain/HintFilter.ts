@@ -16,8 +16,6 @@ export interface FilterCandidate {
   /** A stable index into the full hint list of the session. It survives a renumber. */
   readonly index: number;
   readonly linkText: string;
-  /** The "second-class citizen" flag of upstream. */
-  readonly secondary: boolean;
 }
 
 export interface FilterMatch {

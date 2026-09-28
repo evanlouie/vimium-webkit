@@ -959,7 +959,7 @@ const filterSession = (settings: SettingsData, entries: readonly HintEntry[]): S
   const numbers = normaliseHintCharacters(settings.linkHintNumbers, DEFAULT_HINT_NUMBERS);
   const candidates = pipe(
     entries,
-    Array.map((entry, index) => ({ index, linkText: entry.linkText, secondary: entry.secondary })),
+    Array.map((entry, index) => ({ index, linkText: entry.linkText })),
   );
   return SessionState.Filter({
     numbers,

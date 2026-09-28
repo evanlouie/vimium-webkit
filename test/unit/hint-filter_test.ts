@@ -25,7 +25,7 @@ const DIGITS = "0123456789";
 const candidates = (...texts: readonly string[]): readonly FilterCandidate[] =>
   pipe(
     texts,
-    Array.map((linkText, index) => ({ index, linkText, secondary: false })),
+    Array.map((linkText, index) => ({ index, linkText })),
   );
 
 const query = (text: string, digits = ""): FilterQuery => ({
