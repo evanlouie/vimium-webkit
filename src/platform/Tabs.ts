@@ -19,7 +19,7 @@ export const TabFailureReason = Schema.Literals([
 
 export type TabFailureReason = typeof TabFailureReason.Type;
 
-export class TabError extends Schema.TaggedErrorClass<TabError>()("TabError", {
+export class TabError extends Schema.TaggedError<TabError>()("TabError", {
   reason: TabFailureReason,
   detail: Schema.String,
   /** Shown in the HUD when the failure is a permanent gap in the manager. */

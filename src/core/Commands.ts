@@ -41,7 +41,7 @@ export const CommandFailureReason = Schema.Literals([
 
 export type CommandFailureReason = typeof CommandFailureReason.Type;
 
-export class CommandError extends Schema.TaggedErrorClass<CommandError>()(
+export class CommandError extends Schema.TaggedError<CommandError>()(
   "CommandError",
   {
     reason: CommandFailureReason,

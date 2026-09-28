@@ -27,7 +27,7 @@ import { Option, Result, Schema } from "effect";
  * know.
  */
 export class KeyNotationError
-  extends Schema.TaggedErrorClass<KeyNotationError>()("KeyNotationError", {
+  extends Schema.TaggedError<KeyNotationError>()("KeyNotationError", {
     input: Schema.String,
     detail: Schema.String,
   })

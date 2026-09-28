@@ -14,11 +14,13 @@
   },
   "json": {
     "lineWidth": 80,
-    "indentWidth": 2
+    "indentWidth": 2,
+    "packageJson.applyConventions": false
   },
   "markdown": {
     "lineWidth": 80,
-    "textWrap": "always"
+    "textWrap": "always",
+    "wrapCodeSpans": false
   },
   "excludes": [
     "**/node_modules",

@@ -32,25 +32,25 @@
     "verify": "npm run fmt:check && npm run lint && npm run check && npm run test && npm run build && npm run test:e2e"
   },
   "dependencies": {
-    "effect": "4.0.0-beta.102"
+    "effect": "4.0.0-rc.118"
   },
   "devDependencies": {
-    "@dprint/json": "^0.23.0",
-    "@dprint/markdown": "^0.22.1",
-    "@dprint/typescript": "^0.95.15",
-    "@effect/tsgo": "^0.24.3",
-    "@effect/vitest": "^4.0.0-beta.102",
-    "@playwright/test": "^1.56.0",
-    "@types/node": "^22.20.0",
-    "@vitest/coverage-v8": "^4.1.10",
-    "dprint": "^0.50.2",
-    "oxlint": "^1.76.0",
-    "oxlint-tsgolint": "^7.0.2001",
-    "playwright": "^1.56.0",
-    "rollup": "^4.52.4",
-    "tsx": "^4.20.6",
+    "@dprint/json": "^0.25.0",
+    "@dprint/markdown": "^0.24.0",
+    "@dprint/typescript": "^0.96.1",
+    "@effect/tsgo": "^0.46.1",
+    "@effect/vitest": "^4.0.0-rc.118",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^22.20.4",
+    "@vitest/coverage-v8": "^5.0.2",
+    "dprint": "^0.57.4",
+    "oxlint": "^1.85.0",
+    "oxlint-tsgolint": "^7.0.2003",
+    "playwright": "^1.63.0",
+    "rollup": "^4.63.5",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vite": "^8.2.0",
-    "vitest": "^4.1.10"
+    "vite": "^8.3.1",
+    "vitest": "^5.0.2"
   }
 }

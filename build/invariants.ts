@@ -464,12 +464,16 @@ export const checkInvariants = async (
   //     the thing it was added for. `global` keeps the member form, because
   //     this project has its own `global:` keys and `#global` fields.
   //
+  //     `globalThis.process` is banned too. Effect moved its probes to that
+  //     form, and a member read slipped past the identifier pattern while it
+  //     was just as able to throw.
+  //
   //     Scanned in the code with comments and strings blanked, so prose about
   //     an "in-process channel" does not fire it.
   for (
     const hit of scan(
       input.code,
-      /(?<![\w$.])(process|Buffer|__dirname|__filename)(?![\w$])|(?<![\w$.])global\s*[.[]|(?<![\w$.])require\s*\(/g,
+      /(?<![\w$.])(process|Buffer|__dirname|__filename)(?![\w$])|(?<![\w$.])globalThis\s*\??\.\s*(process|Buffer)(?![\w$])|(?<![\w$.])global\s*[.[]|(?<![\w$.])require\s*\(/g,
     )
   ) {
     violations.push({

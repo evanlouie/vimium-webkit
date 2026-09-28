@@ -69,7 +69,7 @@ import { BASE_CSS, type ColorScheme, detectPageScheme } from "~/ui/Styles.ts";
 // Errors
 // ---------------------------------------------------------------------------
 
-export class UiError extends Schema.TaggedErrorClass<UiError>()("UiError", {
+export class UiError extends Schema.TaggedError<UiError>()("UiError", {
   reason: Schema.Literals(["unavailable"]),
   detail: Schema.String,
 }) {}

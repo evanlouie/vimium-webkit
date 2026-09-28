@@ -45,7 +45,7 @@ export const ClipboardFailureReason = Schema.Literals([
 export type ClipboardFailureReason = typeof ClipboardFailureReason.Type;
 
 export class ClipboardError
-  extends Schema.TaggedErrorClass<ClipboardError>()("ClipboardError", {
+  extends Schema.TaggedError<ClipboardError>()("ClipboardError", {
     reason: ClipboardFailureReason,
     detail: Schema.String,
     cause: Schema.optional(Schema.Defect()),

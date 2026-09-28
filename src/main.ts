@@ -41,7 +41,7 @@ import { Realm } from "~/platform/Realm.ts";
  */
 const GuardLayer = Layer.mergeAll(
   Realm.layer,
-  Logger.layer([Logger.consolePretty()]),
+  Logger.layer([Logger.consolePrettyBrowser()]),
   Layer.succeed(References.MinimumLogLevel, "Warn"),
 ).pipe(Layer.provideMerge(Dom.layer));
 
@@ -52,7 +52,7 @@ const GuardLayer = Layer.mergeAll(
  * failure has a name in the error channel, and so that the one report below is
  * the only thing that happens next.
  */
-class StartupFailed extends Schema.TaggedErrorClass<StartupFailed>()(
+class StartupFailed extends Schema.TaggedError<StartupFailed>()(
   "StartupFailed",
   { detail: Schema.String, cause: Schema.optional(Schema.Defect()) },
 ) {}

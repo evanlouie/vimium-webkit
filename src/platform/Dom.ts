@@ -36,7 +36,7 @@ export const DomFailureReason = Schema.Literals([
 
 export type DomFailureReason = typeof DomFailureReason.Type;
 
-export class DomError extends Schema.TaggedErrorClass<DomError>()("DomError", {
+export class DomError extends Schema.TaggedError<DomError>()("DomError", {
   reason: DomFailureReason,
   api: Schema.String,
   detail: Schema.String,

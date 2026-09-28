@@ -49,7 +49,7 @@ export const GmFailureReason = Schema.Literals([
 
 export type GmFailureReason = typeof GmFailureReason.Type;
 
-export class GmError extends Schema.TaggedErrorClass<GmError>()("GmError", {
+export class GmError extends Schema.TaggedError<GmError>()("GmError", {
   reason: GmFailureReason,
   api: Schema.String,
   detail: Schema.String,

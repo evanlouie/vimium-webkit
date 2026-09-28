@@ -12,8 +12,8 @@ The reference for the Effect idiom is
    DOM, or can fail is a `Context.Service` with a `static layer`.
 2. **Every fallible operation returns an `Effect`.** The error channel names the
    failure. There is no `throw` and no rejected `Promise` in `src/`.
-3. **Every error is a value.** Declare it with `Schema.TaggedErrorClass`. Handle
-   it with `Effect.catchTag`, `Effect.catchTags` or `Effect.catchReason`.
+3. **Every error is a value.** Declare it with `Schema.TaggedError`. Handle it
+   with `Effect.catchTag`, `Effect.catchTags` or `Effect.catchReason`.
 4. **No `any`.** Untrusted input is `unknown`, and `Schema` decodes it.
 5. **No `Promise` and no `async`.** A browser API that gives a promise is
    wrapped once, at the edge, with `Effect.tryPromise` or `Effect.callback`.
@@ -197,9 +197,8 @@ says where that path is used.
 
 ## 6. Errors
 
-Every error is a `Schema.TaggedErrorClass`. A `reason` field is used when the
-callers treat the variants the same way, and a separate class is used when they
-do not.
+Every error is a `Schema.TaggedError`. A `reason` field is used when the callers
+treat the variants the same way, and a separate class is used when they do not.
 
 | Error            | Raised by               | Reasons                                                            |
 | ---------------- | ----------------------- | ------------------------------------------------------------------ |

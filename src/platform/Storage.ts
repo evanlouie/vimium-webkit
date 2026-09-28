@@ -86,7 +86,7 @@ export const StorageDirection = Schema.Literals(["read", "write"]);
 
 export type StorageDirection = typeof StorageDirection.Type;
 
-export class StorageError extends Schema.TaggedErrorClass<StorageError>()(
+export class StorageError extends Schema.TaggedError<StorageError>()(
   "StorageError",
   {
     reason: StorageFailureReason,

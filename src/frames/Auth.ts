@@ -98,7 +98,7 @@ export const FrameAuthFailureReason = Schema.Literals([
 
 export type FrameAuthFailureReason = typeof FrameAuthFailureReason.Type;
 
-export class FrameAuthError extends Schema.TaggedErrorClass<FrameAuthError>()(
+export class FrameAuthError extends Schema.TaggedError<FrameAuthError>()(
   "FrameAuthError",
   {
     reason: FrameAuthFailureReason,

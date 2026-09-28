@@ -18,7 +18,7 @@ import { Dom } from "./Dom.ts";
 export const FrameId = Schema.String.pipe(Schema.brand("FrameId"));
 export type FrameId = typeof FrameId.Type;
 
-export class RealmError extends Schema.TaggedErrorClass<RealmError>()(
+export class RealmError extends Schema.TaggedError<RealmError>()(
   "RealmError",
   { detail: Schema.String },
 ) {}

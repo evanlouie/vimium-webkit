@@ -284,19 +284,19 @@ is composed with NFC first, so `é` is one character however it was pasted.
 
 A character is refused when it is one of these:
 
-| Refused                            | Example              | Why                                         |
-| ---------------------------------- | -------------------- | ------------------------------------------- |
-| a variation selector               | the U+FE0F in `❤️`    | it draws nothing, so the label is invisible |
-| a zero width joiner                | the joiner in `👨‍👩` | the same                                    |
-| a combining mark                   | a combining acute    | it draws on the character before it         |
-| a Hangul jamo                      | `ᄀ` or `ᅡ`           | it can compose with an adjacent jamo        |
-| a regional indicator               | the letters in `🇩🇪`  | two indicators draw as one flag             |
-| an emoji modifier                  | the tone in `👍🏽`   | it joins the emoji before it                |
-| a control or format character      | a soft hyphen        | it has no shape                             |
-| white space                        | a no-break space     | the label looks empty                       |
-| half of a surrogate pair           | a cut emoji          | it is half of a character                   |
-| a character that a case fold grows | `ß`, `İ`, `ﬁ`        | the label would need two keystrokes         |
-| a repeat of an earlier character   | `a` and `A`          | two links would show one label              |
+| Refused                            | Example             | Why                                         |
+| ---------------------------------- | ------------------- | ------------------------------------------- |
+| a variation selector               | the U+FE0F in `❤️`  | it draws nothing, so the label is invisible |
+| a zero width joiner                | the joiner in `👨‍👩`  | the same                                    |
+| a combining mark                   | a combining acute   | it draws on the character before it         |
+| a Hangul jamo                      | `ᄀ` or `ᅡ`          | it can compose with an adjacent jamo        |
+| a regional indicator               | the letters in `🇩🇪` | two indicators draw as one flag             |
+| an emoji modifier                  | the tone in `👍🏽`    | it joins the emoji before it                |
+| a control or format character      | a soft hyphen       | it has no shape                             |
+| white space                        | a no-break space    | the label looks empty                       |
+| half of a surrogate pair           | a cut emoji         | it is half of a character                   |
+| a character that a case fold grows | `ß`, `İ`, `ﬁ`       | the label would need two keystrokes         |
+| a repeat of an earlier character   | `a` and `A`         | two links would show one label              |
 
 A refused character is dropped, and the rest of your set stays in use. A joined
 symbol that uses a join control refuses the complete set. Thus, a family emoji
@@ -350,14 +350,14 @@ for.
 `o` opens a completion overlay. It is deliberately **not** a ⌘L clone, because
 the two APIs that would make it one do not exist for a userscript:
 
-| Source             | Availability                                                  |
-| ------------------ | ------------------------------------------------------------- |
-| Commands (`:`)     | ✅ Full parity, including greyed-out Tier C entries           |
-| Search engines     | ✅ Vimium-compatible `keyword: url %s Description` config     |
+| Source             | Availability                                                   |
+| ------------------ | -------------------------------------------------------------- |
+| Commands (`:`)     | ✅ Full parity, including greyed-out Tier C entries            |
+| Search engines     | ✅ Vimium-compatible `keyword: url %s Description` config      |
 | Search suggestions | ⚠️ **Opt-in, off by default** — see below                      |
 | Local history      | ⚠️ **Opt-in, off by default** — see below                      |
-| Browser history    | ❌ No `chrome.history`                                        |
-| Bookmarks          | ❌ No `chrome.bookmarks`                                      |
+| Browser history    | ❌ No `chrome.history`                                         |
+| Bookmarks          | ❌ No `chrome.bookmarks`                                       |
 | Open tabs          | ⚠️ Only tabs _we_ opened, labelled "Recent" rather than "Tabs" |
 
 > [!WARNING]

@@ -171,7 +171,7 @@ export const FrameFailureReason = Schema.Literals([
 
 export type FrameFailureReason = typeof FrameFailureReason.Type;
 
-export class FrameError extends Schema.TaggedErrorClass<FrameError>()(
+export class FrameError extends Schema.TaggedError<FrameError>()(
   "FrameError",
   {
     reason: FrameFailureReason,

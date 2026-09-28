@@ -56,7 +56,7 @@ import { Ui } from "~/ui/Ui.ts";
  * Anything below a warning is noise in another person's developer tools.
  */
 const Observability = Layer.mergeAll(
-  Logger.layer([Logger.consolePretty()]),
+  Logger.layer([Logger.consolePrettyBrowser()]),
   Layer.succeed(References.MinimumLogLevel, "Warn"),
   /**
    * Tracing is off.

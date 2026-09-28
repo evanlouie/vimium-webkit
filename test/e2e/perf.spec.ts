@@ -88,6 +88,9 @@ test.describe("performance", () => {
         // oxlint-disable-next-line no-await-in-loop
         const ms = await frame.evaluate((code) => {
           const started = performance.now();
+          // Evaluating the artefact is what this test measures. The indirect
+          // form runs it in global scope, as a manager does.
+          // oxlint-disable-next-line no-eval
           (0, eval)(code);
           return performance.now() - started;
         }, source).catch(() => null);
