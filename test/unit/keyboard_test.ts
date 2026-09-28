@@ -5,14 +5,15 @@
  * `Report` layers. `Settings`, `Mappings` and `Exclusions` are stubs, because a
  * test decides what the user configured. Nothing here writes to a global.
  *
- * Node has no `KeyboardEvent`, so a test presses a plain object that carries
- * every field that the key path reads. The path never asks for more than that:
- * `domain/Key.ts` declares the shape as `KeyEventLike`, and the handler stack
- * only calls `preventDefault` and `stopImmediatePropagation`.
+ * Node has no `KeyboardEvent`, and no script can make a trusted one, so a test
+ * presses a double of its own. The double is a whole `KeyboardEvent`. A test
+ * chooses the fields that the key path reads, and the rest are the values of a
+ * plain event. The handler stack only calls `preventDefault` and
+ * `stopImmediatePropagation`, and the double records both.
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer, Ref, Stream, SubscriptionRef, Record, pipe } from "effect";
+import { Array, Effect, Layer, Ref, Stream, SubscriptionRef, Record, pipe } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Exclusions } from "~/core/Exclusions.ts";
 import { HandlerStack } from "~/core/HandlerStack.ts";
@@ -21,7 +22,7 @@ import { Mappings } from "~/core/Mappings.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
-import { COMMANDS } from "~/domain/Command.ts";
+import { COMMANDS, type CommandName } from "~/domain/Command.ts";
 import { type EffectiveRule, FULLY_ENABLED } from "~/domain/Exclusion.ts";
 import { compileMappings } from "~/domain/Mapping.ts";
 import { defaultSettings, type Settings as SettingsData } from "~/domain/Persisted.ts";
@@ -44,29 +45,45 @@ interface PressOptions {
   readonly keyCode?: number;
 }
 
-/** Everything that the key path reads from a `KeyboardEvent`. */
-class Press {
-  readonly key: string;
-  readonly code: string;
-  readonly isTrusted: boolean;
-  readonly ctrlKey: boolean;
-  readonly shiftKey: boolean;
-  readonly altKey: boolean;
-  readonly keyCode: number | undefined;
-  readonly metaKey = false;
-  readonly isComposing = false;
+/**
+ * Every member of a `UIEvent`, with the values of a plain event.
+ *
+ * `defaultPrevented` and `propagationStopped` record what the handler stack
+ * did to the event.
+ */
+class UiEventDouble implements UIEvent {
+  readonly bubbles = true;
+  cancelBubble = false;
+  readonly cancelable = true;
+  readonly composed = true;
+  readonly currentTarget = null;
   defaultPrevented = false;
+  readonly eventPhase = 0;
+  returnValue = true;
+  readonly srcElement = null;
+  readonly target = null;
+  readonly timeStamp = 0;
+  readonly detail = 0;
+  readonly view = null;
+  readonly which = 0;
+  readonly NONE = 0;
+  readonly CAPTURING_PHASE = 1;
+  readonly AT_TARGET = 2;
+  readonly BUBBLING_PHASE = 3;
   propagationStopped = false;
 
-  constructor(key: string, options: PressOptions = {}) {
-    this.key = key;
-    this.code = options.code ?? `Key${key.toUpperCase()}`;
-    this.isTrusted = options.isTrusted ?? true;
-    this.ctrlKey = options.ctrlKey ?? false;
-    this.shiftKey = options.shiftKey ?? false;
-    this.altKey = options.altKey ?? false;
-    this.keyCode = options.keyCode;
+  constructor(
+    readonly type: string,
+    readonly isTrusted: boolean,
+  ) {}
+
+  composedPath(): EventTarget[] {
+    return [];
   }
+
+  initEvent(): void {}
+
+  initUIEvent(): void {}
 
   preventDefault(): void {
     this.defaultPrevented = true;
@@ -75,13 +92,53 @@ class Press {
   stopImmediatePropagation(): void {
     this.propagationStopped = true;
   }
+
+  stopPropagation(): void {}
 }
 
-/** The cast names what the object already is: everything the path reads. */
-const asEvent = (press: Press): KeyboardEvent => press as unknown as KeyboardEvent;
+/** A pressed key. `keyCode` is `0` when a test gives none, as for a key with no code. */
+class Press extends UiEventDouble implements KeyboardEvent {
+  readonly key: string;
+  readonly code: string;
+  readonly ctrlKey: boolean;
+  readonly shiftKey: boolean;
+  readonly altKey: boolean;
+  readonly keyCode: number;
+  readonly metaKey = false;
+  readonly isComposing = false;
+  readonly repeat = false;
+  readonly charCode = 0;
+  readonly location = 0;
+  readonly DOM_KEY_LOCATION_STANDARD = 0;
+  readonly DOM_KEY_LOCATION_LEFT = 1;
+  readonly DOM_KEY_LOCATION_RIGHT = 2;
+  readonly DOM_KEY_LOCATION_NUMPAD = 3;
+
+  constructor(key: string, options: PressOptions = {}) {
+    super("keydown", options.isTrusted ?? true);
+    this.key = key;
+    this.code = options.code ?? `Key${key.toUpperCase()}`;
+    this.ctrlKey = options.ctrlKey ?? false;
+    this.shiftKey = options.shiftKey ?? false;
+    this.altKey = options.altKey ?? false;
+    this.keyCode = options.keyCode ?? 0;
+  }
+
+  getModifierState(): boolean {
+    return false;
+  }
+
+  initKeyboardEvent(): void {}
+}
 
 /** A focus event. Normal mode reads nothing from it. */
-const asFocus = (): FocusEvent => ({}) as unknown as FocusEvent;
+class Focus extends UiEventDouble implements FocusEvent {
+  readonly relatedTarget = null;
+
+  constructor() {
+    super("focus", true);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // The layers
@@ -104,35 +161,32 @@ const mappingsOf = (source: string): Layer.Layer<Mappings> =>
     });
   });
 
-const settingsOf = (patch: Partial<SettingsData>): Layer.Layer<Settings> =>
-  Layer.sync(Settings, () => {
-    const data: SettingsData = { ...defaultSettings(), ...patch };
-    return Settings.of({
+const settingsOf = (data: SettingsData): Layer.Layer<Settings> =>
+  Layer.sync(Settings, () =>
+    Settings.of({
       current: Effect.succeed(data),
       currentUnsafe: () => data,
       changes: Stream.make(data),
       save: (next) => Effect.succeed(next),
       patch: (change) => Effect.succeed(change(data)),
       reload: Effect.succeed(data),
-    });
-  });
+    }),
+  );
 
 const exclusionsOf = (rule: EffectiveRule): Layer.Layer<Exclusions> =>
-  Layer.effect(
-    Exclusions,
-    pipe(
-      SubscriptionRef.make(rule),
-      Effect.map((effective) =>
-        Exclusions.of({
-          effective,
-          effectiveUnsafe: () => rule,
-          resolveLocal: Effect.succeed(rule),
-          match: () => Effect.succeed(rule),
-          adopt: () => Effect.void,
-          isEnabled: Effect.succeed(rule.enabled),
-        }),
-      ),
+  pipe(
+    SubscriptionRef.make(rule),
+    Effect.map((effective) =>
+      Exclusions.of({
+        effective,
+        effectiveUnsafe: () => rule,
+        resolveLocal: Effect.succeed(rule),
+        match: () => Effect.succeed(rule),
+        adopt: () => Effect.void,
+        isEnabled: Effect.succeed(rule.enabled),
+      }),
     ),
+    Layer.effect(Exclusions),
   );
 
 /**
@@ -176,7 +230,7 @@ const capabilitiesOf = (applePlatform: boolean): Layer.Layer<Capabilities> =>
 
 interface Options {
   readonly mappings: string;
-  readonly settings?: Partial<SettingsData>;
+  readonly settings?: SettingsData;
   readonly exclusion?: EffectiveRule;
   /** macOS, iOS or iPadOS. It changes the reading of an Option chord. */
   readonly applePlatform?: boolean;
@@ -195,7 +249,7 @@ const layerFor = (options: Options): Layer.Layer<Commands | HandlerStack | Keybo
     capabilitiesOf(options.applePlatform ?? false),
     Layer.provideMerge(Modes.layer, HandlerStack.layer),
     Layer.provideMerge(Realm.layer, Dom.layer),
-    settingsOf(options.settings ?? {}),
+    settingsOf(options.settings ?? defaultSettings()),
     exclusionsOf(options.exclusion ?? FULLY_ENABLED),
     mappingsOf(options.mappings),
   );
@@ -203,15 +257,19 @@ const layerFor = (options: Options): Layer.Layer<Commands | HandlerStack | Keybo
 };
 
 /** Register a body for each command that a test maps, and record every call. */
-const recorder = Effect.fn("recorder")(function* (names: readonly string[]) {
+const recorder = Effect.fn("recorder")(function* (names: ReadonlyArray<CommandName>) {
   const commands = yield* Commands;
   const calls = yield* Ref.make<readonly string[]>([]);
-  for (const name of names) {
-    // The cast is the catalogue's own key type; the list comes from a test.
-    yield* commands.register(name as Parameters<typeof commands.register>[0], ({ count }) =>
-      Ref.update(calls, (current) => [...current, `${name}:${count}`]),
-    );
-  }
+  yield* pipe(
+    names,
+    Effect.forEach(
+      (name) =>
+        commands.register(name, ({ count }) =>
+          pipe(calls, Ref.update(Array.append(`${name}:${count}`))),
+        ),
+      { discard: true },
+    ),
+  );
   return calls;
 });
 
@@ -236,7 +294,7 @@ describe("Keyboard", () => {
             keyCode: 70,
             altKey: true,
           });
-          yield* stack.bubble("keydown", asEvent(press));
+          yield* stack.bubble("keydown", press);
 
           assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
         }),
@@ -262,7 +320,7 @@ describe("Keyboard", () => {
             keyCode: 65,
             altKey: true,
           });
-          yield* stack.bubble("keydown", asEvent(press));
+          yield* stack.bubble("keydown", press);
 
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
         }),
@@ -284,7 +342,7 @@ describe("Keyboard", () => {
           const calls = yield* recorder(["scrollDown"]);
 
           const press = new Press("j", { isTrusted: false });
-          const toPage = yield* stack.bubble("keydown", asEvent(press));
+          const toPage = yield* stack.bubble("keydown", press);
 
           assert.deepEqual(yield* Ref.get(calls), []);
           // The page made the event, so the page keeps it.
@@ -301,12 +359,12 @@ describe("Keyboard", () => {
           const stack = yield* HandlerStack;
           const calls = yield* recorder(["scrollToTop"]);
 
-          yield* stack.bubble("keydown", asEvent(new Press("g")));
-          yield* stack.bubble("keydown", asEvent(new Press("g", { isTrusted: false })));
+          yield* stack.bubble("keydown", new Press("g"));
+          yield* stack.bubble("keydown", new Press("g", { isTrusted: false }));
           assert.deepEqual(yield* Ref.get(calls), []);
 
           // The true key still completes the sequence that the user typed.
-          yield* stack.bubble("keydown", asEvent(new Press("g")));
+          yield* stack.bubble("keydown", new Press("g"));
           assert.deepEqual(yield* Ref.get(calls), ["scrollToTop:1"]);
         }),
         Effect.provide(layerFor({ mappings: "map gg scrollToTop" })),
@@ -320,10 +378,10 @@ describe("Keyboard", () => {
           yield* recorder(["scrollDown"]);
 
           // A true press, so that the release of `KeyJ` is one that we took.
-          yield* stack.bubble("keydown", asEvent(new Press("j")));
+          yield* stack.bubble("keydown", new Press("j"));
 
           const release = new Press("j", { isTrusted: false });
-          const toPage = yield* stack.bubble("keyup", asEvent(release));
+          const toPage = yield* stack.bubble("keyup", release);
 
           assert.isTrue(toPage);
           assert.isFalse(release.propagationStopped);
@@ -339,7 +397,7 @@ describe("Keyboard", () => {
           const calls = yield* recorder(["scrollDown"]);
 
           const press = new Press("j");
-          const toPage = yield* stack.bubble("keydown", asEvent(press));
+          const toPage = yield* stack.bubble("keydown", press);
 
           assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
           assert.isFalse(toPage);
@@ -368,10 +426,10 @@ describe("Keyboard", () => {
           const stack = yield* HandlerStack;
           const calls = yield* recorder(["scrollUp", "scrollToTop", "scrollDown"]);
 
-          yield* stack.bubble("keydown", asEvent(new Press("g")));
+          yield* stack.bubble("keydown", new Press("g"));
           assert.deepEqual(yield* Ref.get(calls), []);
 
-          yield* stack.bubble("keydown", asEvent(new Press("g")));
+          yield* stack.bubble("keydown", new Press("g"));
           assert.deepEqual(yield* Ref.get(calls), ["scrollToTop:1"]);
         }),
         Effect.provide(prefixLayer),
@@ -384,8 +442,8 @@ describe("Keyboard", () => {
           const stack = yield* HandlerStack;
           const calls = yield* recorder(["scrollUp", "scrollToTop", "scrollDown"]);
 
-          yield* stack.bubble("keydown", asEvent(new Press("g")));
-          yield* stack.bubble("keydown", asEvent(new Press("j")));
+          yield* stack.bubble("keydown", new Press("g"));
+          yield* stack.bubble("keydown", new Press("j"));
 
           // `g` ran, and `j` then started a sequence of its own.
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1", "scrollDown:1"]);
@@ -400,9 +458,9 @@ describe("Keyboard", () => {
           const stack = yield* HandlerStack;
           const calls = yield* recorder(["scrollUp", "scrollToTop", "scrollDown"]);
 
-          yield* stack.bubble("keydown", asEvent(new Press("g")));
+          yield* stack.bubble("keydown", new Press("g"));
           const stray = new Press("x");
-          const toPage = yield* stack.bubble("keydown", asEvent(stray));
+          const toPage = yield* stack.bubble("keydown", stray);
 
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
           // The sequence is over, so the key that ended it belongs to the page.
@@ -420,14 +478,12 @@ describe("Keyboard", () => {
 
           yield* stack.bubble(
             "keydown",
-            asEvent(
-              new Press("3", {
-                code: "Digit3",
-              }),
-            ),
+            new Press("3", {
+              code: "Digit3",
+            }),
           );
-          yield* stack.bubble("keydown", asEvent(new Press("g")));
-          yield* stack.bubble("keydown", asEvent(new Press("j")));
+          yield* stack.bubble("keydown", new Press("g"));
+          yield* stack.bubble("keydown", new Press("j"));
 
           // The count belongs to the binding that the user typed it in front of.
           // The key that ends the sequence starts a count of its own.
@@ -443,18 +499,16 @@ describe("Keyboard", () => {
           const stack = yield* HandlerStack;
           const calls = yield* recorder(["scrollUp", "scrollToTop", "scrollDown"]);
 
-          yield* stack.bubble("keydown", asEvent(new Press("g")));
+          yield* stack.bubble("keydown", new Press("g"));
           yield* stack.bubble(
             "keydown",
-            asEvent(
-              new Press("2", {
-                code: "Digit2",
-              }),
-            ),
+            new Press("2", {
+              code: "Digit2",
+            }),
           );
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
 
-          yield* stack.bubble("keydown", asEvent(new Press("j")));
+          yield* stack.bubble("keydown", new Press("j"));
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1", "scrollDown:2"]);
         }),
         Effect.provide(prefixLayer),
@@ -469,9 +523,9 @@ describe("Keyboard", () => {
 
           // The count and the focus reset meet here. The indicator showed `5`,
           // and the reset takes the count away with the keys.
-          yield* stack.bubble("keydown", asEvent(new Press("5", { code: "Digit5" })));
-          yield* stack.bubble("focus", asFocus());
-          yield* stack.bubble("keydown", asEvent(new Press("j")));
+          yield* stack.bubble("keydown", new Press("5", { code: "Digit5" }));
+          yield* stack.bubble("focus", new Focus());
+          yield* stack.bubble("keydown", new Press("j"));
 
           assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
         }),
@@ -485,11 +539,11 @@ describe("Keyboard", () => {
           const stack = yield* HandlerStack;
           const calls = yield* recorder(["scrollUp", "scrollToTop", "scrollDown"]);
 
-          yield* stack.bubble("keydown", asEvent(new Press("g")));
+          yield* stack.bubble("keydown", new Press("g"));
           // The user clicks a text field. Insert mode takes the keys, and this
           // half-typed sequence is over.
-          yield* stack.bubble("focus", asFocus());
-          yield* stack.bubble("keydown", asEvent(new Press("j")));
+          yield* stack.bubble("focus", new Focus());
+          yield* stack.bubble("keydown", new Press("j"));
 
           assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
         }),
@@ -505,11 +559,11 @@ describe("Keyboard", () => {
 
           // `ab` is a prefix of `abc` and carries no binding of its own, so the
           // binding on `a` must survive the second key.
-          yield* stack.bubble("keydown", asEvent(new Press("a")));
-          yield* stack.bubble("keydown", asEvent(new Press("b")));
+          yield* stack.bubble("keydown", new Press("a"));
+          yield* stack.bubble("keydown", new Press("b"));
           assert.deepEqual(yield* Ref.get(calls), []);
 
-          yield* stack.bubble("keydown", asEvent(new Press("x")));
+          yield* stack.bubble("keydown", new Press("x"));
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
         }),
         Effect.provide(
@@ -531,7 +585,7 @@ describe("Keyboard", () => {
       const overlapping = ["map a scrollUp", "map abc scrollToTop", "map b scrollDown"].join("\n");
 
       const overlappingLayer = layerFor({ mappings: overlapping });
-      const names = ["scrollUp", "scrollToTop", "scrollDown"];
+      const names: ReadonlyArray<CommandName> = ["scrollUp", "scrollToTop", "scrollDown"];
 
       it.effect("runs the binding that the first key accepted", () =>
         pipe(
@@ -539,9 +593,9 @@ describe("Keyboard", () => {
             const stack = yield* HandlerStack;
             const calls = yield* recorder(names);
 
-            yield* stack.bubble("keydown", asEvent(new Press("a")));
-            yield* stack.bubble("keydown", asEvent(new Press("b")));
-            yield* stack.bubble("keydown", asEvent(new Press("x")));
+            yield* stack.bubble("keydown", new Press("a"));
+            yield* stack.bubble("keydown", new Press("b"));
+            yield* stack.bubble("keydown", new Press("x"));
 
             // `b` was part of the attempt at `abc`, so only `a` runs.
             assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
@@ -556,9 +610,9 @@ describe("Keyboard", () => {
             const stack = yield* HandlerStack;
             const calls = yield* recorder(names);
 
-            yield* stack.bubble("keydown", asEvent(new Press("a")));
-            yield* stack.bubble("keydown", asEvent(new Press("b")));
-            yield* stack.bubble("keydown", asEvent(new Press("c")));
+            yield* stack.bubble("keydown", new Press("a"));
+            yield* stack.bubble("keydown", new Press("b"));
+            yield* stack.bubble("keydown", new Press("c"));
 
             assert.deepEqual(yield* Ref.get(calls), ["scrollToTop:1"]);
           }),
@@ -572,7 +626,7 @@ describe("Keyboard", () => {
             const stack = yield* HandlerStack;
             const calls = yield* recorder(names);
 
-            yield* stack.bubble("keydown", asEvent(new Press("b")));
+            yield* stack.bubble("keydown", new Press("b"));
 
             assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
           }),
@@ -587,10 +641,10 @@ describe("Keyboard", () => {
             const calls = yield* recorder(names);
 
             // The count, the accepted binding and the root restart meet here.
-            yield* stack.bubble("keydown", asEvent(new Press("2", { code: "Digit2" })));
-            yield* stack.bubble("keydown", asEvent(new Press("a")));
-            yield* stack.bubble("keydown", asEvent(new Press("b")));
-            yield* stack.bubble("keydown", asEvent(new Press("x")));
+            yield* stack.bubble("keydown", new Press("2", { code: "Digit2" }));
+            yield* stack.bubble("keydown", new Press("a"));
+            yield* stack.bubble("keydown", new Press("b"));
+            yield* stack.bubble("keydown", new Press("x"));
 
             // The count belongs to `a`, and `b` did not start a count of its own.
             assert.deepEqual(yield* Ref.get(calls), ["scrollUp:2"]);
@@ -605,17 +659,17 @@ describe("Keyboard", () => {
             const stack = yield* HandlerStack;
             const calls = yield* recorder(names);
 
-            yield* stack.bubble("keydown", asEvent(new Press("a")));
-            yield* stack.bubble("keydown", asEvent(new Press("b")));
+            yield* stack.bubble("keydown", new Press("a"));
+            yield* stack.bubble("keydown", new Press("b"));
             const escape = new Press("Escape", { code: "Escape" });
-            const toPage = yield* stack.bubble("keydown", asEvent(escape));
+            const toPage = yield* stack.bubble("keydown", escape);
 
             // Escape ends the attempt. It runs nothing, and it stays with us.
             assert.deepEqual(yield* Ref.get(calls), []);
             assert.isFalse(toPage);
 
             // The state is clean, so the next key starts a sequence of its own.
-            yield* stack.bubble("keydown", asEvent(new Press("b")));
+            yield* stack.bubble("keydown", new Press("b"));
             assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
           }),
           Effect.provide(overlappingLayer),
@@ -632,7 +686,7 @@ describe("Keyboard", () => {
      * binding of the branch that lived longest runs.
      */
     describe("an accepted binding that belongs to a branch", () => {
-      const names = ["scrollUp", "scrollToTop", "scrollLeft"];
+      const names: ReadonlyArray<CommandName> = ["scrollUp", "scrollToTop", "scrollLeft"];
 
       it.effect("keeps the binding of the branch that lived longest", () =>
         pipe(
@@ -642,10 +696,10 @@ describe("Keyboard", () => {
 
             // `c` opens `bc`, which is one key deep and carries `scrollLeft`. The
             // attempt at `abcd` is deeper, and it accepted `scrollUp` at `ab`.
-            yield* stack.bubble("keydown", asEvent(new Press("a")));
-            yield* stack.bubble("keydown", asEvent(new Press("b")));
-            yield* stack.bubble("keydown", asEvent(new Press("c")));
-            yield* stack.bubble("keydown", asEvent(new Press("x")));
+            yield* stack.bubble("keydown", new Press("a"));
+            yield* stack.bubble("keydown", new Press("b"));
+            yield* stack.bubble("keydown", new Press("c"));
+            yield* stack.bubble("keydown", new Press("x"));
 
             assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
           }),
@@ -673,10 +727,10 @@ describe("Keyboard", () => {
               const stack = yield* HandlerStack;
               const calls = yield* recorder(names);
 
-              yield* stack.bubble("keydown", asEvent(new Press("a")));
-              yield* stack.bubble("keydown", asEvent(new Press("b")));
-              yield* stack.bubble("keydown", asEvent(new Press("c")));
-              yield* stack.bubble("keydown", asEvent(new Press("x")));
+              yield* stack.bubble("keydown", new Press("a"));
+              yield* stack.bubble("keydown", new Press("b"));
+              yield* stack.bubble("keydown", new Press("c"));
+              yield* stack.bubble("keydown", new Press("x"));
 
               // `scrollUp` died at `c`, and `bcd` accepted nothing.
               assert.deepEqual(yield* Ref.get(calls), []);
@@ -691,10 +745,10 @@ describe("Keyboard", () => {
               const stack = yield* HandlerStack;
               const calls = yield* recorder(names);
 
-              yield* stack.bubble("keydown", asEvent(new Press("a")));
-              yield* stack.bubble("keydown", asEvent(new Press("b")));
-              yield* stack.bubble("keydown", asEvent(new Press("c")));
-              yield* stack.bubble("keydown", asEvent(new Press("d")));
+              yield* stack.bubble("keydown", new Press("a"));
+              yield* stack.bubble("keydown", new Press("b"));
+              yield* stack.bubble("keydown", new Press("c"));
+              yield* stack.bubble("keydown", new Press("d"));
 
               // The single slot gave this answer as well, so this test holds
               // before the branch model and after it. It is here because the two
@@ -720,7 +774,7 @@ describe("Keyboard", () => {
           mappings: ["map abz scrollToTop", "map b scrollDown", "map bz scrollLeft"].join("\n"),
         });
 
-        const unevenNames = ["scrollToTop", "scrollDown", "scrollLeft"];
+        const unevenNames: ReadonlyArray<CommandName> = ["scrollToTop", "scrollDown", "scrollLeft"];
 
         it.effect("drops a shallower dead branch that holds a binding", () =>
           pipe(
@@ -728,10 +782,10 @@ describe("Keyboard", () => {
               const stack = yield* HandlerStack;
               const calls = yield* recorder(unevenNames);
 
-              yield* stack.bubble("keydown", asEvent(new Press("a")));
-              yield* stack.bubble("keydown", asEvent(new Press("b")));
+              yield* stack.bubble("keydown", new Press("a"));
+              yield* stack.bubble("keydown", new Press("b"));
               const stray = new Press("x");
-              yield* stack.bubble("keydown", asEvent(stray));
+              yield* stack.bubble("keydown", stray);
 
               // The deepest dead branch decides, and it accepted nothing.
               assert.deepEqual(yield* Ref.get(calls), []);
@@ -751,8 +805,8 @@ describe("Keyboard", () => {
               // The same keys with no `a` in front. The branch `b` is then the
               // only one, so its binding runs. The pair of tests shows that the
               // depth alone decides in the test above.
-              yield* stack.bubble("keydown", asEvent(new Press("b")));
-              yield* stack.bubble("keydown", asEvent(new Press("x")));
+              yield* stack.bubble("keydown", new Press("b"));
+              yield* stack.bubble("keydown", new Press("x"));
 
               assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
             }),
@@ -776,9 +830,9 @@ describe("Keyboard", () => {
           const stack = yield* HandlerStack;
           const calls = yield* recorder(["scrollDown"]);
 
-          yield* stack.bubble("keydown", asEvent(new Press("5", { code: "Digit5" })));
+          yield* stack.bubble("keydown", new Press("5", { code: "Digit5" }));
           const stray = new Press("x");
-          const toPage = yield* stack.bubble("keydown", asEvent(stray));
+          const toPage = yield* stack.bubble("keydown", stray);
 
           // The count made this key part of a half-typed command. The user is
           // in the middle of a sequence, so the page must not see the key.
@@ -787,7 +841,7 @@ describe("Keyboard", () => {
           assert.deepEqual(yield* Ref.get(calls), []);
 
           // The stray key ended the count, so the next key counts as one.
-          yield* stack.bubble("keydown", asEvent(new Press("j")));
+          yield* stack.bubble("keydown", new Press("j"));
           assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
         }),
         Effect.provide(layerFor({ mappings: "map j scrollDown" })),
@@ -802,13 +856,13 @@ describe("Keyboard", () => {
 
           // The user gave `j` to the page, so `j` alone goes to the page.
           const promised = new Press("j");
-          assert.isTrue(yield* stack.bubble("keydown", asEvent(promised)));
+          assert.isTrue(yield* stack.bubble("keydown", promised));
           assert.isFalse(promised.defaultPrevented);
           assert.deepEqual(yield* Ref.get(calls), []);
 
-          yield* stack.bubble("keydown", asEvent(new Press("3", { code: "Digit3" })));
+          yield* stack.bubble("keydown", new Press("3", { code: "Digit3" }));
           const ours = new Press("j");
-          const toPage = yield* stack.bubble("keydown", asEvent(ours));
+          const toPage = yield* stack.bubble("keydown", ours);
 
           // The count started a sequence, so the pass rule no longer applies.
           assert.deepEqual(yield* Ref.get(calls), ["scrollDown:3"]);
@@ -839,9 +893,9 @@ describe("Keyboard", () => {
           const stack = yield* HandlerStack;
           const calls = yield* recorder(["scrollUp", "scrollToTop", "scrollDown"]);
 
-          yield* stack.bubble("keydown", asEvent(new Press("g")));
+          yield* stack.bubble("keydown", new Press("g"));
           const promised = new Press("j");
-          const toPage = yield* stack.bubble("keydown", asEvent(promised));
+          const toPage = yield* stack.bubble("keydown", promised);
 
           // `g` ran, because the sequence ended. `j` belongs to the page, and
           // the user promised it before any of this.
@@ -870,14 +924,15 @@ describe("Keyboard", () => {
           // counter must hold the pass before the next key is read.
           yield* commands.register("passNextKey", ({ count }) =>
             pipe(
-              Ref.update(calls, (current) => [...current, `passNextKey:${count}`]),
+              calls,
+              Ref.update(Array.append(`passNextKey:${count}`)),
               Effect.andThen(keyboard.passNextKey(count)),
             ),
           );
 
-          yield* stack.bubble("keydown", asEvent(new Press("g")));
+          yield* stack.bubble("keydown", new Press("g"));
           const passed = new Press("x");
-          const toPage = yield* stack.bubble("keydown", asEvent(passed));
+          const toPage = yield* stack.bubble("keydown", passed);
 
           // `x` is the key after the command, so `x` is the key that passes.
           assert.deepEqual(yield* Ref.get(calls), ["passNextKey:1"]);
@@ -885,7 +940,7 @@ describe("Keyboard", () => {
           assert.isFalse(passed.defaultPrevented);
 
           // The counter held one pass, and `x` used it.
-          yield* stack.bubble("keydown", asEvent(new Press("x")));
+          yield* stack.bubble("keydown", new Press("x"));
           assert.deepEqual(yield* Ref.get(calls), ["passNextKey:1", "scrollDown:1"]);
         }),
         Effect.provide(
@@ -906,24 +961,25 @@ describe("Keyboard", () => {
 
           yield* commands.register("passNextKey", ({ count }) =>
             pipe(
-              Ref.update(calls, (current) => [...current, `passNextKey:${count}`]),
+              calls,
+              Ref.update(Array.append(`passNextKey:${count}`)),
               Effect.andThen(keyboard.passNextKey(count)),
             ),
           );
 
           // The count, the accepted binding and the pass counter meet here.
-          yield* stack.bubble("keydown", asEvent(new Press("2", { code: "Digit2" })));
-          yield* stack.bubble("keydown", asEvent(new Press("g")));
+          yield* stack.bubble("keydown", new Press("2", { code: "Digit2" }));
+          yield* stack.bubble("keydown", new Press("g"));
 
           // `x` ends the sequence, so it is the first of the two keys that pass.
           const first = new Press("x");
-          assert.isTrue(yield* stack.bubble("keydown", asEvent(first)));
+          assert.isTrue(yield* stack.bubble("keydown", first));
           assert.isFalse(first.defaultPrevented);
-          assert.isTrue(yield* stack.bubble("keydown", asEvent(new Press("x"))));
+          assert.isTrue(yield* stack.bubble("keydown", new Press("x")));
           assert.deepEqual(yield* Ref.get(calls), ["passNextKey:2"]);
 
           // The counter is spent, so the third `x` is ours again.
-          yield* stack.bubble("keydown", asEvent(new Press("x")));
+          yield* stack.bubble("keydown", new Press("x"));
           assert.deepEqual(yield* Ref.get(calls), ["passNextKey:2", "scrollDown:1"]);
         }),
         Effect.provide(
@@ -944,13 +1000,13 @@ describe("Keyboard", () => {
 
           yield* commands.register("passNextKey", ({ count }) => keyboard.passNextKey(count));
 
-          yield* stack.bubble("keydown", asEvent(new Press("p")));
+          yield* stack.bubble("keydown", new Press("p"));
           // The focus reset ends a half-typed sequence. The promise to give one
           // key to the page is not a half-typed sequence, so it stands.
-          yield* stack.bubble("focus", asFocus());
+          yield* stack.bubble("focus", new Focus());
 
           const promised = new Press("j");
-          const toPage = yield* stack.bubble("keydown", asEvent(promised));
+          const toPage = yield* stack.bubble("keydown", promised);
           assert.isTrue(toPage);
           assert.isFalse(promised.defaultPrevented);
           assert.deepEqual(yield* Ref.get(calls), []);
@@ -981,7 +1037,7 @@ describe("Keyboard", () => {
           const calls = yield* recorder(["scrollUp", "scrollDown"]);
 
           const press = new Press("j");
-          const toPage = yield* stack.bubble("keydown", asEvent(press));
+          const toPage = yield* stack.bubble("keydown", press);
 
           assert.deepEqual(yield* Ref.get(calls), []);
           assert.isTrue(toPage);
@@ -1003,12 +1059,12 @@ describe("Keyboard", () => {
           const calls = yield* recorder(["scrollUp", "scrollDown"]);
 
           // The user gave `k` to the page, and `j` is not `k`.
-          yield* stack.bubble("keydown", asEvent(new Press("j")));
+          yield* stack.bubble("keydown", new Press("j"));
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
 
           // The physical `k` is the one that the page keeps.
           const kept = new Press("k");
-          const toPage = yield* stack.bubble("keydown", asEvent(kept));
+          const toPage = yield* stack.bubble("keydown", kept);
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
           assert.isTrue(toPage);
         }),
