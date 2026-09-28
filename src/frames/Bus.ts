@@ -49,13 +49,21 @@
  */
 
 import {
+  Array,
+  Boolean,
   Context,
+  Data,
   Deferred,
   type Duration,
   Effect,
   Exit,
+  flow,
+  HashMap,
   Layer,
+  Match,
   Option,
+  Order,
+  Predicate,
   PubSub,
   Queue,
   Ref,
@@ -66,13 +74,17 @@ import {
   pipe,
 } from "effect";
 import {
+  type ChallengeMessage,
+  challengeMessage,
   encodeMessage,
-  ENVELOPE,
   type FrameMessage,
   type FrameWire,
+  helloMessage,
+  joinMessage,
   type JoinMessage,
   MAX_SEAL_SEQUENCE,
   type MessageKind,
+  type MessageOf,
   NO_REQUEST_ID,
   parseChallenge,
   parseSealed,
@@ -83,12 +95,14 @@ import {
   REQUEST_DEADLINE_MS,
   type SealDirection,
   type SealedMessage,
+  welcomeMessage,
   type WelcomeMessage,
+  type WindowToTopMessage,
   WIRE_TARGET_ALL,
   WIRE_TARGET_TOP,
 } from "~/domain/FrameMessage.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { ANNOUNCE_MESSAGE, type FrameId, Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
+import { ANNOUNCE_MESSAGE, FrameId, Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
 import { FrameAuth, type FrameCipher } from "./Auth.ts";
 
 // ---------------------------------------------------------------------------
@@ -173,24 +187,47 @@ export class FrameError extends Schema.TaggedError<FrameError>()("FrameError", {
 }) {}
 
 // ---------------------------------------------------------------------------
-// Targets and inbound messages
+// Roles, targets and inbound messages
 // ---------------------------------------------------------------------------
 
-export type FrameTarget =
-  | { readonly _tag: "Top" }
-  | { readonly _tag: "All" }
-  | { readonly _tag: "Frame"; readonly frameId: FrameId };
+/** A variant with no fields. The type `{}` would mean any value that is not nullish. */
+type NoFields = Record<never, never>;
+
+/**
+ * What this frame is in the session.
+ *
+ * The top frame is the coordinator. It owns the session nonce, admits every
+ * other frame and relays between them. Every other frame is a member, which
+ * joins the session of the coordinator.
+ */
+export type FrameRole = Data.TaggedEnum<{
+  Coordinator: NoFields;
+  Member: NoFields;
+}>;
+
+export const FrameRole = Data.taggedEnum<FrameRole>();
+
+/** The role of a realm, which only its place in the frames tree decides. */
+const roleOf: (isTop: boolean) => FrameRole = Boolean.match({
+  onTrue: () => FrameRole.Coordinator(),
+  onFalse: () => FrameRole.Member(),
+});
+
+export type FrameTarget = Data.TaggedEnum<{
+  Top: NoFields;
+  All: NoFields;
+  Frame: { readonly frameId: FrameId };
+}>;
+
+export const FrameTarget = Data.taggedEnum<FrameTarget>();
 
 /** The coordinator. In the top frame this is the frame itself. */
-export const toTop: FrameTarget = { _tag: "Top" };
+export const toTop: FrameTarget = FrameTarget.Top();
 
 /** Every frame that this frame can reach, and not this frame. */
-export const toAll: FrameTarget = { _tag: "All" };
+export const toAll: FrameTarget = FrameTarget.All();
 
-export const toFrame = (frameId: FrameId): FrameTarget => ({
-  _tag: "Frame",
-  frameId,
-});
+export const toFrame = (frameId: FrameId): FrameTarget => FrameTarget.Frame({ frameId });
 
 /** One message that reached this frame and passed every check. */
 export interface InboundMessage {
@@ -200,6 +237,16 @@ export interface InboundMessage {
   readonly requestId: Option.Option<string>;
   readonly message: FrameMessage;
 }
+
+/** One inbound message of one kind. `serve` gives its handler this type. */
+export interface InboundOf<K extends MessageKind> extends InboundMessage {
+  readonly message: MessageOf<K>;
+}
+
+const isInboundOf =
+  <K extends MessageKind>(kind: K) =>
+  (inbound: InboundMessage): inbound is InboundOf<K> =>
+    inbound.message.kind === kind;
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -212,13 +259,17 @@ export interface InboundMessage {
  * value. The identity itself is checked by the coordinator, which compares the
  * `from` field against the port that the message came on.
  */
-const asFrameId = (value: string): FrameId => value as FrameId;
+const toFrameId = (value: string): FrameId => FrameId.make(value);
 
-const describe = (cause: unknown): string => {
-  if (cause instanceof Error) return cause.message;
-  if (typeof cause === "string") return cause;
-  return String(cause);
-};
+const toRoster: (frames: ReadonlyArray<string>) => ReadonlyArray<FrameId> = Array.map(toFrameId);
+
+const describe = (cause: unknown): string =>
+  pipe(
+    Match.value(cause),
+    Match.when(Predicate.isError, (error) => error.message),
+    Match.when(Predicate.isString, (text) => text),
+    Match.orElse((other) => String(other)),
+  );
 
 /**
  * The origin to post to.
@@ -229,7 +280,11 @@ const describe = (cause: unknown): string => {
  * we could not authenticate in any case.
  */
 const targetOrigin = (origin: string): string =>
-  origin === "null" || origin === "" ? "*" : origin;
+  pipe(
+    Match.value(origin),
+    Match.whenOr("null", "", () => "*"),
+    Match.orElse(() => origin),
+  );
 
 /**
  * Every window that `root` can reach, in document order.
@@ -243,6 +298,13 @@ const targetOrigin = (origin: string): string =>
  * The root itself is not in the list. The coordinator once treated its own
  * window as known, and a page could then post itself a `HELLO` and be admitted
  * as a frame, with the session nonce delivered straight back to it.
+ *
+ * This is an imperative loop on purpose. The coordinator walks the tree for
+ * every message that it routes, and a keystroke that a hint round relays is
+ * one of those, so the walk runs inside a `keydown` listener. A throwaway
+ * benchmark on fake frame trees measured the loop at 0.4 µs for 20 frames and
+ * 5.6 µs for 512 frames. The fastest version built from `Array` or `Iterable`
+ * stages, with a `Result.try` for each read, took 28 µs and 760 µs.
  */
 const collectFrameWindows = (root: Window): readonly Window[] => {
   const out: Window[] = [];
@@ -287,26 +349,94 @@ const collectFrameWindows = (root: Window): readonly Window[] => {
  * A frame that already belongs to the session answers neither of them. Read the
  * note at the call site.
  */
-const isAnnounceRequest = (data: unknown): boolean => {
-  if (typeof data !== "object" || data === null) return false;
-  const raw = data as Record<string, unknown>;
-  if (raw["magic"] !== WAKE_MESSAGE.magic || raw["v"] !== WAKE_MESSAGE.v) {
-    return false;
-  }
-  return raw["kind"] === WAKE_MESSAGE.kind || raw["kind"] === ANNOUNCE_MESSAGE.kind;
-};
+const isAnnounceRequest = (data: unknown): boolean =>
+  Predicate.isObject(data) &&
+  data["magic"] === WAKE_MESSAGE.magic &&
+  data["v"] === WAKE_MESSAGE.v &&
+  (data["kind"] === WAKE_MESSAGE.kind || data["kind"] === ANNOUNCE_MESSAGE.kind);
 
 /** Read the text of an opened message. A text that is not JSON is dropped. */
-const readJson = (text: string): Option.Option<unknown> => {
-  try {
-    return Option.some(JSON.parse(text) as unknown);
-  } catch {
-    return Option.none();
-  }
-};
+const readJson = (text: string): Option.Option<unknown> =>
+  pipe(
+    Result.try((): unknown => JSON.parse(text)),
+    Result.getSuccess,
+  );
+
+/** The JSON text of an outbound message. A message with no text is not sent. */
+const serialize = (message: FrameWire | WelcomeMessage): Option.Option<string> =>
+  pipe(
+    Result.try(() => JSON.stringify(message)),
+    Result.getSuccess,
+    Option.filter((text) => text.length > 0),
+  );
 
 /** The other direction of travel. */
-const opposite = (direction: SealDirection): SealDirection => (direction === "up" ? "down" : "up");
+const opposite = (direction: SealDirection): SealDirection =>
+  pipe(
+    Match.value(direction),
+    Match.withReturnType<SealDirection>(),
+    Match.when("up", () => "down"),
+    Match.when("down", () => "up"),
+    Match.exhaustive,
+  );
+
+/**
+ * The payload of a `message` event on a port.
+ *
+ * `listenOn` gives a plain `Event`. A read of the property says what it holds,
+ * and it does not ask which realm made the event.
+ */
+const messageData: (event: Event) => Option.Option<unknown> = flow(
+  Option.liftPredicate(Predicate.hasProperty("data")),
+  Option.map(({ data }) => data),
+);
+
+/** The `to` field of a message for one target. */
+const wireTarget: (target: FrameTarget) => string = FrameTarget.$match({
+  Top: () => WIRE_TARGET_TOP,
+  All: () => WIRE_TARGET_ALL,
+  Frame: ({ frameId }) => frameId,
+});
+
+/** A routed message as the subscribers of this frame read it. */
+const inboundOf = (wire: FrameWire): InboundMessage => ({
+  from: toFrameId(wire.from),
+  requestId: pipe(
+    wire.requestId,
+    Option.liftPredicate((id) => id !== NO_REQUEST_ID),
+  ),
+  message: wire,
+});
+
+/** Where the coordinator delivers one routed message. */
+type Delivery = Data.TaggedEnum<{
+  /** To every other frame, and to this frame unless this frame sent it. */
+  Everyone: NoFields;
+  /** To this frame only. */
+  Here: NoFields;
+  /** To one other frame. */
+  Peer: { readonly frameId: string };
+}>;
+
+const Delivery = Data.taggedEnum<Delivery>();
+
+/** Read the `to` field of a routed message, in the frame `self`, which is the top frame. */
+const deliveryOf = (to: string, self: FrameId): Delivery =>
+  pipe(
+    Match.value(to),
+    Match.withReturnType<Delivery>(),
+    Match.when(WIRE_TARGET_ALL, () => Delivery.Everyone()),
+    Match.when(
+      (value) => value === WIRE_TARGET_TOP || value === self,
+      () => Delivery.Here(),
+    ),
+    Match.orElse((frameId) => Delivery.Peer({ frameId })),
+  );
+
+const closePort = (port: MessagePort): Effect.Effect<void> =>
+  Effect.sync(() => {
+    port.close();
+  });
 
 // ---------------------------------------------------------------------------
 // Internal state
@@ -355,12 +485,127 @@ interface PendingJoin {
   readonly message: JoinMessage;
 }
 
-/** One handshake attempt of a child frame. */
-interface Attempt {
+/** A join whose proof holds, which the coordinator now registers. */
+interface Admission {
+  readonly port: MessagePort;
+  readonly source: Window;
+  readonly frameId: FrameId;
+  readonly helloId: string;
+  readonly cipher: FrameCipher;
+}
+
+/** The port of one handshake attempt of a child frame. */
+type AttemptLink = {
   readonly helloId: string;
   readonly link: Link;
   readonly release: Effect.Effect<void>;
+};
+
+/**
+ * One handshake attempt of a child frame.
+ *
+ * `Joining` waits for its welcome, and `Joined` has had it. A repeat of the
+ * welcome finds `Joined`, and it changes nothing.
+ */
+type Attempt = Data.TaggedEnum<{
+  Joining: AttemptLink;
+  Joined: AttemptLink;
+}>;
+
+const Attempt = Data.taggedEnum<Attempt>();
+
+/**
+ * Accept a welcome for the attempt that is open, once.
+ *
+ * A welcome that we did not ask for, or one for an attempt that a later
+ * attempt replaced, is a race or a spoof. It must not re-key this frame. The
+ * coordinator must also have recorded the identity that we claimed. The first
+ * value is the welcome that this frame now acts on.
+ */
+const acceptWelcome =
+  (welcome: WelcomeMessage, frameId: FrameId) =>
+  (
+    current: Option.Option<Attempt>,
+  ): readonly [Option.Option<WelcomeMessage>, Option.Option<Attempt>] =>
+    pipe(
+      current,
+      Option.filter(Attempt.$is("Joining")),
+      Option.filter(
+        (attempt) => attempt.helloId === welcome.helloId && welcome.frameId === frameId,
+      ),
+      Option.match({
+        onNone: () => [Option.none(), current],
+        onSome: ({ helloId, link, release }) => [
+          Option.some(welcome),
+          Option.some(Attempt.Joined({ helloId, link, release })),
+        ],
+      }),
+    );
+
+/** Take one token out of the open challenges, whether or not it is redeemable. */
+const takeChallenge =
+  (token: string) =>
+  (
+    open: HashMap.HashMap<string, Challenge>,
+  ): readonly [Option.Option<Challenge>, HashMap.HashMap<string, Challenge>] => [
+    pipe(open, HashMap.get(token)),
+    pipe(open, HashMap.remove(token)),
+  ];
+
+/** A record with the place of its window in the frames tree. */
+interface Placed {
+  readonly record: FrameRecord;
+  readonly position: number;
 }
+
+const byPosition: Order.Order<Placed> = pipe(
+  Order.Number,
+  Order.mapInput(({ position }: Placed) => position),
+);
+
+const byPlacedFrameId: Order.Order<Placed> = pipe(
+  Order.String,
+  Order.mapInput(({ record }: Placed) => record.frameId),
+);
+
+const inDocumentOrder: Order.Order<Placed> = pipe(byPosition, Order.combine(byPlacedFrameId));
+
+/**
+ * Split the records into the ones whose window is still in the frames tree,
+ * in document order, and the ones whose window has left it.
+ *
+ * The positions are in a native `Map`, because its keys are windows. An Effect
+ * `HashMap` hashes a key by reading its properties, and a cross-origin window
+ * refuses that read with an exception.
+ */
+const inTreeOrder = (
+  records: ReadonlyArray<FrameRecord>,
+  windows: ReadonlyArray<Window>,
+): { readonly live: ReadonlyArray<FrameRecord>; readonly dead: ReadonlyArray<FrameRecord> } => {
+  const positions = new Map(
+    pipe(
+      windows,
+      Array.map((view, index) => [view, index] as const),
+    ),
+  );
+  const [dead, placed] = pipe(
+    records,
+    Array.partition((record) =>
+      pipe(
+        positions.get(record.source),
+        Option.fromNullishOr,
+        Option.map((position): Placed => ({ record, position })),
+        Result.fromOption(() => record),
+      ),
+    ),
+  );
+  const live = pipe(
+    placed,
+    Array.sort(inDocumentOrder),
+    Array.map(({ record }) => record),
+  );
+  return { live, dead };
+};
 
 // ---------------------------------------------------------------------------
 // The link of one port
@@ -426,76 +671,105 @@ export const makeSealedLink = Effect.fn("FrameBus.link")(function* (
   // A ceiling, because page code holds a copy of the port and can flood it.
   const mailbox = yield* Queue.dropping<SealedMessage>(MAILBOX_CAPACITY);
 
-  const sealAndPost = (message: FrameWire | WelcomeMessage): Effect.Effect<void> =>
-    Effect.gen(function* () {
-      const seq = yield* Ref.modify(nextSeq, (current) => [current, current + 1]);
-      // The link goes quiet here, and it stays quiet. It is not closed: the
-      // frame keeps its record and its port, and every later request of a
-      // caller fails at its deadline. The state is safe, because no
-      // initialisation vector repeats.
-      if (seq > MAX_SEAL_SEQUENCE) {
-        yield* Effect.logDebug("this link has sent as many messages as it may");
-        return;
-      }
-      const text = yield* pipe(
-        Effect.try(() => JSON.stringify(message)),
-        Effect.orElseSucceed(() => ""),
-      );
-      if (text.length === 0) return;
+  /** Post one sealed message. A port that refuses it is a peer that never answers. */
+  const postSealed = (sealed: SealedMessage): Effect.Effect<void> =>
+    pipe(postTo(port, sealed), Effect.ignore);
 
-      const sealed = yield* Effect.result(cipher.seal(outbound, seq, text));
-      if (Result.isFailure(sealed)) {
-        yield* Effect.logDebug(`could not seal a message: ${sealed.failure.detail}`);
-        return;
-      }
-      yield* Effect.ignore(postTo(port, sealed.success));
-    });
+  const sealText = (seq: number, text: string): Effect.Effect<void> =>
+    pipe(
+      cipher.seal(outbound, seq, text),
+      Effect.flatMap(postSealed),
+      Effect.catch((error) => Effect.logDebug(`could not seal a message: ${error.detail}`)),
+    );
 
-  const open = (sealed: SealedMessage): Effect.Effect<void> =>
-    Effect.gen(function* () {
+  /** Seal one message with its counter, and post it. */
+  const sealAt = (seq: number, message: FrameWire | WelcomeMessage): Effect.Effect<void> =>
+    pipe(
+      serialize(message),
+      Option.match({
+        onNone: () => Effect.void,
+        onSome: (text) => sealText(seq, text),
+      }),
+    );
+
+  const sealAndPost = Effect.fnUntraced(function* (message: FrameWire | WelcomeMessage) {
+    const seq = yield* pipe(
+      nextSeq,
+      Ref.modify((current) => [current, current + 1]),
+    );
+    yield* pipe(
+      seq > MAX_SEAL_SEQUENCE,
+      Boolean.match({
+        // The link goes quiet here, and it stays quiet. It is not closed: the
+        // frame keeps its record and its port, and every later request of a
+        // caller fails at its deadline. The state is safe, because no
+        // initialisation vector repeats.
+        onTrue: () => Effect.logDebug("this link has sent as many messages as it may"),
+        onFalse: () => sealAt(seq, message),
+      }),
+    );
+  });
+
+  const open = Effect.fnUntraced(
+    function* (sealed: SealedMessage) {
       // A counter that does not rise is a message that we have already seen, or
       // one that a holder of the port kept and sent again. A message that the
       // full mailbox dropped leaves a gap. A gap is safe: the counter only has
       // to rise, and a page cannot seal the message that fills the gap.
-      const last = yield* Ref.get(lastSeen);
-      if (sealed.seq <= last) return;
-
-      const opened = yield* pipe(
+      yield* pipe(
+        Ref.get(lastSeen),
+        Effect.filterOrFail((last) => sealed.seq > last),
+      );
+      const text = yield* pipe(
         cipher.open(inbound, sealed),
         Effect.orElseSucceed(() => Option.none<string>()),
+        Effect.flatMap(Effect.fromOption),
       );
-      if (Option.isNone(opened)) return;
-      yield* Ref.set(lastSeen, sealed.seq);
+      yield* pipe(lastSeen, Ref.set(sealed.seq));
+      const data = yield* pipe(readJson(text), Effect.fromOption);
+      yield* receive(data);
+    },
+    Effect.catchNoSuchElement,
+    Effect.asVoid,
+  );
 
-      const parsed = readJson(opened.value);
-      if (Option.isNone(parsed)) return;
-      yield* receive(parsed.value);
-    });
+  /**
+   * Put one sealed message in the mailbox.
+   *
+   * A full mailbox drops the new message and says so. To wait here is not a
+   * choice: the listener must not suspend, and a page that holds the port
+   * would otherwise decide how much memory this tab uses.
+   */
+  const deliver = (sealed: SealedMessage): Effect.Effect<void> =>
+    pipe(
+      Effect.sync(() => Queue.offerUnsafe(mailbox, sealed)),
+      Effect.flatMap(
+        Boolean.match({
+          onTrue: () => Effect.void,
+          onFalse: () =>
+            Effect.logDebug("the mailbox of this link is full, so a message is dropped"),
+        }),
+      ),
+    );
 
-  yield* Effect.forkScoped(Effect.forever(pipe(Queue.take(outbox), Effect.flatMap(sealAndPost))));
-  yield* Effect.forkScoped(Effect.forever(pipe(Queue.take(mailbox), Effect.flatMap(open))));
+  yield* pipe(Queue.take(outbox), Effect.flatMap(sealAndPost), Effect.forever, Effect.forkScoped);
+  yield* pipe(Queue.take(mailbox), Effect.flatMap(open), Effect.forever, Effect.forkScoped);
 
   yield* host.listenOn(port, "message", (event) =>
-    Effect.suspend(() => {
-      const sealed = parseSealed((event as MessageEvent).data);
-      if (Option.isNone(sealed)) return Effect.void;
-      // A full mailbox drops the new message and says so. To wait here is not
-      // a choice: the listener must not suspend, and a page that holds the
-      // port would otherwise decide how much memory this tab uses.
-      return Queue.offerUnsafe(mailbox, sealed.value)
-        ? Effect.void
-        : Effect.logDebug("the mailbox of this link is full, so a message is dropped");
-    }),
+    Effect.suspend(() =>
+      pipe(
+        messageData(event),
+        Option.flatMap(parseSealed),
+        Option.match({ onNone: () => Effect.void, onSome: deliver }),
+      ),
+    ),
   );
 
   yield* Effect.acquireRelease(
     Effect.sync(() => {
       port.start();
     }),
-    () =>
-      Effect.sync(() => {
-        port.close();
-      }),
+    () => closePort(port),
   );
 
   return {
@@ -516,6 +790,9 @@ export class FrameBus extends Context.Service<
     /** This frame's identity on the wire. */
     readonly frameId: FrameId;
     readonly isTop: boolean;
+
+    /** The coordinator in the top frame, and a member in every other frame. */
+    readonly role: FrameRole;
 
     /**
      * True when this frame belongs to a session.
@@ -552,12 +829,13 @@ export class FrameBus extends Context.Service<
     /**
      * Answer one kind of request for as long as the scope is open.
      *
-     * The handler gives `Option.none()` when there is nothing to answer. A reply
+     * The handler receives the messages of that kind only, already narrowed to
+     * it. It gives `Option.none()` when there is nothing to answer. A reply
      * goes back to the sender with the correlation id of the request.
      */
-    readonly serve: <R>(
-      kind: MessageKind,
-      handler: (message: InboundMessage) => Effect.Effect<Option.Option<FrameMessage>, never, R>,
+    readonly serve: <K extends MessageKind, R>(
+      kind: K,
+      handler: (message: InboundOf<K>) => Effect.Effect<Option.Option<FrameMessage>, never, R>,
     ) => Effect.Effect<void, never, R | Scope.Scope>;
 
     /** The frames that the coordinator knows, in document order. */
@@ -571,6 +849,7 @@ export class FrameBus extends Context.Service<
       const realm = yield* Realm;
       const auth = yield* FrameAuth;
       const layerScope = yield* Effect.scope;
+      const role = roleOf(realm.isTop);
 
       const inbox = yield* PubSub.unbounded<InboundMessage>();
       const nonceRef = yield* Ref.make(Option.none<string>());
@@ -587,8 +866,12 @@ export class FrameBus extends Context.Service<
       const randomId = dom.probeOr(() => {
         const bytes = new Uint8Array(16);
         crypto.getRandomValues(bytes);
-        return Option.some(
-          Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(""),
+        return pipe(
+          bytes,
+          Array.fromIterable,
+          Array.map((byte) => byte.toString(16).padStart(2, "0")),
+          Array.join(""),
+          Option.some,
         );
       }, Option.none<string>());
 
@@ -611,29 +894,29 @@ export class FrameBus extends Context.Service<
 
       const publishLocal = (wire: FrameWire): Effect.Effect<void> =>
         Effect.sync(() => {
-          PubSub.publishUnsafe(inbox, {
-            from: asFrameId(wire.from),
-            requestId:
-              wire.requestId === NO_REQUEST_ID ? Option.none() : Option.some(wire.requestId),
-            message: wire,
-          });
+          pipe(inbox, PubSub.publishUnsafe(inboundOf(wire)));
         });
+
+      /** The routed message in `data`, when it belongs to the session of this frame. */
+      const readWire = (data: unknown): Effect.Effect<Option.Option<FrameWire>> =>
+        pipe(
+          Ref.get(nonceRef),
+          Effect.map((nonce) => parseWire(data, nonce)),
+        );
 
       // ---------------------------------------------------------------------
       // The registry of the coordinator
       // ---------------------------------------------------------------------
 
+      const releaseAll: (open: ReadonlyArray<FrameRecord>) => Effect.Effect<void> = Effect.forEach(
+        (record: FrameRecord) => record.release,
+        { discard: true },
+      );
+
+      const noRecords: ReadonlyArray<FrameRecord> = [];
       const records = yield* Effect.acquireRelease(
-        Ref.make<ReadonlyArray<FrameRecord>>([]),
-        (ref) =>
-          pipe(
-            Ref.getAndSet(ref, []),
-            Effect.flatMap((open) =>
-              Effect.forEach(open, (record) => record.release, {
-                discard: true,
-              }),
-            ),
-          ),
+        Ref.make(noRecords),
+        flow(Ref.getAndSet(noRecords), Effect.flatMap(releaseAll)),
       );
 
       const wireFor = (
@@ -643,29 +926,50 @@ export class FrameBus extends Context.Service<
       ): Effect.Effect<FrameWire, FrameError> =>
         pipe(
           Ref.get(nonceRef),
-          Effect.flatMap((nonce) =>
-            Option.isNone(nonce)
-              ? Effect.fail(
-                  new FrameError({
-                    reason: "unauthenticated",
-                    detail: "this frame is not admitted to a session",
-                  }),
-                )
-              : Effect.succeed(
-                  encodeMessage(
-                    { nonce: nonce.value, from: realm.frameId, to, requestId },
-                    message,
-                  ),
-                ),
+          Effect.flatMap(
+            Effect.fromOption(
+              () =>
+                new FrameError({
+                  reason: "unauthenticated",
+                  detail: "this frame is not admitted to a session",
+                }),
+            ),
+          ),
+          Effect.map((nonce) =>
+            encodeMessage({ nonce, from: realm.frameId, to, requestId }, message),
           ),
         );
 
       const postAll = (open: ReadonlyArray<FrameRecord>, wire: FrameWire): Effect.Effect<void> =>
-        Effect.forEach(
-          open.filter((record) => record.frameId !== wire.from),
-          (record) => record.link.send(wire),
-          { discard: true },
+        pipe(
+          open,
+          Array.filter((record) => record.frameId !== wire.from),
+          Effect.forEach((record) => record.link.send(wire), { discard: true }),
         );
+
+      const rosterOf: (open: ReadonlyArray<FrameRecord>) => ReadonlyArray<FrameId> = flow(
+        Array.map((record: FrameRecord) => record.frameId),
+        // The top frame is first, because it is the root document.
+        Array.prepend(realm.frameId),
+      );
+
+      const publishRoster = (open: ReadonlyArray<FrameRecord>): Effect.Effect<void> =>
+        pipe(
+          wireFor({ kind: "ROSTER", frames: rosterOf(open) }, WIRE_TARGET_ALL, NO_REQUEST_ID),
+          Effect.flatMap((wire) => postAll(open, wire)),
+          // A coordinator with no nonce has no session to tell about.
+          Effect.ignore,
+        );
+
+      /** Keep `kept` as the registry, close the links of `gone`, and tell the frames. */
+      const retire = Effect.fnUntraced(function* (
+        kept: ReadonlyArray<FrameRecord>,
+        gone: ReadonlyArray<FrameRecord>,
+      ) {
+        yield* pipe(records, Ref.set(kept));
+        yield* releaseAll(gone);
+        yield* publishRoster(kept);
+      });
 
       /**
        * Drop the records whose window has left the frames tree, and give back
@@ -679,51 +983,49 @@ export class FrameBus extends Context.Service<
        */
       const sweep: Effect.Effect<ReadonlyArray<FrameRecord>> = Effect.gen(function* () {
         const windows = collectFrameWindows(dom.window);
-        const order = new Map<Window, number>();
-        windows.forEach((view, index) => {
-          order.set(view, index);
-        });
-
         const current = yield* Ref.get(records);
-        const live = current.filter((record) => order.has(record.source));
-        const dead = current.filter((record) => !order.has(record.source));
-
-        const ordered = [...live].sort((left, right) => {
-          const leftOrder = order.get(left.source) ?? MAX_TREE_NODES;
-          const rightOrder = order.get(right.source) ?? MAX_TREE_NODES;
-          if (leftOrder !== rightOrder) return leftOrder - rightOrder;
-          return left.frameId < right.frameId ? -1 : 1;
-        });
-
-        if (dead.length > 0) {
-          yield* Ref.set(records, ordered);
-          yield* Effect.forEach(dead, (record) => record.release, {
-            discard: true,
-          });
-          yield* publishRoster(ordered);
-        }
-        return ordered;
-      });
-
-      const rosterOf = (open: ReadonlyArray<FrameRecord>): ReadonlyArray<FrameId> => [
-        // The top frame is first, because it is the root document.
-        realm.frameId,
-        ...open.map((record) => record.frameId),
-      ];
-
-      const publishRoster = (open: ReadonlyArray<FrameRecord>): Effect.Effect<void> =>
-        pipe(
-          Effect.result(
-            wireFor({ kind: "ROSTER", frames: rosterOf(open) }, WIRE_TARGET_ALL, NO_REQUEST_ID),
-          ),
-          Effect.flatMap((built) =>
-            Result.isSuccess(built) ? postAll(open, built.success) : Effect.void,
-          ),
+        const { live, dead } = inTreeOrder(current, windows);
+        yield* pipe(
+          dead,
+          Array.match({
+            onEmpty: () => Effect.void,
+            onNonEmpty: (gone) => retire(live, gone),
+          }),
         );
+        return live;
+      });
 
       // ---------------------------------------------------------------------
       // Routing
       // ---------------------------------------------------------------------
+
+      /** A message of this frame does not come back to this frame. */
+      const publishFromPeer = (wire: FrameWire): Effect.Effect<void> =>
+        pipe(
+          wire.from === realm.frameId,
+          Boolean.match({
+            onTrue: () => Effect.void,
+            onFalse: () => publishLocal(wire),
+          }),
+        );
+
+      const forward = (
+        open: ReadonlyArray<FrameRecord>,
+        frameId: string,
+        wire: FrameWire,
+      ): Effect.Effect<void, FrameError> =>
+        pipe(
+          open,
+          Array.findFirst((record) => record.frameId === frameId),
+          Effect.fromOption(
+            () =>
+              new FrameError({
+                reason: "no-peer",
+                detail: `no frame with the id ${frameId}`,
+              }),
+          ),
+          Effect.flatMap((record) => record.link.send(wire)),
+        );
 
       /**
        * Route one message in the top frame.
@@ -734,34 +1036,25 @@ export class FrameBus extends Context.Service<
        */
       const routeInTop = Effect.fn("FrameBus.route")(function* (wire: FrameWire) {
         const open = yield* sweep;
-
-        if (wire.to === WIRE_TARGET_ALL) {
-          yield* postAll(open, wire);
-          // A message of this frame does not come back to this frame.
-          if (wire.from !== realm.frameId) yield* publishLocal(wire);
-          return;
-        }
-
-        if (wire.to === WIRE_TARGET_TOP || wire.to === realm.frameId) {
-          yield* publishLocal(wire);
-          return;
-        }
-
-        const target = open.find((record) => record.frameId === wire.to);
-        if (target === undefined) {
-          return yield* new FrameError({
-            reason: "no-peer",
-            detail: `no frame with the id ${wire.to}`,
-          });
-        }
-        yield* target.link.send(wire);
+        return yield* pipe(
+          deliveryOf(wire.to, realm.frameId),
+          Delivery.$match({
+            Everyone: () => pipe(postAll(open, wire), Effect.andThen(publishFromPeer(wire))),
+            Here: () => publishLocal(wire),
+            Peer: ({ frameId }) => forward(open, frameId, wire),
+          }),
+        );
       });
 
-      const attemptRef = yield* Effect.acquireRelease(Ref.make(Option.none<Attempt>()), (ref) =>
-        pipe(
-          Ref.getAndSet(ref, Option.none<Attempt>()),
-          Effect.flatMap((attempt) =>
-            Option.isNone(attempt) ? Effect.void : attempt.value.release,
+      const attemptRef = yield* Effect.acquireRelease(
+        Ref.make(Option.none<Attempt>()),
+        flow(
+          Ref.getAndSet(Option.none<Attempt>()),
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.void,
+              onSome: (attempt) => attempt.release,
+            }),
           ),
         ),
       );
@@ -769,36 +1062,37 @@ export class FrameBus extends Context.Service<
       /** Route one message in a child frame. The port goes to the coordinator. */
       const routeInChild = Effect.fn("FrameBus.route")(function* (wire: FrameWire) {
         const attempt = yield* Ref.get(attemptRef);
-        if (Option.isNone(attempt)) {
-          return yield* new FrameError({
-            reason: "no-peer",
-            detail: "this frame has no link to the top frame",
-          });
-        }
-        yield* attempt.value.link.send(wire);
+        return yield* pipe(
+          attempt,
+          Effect.fromOption(
+            () =>
+              new FrameError({
+                reason: "no-peer",
+                detail: "this frame has no link to the top frame",
+              }),
+          ),
+          Effect.flatMap(({ link }) => link.send(wire)),
+        );
       });
 
-      const route = realm.isTop ? routeInTop : routeInChild;
+      const route = pipe(
+        role,
+        FrameRole.$match({
+          Coordinator: () => routeInTop,
+          Member: () => routeInChild,
+        }),
+      );
 
       const post = Effect.fn("FrameBus.send")(function* (
         target: FrameTarget,
         message: FrameMessage,
         requestId: Option.Option<string>,
       ) {
-        const to =
-          target._tag === "Top"
-            ? WIRE_TARGET_TOP
-            : target._tag === "All"
-              ? WIRE_TARGET_ALL
-              : target.frameId;
-        const wire = yield* wireFor(
-          message,
-          to,
-          pipe(
-            requestId,
-            Option.getOrElse(() => NO_REQUEST_ID),
-          ),
+        const correlation = pipe(
+          requestId,
+          Option.getOrElse(() => NO_REQUEST_ID),
         );
+        const wire = yield* wireFor(message, wireTarget(target), correlation);
         yield* route(wire);
       });
 
@@ -809,7 +1103,7 @@ export class FrameBus extends Context.Service<
       // The coordinator: admission
       // ---------------------------------------------------------------------
 
-      const challenges = yield* Ref.make<ReadonlyMap<string, Challenge>>(new Map());
+      const challenges = yield* Ref.make(HashMap.empty<string, Challenge>());
 
       /**
        * Is `source` a window of our frames tree?
@@ -820,25 +1114,29 @@ export class FrameBus extends Context.Service<
        * coordinator itself.
        */
       const knownWindow = (source: unknown): Effect.Effect<Option.Option<Window>> =>
-        dom.probeOr(() => {
-          if (source === null || source === undefined) {
-            return Option.none<Window>();
-          }
-          for (const candidate of collectFrameWindows(dom.window)) {
-            if (candidate === source) return Option.some(candidate);
-          }
-          return Option.none<Window>();
-        }, Option.none<Window>());
+        dom.probeOr(
+          () =>
+            pipe(
+              source,
+              Option.fromNullishOr,
+              Option.flatMap((sender) =>
+                pipe(
+                  collectFrameWindows(dom.window),
+                  Array.findFirst((candidate) => candidate === sender),
+                ),
+              ),
+            ),
+          Option.none<Window>(),
+        );
 
       const expireChallenges = Effect.gen(function* () {
         const now = yield* dom.now;
-        yield* Ref.update(challenges, (open) => {
-          const next = new Map(open);
-          for (const [token, challenge] of next) {
-            if (now - challenge.issuedAt > CHALLENGE_TTL_MS) next.delete(token);
-          }
-          return next;
-        });
+        yield* pipe(
+          challenges,
+          Ref.update(
+            HashMap.filter((challenge: Challenge) => now - challenge.issuedAt <= CHALLENGE_TTL_MS),
+          ),
+        );
       });
 
       /**
@@ -848,42 +1146,59 @@ export class FrameBus extends Context.Service<
        * from the event and not guessed. No other document can then read the
        * token, and above all not the top page, which an unrestricted `"*"`
        * would allow on a same-origin child.
+       *
+       * A full map of open challenges, and a realm with no random source, give
+       * no token.
        */
-      const challenge = Effect.fn("FrameBus.challenge")(function* (source: Window, origin: string) {
-        yield* expireChallenges;
-        const open = yield* Ref.get(challenges);
-        if (open.size >= MAX_PENDING_CHALLENGES) return;
+      const challenge = Effect.fn("FrameBus.challenge")(
+        function* (source: Window, origin: string) {
+          yield* expireChallenges;
+          yield* pipe(
+            Ref.get(challenges),
+            Effect.filterOrFail((open) => HashMap.size(open) < MAX_PENDING_CHALLENGES),
+          );
+          const token = yield* pipe(randomId, Effect.flatMap(Effect.fromOption));
+          const issuedAt = yield* dom.now;
+          yield* pipe(challenges, Ref.update(HashMap.set(token, { source, issuedAt })));
+          yield* pipe(
+            dom.attempt("Window.postMessage", () => {
+              source.postMessage(challengeMessage(token), targetOrigin(origin));
+            }),
+            Effect.ignore,
+          );
+        },
+        Effect.catchNoSuchElement,
+        Effect.asVoid,
+      );
 
-        const token = yield* randomId;
-        if (Option.isNone(token)) return;
-        const issuedAt = yield* dom.now;
-        yield* Ref.update(challenges, (current) => {
-          const next = new Map(current);
-          next.set(token.value, { source, issuedAt });
-          return next;
-        });
-
-        yield* Effect.ignore(
-          dom.attempt("Window.postMessage", () => {
-            source.postMessage(
-              { ...ENVELOPE, kind: "CHALLENGE", token: token.value },
-              targetOrigin(origin),
-            );
+      const removeRecord = Effect.fn("FrameBus.removeRecord")(function* (frameId: FrameId) {
+        const current = yield* Ref.get(records);
+        const gone = pipe(
+          current,
+          Array.filter((record) => record.frameId === frameId),
+        );
+        const left = pipe(
+          current,
+          Array.filter((record) => record.frameId !== frameId),
+        );
+        yield* pipe(
+          gone,
+          Array.match({
+            onEmpty: () => Effect.void,
+            onNonEmpty: (closing) => retire(left, closing),
           }),
         );
       });
 
-      const removeRecord = Effect.fn("FrameBus.removeRecord")(function* (frameId: FrameId) {
-        const current = yield* Ref.get(records);
-        const gone = current.filter((record) => record.frameId === frameId);
-        if (gone.length === 0) return;
-        const left = current.filter((record) => record.frameId !== frameId);
-        yield* Ref.set(records, left);
-        yield* Effect.forEach(gone, (record) => record.release, {
-          discard: true,
-        });
-        yield* publishRoster(left);
-      });
+      /** Act on one routed message of a child. A `GOODBYE` removes the child. */
+      const actOnChild =
+        (frameId: FrameId) =>
+        (wire: FrameWire): Effect.Effect<void> =>
+          pipe(
+            Match.value(wire),
+            Match.when({ kind: "GOODBYE" }, () => removeRecord(frameId)),
+            Match.orElse((routed) => pipe(routeInTop(routed), Effect.ignore)),
+          );
 
       /**
        * Read one message that a child frame sent on its link.
@@ -894,20 +1209,33 @@ export class FrameBus extends Context.Service<
        * itself. To attribute a message to a frame that did not send it would
        * break the order that every frame must agree on.
        */
-      const receiveFromChild = (frameId: FrameId, data: unknown): Effect.Effect<void> =>
-        Effect.gen(function* () {
-          const nonce = yield* Ref.get(nonceRef);
-          const parsed = parseWire(data, nonce);
-          if (Option.isNone(parsed)) return;
-          const wire = parsed.value;
-          if (wire.from !== frameId) return;
+      const receiveFromChild = Effect.fnUntraced(function* (frameId: FrameId, data: unknown) {
+        const parsed = yield* readWire(data);
+        yield* pipe(
+          parsed,
+          Option.filter((wire) => wire.from === frameId),
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: actOnChild(frameId),
+          }),
+        );
+      });
 
-          if (wire.kind === "GOODBYE") {
-            yield* removeRecord(frameId);
-            return;
-          }
-          yield* Effect.ignore(routeInTop(wire));
-        });
+      /** The link of one child, which a `messageerror` removes. */
+      const childLink = Effect.fnUntraced(function* (
+        port: MessagePort,
+        frameId: FrameId,
+        cipher: FrameCipher,
+      ) {
+        const link = yield* makeSealedLink(dom, port, cipher, "down", (data) =>
+          receiveFromChild(frameId, data),
+        );
+        // `messageerror` is the only failure event that a port gives. A
+        // payload that cannot be cloned means that the peer is not the code
+        // that we expect.
+        yield* dom.listenOn(port, "messageerror", () => pipe(removeRecord(frameId), Effect.ignore));
+        return link;
+      });
 
       /**
        * Add one frame to the registry, and welcome it.
@@ -915,76 +1243,57 @@ export class FrameBus extends Context.Service<
        * The port, its listener and the entry live in one scope. To remove the
        * entry is to close that scope, so there is nothing else to remember.
        */
-      const admit = Effect.fn("FrameBus.admit")(function* (
-        port: MessagePort,
-        source: Window,
-        frameId: FrameId,
-        helloId: string,
-        cipher: FrameCipher,
+      const register = Effect.fnUntraced(function* (
+        current: ReadonlyArray<FrameRecord>,
+        { port, source, frameId, helloId, cipher }: Admission,
       ) {
-        const current = yield* Ref.get(records);
+        // The same window that joins again is a reload or a restore from the
+        // back-forward cache, and not a new frame. Its old record goes.
+        const previous = pipe(
+          current,
+          Array.filter((record) => record.source === source),
+        );
+        const rest = pipe(
+          current,
+          Array.filter((record) => record.source !== source),
+        );
+        yield* releaseAll(previous);
 
+        const scope = yield* Scope.make();
+        const release = pipe(closePort(port), Effect.andThen(Scope.close(scope, Exit.void)));
+        const link = yield* pipe(childLink(port, frameId, cipher), Scope.provide(scope));
+
+        const record: FrameRecord = { frameId, source, link, release };
+        const next: ReadonlyArray<FrameRecord> = pipe(rest, Array.append(record));
+        yield* pipe(records, Ref.set(next));
+
+        const nonce = yield* Ref.get(nonceRef);
+        yield* pipe(
+          nonce,
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (value) =>
+              link.send(welcomeMessage({ nonce: value, frameId, helloId, frames: rosterOf(next) })),
+          }),
+        );
+        yield* publishRoster(next);
+      });
+
+      const admit = Effect.fn("FrameBus.admit")(function* (admission: Admission) {
+        const current = yield* Ref.get(records);
         // An identity belongs to one window. A frame that claims the identity
         // of another live frame is refused, because the coordinator would
         // otherwise deliver that frame's messages to it.
-        const conflict = current.find(
-          (record) => record.frameId === frameId && record.source !== source,
-        );
-        if (conflict !== undefined) {
-          yield* Effect.sync(() => {
-            port.close();
-          });
-          return;
-        }
-
-        // The same window that joins again is a reload or a restore from the
-        // back-forward cache, and not a new frame. Its old record goes.
-        const previous = current.filter((record) => record.source === source);
-        const rest = current.filter((record) => record.source !== source);
-        yield* Effect.forEach(previous, (record) => record.release, {
-          discard: true,
-        });
-
-        const scope = yield* Scope.make();
-        const release = pipe(
-          Effect.sync(() => {
-            port.close();
+        yield* pipe(
+          current,
+          Array.findFirst(
+            (record) => record.frameId === admission.frameId && record.source !== admission.source,
+          ),
+          Option.match({
+            onSome: () => closePort(admission.port),
+            onNone: () => register(current, admission),
           }),
-          Effect.andThen(Scope.close(scope, Exit.void)),
         );
-
-        const link = yield* Scope.provide(
-          Effect.gen(function* () {
-            const built = yield* makeSealedLink(dom, port, cipher, "down", (data) =>
-              receiveFromChild(frameId, data),
-            );
-            // `messageerror` is the only failure event that a port gives. A
-            // payload that cannot be cloned means that the peer is not the code
-            // that we expect.
-            yield* dom.listenOn(port, "messageerror", () => {
-              return Effect.ignore(removeRecord(frameId));
-            });
-            return built;
-          }),
-          scope,
-        );
-
-        const record: FrameRecord = { frameId, source, link, release };
-        const next = [...rest, record];
-        yield* Ref.set(records, next);
-
-        const nonce = yield* Ref.get(nonceRef);
-        if (Option.isSome(nonce)) {
-          yield* link.send({
-            ...ENVELOPE,
-            kind: "WELCOME",
-            nonce: nonce.value,
-            frameId,
-            helloId,
-            frames: rosterOf(next),
-          });
-        }
-        yield* publishRoster(next);
       });
 
       /**
@@ -994,36 +1303,37 @@ export class FrameBus extends Context.Service<
        * frame can read manager-private storage, which page code cannot do. The
        * key of the link comes from the same credential, so a holder of a copy
        * of the port can neither read the session nor speak in it.
+       *
+       * A proof that does not hold, a window that left the tree and a key that
+       * this frame cannot derive each close the port.
        */
-      const completeJoin = Effect.fn("FrameBus.completeJoin")(function* (
-        port: MessagePort,
-        source: Window,
-        message: JoinMessage,
-      ) {
+      const completeJoin = Effect.fn("FrameBus.completeJoin")(function* ({
+        port,
+        source,
+        message,
+      }: PendingJoin) {
         const handshake = {
           token: message.token,
           helloId: message.helloId,
           frameId: message.frameId,
         };
-        const proven = yield* pipe(
+        yield* pipe(
           auth.verifyJoin(handshake, message.proof),
-          Effect.orElseSucceed(() => false),
+          Effect.filterOrFail((proven) => proven),
+          Effect.andThen(knownWindow(source)),
+          Effect.flatMap(Effect.fromOption),
+          Effect.andThen(auth.cipher(handshake)),
+          Effect.flatMap((cipher) =>
+            admit({
+              port,
+              source,
+              frameId: toFrameId(message.frameId),
+              helloId: message.helloId,
+              cipher,
+            }),
+          ),
+          Effect.catch(() => closePort(port)),
         );
-        const stillThere = yield* knownWindow(source);
-        const closePort = Effect.sync(() => {
-          port.close();
-        });
-        if (!proven || Option.isNone(stillThere)) {
-          yield* closePort;
-          return;
-        }
-
-        const cipher = yield* Effect.result(auth.cipher(handshake));
-        if (Result.isFailure(cipher)) {
-          yield* closePort;
-          return;
-        }
-        yield* admit(port, source, asFrameId(message.frameId), message.helloId, cipher.success);
       });
 
       /**
@@ -1053,6 +1363,100 @@ export class FrameBus extends Context.Service<
       const pendingJoins = yield* Queue.sliding<PendingJoin>(MAX_PENDING_JOINS);
 
       /**
+       * Take the oldest join out of the queue, and close its port.
+       *
+       * The slide of the queue would drop that record silently, and the port
+       * of a dead attempt would stay open. `poll` does not suspend.
+       */
+      const dropOldestJoin: Effect.Effect<void> = pipe(
+        Queue.poll(pendingJoins),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (oldest) =>
+              pipe(
+                closePort(oldest.port),
+                Effect.andThen(
+                  Effect.logDebug("too many joins wait, so the oldest one is dropped"),
+                ),
+              ),
+          }),
+        ),
+      );
+
+      /**
+       * Queue one join for the fiber that reads its proof.
+       *
+       * The proof needs Web Crypto, which is asynchronous, and the listener
+       * must not suspend. One fiber finishes the joins, and it takes them in
+       * the order that they arrived.
+       */
+      const enqueueJoin = Effect.fnUntraced(function* (join: PendingJoin) {
+        const waiting = yield* Queue.size(pendingJoins);
+        yield* pipe(
+          waiting >= MAX_PENDING_JOINS,
+          Boolean.match({
+            onFalse: () => Effect.void,
+            onTrue: () => dropOldestJoin,
+          }),
+        );
+        const queued = yield* Effect.sync(() => Queue.offerUnsafe(pendingJoins, join));
+        yield* pipe(
+          queued,
+          Boolean.match({
+            onTrue: () => Effect.void,
+            onFalse: () =>
+              pipe(
+                closePort(join.port),
+                Effect.andThen(
+                  Effect.logDebug("the join queue is closed, so this join is dropped"),
+                ),
+              ),
+          }),
+        );
+      });
+
+      /**
+       * Redeem the token of a `JOIN`.
+       *
+       * The token is used once, whether or not it turns out to be redeemable.
+       * It must have been issued to the same window, inside its lifetime, and
+       * the `JOIN` must carry a port.
+       */
+      const redeem = Effect.fnUntraced(function* (
+        event: MessageEvent,
+        source: Window,
+        message: JoinMessage,
+      ) {
+        const now = yield* dom.now;
+        const issued = yield* pipe(challenges, Ref.modify(takeChallenge(message.token)));
+        yield* pipe(
+          issued,
+          Effect.fromOption,
+          Effect.filterOrFail(
+            (open) => open.source === source && now - open.issuedAt <= CHALLENGE_TTL_MS,
+          ),
+        );
+        const port = yield* pipe(event.ports, Array.head, Effect.fromOption);
+        yield* enqueueJoin({ port, source, message });
+      });
+
+      const onHandshake = Effect.fnUntraced(
+        function* (event: MessageEvent, message: WindowToTopMessage) {
+          const source = yield* pipe(knownWindow(event.source), Effect.flatMap(Effect.fromOption));
+          yield* pipe(
+            Match.value(message),
+            Match.discriminatorsExhaustive("kind")({
+              HELLO: () => challenge(source, event.origin),
+              JOIN: (join) => redeem(event, source, join),
+            }),
+          );
+        },
+        Effect.catchNoSuchElement,
+        Effect.asVoid,
+      );
+
+      /**
        * The half of the handshake that runs on `window`.
        *
        * A `HELLO` earns a challenge, and a `JOIN` redeems one. The two steps
@@ -1061,140 +1465,117 @@ export class FrameBus extends Context.Service<
        * could do neither.
        */
       const onTopWindowMessage = (event: MessageEvent): Effect.Effect<void> =>
-        Effect.gen(function* () {
-          const parsed = parseWindowToTop(event.data);
-          if (Option.isNone(parsed)) return;
-          const message = parsed.value;
-
-          const source = yield* knownWindow(event.source);
-          if (Option.isNone(source)) return;
-
-          if (message.kind === "HELLO") {
-            yield* challenge(source.value, event.origin);
-            return;
-          }
-
-          const open = yield* Ref.get(challenges);
-          const issued = open.get(message.token);
-          // One use, whether or not the token turns out to be redeemable.
-          yield* Ref.update(challenges, (current) => {
-            const next = new Map(current);
-            next.delete(message.token);
-            return next;
-          });
-          if (issued === undefined || issued.source !== source.value) return;
-          const now = yield* dom.now;
-          if (now - issued.issuedAt > CHALLENGE_TTL_MS) return;
-
-          const port = event.ports[0];
-          if (port === undefined) return;
-
-          // The proof needs Web Crypto, which is asynchronous, and the listener
-          // must not suspend. One fiber finishes the joins, and it takes them
-          // in the order that they arrived.
-          //
-          // Take the oldest join out of a full queue here, so that its port is
-          // closed. The slide of the queue would drop that record silently, and
-          // the port of a dead attempt would stay open. `poll` does not suspend.
-          if (Queue.sizeUnsafe(pendingJoins) >= MAX_PENDING_JOINS) {
-            const oldest = yield* Queue.poll(pendingJoins);
-            if (Option.isSome(oldest)) {
-              yield* Effect.sync(() => {
-                oldest.value.port.close();
-              });
-              yield* Effect.logDebug("too many joins wait, so the oldest one is dropped");
-            }
-          }
-
-          const queued = Queue.offerUnsafe(pendingJoins, {
-            port,
-            source: source.value,
-            message,
-          });
-          if (!queued) {
-            yield* Effect.sync(() => {
-              port.close();
-            });
-            yield* Effect.logDebug("the join queue is closed, so this join is dropped");
-          }
-        });
+        pipe(
+          parseWindowToTop(event.data),
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (message) => onHandshake(event, message),
+          }),
+        );
 
       // ---------------------------------------------------------------------
       // The child: the handshake
       // ---------------------------------------------------------------------
 
-      const topWindow: Effect.Effect<Option.Option<Window>> = dom.probeOr(() => {
-        const view = dom.window.top;
-        // `top === self` in a frame that says it is not the top means that
-        // the frame was detached after it started. There is nobody to give a
-        // port to.
-        return view === null || view === dom.window ? Option.none<Window>() : Option.some(view);
-      }, Option.none<Window>());
+      const topWindow: Effect.Effect<Option.Option<Window>> = dom.probeOr(
+        () =>
+          pipe(
+            dom.window.top,
+            Option.fromNullishOr,
+            // `top === self` in a frame that says it is not the top means that
+            // the frame was detached after it started. There is nobody to give
+            // a port to.
+            Option.filter((view) => view !== dom.window),
+          ),
+        Option.none<Window>(),
+      );
 
-      const announce: Effect.Effect<void> = Effect.gen(function* () {
-        const top = yield* topWindow;
-        if (Option.isNone(top)) return;
-        yield* Effect.ignore(
+      const postHello = (top: Window): Effect.Effect<void> =>
+        pipe(
           dom.attempt("Window.postMessage", () => {
             // `"*"` is correct here, and only here. We do not know the origin of
             // the top frame yet, and to learn it is what the answer is for. The
             // payload says "I exist", which every frame of the page can see in
             // any case.
-            top.value.postMessage({ ...ENVELOPE, kind: "HELLO" }, "*");
+            top.postMessage(helloMessage, "*");
+          }),
+          Effect.ignore,
+        );
+
+      const announce: Effect.Effect<void> = pipe(
+        topWindow,
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: postHello,
+          }),
+        ),
+      );
+
+      const joinSession = Effect.fnUntraced(function* (welcome: WelcomeMessage) {
+        yield* pipe(nonceRef, Ref.set(Option.some(welcome.nonce)));
+        yield* pipe(rosterRef, Ref.set(toRoster(welcome.frames)));
+        yield* pipe(admitted, Deferred.succeed(true));
+      });
+
+      const onWelcome = Effect.fnUntraced(function* (welcome: WelcomeMessage) {
+        const accepted = yield* pipe(attemptRef, Ref.modify(acceptWelcome(welcome, realm.frameId)));
+        yield* pipe(
+          accepted,
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: joinSession,
           }),
         );
       });
 
-      /** The id of the attempt that was welcomed, so a repeat is ignored. */
-      const welcomedRef = yield* Ref.make(Option.none<string>());
+      const receiveWelcome = (data: unknown): Effect.Effect<void> =>
+        pipe(
+          parseWelcome(data),
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: onWelcome,
+          }),
+        );
 
-      const onWelcome = (data: unknown): Effect.Effect<void> =>
-        Effect.gen(function* () {
-          const parsed = parseWelcome(data);
-          if (Option.isNone(parsed)) return;
-          const welcome = parsed.value;
+      /**
+       * Deliver one routed message of the top frame.
+       *
+       * The roster is transport state, so the bus keeps it. Every other
+       * service reads it through `peers`.
+       */
+      const deliverFromTop = Effect.fnUntraced(function* (wire: FrameWire) {
+        yield* pipe(
+          Match.value(wire),
+          Match.when({ kind: "ROSTER" }, ({ frames }) =>
+            pipe(rosterRef, Ref.set(toRoster(frames))),
+          ),
+          Match.orElse(() => Effect.void),
+        );
+        yield* publishLocal(wire);
+      });
 
-          const attempt = yield* Ref.get(attemptRef);
-          // A welcome that we did not ask for, or one for an attempt that a
-          // later attempt replaced, is a race or a spoof. It must not re-key
-          // this frame.
-          if (Option.isNone(attempt)) return;
-          if (welcome.helloId !== attempt.value.helloId) return;
-          // The coordinator must have recorded the identity that we claimed.
-          if (welcome.frameId !== realm.frameId) return;
+      const receiveRouted = Effect.fnUntraced(function* (data: unknown) {
+        const parsed = yield* readWire(data);
+        yield* pipe(
+          parsed,
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: deliverFromTop,
+          }),
+        );
+      });
 
-          const welcomed = yield* Ref.get(welcomedRef);
-          if (Option.isSome(welcomed) && welcomed.value === attempt.value.helloId) {
-            return;
-          }
-
-          yield* Ref.set(welcomedRef, Option.some(attempt.value.helloId));
-          yield* Ref.set(nonceRef, Option.some(welcome.nonce));
-          yield* Ref.set(rosterRef, welcome.frames.map(asFrameId));
-          yield* Deferred.succeed(admitted, true);
-        });
-
+      /** Read one message that the top frame sent on the link of this frame. */
       const receiveFromTop = (data: unknown): Effect.Effect<void> =>
-        Effect.gen(function* () {
-          const kind = peekKind(data);
-          if (Option.isNone(kind)) return;
-          if (kind.value === "WELCOME") {
-            yield* onWelcome(data);
-            return;
-          }
-
-          const nonce = yield* Ref.get(nonceRef);
-          const parsed = parseWire(data, nonce);
-          if (Option.isNone(parsed)) return;
-          const wire = parsed.value;
-
-          // The roster is transport state, so the bus keeps it. Every other
-          // service reads it through `peers`.
-          if (wire.kind === "ROSTER") {
-            yield* Ref.set(rosterRef, wire.frames.map(asFrameId));
-          }
-          yield* publishLocal(wire);
-        });
+        pipe(
+          peekKind(data),
+          Option.exists((kind) => kind === "WELCOME"),
+          Boolean.match({
+            onTrue: () => receiveWelcome(data),
+            onFalse: () => receiveRouted(data),
+          }),
+        );
 
       /**
        * One attempt to join the session.
@@ -1203,113 +1584,133 @@ export class FrameBus extends Context.Service<
        * transferred twice. The attempt that was open before is closed here, so
        * one child frame never holds two ports.
        */
-      const startAttempt = Effect.fn("FrameBus.join")(function* (token: string, origin: string) {
-        const top = yield* topWindow;
-        if (Option.isNone(top)) return;
+      const startAttempt = Effect.fn("FrameBus.join")(
+        function* (token: string, origin: string) {
+          const top = yield* pipe(topWindow, Effect.flatMap(Effect.fromOption));
+          const helloId = yield* pipe(randomId, Effect.flatMap(Effect.fromOption));
+          const handshake = { token, helloId, frameId: realm.frameId };
 
-        const helloId = yield* randomId;
-        if (Option.isNone(helloId)) return;
-
-        const handshake = {
-          token,
-          helloId: helloId.value,
-          frameId: realm.frameId,
-        };
-        const signed = yield* Effect.result(auth.joinProof(handshake));
-        if (Result.isFailure(signed)) {
           // No credential means no admission. A frame that cannot read
           // manager-private storage must stay outside the session.
-          yield* Effect.logDebug(`frame join is not possible: ${signed.failure.detail}`);
-          return;
-        }
+          const proof = yield* auth.joinProof(handshake);
 
-        // The same credential gives the key of the port. Both ends derive it
-        // from the three values of this attempt, and neither one sends it.
-        const cipher = yield* Effect.result(auth.cipher(handshake));
-        if (Result.isFailure(cipher)) {
-          yield* Effect.logDebug(`frame join is not possible: ${cipher.failure.detail}`);
-          return;
-        }
+          // The same credential gives the key of the port. Both ends derive it
+          // from the three values of this attempt, and neither one sends it.
+          const cipher = yield* auth.cipher(handshake);
 
-        const built = yield* Effect.result(
-          dom.attempt("MessageChannel", () => new MessageChannel()),
-        );
-        if (Result.isFailure(built)) return;
-        const channel = built.success;
+          const channel = yield* dom.attempt("MessageChannel", () => new MessageChannel());
+          const scope = yield* Scope.make();
+          const link = yield* pipe(
+            makeSealedLink(dom, channel.port1, cipher, "up", receiveFromTop),
+            Scope.provide(scope),
+          );
 
-        const scope = yield* Scope.make();
-        const link = yield* Scope.provide(
-          makeSealedLink(dom, channel.port1, cipher.success, "up", (data) => receiveFromTop(data)),
-          scope,
-        );
+          const previous = yield* pipe(
+            attemptRef,
+            Ref.getAndSet(
+              Option.some<Attempt>(
+                Attempt.Joining({ helloId, link, release: Scope.close(scope, Exit.void) }),
+              ),
+            ),
+          );
+          yield* pipe(
+            previous,
+            Option.match({
+              onNone: () => Effect.void,
+              onSome: (attempt) => attempt.release,
+            }),
+          );
 
-        const previous = yield* Ref.getAndSet(
-          attemptRef,
-          Option.some<Attempt>({
-            helloId: helloId.value,
-            link,
-            release: Scope.close(scope, Exit.void),
-          }),
-        );
-        if (Option.isSome(previous)) yield* previous.value.release;
+          yield* pipe(
+            dom.attempt("Window.postMessage", () => {
+              top.postMessage(
+                joinMessage({ token, helloId, frameId: realm.frameId, proof }),
+                // The origin that the challenge came from, so the port cannot go
+                // to a document that only happens to be at `window.top` now.
+                targetOrigin(origin),
+                [channel.port2],
+              );
+            }),
+            Effect.ignore,
+          );
+        },
+        Effect.catchTags({
+          FrameAuthError: (error) => Effect.logDebug(`frame join is not possible: ${error.detail}`),
+          NoSuchElementError: () => Effect.void,
+          DomError: () => Effect.void,
+        }),
+      );
 
-        yield* Effect.ignore(
-          dom.attempt("Window.postMessage", () => {
-            top.value.postMessage(
-              {
-                ...ENVELOPE,
-                kind: "JOIN",
-                token,
-                helloId: helloId.value,
-                frameId: realm.frameId,
-                proof: signed.success,
-              },
-              // The origin that the challenge came from, so the port cannot go to
-              // a document that only happens to be at `window.top` now.
-              targetOrigin(origin),
-              [channel.port2],
-            );
+      /**
+       * An order to announce this frame again.
+       *
+       * Only an ancestor may wake a frame. A page could otherwise make every
+       * frame that it can reach start a handshake at will.
+       *
+       * A frame that already holds the session says nothing. A second
+       * handshake makes a second `MessageChannel`, and the port of the attempt
+       * before it is closed. A hint round runs on that port, and the round
+       * starts with the same wake message that would ask for the new
+       * handshake, so the answer of this frame and the `ACTIVATE` of the top
+       * frame would both be dropped. A frame that is not admitted still
+       * announces itself, which is the recovery that the sweep of the
+       * coordinator exists for.
+       */
+      const onAnnounceRequest = Effect.fnUntraced(function* (source: unknown) {
+        const fromAncestor = yield* realm.isAncestor(source);
+        const nonce = yield* Ref.get(nonceRef);
+        yield* pipe(
+          fromAncestor && Option.isNone(nonce),
+          Boolean.match({
+            onFalse: () => Effect.void,
+            onTrue: () => announce,
           }),
         );
       });
 
+      /**
+       * Answer a challenge with a new attempt.
+       *
+       * Only the top frame may challenge us. A sibling, or the script of the
+       * page, could otherwise make this frame transfer a port to an origin of
+       * its choice.
+       */
+      const acceptChallenge = Effect.fnUntraced(
+        function* (event: MessageEvent, message: ChallengeMessage) {
+          yield* pipe(
+            topWindow,
+            Effect.flatMap(Effect.fromOption),
+            Effect.filterOrFail((top) => event.source === top),
+          );
+          yield* pipe(startAttempt(message.token, event.origin), Effect.forkIn(layerScope));
+        },
+        Effect.catchNoSuchElement,
+        Effect.asVoid,
+      );
+
+      const onChallengeMessage = (event: MessageEvent): Effect.Effect<void> =>
+        pipe(
+          parseChallenge(event.data),
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (message) => acceptChallenge(event, message),
+          }),
+        );
+
       const onChildWindowMessage = (event: MessageEvent): Effect.Effect<void> =>
-        Effect.gen(function* () {
-          if (isAnnounceRequest(event.data)) {
-            // Only an ancestor may wake a frame. A page could otherwise make
-            // every frame that it can reach start a handshake at will.
-            if (!(yield* realm.isAncestor(event.source))) return;
-            // A frame that already holds the session says nothing. A second
-            // handshake makes a second `MessageChannel`, and the port of the
-            // attempt before it is closed. A hint round runs on that port, and
-            // the round starts with the same wake message that would ask for
-            // the new handshake, so the answer of this frame and the `ACTIVATE`
-            // of the top frame would both be dropped. A frame that is not
-            // admitted still announces itself, which is the recovery that the
-            // sweep of the coordinator exists for.
-            const nonce = yield* Ref.get(nonceRef);
-            if (Option.isSome(nonce)) return;
-            yield* announce;
-            return;
-          }
-
-          const parsed = parseChallenge(event.data);
-          if (Option.isNone(parsed)) return;
-
-          // Only the top frame may challenge us. A sibling, or the script of
-          // the page, could otherwise make this frame transfer a port to an
-          // origin of its choice.
-          const top = yield* topWindow;
-          if (Option.isNone(top) || event.source !== top.value) return;
-
-          yield* Effect.forkIn(startAttempt(parsed.value.token, event.origin), layerScope);
-        });
+        pipe(
+          isAnnounceRequest(event.data),
+          Boolean.match({
+            onTrue: () => onAnnounceRequest(event.source),
+            onFalse: () => onChallengeMessage(event),
+          }),
+        );
 
       // ---------------------------------------------------------------------
       // Wiring
       // ---------------------------------------------------------------------
 
-      if (realm.isTop) {
+      const startCoordinator = Effect.gen(function* () {
         // The coordinator owns the session nonce. It never travels except in a
         // `WELCOME`, which is the first sealed message of a link. A page that
         // holds a copy of the port cannot open it. The credential of the
@@ -1317,20 +1718,15 @@ export class FrameBus extends Context.Service<
         // layer is built. That layer is built before this one, so the first
         // child that answers a challenge finds a frame that can verify a proof.
         const created = yield* randomId;
-        yield* Ref.set(nonceRef, created);
+        yield* pipe(nonceRef, Ref.set(created));
 
         // One fiber admits the joins, one at a time and in order. See
         // `pendingJoins` for why the order is a requirement, and not a taste.
-        yield* Effect.forkIn(
-          Effect.forever(
-            pipe(
-              Queue.take(pendingJoins),
-              Effect.flatMap((join) =>
-                Effect.ignore(completeJoin(join.port, join.source, join.message)),
-              ),
-            ),
-          ),
-          layerScope,
+        yield* pipe(
+          Queue.take(pendingJoins),
+          Effect.flatMap(completeJoin),
+          Effect.forever,
+          Effect.forkIn(layerScope),
         );
 
         // Registration is accepted at any time and for ever. `document-start`
@@ -1345,7 +1741,9 @@ export class FrameBus extends Context.Service<
         // would build the whole application in every frame of the page, which
         // is the cost that the guard exists to avoid.
         yield* realm.askDescendantsToAnnounce;
-      } else {
+      });
+
+      const startMember = Effect.gen(function* () {
         yield* dom.listen("window", "message", onChildWindowMessage);
 
         // Safari puts a page with an `unload` handler in the back-forward cache
@@ -1362,27 +1760,42 @@ export class FrameBus extends Context.Service<
           // leave the frames tree, or until the same window joins again. A
           // frame that navigates in place keeps its window, so its record
           // survives until the new document joins.
-          event.persisted ? Effect.void : Effect.ignore(send(toTop, { kind: "GOODBYE" })),
+          pipe(
+            event.persisted,
+            Boolean.match({
+              onTrue: () => Effect.void,
+              onFalse: () => pipe(send(toTop, { kind: "GOODBYE" }), Effect.ignore),
+            }),
+          ),
         );
 
         yield* dom.listen("window", "pageshow", (event) =>
           // A restore brings back a document whose port the coordinator has
           // already swept. To announce again is cheap, and the registry gives
           // this frame the same identity, because the identity is ours.
-          event.persisted ? announce : Effect.void,
+          pipe(
+            event.persisted,
+            Boolean.match({
+              onTrue: () => announce,
+              onFalse: () => Effect.void,
+            }),
+          ),
         );
 
-        const handshake = Effect.gen(function* () {
-          yield* announce;
-          for (const delay of HANDSHAKE_RETRY_MS) {
-            yield* Effect.sleep(delay);
-            yield* announce;
-          }
-        });
+        const retries = pipe(
+          HANDSHAKE_RETRY_MS,
+          Effect.forEach((delay) => pipe(announce, Effect.delay(delay)), { discard: true }),
+        );
+        const handshake = pipe(announce, Effect.andThen(retries));
 
         // The race ends the retries as soon as the welcome lands.
-        yield* Effect.forkScoped(Effect.asVoid(Effect.race(Deferred.await(admitted), handshake)));
-      }
+        yield* pipe(
+          Deferred.await(admitted),
+          Effect.race(handshake),
+          Effect.asVoid,
+          Effect.forkScoped,
+        );
+      });
 
       // ---------------------------------------------------------------------
       // The interface
@@ -1390,12 +1803,39 @@ export class FrameBus extends Context.Service<
 
       const incoming = Stream.fromPubSub(inbox);
 
-      const peers: Effect.Effect<ReadonlyArray<FrameId>> = realm.isTop
-        ? pipe(sweep, Effect.map(rosterOf))
-        : pipe(
-            Ref.get(rosterRef),
-            Effect.map((roster) => (roster.length > 0 ? roster : [realm.frameId])),
-          );
+      /** A member that has no roster yet knows itself. */
+      const memberRoster: Effect.Effect<ReadonlyArray<FrameId>> = pipe(
+        Ref.get(rosterRef),
+        Effect.map(
+          Array.match({
+            onEmpty: () => [realm.frameId],
+            onNonEmpty: (known: Array.NonEmptyReadonlyArray<FrameId>) => known,
+          }),
+        ),
+      );
+
+      const peers: Effect.Effect<ReadonlyArray<FrameId>> = pipe(
+        role,
+        FrameRole.$match({
+          Coordinator: () => pipe(sweep, Effect.map(rosterOf)),
+          Member: () => memberRoster,
+        }),
+      );
+
+      const ready: Effect.Effect<boolean> = pipe(
+        role,
+        FrameRole.$match({
+          Coordinator: () => Effect.succeed(true),
+          Member: () =>
+            pipe(
+              Deferred.await(admitted),
+              Effect.timeoutOrElse({
+                duration: REQUEST_DEADLINE,
+                orElse: () => Effect.succeed(false),
+              }),
+            ),
+        }),
+      );
 
       const request = Effect.fn("FrameBus.request")(function* <A>(
         target: FrameTarget,
@@ -1403,7 +1843,7 @@ export class FrameBus extends Context.Service<
         decode: (reply: InboundMessage) => Option.Option<A>,
         timeout: Duration.Input,
       ) {
-        return yield* Effect.scoped(
+        return yield* pipe(
           Effect.gen(function* () {
             // Subscribe before the send, so a fast answer cannot arrive between
             // the two steps and be lost.
@@ -1411,19 +1851,19 @@ export class FrameBus extends Context.Service<
             const requestId = yield* freshId;
             yield* post(target, message, Option.some(requestId));
 
-            const wait = Effect.gen(function* () {
-              while (true) {
-                const reply = yield* PubSub.take(replies);
-                if (Option.isNone(reply.requestId) || reply.requestId.value !== requestId) {
-                  continue;
-                }
-                const decoded = decode(reply);
-                if (Option.isSome(decoded)) return decoded.value;
-              }
-            });
+            /** The answer that one reply carries to this request. */
+            const answer = (reply: InboundMessage): Option.Option<A> =>
+              pipe(
+                reply.requestId,
+                Option.filter((id) => id === requestId),
+                Option.flatMap(() => decode(reply)),
+              );
 
             return yield* pipe(
-              wait,
+              PubSub.take(replies),
+              Effect.map(answer),
+              Effect.repeat({ until: Option.isSome<A> }),
+              Effect.map((found) => found.value),
               Effect.timeoutOrElse({
                 duration: timeout,
                 orElse: () =>
@@ -1436,43 +1876,51 @@ export class FrameBus extends Context.Service<
               }),
             );
           }),
+          Effect.scoped,
         );
       });
 
-      const serve = Effect.fn("FrameBus.serve")(function* <R>(
-        kind: MessageKind,
-        handler: (message: InboundMessage) => Effect.Effect<Option.Option<FrameMessage>, never, R>,
+      const serve = Effect.fn("FrameBus.serve")(function* <K extends MessageKind, R>(
+        kind: K,
+        handler: (message: InboundOf<K>) => Effect.Effect<Option.Option<FrameMessage>, never, R>,
       ) {
-        yield* Effect.forkScoped(
-          pipe(
-            incoming,
-            Stream.filter((message) => message.message.kind === kind),
-            Stream.runForEach((message) =>
-              pipe(
-                handler(message),
-                Effect.flatMap((reply) =>
-                  Option.isNone(reply)
-                    ? Effect.void
-                    : Effect.ignore(post(toFrame(message.from), reply.value, message.requestId)),
-                ),
+        /** Send one answer back to the sender, with the correlation id of the request. */
+        const replyTo =
+          (inbound: InboundOf<K>) =>
+          (reply: FrameMessage): Effect.Effect<void> =>
+            pipe(post(toFrame(inbound.from), reply, inbound.requestId), Effect.ignore);
+
+        yield* pipe(
+          incoming,
+          Stream.filter(isInboundOf(kind)),
+          Stream.runForEach((inbound) =>
+            pipe(
+              handler(inbound),
+              Effect.flatMap(
+                Option.match({
+                  onNone: () => Effect.void,
+                  onSome: replyTo(inbound),
+                }),
               ),
             ),
           ),
+          Effect.forkScoped,
         );
       });
+
+      yield* pipe(
+        role,
+        FrameRole.$match({
+          Coordinator: () => startCoordinator,
+          Member: () => startMember,
+        }),
+      );
 
       return FrameBus.of({
         frameId: realm.frameId,
         isTop: realm.isTop,
-        ready: realm.isTop
-          ? Effect.succeed(true)
-          : pipe(
-              Deferred.await(admitted),
-              Effect.timeoutOrElse({
-                duration: REQUEST_DEADLINE,
-                orElse: () => Effect.succeed(false),
-              }),
-            ),
+        role,
+        ready,
         incoming,
         send,
         broadcast: (message) => post(toAll, message, Option.none()),

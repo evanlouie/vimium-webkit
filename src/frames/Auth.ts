@@ -73,16 +73,33 @@
  * the safe result as well.
  */
 
-import { Context, Effect, Layer, Option, Queue, Ref, Schema, pipe } from "effect";
 import {
-  ENVELOPE,
+  Boolean,
+  Context,
+  Effect,
+  flow,
+  Iterable,
+  Layer,
+  Match,
+  Option,
+  Predicate,
+  Queue,
+  Ref,
+  Result,
+  Schema,
+  String as Str,
+  Struct,
+  pipe,
+} from "effect";
+import {
   joinProofPayload,
   linkKeyPayload,
   type SealDirection,
   sealedAad,
+  sealedMessage,
   type SealedMessage,
 } from "~/domain/FrameMessage.ts";
-import { frameCredentialGroup } from "~/domain/Persisted.ts";
+import { type FrameCredential, frameCredentialGroup } from "~/domain/Persisted.ts";
 import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 import { Realm } from "~/platform/Realm.ts";
 import { makeGroup, type StorageError } from "~/platform/Storage.ts";
@@ -143,18 +160,24 @@ export interface FrameCipher {
   ) => Effect.Effect<Option.Option<string>, FrameAuthError>;
 }
 
-const describe = (cause: unknown): string => {
-  if (cause instanceof Error) return cause.message;
-  if (typeof cause === "string") return cause;
-  return String(cause);
-};
+const describe = (cause: unknown): string =>
+  pipe(
+    Match.value(cause),
+    Match.when(Predicate.isError, (error) => error.message),
+    Match.when(Predicate.isString, (text) => text),
+    Match.orElse((other) => String(other)),
+  );
+
+/** One character for each byte, which is the text that `btoa` takes. */
+const binaryText: (bytes: Uint8Array) => string = Iterable.reduce(
+  "",
+  (binary: string, byte: number) => binary + String.fromCharCode(byte),
+);
 
 /** Base64, in the alphabet that a URL accepts, with no padding. */
-const toBase64Url = (bytes: Uint8Array): string => {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-};
+const toBase64Url: (bytes: Uint8Array) => string = flow(binaryText, btoa, (base64) =>
+  base64.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""),
+);
 
 const fromBase64Url = (value: string): Uint8Array<ArrayBuffer> => {
   const base64 =
@@ -170,23 +193,28 @@ const fromBase64Url = (value: string): Uint8Array<ArrayBuffer> => {
  * throw. Only a `try` survives that. The result is `None` in a context that is
  * not secure, where the API is absent.
  */
-const readSubtle = (): Option.Option<SubtleCrypto> => {
-  try {
-    const api: SubtleCrypto | undefined = crypto.subtle;
-    return api === undefined ? Option.none() : Option.some(api);
-  } catch {
-    return Option.none();
-  }
-};
+const readSubtle = (): Option.Option<SubtleCrypto> =>
+  pipe(
+    Result.try((): SubtleCrypto | undefined => crypto.subtle),
+    Result.getSuccess,
+    Option.flatMap(Option.fromNullishOr),
+  );
 
 /** A value that is not base64 is a rejection, and not a failure of ours. */
-const decodeBase64Url = (value: string): Option.Option<Uint8Array<ArrayBuffer>> => {
-  try {
-    return Option.some(fromBase64Url(value));
-  } catch {
-    return Option.none();
-  }
-};
+const decodeBase64Url = (value: string): Option.Option<Uint8Array<ArrayBuffer>> =>
+  pipe(
+    Result.try(() => fromBase64Url(value)),
+    Result.getSuccess,
+  );
+
+/** The first byte of an initialisation vector names the direction. */
+const directionByte = (direction: SealDirection): number =>
+  pipe(
+    Match.value(direction),
+    Match.when("up", () => 1),
+    Match.when("down", () => 2),
+    Match.exhaustive,
+  );
 
 /**
  * The initialisation vector of one message.
@@ -197,10 +225,35 @@ const decodeBase64Url = (value: string): Option.Option<Uint8Array<ArrayBuffer>> 
  */
 const ivFor = (direction: SealDirection, seq: number): Uint8Array<ArrayBuffer> => {
   const bytes = new Uint8Array(IV_BYTES);
-  bytes[0] = direction === "up" ? 1 : 2;
-  new DataView(bytes.buffer).setUint32(IV_BYTES - 4, seq, false);
+  const view = new DataView(bytes.buffer);
+  view.setUint8(0, directionByte(direction));
+  view.setUint32(IV_BYTES - 4, seq, false);
   return bytes;
 };
+
+/** The credential that the group holds. An empty text is no credential. */
+const presentSecret: (secret: string) => Option.Option<string> = Option.liftPredicate(
+  Str.isNonEmpty,
+);
+
+/**
+ * Put a credential into a group that holds none.
+ *
+ * The caller has already looked, and this is the same test again, against the
+ * value that the group holds. Another tab can reach the group through the
+ * change stream of the manager between the read and the write.
+ */
+const withSecret =
+  (created: string) =>
+  (current: FrameCredential): FrameCredential =>
+    pipe(
+      current.secret,
+      presentSecret,
+      Option.match({
+        onSome: () => current,
+        onNone: () => pipe(current, Struct.assign({ secret: created })),
+      }),
+    );
 
 interface CachedKey {
   readonly secret: string;
@@ -249,26 +302,24 @@ export class FrameAuth extends Context.Service<
 
       // A failure of the store also reaches the caller as a
       // `FrameAuthError`, so this line is a record and not the only signal.
-      yield* Effect.forkScoped(
-        Effect.forever(
-          pipe(
-            Queue.take(issues),
-            Effect.flatMap((issue) =>
-              Effect.logDebug(`the credential store failed: ${issue.detail}`),
-            ),
-          ),
-        ),
+      yield* pipe(
+        Queue.take(issues),
+        Effect.flatMap((issue) => Effect.logDebug(`the credential store failed: ${issue.detail}`)),
+        Effect.forever,
+        Effect.forkScoped,
       );
 
       /** Web Crypto, read again for each call, and never held. */
-      const subtle: Effect.Effect<SubtleCrypto, FrameAuthError> = Effect.suspend(() =>
-        Effect.fromOption(
-          readSubtle(),
-          () =>
-            new FrameAuthError({
-              reason: "unavailable",
-              detail: "web crypto is not in this realm",
-            }),
+      const subtle: Effect.Effect<SubtleCrypto, FrameAuthError> = pipe(
+        Effect.sync(readSubtle),
+        Effect.flatMap(
+          Effect.fromOption(
+            () =>
+              new FrameAuthError({
+                reason: "unavailable",
+                detail: "web crypto is not in this realm",
+              }),
+          ),
         ),
       );
 
@@ -279,16 +330,41 @@ export class FrameAuth extends Context.Service<
        * hostile page could otherwise read the credential out of
        * `localStorage` and calculate a valid proof.
        */
-      const privateStore: Effect.Effect<void, FrameAuthError> = kv.managerPrivate
-        ? Effect.void
-        : Effect.fail(
-            new FrameAuthError({
-              reason: "unavailable",
-              detail:
-                "the manager has no private value store, so a credential " +
-                "would be readable by the page",
-            }),
-          );
+      const privateStore: Effect.Effect<void, FrameAuthError> = pipe(
+        kv.managerPrivate,
+        Boolean.match({
+          onTrue: () => Effect.void,
+          onFalse: () =>
+            Effect.fail(
+              new FrameAuthError({
+                reason: "unavailable",
+                detail:
+                  "the manager has no private value store, so a credential " +
+                  "would be readable by the page",
+              }),
+            ),
+        }),
+      );
+
+      /**
+       * Only the top frame creates the credential.
+       *
+       * Two frames that created one at the same time would write two values,
+       * and the frame that wrote last would lock the other frames out.
+       */
+      const creator: Effect.Effect<void, FrameAuthError> = pipe(
+        realm.isTop,
+        Boolean.match({
+          onTrue: () => Effect.void,
+          onFalse: () =>
+            Effect.fail(
+              new FrameAuthError({
+                reason: "unauthenticated",
+                detail: "this frame has no credential in manager storage",
+              }),
+            ),
+        }),
+      );
 
       const createSecret = Effect.try({
         try: (): string => {
@@ -304,52 +380,24 @@ export class FrameAuth extends Context.Service<
       });
 
       /**
-       * The shared credential, as storage holds it.
+       * The credential that storage holds now.
        *
-       * It is private to this module. The top frame creates one when storage
-       * holds none. Every call reads storage again, and does not trust the
-       * value in memory: the top frame can write the credential after a child
-       * frame has started.
+       * Every read goes to storage again, and does not trust the value in
+       * memory: the top frame can write the credential after a child frame has
+       * started.
        */
-      const secret = Effect.fn("FrameAuth.secret")(function* () {
-        yield* privateStore;
+      const stored: Effect.Effect<Option.Option<string>> = pipe(
+        store.hydrate,
+        Effect.map(({ secret }) => presentSecret(secret)),
+      );
 
-        const stored = yield* store.hydrate;
-        if (stored.secret.length > 0) return stored.secret;
-
-        if (!realm.isTop) {
-          return yield* new FrameAuthError({
-            reason: "unauthenticated",
-            detail: "this frame has no credential in manager storage",
-          });
-        }
-
-        const created = yield* createSecret;
-
-        // Read storage once more, immediately before the write. The top frame
-        // of another tab shares this store, and it can create the credential
-        // while this frame collects its random bytes. A credential that is
-        // already in use must not be replaced: the two ends of a live link
-        // derived their key from it, and a new value would break them.
-        //
-        // The value store gives no compare-and-set, so this makes the window
-        // small and does not close it. A frame that loses converges on the
-        // next read, and a join inside the window fails and is repeated.
-        const again = yield* store.hydrate;
-        if (again.secret.length > 0) return again.secret;
-
+      /**
+       * Write a credential that this frame made, and give back the one that
+       * storage then holds.
+       */
+      const storeSecret = Effect.fnUntraced(function* (created: string) {
         yield* pipe(
-          store.update((current) =>
-            // The same test again, against the value that the group holds.
-            // Another tab can reach this group through the change stream of
-            // the manager between the read and the write.
-            current.secret.length > 0
-              ? current
-              : {
-                  ...current,
-                  secret: created,
-                },
-          ),
+          store.update(withSecret(created)),
           Effect.mapError(
             (cause) =>
               new FrameAuthError({
@@ -361,15 +409,56 @@ export class FrameAuth extends Context.Service<
 
         // Keep the value that storage holds, and not the value that this
         // frame made. The two differ when another tab wrote last.
-        const settled = yield* store.hydrate;
-        return settled.secret.length > 0 ? settled.secret : created;
+        const settled = yield* stored;
+        return pipe(
+          settled,
+          Option.getOrElse(() => created),
+        );
       });
 
-      const keyFor = Effect.fn("FrameAuth.key")(function* (value: string) {
-        const cached = yield* Ref.get(cache);
-        if (Option.isSome(cached) && cached.value.secret === value) {
-          return cached.value.key;
-        }
+      /** Create the credential, unless another frame stores one first. */
+      const createShared = Effect.fnUntraced(function* () {
+        yield* creator;
+        const created = yield* createSecret;
+
+        // Read storage once more, immediately before the write. The top frame
+        // of another tab shares this store, and it can create the credential
+        // while this frame collects its random bytes. A credential that is
+        // already in use must not be replaced: the two ends of a live link
+        // derived their key from it, and a new value would break them.
+        //
+        // The value store gives no compare-and-set, so this makes the window
+        // small and does not close it. A frame that loses converges on the
+        // next read, and a join inside the window fails and is repeated.
+        const again = yield* stored;
+        return yield* pipe(
+          again,
+          Option.match({
+            onSome: Effect.succeed,
+            onNone: () => storeSecret(created),
+          }),
+        );
+      });
+
+      /**
+       * The shared credential, as storage holds it.
+       *
+       * It is private to this module. The top frame creates one when storage
+       * holds none.
+       */
+      const secret = Effect.fn("FrameAuth.secret")(function* () {
+        yield* privateStore;
+        const current = yield* stored;
+        return yield* pipe(
+          current,
+          Option.match({
+            onSome: Effect.succeed,
+            onNone: createShared,
+          }),
+        );
+      });
+
+      const importCredential = Effect.fnUntraced(function* (value: string) {
         const api = yield* subtle;
         const key = yield* Effect.tryPromise({
           try: () =>
@@ -388,8 +477,20 @@ export class FrameAuth extends Context.Service<
               detail: `could not import the credential: ${describe(cause)}`,
             }),
         });
-        yield* Ref.set(cache, Option.some({ secret: value, key }));
+        yield* pipe(cache, Ref.set(Option.some({ secret: value, key })));
         return key;
+      });
+
+      const keyFor = Effect.fn("FrameAuth.key")(function* (value: string) {
+        const cached = yield* Ref.get(cache);
+        return yield* pipe(
+          cached,
+          Option.filter((entry) => entry.secret === value),
+          Option.match({
+            onSome: ({ key }) => Effect.succeed(key),
+            onNone: () => importCredential(value),
+          }),
+        );
       });
 
       /**
@@ -427,25 +528,29 @@ export class FrameAuth extends Context.Service<
         const value = yield* secret();
         const key = yield* keyFor(value);
         const api = yield* subtle;
-        const bytes = decodeBase64Url(proof);
-        if (Option.isNone(bytes)) return false;
-
-        return yield* Effect.tryPromise({
-          try: () =>
-            api.verify(
-              ALGORITHM,
-              key,
-              bytes.value,
-              encoder.encode(
-                joinProofPayload(handshake.token, handshake.helloId, handshake.frameId),
-              ),
-            ),
-          catch: (cause) =>
-            new FrameAuthError({
-              reason: "failed",
-              detail: `could not verify: ${describe(cause)}`,
-            }),
-        });
+        return yield* pipe(
+          decodeBase64Url(proof),
+          Option.match({
+            onNone: () => Effect.succeed(false),
+            onSome: (bytes) =>
+              Effect.tryPromise({
+                try: () =>
+                  api.verify(
+                    ALGORITHM,
+                    key,
+                    bytes,
+                    encoder.encode(
+                      joinProofPayload(handshake.token, handshake.helloId, handshake.frameId),
+                    ),
+                  ),
+                catch: (cause) =>
+                  new FrameAuthError({
+                    reason: "failed",
+                    detail: `could not verify: ${describe(cause)}`,
+                  }),
+              }),
+          }),
+        );
       });
 
       const cipher = Effect.fn("FrameAuth.cipher")(function* (handshake: FrameHandshake) {
@@ -485,26 +590,19 @@ export class FrameAuth extends Context.Service<
                 detail: `could not seal the message: ${describe(cause)}`,
               }),
           });
-          return {
-            ...ENVELOPE,
-            kind: "SEALED",
-            seq,
-            data: toBase64Url(new Uint8Array(sealed)),
-          } satisfies SealedMessage;
+          return sealedMessage(seq, toBase64Url(new Uint8Array(sealed)));
         });
 
-        const open = Effect.fn("FrameCipher.open")(function* (
+        // Every failure of `decrypt` is one answer: this message is not ours.
+        // The API gives the same error for a changed byte, a wrong key and a
+        // wrong counter, and it must, because a peer that could tell them
+        // apart would learn about the key.
+        const decrypt = (
           direction: SealDirection,
           sealed: SealedMessage,
-        ) {
-          const bytes = decodeBase64Url(sealed.data);
-          if (Option.isNone(bytes)) return Option.none<string>();
-
-          // Every failure of `decrypt` is one answer: this message is not
-          // ours. The API gives the same error for a changed byte, a wrong
-          // key and a wrong counter, and it must, because a peer that could
-          // tell them apart would learn about the key.
-          const plain = yield* Effect.option(
+          bytes: Uint8Array<ArrayBuffer>,
+        ): Effect.Effect<Option.Option<string>> =>
+          pipe(
             Effect.tryPromise({
               try: () =>
                 api.decrypt(
@@ -516,7 +614,7 @@ export class FrameAuth extends Context.Service<
                     ),
                   },
                   key,
-                  bytes.value,
+                  bytes,
                 ),
               catch: () =>
                 new FrameAuthError({
@@ -524,10 +622,20 @@ export class FrameAuth extends Context.Service<
                   detail: "the message did not open",
                 }),
             }),
+            Effect.option,
+            Effect.map(Option.map((buffer) => decoder.decode(new Uint8Array(buffer)))),
           );
-          return pipe(
-            plain,
-            Option.map((buffer) => decoder.decode(new Uint8Array(buffer))),
+
+        const open = Effect.fn("FrameCipher.open")(function* (
+          direction: SealDirection,
+          sealed: SealedMessage,
+        ) {
+          return yield* pipe(
+            decodeBase64Url(sealed.data),
+            Option.match({
+              onNone: () => Effect.succeedNone,
+              onSome: (bytes) => decrypt(direction, sealed, bytes),
+            }),
           );
         });
 
@@ -538,11 +646,20 @@ export class FrameAuth extends Context.Service<
       // the top frame can create it, and a child cannot wait for a value that
       // nobody writes. A clean installation would otherwise keep every frame
       // outside the session for the life of the page.
-      if (realm.isTop) {
-        yield* Effect.catch(Effect.asVoid(secret()), (error) =>
-          Effect.logDebug(`no frame credential in this realm: ${error.detail}`),
-        );
-      }
+      yield* pipe(
+        realm.isTop,
+        Boolean.match({
+          onFalse: () => Effect.void,
+          onTrue: () =>
+            pipe(
+              secret(),
+              Effect.asVoid,
+              Effect.catch((error) =>
+                Effect.logDebug(`no frame credential in this realm: ${error.detail}`),
+              ),
+            ),
+        }),
+      );
 
       return FrameAuth.of({
         joinProof,

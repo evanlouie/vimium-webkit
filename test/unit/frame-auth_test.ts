@@ -24,11 +24,26 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer, Option, Result, Stream, pipe, Struct } from "effect";
+import {
+  Array,
+  Boolean,
+  Effect,
+  flow,
+  Layer,
+  Option,
+  Predicate,
+  Ref,
+  Result,
+  Schema,
+  Stream,
+  String as Str,
+  pipe,
+  Struct,
+} from "effect";
 import { frameCredentialGroup, sessionGroup } from "~/domain/Persisted.ts";
 import { FrameAuth, type FrameHandshake } from "~/frames/Auth.ts";
 import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
-import { type FrameId, Realm } from "~/platform/Realm.ts";
+import { FrameId, Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
 
 /** The key of the group that only `frames/Auth.ts` builds. */
@@ -61,7 +76,13 @@ const makeStore = (managerPrivate: boolean): Store => {
     map,
     service: KeyValueStore.of({
       setUnsafe: null,
-      kind: managerPrivate ? "gm-sync" : "memory",
+      kind: pipe(
+        managerPrivate,
+        Boolean.match({
+          onTrue: () => "gm-sync" as const,
+          onFalse: () => "memory" as const,
+        }),
+      ),
       durable: managerPrivate,
       watchable: false,
       managerPrivate,
@@ -84,7 +105,7 @@ const realmLayer = (isTop: boolean, frameId: string): Layer.Layer<Realm> =>
   Layer.succeed(
     Realm,
     Realm.of({
-      frameId: frameId as FrameId,
+      frameId: FrameId.make(frameId),
       isTop,
       isLive: true,
       wakeDescendants: Effect.void,
@@ -100,10 +121,32 @@ const frameLayer = (store: Store, isTop: boolean, frameId: string): Layer.Layer<
   // of a service is otherwise built once and shared. Two frames of a page each
   // hold their own instance.
   return pipe(
-    Layer.fresh(FrameAuth.layer),
+    FrameAuth.layer,
+    Layer.fresh,
     Layer.provide(Layer.mergeAll(kv, realmLayer(isTop, frameId))),
   );
 };
+
+/** The two fields of a stored group that could hold a credential. */
+const decodeStoredGroup = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      data: Schema.Struct({
+        secret: Schema.optionalKey(Schema.Unknown),
+        frameSecret: Schema.optionalKey(Schema.Unknown),
+      }),
+    }),
+  ),
+);
+
+/** The values of one stored group that could be the credential, in the order of the scan. */
+const candidateSecrets: (raw: string) => ReadonlyArray<unknown> = flow(
+  decodeStoredGroup,
+  Option.match({
+    onNone: () => Array.empty<unknown>(),
+    onSome: ({ data }) => [data.secret, data.frameSecret],
+  }),
+);
 
 /**
  * The credential that the store holds, wherever it holds it.
@@ -111,18 +154,23 @@ const frameLayer = (store: Store, isTop: boolean, frameId: string): Layer.Layer<
  * The scan covers every group and both field names, because the subject of
  * these tests is where the credential is not.
  */
-const storedSecret = (store: Store): string => {
-  for (const raw of store.map.values()) {
-    const parsed = JSON.parse(raw) as { readonly data?: unknown };
-    const data = parsed.data as Record<string, unknown> | undefined;
-    if (data === undefined) continue;
-    for (const name of ["secret", "frameSecret"]) {
-      const value = data[name];
-      if (typeof value === "string" && value.length > 0) return value;
-    }
-  }
-  return "";
-};
+const storedSecret = (store: Store): string =>
+  pipe(
+    store.map.values(),
+    Array.fromIterable,
+    Array.flatMap(candidateSecrets),
+    Array.filter(Predicate.isString),
+    Array.findFirst(Str.isNonEmpty),
+    Option.getOrElse(() => ""),
+  );
+
+/** The reason of a failed outcome. */
+const reasonOf: (
+  outcome: Result.Result<unknown, { readonly reason: string }>,
+) => Option.Option<string> = flow(
+  Result.getFailure,
+  Option.map(({ reason }) => reason),
+);
 
 /** The raw value of the credential group, as the store holds it. */
 const credentialValue = (secret: string): string =>
@@ -142,7 +190,24 @@ const credentialValue = (secret: string): string =>
  */
 const makeRacingStore = (rival: string): Store => {
   const map = new Map<string, string>();
-  let firstRead = true;
+  const firstRead = Ref.makeUnsafe(true);
+  const read = (key: string): Effect.Effect<Option.Option<string>> =>
+    Effect.sync(() => Option.fromNullishOr(map.get(key)));
+  // The other tab writes here: after this read, and before our own write.
+  const rivalWrites = Effect.sync(() => {
+    map.set(CREDENTIAL_KEY, credentialValue(rival));
+    return Option.none<string>();
+  });
+  const readCredential = pipe(
+    firstRead,
+    Ref.getAndSet(false),
+    Effect.flatMap(
+      Boolean.match({
+        onTrue: () => rivalWrites,
+        onFalse: () => read(CREDENTIAL_KEY),
+      }),
+    ),
+  );
   return {
     map,
     service: KeyValueStore.of({
@@ -152,16 +217,13 @@ const makeRacingStore = (rival: string): Store => {
       watchable: false,
       managerPrivate: true,
       get: (key) =>
-        Effect.sync(() => {
-          if (key === CREDENTIAL_KEY && firstRead) {
-            firstRead = false;
-            // The other tab writes here: after this read, and before our own
-            // write.
-            map.set(key, credentialValue(rival));
-            return Option.none<string>();
-          }
-          return Option.fromNullishOr(map.get(key) ?? null);
-        }),
+        pipe(
+          key === CREDENTIAL_KEY,
+          Boolean.match({
+            onTrue: () => readCredential,
+            onFalse: () => read(key),
+          }),
+        ),
       set: (key, value) =>
         Effect.sync(() => {
           map.set(key, value);
@@ -209,18 +271,10 @@ describe("FrameAuth", () => {
               assert.isTrue(yield* top.verifyJoin(HANDSHAKE, proof));
 
               // The proof names one attempt and one identity, and nothing else.
-              assert.isFalse(
-                yield* top.verifyJoin(
-                  pipe(HANDSHAKE, Struct.assign({ frameId: TOP_FRAME })),
-                  proof,
-                ),
-              );
-              assert.isFalse(
-                yield* top.verifyJoin(
-                  pipe(HANDSHAKE, Struct.assign({ token: "abcdefabcdefabcd" })),
-                  proof,
-                ),
-              );
+              const otherFrame = pipe(HANDSHAKE, Struct.assign({ frameId: TOP_FRAME }));
+              const otherToken = pipe(HANDSHAKE, Struct.assign({ token: "abcdefabcdefabcd" }));
+              assert.isFalse(yield* top.verifyJoin(otherFrame, proof));
+              assert.isFalse(yield* top.verifyJoin(otherToken, proof));
               assert.isFalse(yield* top.verifyJoin(HANDSHAKE, "bm90LWEtcHJvb2Y"));
             }),
             Effect.provide(frameLayer(store, false, CHILD_FRAME)),
@@ -240,8 +294,7 @@ describe("FrameAuth", () => {
           const child = yield* FrameAuth;
           const outcome = yield* Effect.result(child.joinProof(HANDSHAKE));
           assert.isTrue(Result.isFailure(outcome));
-          if (Result.isSuccess(outcome)) return;
-          assert.strictEqual(outcome.failure.reason, "unauthenticated");
+          assert.deepEqual(reasonOf(outcome), Option.some("unauthenticated"));
         }),
         Effect.provide(frameLayer(store, false, CHILD_FRAME)),
       );
@@ -260,11 +313,11 @@ describe("FrameAuth", () => {
           // Every route to the credential must fail. The service also gives no
           // way to read the credential itself: a caller can ask for a proof, for
           // a check of a proof and for a cipher, and for nothing else.
-          assert.isFalse(Object.hasOwn(top, "secret"), "the service publishes the credential");
+          const published = pipe(top, Predicate.hasProperty("secret"));
+          assert.isFalse(published, "the service publishes the credential");
           const outcome = yield* Effect.result(top.joinProof(HANDSHAKE));
           assert.isTrue(Result.isFailure(outcome));
-          if (Result.isSuccess(outcome)) return;
-          assert.strictEqual(outcome.failure.reason, "unavailable");
+          assert.deepEqual(reasonOf(outcome), Option.some("unavailable"));
         }),
         Effect.provide(frameLayer(store, true, TOP_FRAME)),
       );
@@ -333,6 +386,12 @@ describe("FrameAuth", () => {
       const secret = storedSecret(store);
       assert.isAbove(secret.length, 0, "no credential was created");
 
+      const storageLayer = pipe(
+        Storage.layer,
+        Layer.fresh,
+        Layer.provide(Layer.succeed(KeyValueStore, store.service)),
+      );
+
       // A feature holds `Storage`, and nothing else. Every group that a
       // feature can name is read here, and none of them carries the
       // credential.
@@ -346,20 +405,20 @@ describe("FrameAuth", () => {
             yield* storage.history.hydrate,
             yield* storage.session.hydrate,
           ];
-          for (const group of readable) {
-            assert.notInclude(
-              JSON.stringify(group),
-              secret,
-              "a feature can read the frame credential",
-            );
-          }
+          yield* pipe(
+            readable,
+            Effect.forEach((group) =>
+              Effect.sync(() => {
+                assert.notInclude(
+                  JSON.stringify(group),
+                  secret,
+                  "a feature can read the frame credential",
+                );
+              }),
+            ),
+          );
         }),
-        Effect.provide(
-          pipe(
-            Layer.fresh(Storage.layer),
-            Layer.provide(Layer.succeed(KeyValueStore, store.service)),
-          ),
-        ),
+        Effect.provide(storageLayer),
       );
 
       // The type of the session group holds no field for a credential, so a
@@ -398,32 +457,29 @@ describe("FrameAuth", () => {
               // A message that is sent back to its sender.
               assert.isTrue(Option.isNone(yield* topCipher.open("down", sealed)));
               // A message that is played again with another counter.
-              assert.isTrue(
-                Option.isNone(yield* topCipher.open("up", pipe(sealed, Struct.assign({ seq: 1 })))),
-              );
+              const replayed = pipe(sealed, Struct.assign({ seq: 1 }));
+              assert.isTrue(Option.isNone(yield* topCipher.open("up", replayed)));
               // A message whose ciphertext was changed. The first character of
               // base64 carries six bits of the first byte, so a change there is
               // always a change of the bytes. The last character can carry two
               // bits only, and a change there can decode to the same bytes.
-              assert.isTrue(
-                Option.isNone(
-                  yield* topCipher.open(
-                    "up",
-                    pipe(
-                      sealed,
-                      Struct.assign({
-                        data: `${sealed.data.startsWith("A") ? "B" : "A"}${sealed.data.slice(1)}`,
-                      }),
-                    ),
-                  ),
-                ),
+              const firstCharacter = pipe(
+                sealed.data.startsWith("A"),
+                Boolean.match({
+                  onTrue: () => "B",
+                  onFalse: () => "A",
+                }),
               );
+              const changed = pipe(
+                sealed,
+                Struct.assign({ data: `${firstCharacter}${sealed.data.slice(1)}` }),
+              );
+              assert.isTrue(Option.isNone(yield* topCipher.open("up", changed)));
 
               // The key belongs to one attempt, so a message of one link never
               // opens on another.
-              const other = yield* top.cipher(
-                pipe(HANDSHAKE, Struct.assign({ helloId: "abcdefabcdefabcd" })),
-              );
+              const otherAttempt = pipe(HANDSHAKE, Struct.assign({ helloId: "abcdefabcdefabcd" }));
+              const other = yield* top.cipher(otherAttempt);
               assert.isTrue(Option.isNone(yield* other.open("up", sealed)));
             }),
             Effect.provide(frameLayer(store, false, CHILD_FRAME)),
