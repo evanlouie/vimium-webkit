@@ -84,6 +84,7 @@
 import {
   Array,
   Boolean,
+  Chunk,
   Data,
   HashSet,
   Iterable,
@@ -92,6 +93,7 @@ import {
   flow,
   pipe,
   Predicate,
+  Record as Rec,
   Result,
   String as Str,
   Struct,
@@ -908,14 +910,27 @@ const unionShapes: (
     ),
 });
 
-/** The set that comes after `short` in the longer shape `long`, when `short` starts `long`. */
-const follower =
-  (intersect: Intersect, short: ReadonlyArray<CharSet>) =>
-  (long: ReadonlyArray<CharSet>): Option.Option<CharSet> =>
+/** The known shapes of the branches, by their length. */
+type ShapesByLength = Rec.ReadonlyRecord<string, ReadonlyArray<ReadonlyArray<CharSet>>>;
+
+/**
+ * The sets of `long` that can follow a shorter shape.
+ *
+ * The set at position `k` follows when a shape of length `k` can start
+ * `long`. Each position counts once, however many shapes start `long` there.
+ */
+const followersIn =
+  (intersect: Intersect, byLength: ShapesByLength) =>
+  (long: ReadonlyArray<CharSet>): ReadonlyArray<CharSet> =>
     pipe(
       long,
-      Array.get(short.length),
-      Option.filter(() => overlaps(intersect, short, long)),
+      Array.filter((_, length) =>
+        pipe(
+          byLength,
+          Rec.get(String(length)),
+          Option.exists(Array.some((short) => overlaps(intersect, short, long))),
+        ),
+      ),
     );
 
 /** Can the two branches start with one character, when one of their shapes is unknown? */
@@ -951,27 +966,24 @@ const crossExtend = (intersect: Intersect, branches: ReadonlyArray<Node>): CharS
     Array.map(({ sequence }) => sequence),
     Array.getSomes,
   );
-  const followers = pipe(
+  const byLength: ShapesByLength = pipe(
     shapes,
-    Array.flatMap((short) =>
-      pipe(
-        shapes,
-        Array.filter((long) => long.length > short.length),
-        Array.map(follower(intersect, short)),
-        Array.getSomes,
-      ),
-    ),
+    Array.groupBy((shape) => String(shape.length)),
   );
+  const followers = pipe(shapes, Array.flatMap(followersIn(intersect, byLength)));
+  // A branch that can be empty lets every other branch start the match again.
+  const empties = pipe(branches, Array.filter(isNullable));
   const starts = pipe(
     branches,
-    Array.filter(isNullable),
-    Array.flatMap((empty) =>
-      pipe(
-        branches,
-        Array.filter((other) => other !== empty && other.span.max > 0),
-        Array.map(({ first }) => first),
-      ),
+    Array.filter(
+      (other) =>
+        other.span.max > 0 &&
+        pipe(
+          empties,
+          Array.some((empty) => empty !== other),
+        ),
     ),
+    Array.map(({ first }) => first),
   );
   return pipe(
     branches,
@@ -1671,15 +1683,20 @@ const lex = (source: string, flags: Flags): Iterable<Result.Result<Token, string
 // The parser
 // ---------------------------------------------------------------------------
 
-/** The branches of one group, while the parser reads it. */
+/**
+ * The branches of one group, while the parser reads it.
+ *
+ * A chunk appends in logarithmic time, so a long branch does not copy its
+ * parts once for every part that it adds.
+ */
 interface Branches {
   /** The branches that a `|` already ended. */
-  readonly done: ReadonlyArray<Node>;
+  readonly done: Chunk.Chunk<Node>;
   /** The parts of the branch that the parser reads now. */
-  readonly parts: ReadonlyArray<Node>;
+  readonly parts: Chunk.Chunk<Node>;
 }
 
-const NO_BRANCHES: Branches = { done: [], parts: [] };
+const NO_BRANCHES: Branches = { done: Chunk.empty(), parts: Chunk.empty() };
 
 /** A group that a `(` opened, and that no `)` closed yet. */
 interface Frame {
@@ -1687,28 +1704,41 @@ interface Frame {
   readonly branches: Branches;
 }
 
+/** The open groups: the innermost one, and the groups that hold it. */
+interface OpenGroups {
+  readonly innermost: Frame;
+  readonly outer: Option.Option<OpenGroups>;
+}
+
 interface Parser {
-  /** The open groups, the innermost first. */
-  readonly open: ReadonlyArray<Frame>;
+  readonly open: Option.Option<OpenGroups>;
   /** The branches of the whole pattern. */
   readonly root: Branches;
   /** The lookaheads and lookbehinds that the parser has opened so far. */
   readonly assertions: number;
 }
 
-const START: Parser = { open: [], root: NO_BRANCHES, assertions: 0 };
+const START: Parser = { open: Option.none(), root: NO_BRANCHES, assertions: 0 };
+
+/** The open groups, the innermost first. */
+const framesOf = (open: Option.Option<OpenGroups>): Iterable<Frame> =>
+  Iterable.unfold(
+    open,
+    Option.map(({ innermost, outer }) => [innermost, outer] as const),
+  );
 
 /** The constructors of the inner nodes, which compare sets under the flags. */
 interface Tree {
   /** No part is the empty node, and one part is that part. */
-  readonly concat: (parts: ReadonlyArray<Node>) => Node;
+  readonly concat: (parts: Chunk.Chunk<Node>) => Node;
   /** One branch is that branch. */
   readonly alternation: (branches: Branches) => Node;
 }
 
 const makeTree = (intersect: Intersect): Tree => {
-  const concat = (parts: ReadonlyArray<Node>): Node =>
-    pipe(
+  const concat = (chunk: Chunk.Chunk<Node>): Node => {
+    const parts = Chunk.toReadonlyArray(chunk);
+    return pipe(
       parts,
       Array.matchLeft({
         onEmpty: () => EMPTY_NODE,
@@ -1719,8 +1749,9 @@ const makeTree = (intersect: Intersect): Tree => {
           ),
       }),
     );
+  };
   const alternation = ({ done, parts }: Branches): Node => {
-    const branches = pipe(done, Array.append(concat(parts)));
+    const branches = pipe(done, Chunk.append(concat(parts)), Chunk.toReadonlyArray);
     return pipe(
       Array.tailNonEmpty(branches),
       Array.match({
@@ -1739,37 +1770,42 @@ const quantified = (node: Node, count: Option.Option<Count>): Node =>
 const modifyCurrent = (parser: Parser, change: (branches: Branches) => Branches): Parser =>
   pipe(
     parser.open,
-    Array.matchLeft({
-      onEmpty: () => pipe(parser, Struct.assign({ root: change(parser.root) })),
-      onNonEmpty: ({ opener, branches }, outer) => {
-        const open = pipe(outer, Array.prepend({ opener, branches: change(branches) }));
-        return pipe(parser, Struct.assign({ open }));
-      },
+    Option.match({
+      onNone: () => pipe(parser, Struct.assign({ root: change(parser.root) })),
+      onSome: ({ innermost: { opener, branches }, outer }) =>
+        pipe(
+          parser,
+          Struct.assign({
+            open: Option.some({ innermost: { opener, branches: change(branches) }, outer }),
+          }),
+        ),
     }),
   );
 
 const addPart =
   (node: Node) =>
-  ({ done, parts }: Branches): Branches => ({ done, parts: pipe(parts, Array.append(node)) });
+  ({ done, parts }: Branches): Branches => ({ done, parts: pipe(parts, Chunk.append(node)) });
 
 const endBranch =
   (tree: Tree) =>
   ({ done, parts }: Branches): Branches => ({
-    done: pipe(done, Array.append(tree.concat(parts))),
-    parts: [],
+    done: pipe(done, Chunk.append(tree.concat(parts))),
+    parts: Chunk.empty(),
   });
 
 const push = (parser: Parser, opener: Opener): Parser =>
   pipe(
     parser,
-    Struct.assign({ open: pipe(parser.open, Array.prepend({ opener, branches: NO_BRANCHES })) }),
+    Struct.assign({
+      open: Option.some({ innermost: { opener, branches: NO_BRANCHES }, outer: parser.open }),
+    }),
   );
 
 const lookDepth = (parser: Parser): number =>
   pipe(
-    parser.open,
-    Array.filter(({ opener }) => Opener.$is("Look")(opener)),
-    Array.length,
+    framesOf(parser.open),
+    Iterable.filter(({ opener }) => Opener.$is("Look")(opener)),
+    Iterable.size,
   );
 
 /** Open a lookahead or a lookbehind, within the two limits on assertions. */
@@ -1794,10 +1830,10 @@ const closeGroup = (
 ): Result.Result<Parser, string> =>
   pipe(
     parser.open,
-    Array.matchLeft({
+    Option.match({
       // A `)` that no `(` opened.
-      onEmpty: () => Result.fail(UNSUPPORTED_SYNTAX),
-      onNonEmpty: ({ opener, branches }, outer) => {
+      onNone: () => Result.fail(UNSUPPORTED_SYNTAX),
+      onSome: ({ innermost: { opener, branches }, outer }) => {
         const group = pipe(
           opener,
           Opener.$match({
@@ -1834,9 +1870,9 @@ const step = (tree: Tree, parser: Parser, token: Token): Result.Result<Parser, s
 const finish = (tree: Tree, parser: Parser): Result.Result<Node, string> =>
   pipe(
     parser.open,
-    Array.match({
-      onEmpty: () => Result.succeed(tree.alternation(parser.root)),
-      onNonEmpty: () => Result.fail(UNSUPPORTED_SYNTAX),
+    Option.match({
+      onNone: () => Result.succeed(tree.alternation(parser.root)),
+      onSome: () => Result.fail(UNSUPPORTED_SYNTAX),
     }),
   );
 
