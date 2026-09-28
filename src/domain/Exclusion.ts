@@ -8,8 +8,7 @@
  * rule, and must not read its own URL. An error here leaves Vimium-WebKit
  * active inside an advertisement iframe on a page that the user excluded.
  *
- * The rule set is a record of pure functions, and not a class. The memoisation
- * lives inside one set, so two sets cannot share a result.
+ * The rule set is a record of pure functions, and not a class.
  */
 
 import {
@@ -20,14 +19,15 @@ import {
   Option,
   Predicate,
   Result,
+  Schema,
   String as Str,
   flow,
   pipe,
 } from "effect";
-import { constVoid } from "effect/Function";
+import { constFalse } from "effect/Function";
 import { exclusionRuleSchema } from "~/domain/Persisted.ts";
 import type { ExclusionRule } from "~/domain/Persisted.ts";
-import { isLinearRegex, regexSafetyError } from "~/domain/RegexSafety.ts";
+import { regexSafetyError } from "~/domain/RegexSafety.ts";
 
 /**
  * The rule as it is stored, given again here.
@@ -38,16 +38,30 @@ import { isLinearRegex, regexSafetyError } from "~/domain/RegexSafety.ts";
 export { exclusionRuleSchema };
 export type { ExclusionRule };
 
-export interface EffectiveRule {
-  readonly enabled: boolean;
-  /** The keys that go directly to the page. Empty when we are fully enabled. */
-  readonly passKeys: string;
-}
+/**
+ * The verdict of the exclusion rules for one page.
+ *
+ * `Disabled` keeps us off the page entirely. `Enabled` keeps us on, and gives
+ * the page the keys in `passKeys`.
+ *
+ * It is a schema, because the verdict travels between frames.
+ * `domain/FrameMessage.ts` keeps the two fields of the wire, and decodes them
+ * into this union.
+ */
+export const EffectiveRule = Schema.TaggedUnion({
+  Disabled: {},
+  Enabled: {
+    /** The keys that go directly to the page. Empty when we are fully enabled. */
+    passKeys: Schema.String,
+  },
+});
 
-export const FULLY_ENABLED: EffectiveRule = { enabled: true, passKeys: "" };
+export type EffectiveRule = typeof EffectiveRule.Type;
+
+export const FULLY_ENABLED: EffectiveRule = EffectiveRule.cases.Enabled.make({ passKeys: "" });
 
 /** The verdict of a rule with no pass keys: we stay off the page entirely. */
-const FULLY_DISABLED: EffectiveRule = { enabled: false, passKeys: "" };
+const FULLY_DISABLED: EffectiveRule = EffectiveRule.cases.Disabled.make({});
 
 const escapeRegExp = (input: string): string => input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -200,37 +214,20 @@ export const isRawPattern = (pattern: string): boolean => {
   return trimmed.length > 1 && trimmed.startsWith("/") && trimmed.endsWith("/");
 };
 
-/** A pattern, trimmed and read once: a raw expression between two `/`, or a glob. */
-type Pattern = Data.TaggedEnum<{
-  Expression: { readonly body: string };
+/**
+ * A pattern that passed every check: a raw expression between two `/`, or a
+ * glob.
+ *
+ * The raw expression compiled, and the safety check accepted it. A glob cannot
+ * backtrack, so it needs no such check. `readPattern` is the one place that
+ * makes this value, so no later step checks a pattern again.
+ */
+type SafePattern = Data.TaggedEnum<{
+  Expression: { readonly regexp: RegExp };
   Glob: { readonly glob: string };
 }>;
 
-const Pattern = Data.taggedEnum<Pattern>();
-
-/**
- * Read a pattern that the user wrote, or say why it gives no rule.
- *
- * `*` is the only wildcard. A pattern between two `/` characters is a raw
- * regular expression, which is the escape of upstream.
- */
-const readPattern: (pattern: string) => Result.Result<Pattern, string> = flow(
-  Str.trim,
-  Result.liftPredicate(Str.isNonEmpty, () => "the rule is empty"),
-  Result.filterOrFail(
-    (trimmed) => trimmed.length <= MAX_PATTERN_LENGTH,
-    () => `the pattern is longer than ${MAX_PATTERN_LENGTH} characters`,
-  ),
-  Result.map((trimmed) =>
-    pipe(
-      isRawPattern(trimmed),
-      Boolean.match({
-        onTrue: () => Pattern.Expression({ body: trimmed.slice(1, -1) }),
-        onFalse: () => Pattern.Glob({ glob: trimmed }),
-      }),
-    ),
-  ),
-);
+const SafePattern = Data.taggedEnum<SafePattern>();
 
 /** What a thrown value says. A `RegExp` that does not compile throws a `SyntaxError`. */
 const describeCause = (cause: unknown): string =>
@@ -240,8 +237,8 @@ const describeCause = (cause: unknown): string =>
     Match.orElse((other) => String(other)),
   );
 
-/** Compile a raw expression, or say why we drop it. */
-const compileExpression = (body: string): Result.Result<UrlMatcher, string> =>
+/** Compile a raw expression and check it, or say why we drop it. */
+const readExpression = (body: string): Result.Result<SafePattern, string> =>
   Result.gen(function* () {
     const source = `^${body}$`;
     const regexp = yield* Result.try({
@@ -252,28 +249,51 @@ const compileExpression = (body: string): Result.Result<UrlMatcher, string> =>
     // expression that backtracks turns one crafted URL into a tab that does
     // not answer: `(a+)+$` against forty characters already takes minutes.
     // The check refuses the shapes that it can prove ambiguous, and the cap
-    // below bounds the work of every shape that it accepts.
+    // of the matcher bounds the work of every shape that it accepts.
     yield* pipe(
       regexSafetyError(source, ""),
       Option.match({ onNone: () => Result.void, onSome: Result.fail }),
     );
-    return pipe((url: string) => regexp.test(url), capped(MAX_REGEX_URL_LENGTH));
+    return SafePattern.Expression({ regexp });
   });
 
 /**
- * Compile a Vimium URL pattern.
+ * Read a pattern that the user wrote, and check it, or say why it gives no
+ * rule.
  *
- * A bad rule costs the user that rule, and no other rule, so every failure
- * comes back as a reason and never as an exception.
+ * `*` is the only wildcard. A pattern between two `/` characters is a raw
+ * regular expression, which is the escape of upstream. A bad rule costs the
+ * user that rule, and no other rule, so every failure comes back as a reason
+ * and never as an exception.
  */
+const readPattern: (pattern: string) => Result.Result<SafePattern, string> = flow(
+  Str.trim,
+  Result.liftPredicate(Str.isNonEmpty, () => "the rule is empty"),
+  Result.filterOrFail(
+    (trimmed) => trimmed.length <= MAX_PATTERN_LENGTH,
+    () => `the pattern is longer than ${MAX_PATTERN_LENGTH} characters`,
+  ),
+  Result.flatMap((trimmed) =>
+    pipe(
+      isRawPattern(trimmed),
+      Boolean.match({
+        onTrue: () => readExpression(trimmed.slice(1, -1)),
+        onFalse: () => Result.succeed(SafePattern.Glob({ glob: trimmed })),
+      }),
+    ),
+  ),
+);
+
+/** The matcher of a checked pattern. Each form reads a capped length of URL. */
+const matcherOf: (pattern: SafePattern) => UrlMatcher = SafePattern.$match({
+  Expression: ({ regexp }) => pipe((url: string) => regexp.test(url), capped(MAX_REGEX_URL_LENGTH)),
+  Glob: ({ glob }) => pipe(glob, readGlob, globMatcher, capped(MAX_URL_LENGTH)),
+});
+
+/** Compile a Vimium URL pattern, or say why we drop it. */
 const compile: (pattern: string) => Result.Result<UrlMatcher, string> = flow(
   readPattern,
-  Result.flatMap(
-    Pattern.$match({
-      Expression: ({ body }) => compileExpression(body),
-      Glob: ({ glob }) => pipe(glob, readGlob, globMatcher, capped(MAX_URL_LENGTH), Result.succeed),
-    }),
-  ),
+  Result.map(matcherOf),
 );
 
 /**
@@ -356,30 +376,29 @@ export const exclusionProblems: (text: string) => ReadonlyArray<string> = flow(
   Array.getSomes,
 );
 
+/** The regular expression of a glob. `globSource` escapes every character but `*`. */
+const globRegExp = Option.liftThrowable((glob: string) => new RegExp(`^${globSource(glob)}$`));
+
 /**
  * The regular expression that a glob is *equivalent* to.
  *
  * Kept for the tests, and for a view that shows the user what a pattern means.
  * It is not used to match. See `UrlMatcher`.
  *
- * The safety check runs on a raw expression only. A glob cannot backtrack,
- * because the glob matcher reads it greedily, and a run of `*` in a glob
- * becomes one `.*` here. The two functions therefore accept the same patterns.
+ * It reads the pattern as `compilePattern` does, so the two functions accept
+ * the same patterns. A raw expression gives the expression that passed the
+ * safety check. A glob cannot backtrack, because the glob matcher reads it
+ * greedily, and a run of `*` in a glob becomes one `.*` here.
  */
 export const patternToRegExp: (pattern: string) => Option.Option<RegExp> = flow(
   readPattern,
   Result.getSuccess,
   Option.flatMap(
-    Pattern.$match({
-      Expression: ({ body }) =>
-        pipe(
-          `^${body}$`,
-          Option.liftPredicate((source) => isLinearRegex(source, "")),
-        ),
-      Glob: ({ glob }) => Option.some(`^${globSource(glob)}$`),
+    SafePattern.$match({
+      Expression: ({ regexp }) => Option.some(regexp),
+      Glob: ({ glob }) => globRegExp(glob),
     }),
   ),
-  Option.flatMap(Option.liftThrowable((source: string) => new RegExp(source))),
 );
 
 // ---------------------------------------------------------------------------
@@ -443,10 +462,10 @@ const passedKeys = ({ passKeys }: CompiledRule): Option.Option<string> =>
  *
  * Each key appears once, in the order that the rules first name it.
  */
-const passing = (keys: ReadonlyArray<string>): EffectiveRule => ({
-  enabled: true,
-  passKeys: pipe(keys, Array.flatMap(Array.fromIterable), Array.dedupe, Array.join("")),
-});
+const passing = (keys: ReadonlyArray<string>): EffectiveRule =>
+  EffectiveRule.cases.Enabled.make({
+    passKeys: pipe(keys, Array.flatMap(Array.fromIterable), Array.dedupe, Array.join("")),
+  });
 
 /**
  * The verdict of the rules that match one URL.
@@ -471,50 +490,14 @@ const verdictFor =
     );
 
 /**
- * How many verdicts one set keeps.
- *
- * A single-page application can make an unlimited number of different URLs,
- * and a set answers on every navigation.
- */
-const CACHE_LIMIT = 64;
-
-/**
- * Keep the verdicts of `resolve`, up to the limit.
- *
- * The cache is the only mutable value in this module, and it belongs to one
- * set. A hit gives what a miss would give, so the set still answers as a pure
- * function of the URL.
- */
-const remembered = (resolve: (url: string) => EffectiveRule): ((url: string) => EffectiveRule) => {
-  const cache = new Map<string, EffectiveRule>();
-  const remember = (url: string): EffectiveRule => {
-    const verdict = resolve(url);
-    pipe(
-      cache.size > CACHE_LIMIT,
-      Boolean.match({ onFalse: constVoid, onTrue: () => cache.clear() }),
-    );
-    cache.set(url, verdict);
-    return verdict;
-  };
-  return (url) =>
-    pipe(
-      cache.get(url),
-      Option.fromUndefinedOr,
-      Option.getOrElse(() => remember(url)),
-    );
-};
-
-/**
  * Compile the rules once, and give a set of functions.
  *
- * The cache belongs to the returned set, and the set holds no other state. Two
- * calls with the same rules give two independent sets, and each one answers
- * every URL in the same way. The result is therefore the same as a set with no
- * cache.
+ * The set holds no state. Two calls with the same rules give two sets that
+ * answer every URL in the same way.
  */
 export const makeExclusionSet = (rules: ReadonlyArray<ExclusionRule>): ExclusionSet => {
   const [dropped, compiled] = pipe(rules, Array.map(compileRule), Array.separate);
-  return { size: compiled.length, dropped, match: remembered(verdictFor(compiled)) };
+  return { size: compiled.length, dropped, match: verdictFor(compiled) };
 };
 
 /**
@@ -524,4 +507,11 @@ export const makeExclusionSet = (rules: ReadonlyArray<ExclusionRule>): Exclusion
  * of characters, so `<c-a>` can never be in one. Upstream has the same limit.
  */
 export const isPassKey = (rule: EffectiveRule, notation: string): boolean =>
-  notation.length === 1 && rule.passKeys.includes(notation);
+  notation.length === 1 &&
+  pipe(
+    rule,
+    EffectiveRule.match({
+      Disabled: constFalse,
+      Enabled: ({ passKeys }) => passKeys.includes(notation),
+    }),
+  );

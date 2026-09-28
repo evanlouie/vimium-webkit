@@ -95,15 +95,22 @@ import {
 } from "~/domain/HintFilter.ts";
 import { hintStrings, matchByPrefix, normaliseHintCharacters } from "~/domain/HintString.ts";
 import { isComposing, type KeyContext, keyNotation } from "~/domain/Key.ts";
-import { FrameBus, type InboundMessage, REQUEST_DEADLINE, toFrame, toTop } from "~/frames/Bus.ts";
+import {
+  FrameBus,
+  type InboundMessage,
+  type InboundOf,
+  REQUEST_DEADLINE,
+  toFrame,
+  toTop,
+} from "~/frames/Bus.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { FrameId } from "~/platform/Realm.ts";
-import { Tabs } from "~/platform/Tabs.ts";
+import { type FrameId, FrameRole } from "~/platform/Realm.ts";
+import { OpenInTabResult, Tabs } from "~/platform/Tabs.ts";
 import { Hud } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
-import { detectHints, type HintRect, type LocalHint } from "./Detect.ts";
+import { detectHints, type HintRect, HintTargets, isSecondary, type LocalHint } from "./Detect.ts";
 import { hintCss, makeMarkerLayer, MarkerSpec } from "./Markers.ts";
 
 export type { LocalHint } from "./Detect.ts";
@@ -204,13 +211,22 @@ const INDICATORS: Record.ReadonlyRecord<HintMode, string> = {
 const writesClipboard = (mode: HintMode): boolean =>
   mode === "copy-link-url" || mode === "copy-link-text";
 
-/** The modes that can act only on something that has a URL. */
-export const modeRequiresHref = (mode: HintMode): boolean =>
-  mode === "activate-new-tab" ||
-  mode === "activate-new-tab-background" ||
-  mode === "copy-link-url" ||
-  mode === "open-with-omnibar" ||
-  mode === "download";
+/** What a mode can act on. A mode that acts on a URL hints only what truly has one. */
+const targetsFor = (mode: HintMode): HintTargets =>
+  pipe(
+    Match.value(mode),
+    Match.withReturnType<HintTargets>(),
+    Match.whenOr("activate", "hover", "focus", "copy-link-text", () => HintTargets.Clickable()),
+    Match.whenOr(
+      "activate-new-tab",
+      "activate-new-tab-background",
+      "copy-link-url",
+      "open-with-omnibar",
+      "download",
+      () => HintTargets.Linked(),
+    ),
+    Match.exhaustive,
+  );
 
 /** What the user reads when a check refuses a hint. */
 const MOVED_DETAIL = "The page moved that hint. Nothing was activated.";
@@ -282,20 +298,20 @@ const descriptorsFor = (frameId: FrameId, hints: readonly LocalHint[]): readonly
       // Cut to the bound of the wire. A longer value makes the whole message
       // fail the schema of the receiver, and that frame would lose every hint.
       linkText: hint.linkText.slice(0, MAX_WIRE_LINK_TEXT),
-      secondary: hint.secondary,
+      secondary: isSecondary(hint),
     })),
   );
 
 /**
  * One entry of the merged list.
  *
- * The wire carries the frame id as a plain string. The bus already checked
- * that a frame speaks for itself, so the id is branded here.
+ * The bus already checked that a frame speaks for itself, and the wire schema
+ * decoded the id of the frame.
  */
 const entryFor =
   (self: FrameId, local: readonly LocalHint[]) =>
   (descriptor: HintDescriptor): HintEntry => ({
-    frameId: FrameId.make(descriptor.frameId),
+    frameId: descriptor.frameId,
     localIndex: descriptor.localIndex,
     linkText: descriptor.linkText,
     secondary: descriptor.secondary,
@@ -1187,13 +1203,6 @@ const ownHints: (entries: readonly HintEntry[]) => readonly OwnHint[] = flow(
   Array.getSomes,
 );
 
-/** Filter mode draws the link text beside the number when the hint has no visible text. */
-const labelOf = (hint: LocalHint): Option.Option<string> =>
-  pipe(
-    hint.linkText,
-    Option.liftPredicate(() => hint.showLinkText),
-  );
-
 const alphabetSpec =
   ({ hints, typed }: AlphabetState, placements: readonly Placement[]) =>
   (own: OwnHint): MarkerSpec =>
@@ -1241,7 +1250,7 @@ const filterSpec =
             matchedLength: matchedPrefixLength(match.hintString, digits),
             secondary: own.secondary,
             active: isActive,
-            label: labelOf(own.hint),
+            label: own.hint.label,
           }),
       }),
     );
@@ -1480,38 +1489,11 @@ const omittedNotice = (dropped: number): Option.Option<string> =>
     Option.map((dropped) => `${dropped} hints were omitted to fit the frame message.`),
   );
 
-/** What a handler of `FrameBus.serve` gives back. */
-type ServeResult = Effect.Effect<Option.Option<FrameMessage>>;
-
 /**
- * Answer one kind of message.
- *
- * `FrameBus.serve` routes by kind already. The refinement narrows the type of
- * the payload for the handler.
+ * The end of a handler of `FrameBus.serve` that acts on a message, and sends no
+ * reply. It goes after the body, as a modifier of `Effect.fn`.
  */
-const answering =
-  <M extends FrameMessage>(
-    isKind: (message: FrameMessage) => message is M,
-    handler: (message: M, inbound: InboundMessage) => ServeResult,
-  ) =>
-  (inbound: InboundMessage): ServeResult =>
-    pipe(
-      inbound.message,
-      Option.liftPredicate(isKind),
-      Option.match({
-        onNone: () => Effect.succeedNone,
-        onSome: (message) => handler(message, inbound),
-      }),
-    );
-
-/** Act on one kind of message, and give no reply. */
-const acting = <M extends FrameMessage>(
-  isKind: (message: FrameMessage) => message is M,
-  handler: (message: M, inbound: InboundMessage) => Effect.Effect<void>,
-): ((inbound: InboundMessage) => ServeResult) =>
-  answering(isKind, (message, inbound) =>
-    pipe(handler(message, inbound), Effect.as(Option.none())),
-  );
+const noReply = Effect.as(Option.none<FrameMessage>());
 
 // ---------------------------------------------------------------------------
 // The service
@@ -1830,16 +1812,23 @@ export class Hints extends Context.Service<
           Effect.ignore,
         );
 
+      /**
+       * `window.open` cannot put a tab in the background. Say so, instead of
+       * letting the user believe that the setting was honoured.
+       */
+      const noteForeground: (active: boolean) => Effect.Effect<void> = Boolean.match({
+        onFalse: () => hud.show("Opened in the foreground: there is no GM.openInTab."),
+        onTrue: () => Effect.void,
+      });
+
       const openInNewTab = Effect.fn("Hints.openInNewTab")(
         function* (url: string, active: boolean) {
-          const opened = yield* tabs.open(url, { active });
-          // `window.open` cannot put a tab in the background. Say so, instead
-          // of letting the user believe that the setting was honoured.
+          const { opened } = yield* tabs.open(url, { active });
           yield* pipe(
-            !opened.viaManager && !active,
-            Boolean.match({
-              onFalse: () => Effect.void,
-              onTrue: () => hud.show("Opened in the foreground: there is no GM.openInTab."),
+            opened,
+            OpenInTabResult.$match({
+              Manager: () => Effect.void,
+              Window: () => noteForeground(active),
             }),
           );
         },
@@ -1958,7 +1947,7 @@ export class Hints extends Context.Service<
             document: dom.document,
             capabilities,
             viewport,
-            requireHref: modeRequiresHref(mode),
+            targets: targetsFor(mode),
             overlayHost: Option.some(ui.shadow.host),
           }),
           Effect.provideContext(browser),
@@ -2626,13 +2615,14 @@ export class Hints extends Context.Service<
       // The messages that this service answers
       // ---------------------------------------------------------------------
 
-      // A handler that drops a message fails with `NoSuchElementError`, and
+      // `FrameBus.serve` gives each handler the messages of its kind only. A
+      // handler that drops a message fails with `NoSuchElementError`, and
       // `Effect.option` turns that into no reply.
 
-      const answerRequestHints = Effect.fnUntraced(function* (
-        { roundId, mode }: MessageOf<"REQUEST_HINTS">,
-        { from }: InboundMessage,
-      ) {
+      const answerRequestHints = Effect.fnUntraced(function* ({
+        message: { roundId, mode },
+        from,
+      }: InboundOf<"REQUEST_HINTS">) {
         yield* unlessCancelled(roundId);
         const now = yield* dom.now;
         const live = yield* pipe(
@@ -2661,10 +2651,10 @@ export class Hints extends Context.Service<
         };
       }, Effect.option);
 
-      const answerCollectHints = Effect.fnUntraced(function* (
-        { roundId, mode, originFrameId }: MessageOf<"COLLECT_HINTS">,
-        { from }: InboundMessage,
-      ) {
+      const answerCollectHints = Effect.fnUntraced(function* ({
+        message: { roundId, mode, originFrameId },
+        from,
+      }: InboundOf<"COLLECT_HINTS">) {
         yield* unlessCancelled(roundId);
         const hints = yield* detectLocal(mode);
         yield* unlessCancelled(roundId);
@@ -2680,7 +2670,7 @@ export class Hints extends Context.Service<
               coordinator: from,
               mode,
               openedAt: now,
-              origin: FrameId.make(originFrameId),
+              origin: originFrameId,
             }),
           ),
         );
@@ -2702,7 +2692,7 @@ export class Hints extends Context.Service<
           roundId: payload.roundId,
           mode: payload.mode,
           entries,
-          role: SessionRole.Participant({ driver: FrameId.make(payload.originFrameId) }),
+          role: SessionRole.Participant({ driver: payload.originFrameId }),
         });
         yield* pipe(
           entries,
@@ -2710,7 +2700,7 @@ export class Hints extends Context.Service<
         );
       });
 
-      const onActivate = Effect.fnUntraced(function* (payload: MessageOf<"ACTIVATE">) {
+      const onActivate = Effect.fnUntraced(function* ({ message: payload }: InboundOf<"ACTIVATE">) {
         const round = yield* Ref.get(roundRef);
         const now = yield* dom.now;
         yield* pipe(
@@ -2718,7 +2708,7 @@ export class Hints extends Context.Service<
           Option.filter(joinsRound(payload, bus.frameId, now)),
           whenSome(() => joinRound(payload)),
         );
-      });
+      }, noReply);
 
       /** Act on a hint of this frame for the origin, and tell the origin how it went. */
       const actForOrigin = Effect.fnUntraced(function* (
@@ -2752,10 +2742,10 @@ export class Hints extends Context.Service<
         );
       });
 
-      const onActivateHint = Effect.fnUntraced(function* (
-        payload: MessageOf<"ACTIVATE_HINT">,
-        { from }: InboundMessage,
-      ) {
+      const onActivateHint = Effect.fnUntraced(function* ({
+        message: payload,
+        from,
+      }: InboundOf<"ACTIVATE_HINT">) {
         const round = yield* Ref.get(roundRef);
         const now = yield* dom.now;
         yield* pipe(
@@ -2766,12 +2756,12 @@ export class Hints extends Context.Service<
             Admit: () => admitHintRequest(payload),
           }),
         );
-      });
+      }, noReply);
 
-      const onCancelHints = Effect.fnUntraced(function* (
-        { roundId }: MessageOf<"CANCEL_HINTS">,
-        { from }: InboundMessage,
-      ) {
+      const onCancelHints = Effect.fnUntraced(function* ({
+        message: { roundId },
+        from,
+      }: InboundOf<"CANCEL_HINTS">) {
         yield* rememberCancelled(roundId);
 
         const localRound = yield* Ref.get(roundRef);
@@ -2798,7 +2788,7 @@ export class Hints extends Context.Service<
           pendingActivationRef,
           Ref.update(Option.filter((pending) => pending.roundId !== roundId)),
         );
-      });
+      }, noReply);
 
       const settled = Effect.gen(function* () {
         yield* pipe(pendingActivationRef, Ref.set(Option.none()));
@@ -2811,10 +2801,11 @@ export class Hints extends Context.Service<
         Option.match({ onNone: () => settled, onSome: (refusal) => report.error(refusal) }),
       );
 
-      const onActivationResult = Effect.fnUntraced(function* (
-        { roundId, detail }: MessageOf<"ACTIVATION_RESULT">,
-        { from, requestId }: InboundMessage,
-      ) {
+      const onActivationResult = Effect.fnUntraced(function* ({
+        message: { roundId, detail },
+        from,
+        requestId,
+      }: InboundOf<"ACTIVATION_RESULT">) {
         const pending = yield* Ref.get(pendingActivationRef);
         yield* pipe(
           pending,
@@ -2824,12 +2815,12 @@ export class Hints extends Context.Service<
           ),
           whenSome(() => settleActivation(detail)),
         );
-      });
+      }, noReply);
 
-      const onKeystroke = Effect.fnUntraced(function* (
-        { roundId, notation }: MessageOf<"KEYSTROKE">,
-        { from }: InboundMessage,
-      ) {
+      const onKeystroke = Effect.fnUntraced(function* ({
+        message: { roundId, notation },
+        from,
+      }: InboundOf<"KEYSTROKE">) {
         // The round of the page ends when the frame that owns it leaves.
         yield* pipe(
           topRoundRef,
@@ -2845,45 +2836,23 @@ export class Hints extends Context.Service<
           Option.filter(followsKeysOf(from, roundId)),
           whenSome((session) => session.key(notation)),
         );
-      });
+      }, noReply);
 
       // The top frame is the broker of the round. A child frame asks it, and
       // it fans the request out to every frame.
       yield* pipe(
-        bus.isTop,
-        Boolean.match({
-          onFalse: () => Effect.void,
-          onTrue: () =>
-            bus.serve(
-              "REQUEST_HINTS",
-              answering((message) => message.kind === "REQUEST_HINTS", answerRequestHints),
-            ),
+        bus.role,
+        FrameRole.$match({
+          Top: () => bus.serve("REQUEST_HINTS", answerRequestHints),
+          Child: () => Effect.void,
         }),
       );
-      yield* bus.serve(
-        "COLLECT_HINTS",
-        answering((message) => message.kind === "COLLECT_HINTS", answerCollectHints),
-      );
-      yield* bus.serve(
-        "ACTIVATE",
-        acting((message) => message.kind === "ACTIVATE", onActivate),
-      );
-      yield* bus.serve(
-        "ACTIVATE_HINT",
-        acting((message) => message.kind === "ACTIVATE_HINT", onActivateHint),
-      );
-      yield* bus.serve(
-        "CANCEL_HINTS",
-        acting((message) => message.kind === "CANCEL_HINTS", onCancelHints),
-      );
-      yield* bus.serve(
-        "ACTIVATION_RESULT",
-        acting((message) => message.kind === "ACTIVATION_RESULT", onActivationResult),
-      );
-      yield* bus.serve(
-        "KEYSTROKE",
-        acting((message) => message.kind === "KEYSTROKE", onKeystroke),
-      );
+      yield* bus.serve("COLLECT_HINTS", answerCollectHints);
+      yield* bus.serve("ACTIVATE", onActivate);
+      yield* bus.serve("ACTIVATE_HINT", onActivateHint);
+      yield* bus.serve("CANCEL_HINTS", onCancelHints);
+      yield* bus.serve("ACTIVATION_RESULT", onActivationResult);
+      yield* bus.serve("KEYSTROKE", onKeystroke);
 
       // ---------------------------------------------------------------------
       // The interface

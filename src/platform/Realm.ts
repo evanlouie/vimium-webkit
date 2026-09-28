@@ -3,7 +3,8 @@
  *
  * One realm holds one instance of the application. This service answers the
  * three questions that every other service asks about the realm it runs in: is
- * it usable, is it the top frame, and what is its identity on the wire.
+ * it usable, is it the top frame or a child frame, and what is its identity on
+ * the wire.
  *
  * The obvious spelling of the top-frame test, `top === self`, is a trap. In a
  * realm that hides those bindings it reads `undefined === undefined` and
@@ -15,6 +16,7 @@ import {
   Array,
   Boolean,
   Context,
+  Data,
   Effect,
   Layer,
   Option,
@@ -24,11 +26,34 @@ import {
   flow,
   pipe,
 } from "effect";
+import { FrameId } from "~/domain/FrameId.ts";
 import { Dom } from "./Dom.ts";
 
-/** A frame identity. Random, per frame, and never reused. */
-export const FrameId = pipe(Schema.String, Schema.brand("FrameId"));
-export type FrameId = typeof FrameId.Type;
+/**
+ * The frame identity, given again here.
+ *
+ * `domain/FrameId.ts` owns the brand, because the wire schemas decode into it.
+ * A caller that asks the realm for its identity then needs only one import.
+ */
+export { FrameId };
+
+/** A variant with no fields. The type `{}` would mean any value that is not nullish. */
+type NoFields = Record<never, never>;
+
+/**
+ * Where this frame sits in the frames tree.
+ *
+ * The top frame is the top document of its tab. It coordinates the frame
+ * session, and its URL decides the exclusion verdict of the page. Every other
+ * frame is a child, which joins the session of the top frame. Only the place in
+ * the frames tree decides the role.
+ */
+export type FrameRole = Data.TaggedEnum<{
+  Top: NoFields;
+  Child: NoFields;
+}>;
+
+export const FrameRole = Data.taggedEnum<FrameRole>();
 
 export class RealmError extends Schema.TaggedError<RealmError>()("RealmError", {
   detail: Schema.String,
@@ -144,10 +169,15 @@ export class Realm extends Context.Service<
   {
     /** This frame's identity on the frame bus. */
     readonly frameId: FrameId;
-    /** True when this frame is the top document of its tab. */
-    readonly isTop: boolean;
-    /** True when the realm has the globals that the application needs. */
-    readonly isLive: boolean;
+    /** Whether this frame is the top document of its tab, or a frame inside it. */
+    readonly role: FrameRole;
+    /**
+     * True when the realm still has the globals that the application needs.
+     *
+     * It reads the globals each time it runs. A frame can go away after the
+     * layer was built, while a timer of the guard is still pending.
+     */
+    readonly isLive: Effect.Effect<boolean>;
 
     /** Send the wake message to every descendant frame, at every depth. */
     readonly wakeDescendants: Effect.Effect<void>;
@@ -164,19 +194,23 @@ export class Realm extends Context.Service<
     Effect.gen(function* () {
       const dom = yield* Dom;
 
-      const isLive = yield* dom.probeOr(
+      const isLive = dom.probeOr(
         () => dom.window.navigator !== undefined && dom.window.document !== undefined,
         false,
       );
 
-      const isTop = yield* dom.probeOr(
+      const role = yield* dom.probeOr(
         () =>
           pipe(
             dom.window.top,
             Option.liftPredicate(Predicate.isObjectKeyword),
-            Option.exists((top) => top === dom.window.self),
+            Option.filter((top) => top === dom.window.self),
+            Option.match({
+              onNone: () => FrameRole.Child(),
+              onSome: () => FrameRole.Top(),
+            }),
           ),
-        false,
+        FrameRole.Child(),
       );
 
       const postToDescendants = (message: unknown): Effect.Effect<void> =>
@@ -195,7 +229,7 @@ export class Realm extends Context.Service<
 
       return Realm.of({
         frameId: FrameId.make(randomId()),
-        isTop,
+        role,
         isLive,
         wakeDescendants: postToDescendants(WAKE_MESSAGE),
         askDescendantsToAnnounce: postToDescendants(ANNOUNCE_MESSAGE),

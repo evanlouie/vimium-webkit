@@ -13,6 +13,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { Effect, Layer, Option, Stream, SubscriptionRef, pipe, Struct } from "effect";
 import { Exclusions } from "~/core/Exclusions.ts";
 import { Settings } from "~/core/Settings.ts";
+import { EffectiveRule } from "~/domain/Exclusion.ts";
 import {
   defaultSettings,
   type ExclusionRule,
@@ -20,7 +21,7 @@ import {
 } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
-import { Realm } from "~/platform/Realm.ts";
+import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
 
 /** A backend that already holds the settings that a test needs. */
@@ -70,26 +71,26 @@ const domAt = (url: string): Layer.Layer<Dom> =>
     Layer.provide(Dom.layer),
   );
 
-/** The real `Realm`, told whether this frame is the top frame. */
-const realmAs = (isTop: boolean): Layer.Layer<Realm, never, Dom> =>
-  pipe(
-    Realm,
-    Effect.map(Struct.assign({ isTop })),
-    Layer.effect(Realm),
-    Layer.provide(Realm.layer),
-  );
+/** The real `Realm`, told whether this frame is the top frame or a child. */
+const realmAs = (role: FrameRole): Layer.Layer<Realm, never, Dom> =>
+  pipe(Realm, Effect.map(Struct.assign({ role })), Layer.effect(Realm), Layer.provide(Realm.layer));
 
 const layerFor = (options: {
   readonly url: string;
-  readonly isTop: boolean;
+  readonly role: FrameRole;
   readonly rules: readonly ExclusionRule[];
 }): Layer.Layer<Exclusions | Settings | Storage> => {
   const dom = domAt(options.url);
-  const realm = pipe(realmAs(options.isTop), Layer.provide(dom));
+  const realm = pipe(realmAs(options.role), Layer.provide(dom));
   const storage = pipe(Storage.layer, Layer.provide(storedSettings(options.rules)));
   const settings = pipe(Settings.layer, Layer.provide(storage));
   return pipe(Exclusions.layer, Layer.provideMerge(Layer.mergeAll(dom, realm, settings, storage)));
 };
+
+const DISABLED: EffectiveRule = EffectiveRule.cases.Disabled.make({});
+
+/** A verdict that keeps us on, and gives the page `passKeys`. */
+const passing = (passKeys: string): EffectiveRule => EffectiveRule.cases.Enabled.make({ passKeys });
 
 const EXCLUDED: readonly ExclusionRule[] = [
   { pattern: "https://excluded.test/*", passKeys: "" },
@@ -108,22 +109,22 @@ describe("Exclusions", () => {
         yield* settings.reload;
 
         const local = yield* exclusions.resolveLocal;
-        assert.deepEqual(local, { enabled: false, passKeys: "" });
+        assert.deepEqual(local, DISABLED);
 
         // The top frame keeps its own verdict up to date from the settings.
         const applied = yield* pipe(
           SubscriptionRef.changes(exclusions.effective),
-          Stream.filter((rule) => !rule.enabled),
+          Stream.filter(EffectiveRule.guards.Disabled),
           Stream.runHead,
         );
         assert.isTrue(Option.isSome(applied));
         assert.isFalse(yield* exclusions.isEnabled);
-        assert.isFalse(exclusions.effectiveUnsafe().enabled);
+        assert.isTrue(EffectiveRule.guards.Disabled(exclusions.effectiveUnsafe()));
       }),
       Effect.provide(
         layerFor({
           url: "https://excluded.test/inbox",
-          isTop: true,
+          role: FrameRole.Top(),
           rules: EXCLUDED,
         }),
       ),
@@ -137,19 +138,13 @@ describe("Exclusions", () => {
         const exclusions = yield* Exclusions;
         yield* settings.reload;
 
-        assert.deepEqual(yield* exclusions.match("https://partial.test/doc"), {
-          enabled: true,
-          passKeys: "jk",
-        });
-        assert.deepEqual(yield* exclusions.match("https://other.test/"), {
-          enabled: true,
-          passKeys: "",
-        });
+        assert.deepEqual(yield* exclusions.match("https://partial.test/doc"), passing("jk"));
+        assert.deepEqual(yield* exclusions.match("https://other.test/"), passing(""));
       }),
       Effect.provide(
         layerFor({
           url: "https://other.test/",
-          isTop: true,
+          role: FrameRole.Top(),
           rules: EXCLUDED,
         }),
       ),
@@ -164,24 +159,18 @@ describe("Exclusions", () => {
         // A child frame starts fully enabled. It must not read its own URL.
         assert.isTrue(yield* exclusions.isEnabled);
 
-        yield* exclusions.adopt({ enabled: false, passKeys: "" });
+        yield* exclusions.adopt(DISABLED);
         assert.isFalse(yield* exclusions.isEnabled);
-        assert.deepEqual(yield* SubscriptionRef.get(exclusions.effective), {
-          enabled: false,
-          passKeys: "",
-        });
+        assert.deepEqual(yield* SubscriptionRef.get(exclusions.effective), DISABLED);
 
-        yield* exclusions.adopt({ enabled: true, passKeys: "jk" });
-        assert.deepEqual(exclusions.effectiveUnsafe(), {
-          enabled: true,
-          passKeys: "jk",
-        });
+        yield* exclusions.adopt(passing("jk"));
+        assert.deepEqual(exclusions.effectiveUnsafe(), passing("jk"));
       }),
       Effect.provide(
         layerFor({
           // The URL of the child frame is excluded, and it must be ignored.
           url: "https://excluded.test/advert",
-          isTop: false,
+          role: FrameRole.Child(),
           rules: EXCLUDED,
         }),
       ),

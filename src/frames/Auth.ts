@@ -101,7 +101,7 @@ import {
 } from "~/domain/FrameMessage.ts";
 import { type FrameCredential, frameCredentialGroup } from "~/domain/Persisted.ts";
 import { KeyValueStore } from "~/platform/KeyValueStore.ts";
-import { Realm } from "~/platform/Realm.ts";
+import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { makeGroup, type StorageError } from "~/platform/Storage.ts";
 
 export const FrameAuthFailureReason = Schema.Literals([
@@ -353,10 +353,10 @@ export class FrameAuth extends Context.Service<
        * and the frame that wrote last would lock the other frames out.
        */
       const creator: Effect.Effect<void, FrameAuthError> = pipe(
-        realm.isTop,
-        Boolean.match({
-          onTrue: () => Effect.void,
-          onFalse: () =>
+        realm.role,
+        FrameRole.$match({
+          Top: () => Effect.void,
+          Child: () =>
             Effect.fail(
               new FrameAuthError({
                 reason: "unauthenticated",
@@ -647,10 +647,9 @@ export class FrameAuth extends Context.Service<
       // nobody writes. A clean installation would otherwise keep every frame
       // outside the session for the life of the page.
       yield* pipe(
-        realm.isTop,
-        Boolean.match({
-          onFalse: () => Effect.void,
-          onTrue: () =>
+        realm.role,
+        FrameRole.$match({
+          Top: () =>
             pipe(
               secret(),
               Effect.asVoid,
@@ -658,6 +657,7 @@ export class FrameAuth extends Context.Service<
                 Effect.logDebug(`no frame credential in this realm: ${error.detail}`),
               ),
             ),
+          Child: () => Effect.void,
         }),
       );
 

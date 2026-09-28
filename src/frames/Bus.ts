@@ -76,6 +76,7 @@ import {
 import {
   type ChallengeMessage,
   challengeMessage,
+  encodeLinkMessage,
   encodeMessage,
   type FrameMessage,
   type FrameWire,
@@ -102,7 +103,13 @@ import {
   WIRE_TARGET_TOP,
 } from "~/domain/FrameMessage.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { ANNOUNCE_MESSAGE, FrameId, Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
+import {
+  ANNOUNCE_MESSAGE,
+  type FrameId,
+  FrameRole,
+  Realm,
+  WAKE_MESSAGE,
+} from "~/platform/Realm.ts";
 import { FrameAuth, type FrameCipher } from "./Auth.ts";
 
 // ---------------------------------------------------------------------------
@@ -187,31 +194,11 @@ export class FrameError extends Schema.TaggedError<FrameError>()("FrameError", {
 }) {}
 
 // ---------------------------------------------------------------------------
-// Roles, targets and inbound messages
+// Targets and inbound messages
 // ---------------------------------------------------------------------------
 
 /** A variant with no fields. The type `{}` would mean any value that is not nullish. */
 type NoFields = Record<never, never>;
-
-/**
- * What this frame is in the session.
- *
- * The top frame is the coordinator. It owns the session nonce, admits every
- * other frame and relays between them. Every other frame is a member, which
- * joins the session of the coordinator.
- */
-export type FrameRole = Data.TaggedEnum<{
-  Coordinator: NoFields;
-  Member: NoFields;
-}>;
-
-export const FrameRole = Data.taggedEnum<FrameRole>();
-
-/** The role of a realm, which only its place in the frames tree decides. */
-const roleOf: (isTop: boolean) => FrameRole = Boolean.match({
-  onTrue: () => FrameRole.Coordinator(),
-  onFalse: () => FrameRole.Member(),
-});
 
 export type FrameTarget = Data.TaggedEnum<{
   Top: NoFields;
@@ -251,17 +238,6 @@ const isInboundOf =
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
-
-/**
- * The wire carries a plain string.
- *
- * `FrameId` is a brand, which exists at compile time only, so this changes no
- * value. The identity itself is checked by the coordinator, which compares the
- * `from` field against the port that the message came on.
- */
-const toFrameId = (value: string): FrameId => FrameId.make(value);
-
-const toRoster: (frames: ReadonlyArray<string>) => ReadonlyArray<FrameId> = Array.map(toFrameId);
 
 const describe = (cause: unknown): string =>
   pipe(
@@ -362,13 +338,23 @@ const readJson = (text: string): Option.Option<unknown> =>
     Result.getSuccess,
   );
 
-/** The JSON text of an outbound message. A message with no text is not sent. */
-const serialize = (message: FrameWire | WelcomeMessage): Option.Option<string> =>
+/** The JSON text of an encoded message. */
+const jsonText = (encoded: unknown): Option.Option<string> =>
   pipe(
-    Result.try(() => JSON.stringify(message)),
+    Result.try(() => JSON.stringify(encoded)),
     Result.getSuccess,
-    Option.filter((text) => text.length > 0),
   );
+
+/**
+ * The JSON text of an outbound message, in its wire shape.
+ *
+ * A message that does not encode, or that has no text, is not sent.
+ */
+const serialize: (message: FrameWire | WelcomeMessage) => Option.Option<string> = flow(
+  encodeLinkMessage,
+  Option.flatMap(jsonText),
+  Option.filter((text) => text.length > 0),
+);
 
 /** The other direction of travel. */
 const opposite = (direction: SealDirection): SealDirection =>
@@ -400,7 +386,7 @@ const wireTarget: (target: FrameTarget) => string = FrameTarget.$match({
 
 /** A routed message as the subscribers of this frame read it. */
 const inboundOf = (wire: FrameWire): InboundMessage => ({
-  from: toFrameId(wire.from),
+  from: wire.from,
   requestId: pipe(
     wire.requestId,
     Option.liftPredicate((id) => id !== NO_REQUEST_ID),
@@ -789,9 +775,14 @@ export class FrameBus extends Context.Service<
   {
     /** This frame's identity on the wire. */
     readonly frameId: FrameId;
-    readonly isTop: boolean;
 
-    /** The coordinator in the top frame, and a member in every other frame. */
+    /**
+     * The role of the realm, which is also its role in the session.
+     *
+     * The top frame is the coordinator. It owns the session nonce, admits every
+     * other frame and relays between them. A child frame is a member, which
+     * joins the session of the coordinator.
+     */
     readonly role: FrameRole;
 
     /**
@@ -849,7 +840,7 @@ export class FrameBus extends Context.Service<
       const realm = yield* Realm;
       const auth = yield* FrameAuth;
       const layerScope = yield* Effect.scope;
-      const role = roleOf(realm.isTop);
+      const role = realm.role;
 
       const inbox = yield* PubSub.unbounded<InboundMessage>();
       const nonceRef = yield* Ref.make(Option.none<string>());
@@ -1078,8 +1069,8 @@ export class FrameBus extends Context.Service<
       const route = pipe(
         role,
         FrameRole.$match({
-          Coordinator: () => routeInTop,
-          Member: () => routeInChild,
+          Top: () => routeInTop,
+          Child: () => routeInChild,
         }),
       );
 
@@ -1327,7 +1318,7 @@ export class FrameBus extends Context.Service<
             admit({
               port,
               source,
-              frameId: toFrameId(message.frameId),
+              frameId: message.frameId,
               helloId: message.helloId,
               cipher,
             }),
@@ -1514,7 +1505,7 @@ export class FrameBus extends Context.Service<
 
       const joinSession = Effect.fnUntraced(function* (welcome: WelcomeMessage) {
         yield* pipe(nonceRef, Ref.set(Option.some(welcome.nonce)));
-        yield* pipe(rosterRef, Ref.set(toRoster(welcome.frames)));
+        yield* pipe(rosterRef, Ref.set(welcome.frames));
         yield* pipe(admitted, Deferred.succeed(true));
       });
 
@@ -1547,9 +1538,7 @@ export class FrameBus extends Context.Service<
       const deliverFromTop = Effect.fnUntraced(function* (wire: FrameWire) {
         yield* pipe(
           Match.value(wire),
-          Match.when({ kind: "ROSTER" }, ({ frames }) =>
-            pipe(rosterRef, Ref.set(toRoster(frames))),
-          ),
+          Match.when({ kind: "ROSTER" }, ({ frames }) => pipe(rosterRef, Ref.set(frames))),
           Match.orElse(() => Effect.void),
         );
         yield* publishLocal(wire);
@@ -1817,16 +1806,16 @@ export class FrameBus extends Context.Service<
       const peers: Effect.Effect<ReadonlyArray<FrameId>> = pipe(
         role,
         FrameRole.$match({
-          Coordinator: () => pipe(sweep, Effect.map(rosterOf)),
-          Member: () => memberRoster,
+          Top: () => pipe(sweep, Effect.map(rosterOf)),
+          Child: () => memberRoster,
         }),
       );
 
       const ready: Effect.Effect<boolean> = pipe(
         role,
         FrameRole.$match({
-          Coordinator: () => Effect.succeed(true),
-          Member: () =>
+          Top: () => Effect.succeed(true),
+          Child: () =>
             pipe(
               Deferred.await(admitted),
               Effect.timeoutOrElse({
@@ -1911,14 +1900,13 @@ export class FrameBus extends Context.Service<
       yield* pipe(
         role,
         FrameRole.$match({
-          Coordinator: () => startCoordinator,
-          Member: () => startMember,
+          Top: () => startCoordinator,
+          Child: () => startMember,
         }),
       );
 
       return FrameBus.of({
         frameId: realm.frameId,
-        isTop: realm.isTop,
         role,
         ready,
         incoming,

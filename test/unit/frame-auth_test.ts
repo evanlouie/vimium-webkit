@@ -43,7 +43,7 @@ import {
 import { frameCredentialGroup, sessionGroup } from "~/domain/Persisted.ts";
 import { FrameAuth, type FrameHandshake } from "~/frames/Auth.ts";
 import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
-import { FrameId, Realm } from "~/platform/Realm.ts";
+import { FrameId, FrameRole, Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
 
 /** The key of the group that only `frames/Auth.ts` builds. */
@@ -101,13 +101,13 @@ const makeStore = (managerPrivate: boolean): Store => {
 };
 
 /** A realm, without a DOM. A unit test provides a layer instead of a global. */
-const realmLayer = (isTop: boolean, frameId: string): Layer.Layer<Realm> =>
+const realmLayer = (role: FrameRole, frameId: string): Layer.Layer<Realm> =>
   Layer.succeed(
     Realm,
     Realm.of({
       frameId: FrameId.make(frameId),
-      isTop,
-      isLive: true,
+      role,
+      isLive: Effect.succeed(true),
       wakeDescendants: Effect.void,
       askDescendantsToAnnounce: Effect.void,
       isAncestor: () => Effect.succeed(false),
@@ -115,7 +115,7 @@ const realmLayer = (isTop: boolean, frameId: string): Layer.Layer<Realm> =>
   );
 
 /** One frame: its own credential store and its own realm, over one store. */
-const frameLayer = (store: Store, isTop: boolean, frameId: string): Layer.Layer<FrameAuth> => {
+const frameLayer = (store: Store, role: FrameRole, frameId: string): Layer.Layer<FrameAuth> => {
   const kv = Layer.succeed(KeyValueStore, store.service);
   // `Layer.fresh`, because a test builds two frames in one fiber and the layer
   // of a service is otherwise built once and shared. Two frames of a page each
@@ -123,7 +123,7 @@ const frameLayer = (store: Store, isTop: boolean, frameId: string): Layer.Layer<
   return pipe(
     FrameAuth.layer,
     Layer.fresh,
-    Layer.provide(Layer.mergeAll(kv, realmLayer(isTop, frameId))),
+    Layer.provide(Layer.mergeAll(kv, realmLayer(role, frameId))),
   );
 };
 
@@ -249,7 +249,7 @@ describe("FrameAuth", () => {
           // only the top frame may write it.
           yield* FrameAuth;
         }),
-        Effect.provide(frameLayer(store, true, TOP_FRAME)),
+        Effect.provide(frameLayer(store, FrameRole.Top(), TOP_FRAME)),
       );
 
       assert.isAbove(storedSecret(store).length, 0);
@@ -277,10 +277,10 @@ describe("FrameAuth", () => {
               assert.isFalse(yield* top.verifyJoin(otherToken, proof));
               assert.isFalse(yield* top.verifyJoin(HANDSHAKE, "bm90LWEtcHJvb2Y"));
             }),
-            Effect.provide(frameLayer(store, false, CHILD_FRAME)),
+            Effect.provide(frameLayer(store, FrameRole.Child(), CHILD_FRAME)),
           );
         }),
-        Effect.provide(frameLayer(store, true, TOP_FRAME)),
+        Effect.provide(frameLayer(store, FrameRole.Top(), TOP_FRAME)),
       );
     }),
   );
@@ -296,7 +296,7 @@ describe("FrameAuth", () => {
           assert.isTrue(Result.isFailure(outcome));
           assert.deepEqual(reasonOf(outcome), Option.some("unauthenticated"));
         }),
-        Effect.provide(frameLayer(store, false, CHILD_FRAME)),
+        Effect.provide(frameLayer(store, FrameRole.Child(), CHILD_FRAME)),
       );
 
       assert.strictEqual(storedSecret(store), "");
@@ -319,7 +319,7 @@ describe("FrameAuth", () => {
           assert.isTrue(Result.isFailure(outcome));
           assert.deepEqual(reasonOf(outcome), Option.some("unavailable"));
         }),
-        Effect.provide(frameLayer(store, true, TOP_FRAME)),
+        Effect.provide(frameLayer(store, FrameRole.Top(), TOP_FRAME)),
       );
 
       // Nothing was written, so a same-origin child of a hostile page has
@@ -332,7 +332,7 @@ describe("FrameAuth", () => {
           const outcome = yield* Effect.result(child.joinProof(HANDSHAKE));
           assert.isTrue(Result.isFailure(outcome));
         }),
-        Effect.provide(frameLayer(store, false, CHILD_FRAME)),
+        Effect.provide(frameLayer(store, FrameRole.Child(), CHILD_FRAME)),
       );
     }),
   );
@@ -346,7 +346,7 @@ describe("FrameAuth", () => {
         Effect.gen(function* () {
           yield* FrameAuth;
         }),
-        Effect.provide(frameLayer(store, true, TOP_FRAME)),
+        Effect.provide(frameLayer(store, FrameRole.Top(), TOP_FRAME)),
       );
 
       // The credential of the other frame is still there. To replace it would
@@ -364,10 +364,10 @@ describe("FrameAuth", () => {
               const proof = yield* child.joinProof(HANDSHAKE);
               assert.isTrue(yield* top.verifyJoin(HANDSHAKE, proof));
             }),
-            Effect.provide(frameLayer(store, false, CHILD_FRAME)),
+            Effect.provide(frameLayer(store, FrameRole.Child(), CHILD_FRAME)),
           );
         }),
-        Effect.provide(frameLayer(store, true, TOP_FRAME)),
+        Effect.provide(frameLayer(store, FrameRole.Top(), TOP_FRAME)),
       );
     }),
   );
@@ -380,7 +380,7 @@ describe("FrameAuth", () => {
         Effect.gen(function* () {
           yield* FrameAuth;
         }),
-        Effect.provide(frameLayer(store, true, TOP_FRAME)),
+        Effect.provide(frameLayer(store, FrameRole.Top(), TOP_FRAME)),
       );
 
       const secret = storedSecret(store);
@@ -482,10 +482,10 @@ describe("FrameAuth", () => {
               const other = yield* top.cipher(otherAttempt);
               assert.isTrue(Option.isNone(yield* other.open("up", sealed)));
             }),
-            Effect.provide(frameLayer(store, false, CHILD_FRAME)),
+            Effect.provide(frameLayer(store, FrameRole.Child(), CHILD_FRAME)),
           );
         }),
-        Effect.provide(frameLayer(store, true, TOP_FRAME)),
+        Effect.provide(frameLayer(store, FrameRole.Top(), TOP_FRAME)),
       );
     }),
   );
@@ -513,10 +513,10 @@ describe("FrameAuth", () => {
               const forged = yield* forger.seal("down", 0, "a false welcome");
               assert.isTrue(Option.isNone(yield* cipher.open("down", forged)));
             }),
-            Effect.provide(frameLayer(theirs, true, TOP_FRAME)),
+            Effect.provide(frameLayer(theirs, FrameRole.Top(), TOP_FRAME)),
           );
         }),
-        Effect.provide(frameLayer(ours, true, TOP_FRAME)),
+        Effect.provide(frameLayer(ours, FrameRole.Top(), TOP_FRAME)),
       );
     }),
   );

@@ -23,7 +23,7 @@ import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { COMMANDS, type CommandName } from "~/domain/Command.ts";
-import { type EffectiveRule, FULLY_ENABLED } from "~/domain/Exclusion.ts";
+import { EffectiveRule, FULLY_ENABLED } from "~/domain/Exclusion.ts";
 import { compileMappings } from "~/domain/Mapping.ts";
 import { defaultSettings, type Settings as SettingsData } from "~/domain/Persisted.ts";
 import { Capabilities, type CapabilityReport } from "~/platform/Capabilities.ts";
@@ -173,6 +173,9 @@ const settingsOf = (data: SettingsData): Layer.Layer<Settings> =>
     }),
   );
 
+/** A verdict that keeps us on, and gives the page `passKeys`. */
+const passing = (passKeys: string): EffectiveRule => EffectiveRule.cases.Enabled.make({ passKeys });
+
 const exclusionsOf = (rule: EffectiveRule): Layer.Layer<Exclusions> =>
   pipe(
     SubscriptionRef.make(rule),
@@ -183,7 +186,7 @@ const exclusionsOf = (rule: EffectiveRule): Layer.Layer<Exclusions> =>
         resolveLocal: Effect.succeed(rule),
         match: () => Effect.succeed(rule),
         adopt: () => Effect.void,
-        isEnabled: Effect.succeed(rule.enabled),
+        isEnabled: Effect.succeed(EffectiveRule.guards.Enabled(rule)),
       }),
     ),
     Layer.effect(Exclusions),
@@ -872,7 +875,7 @@ describe("Keyboard", () => {
         Effect.provide(
           layerFor({
             mappings: "map j scrollDown",
-            exclusion: { enabled: true, passKeys: "j" },
+            exclusion: passing("j"),
           }),
         ),
       ),
@@ -906,7 +909,7 @@ describe("Keyboard", () => {
         Effect.provide(
           layerFor({
             mappings: ["map g scrollUp", "map gg scrollToTop", "map j scrollDown"].join("\n"),
-            exclusion: { enabled: true, passKeys: "j" },
+            exclusion: passing("j"),
           }),
         ),
       ),
@@ -1046,7 +1049,7 @@ describe("Keyboard", () => {
         Effect.provide(
           layerFor({
             mappings: remap,
-            exclusion: { enabled: true, passKeys: "j" },
+            exclusion: passing("j"),
           }),
         ),
       ),
@@ -1071,7 +1074,7 @@ describe("Keyboard", () => {
         Effect.provide(
           layerFor({
             mappings: remap,
-            exclusion: { enabled: true, passKeys: "k" },
+            exclusion: passing("k"),
           }),
         ),
       ),

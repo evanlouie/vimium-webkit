@@ -10,6 +10,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { Array, Effect, Option, String as Str, pipe } from "effect";
 import {
   compilePattern,
+  EffectiveRule,
   exclusionProblems,
   type ExclusionRule,
   isPassKey,
@@ -18,7 +19,6 @@ import {
   patternProblem,
   patternToRegExp,
 } from "~/domain/Exclusion.ts";
-import { parseExclusionText } from "~/ui/Dialog.ts";
 
 /** Test a compiled pattern. `null` means that the pattern did not compile. */
 const matches = (pattern: string, url: string): boolean | null =>
@@ -36,6 +36,9 @@ const described = (pattern: string, url: string): Option.Option<boolean> =>
   );
 
 const rules = (...entries: readonly ExclusionRule[]): readonly ExclusionRule[] => entries;
+
+/** A verdict that keeps us on, and gives the page `passKeys`. */
+const passing = (passKeys: string): EffectiveRule => EffectiveRule.cases.Enabled.make({ passKeys });
 
 /**
  * Raw expressions that can backtrack.
@@ -235,29 +238,31 @@ describe("Exclusion", () => {
     }),
   );
 
-  it.effect("reads the settings text as the settings dialog reads it", () =>
+  it.effect("reads each rule of the settings text with the line that holds it", () =>
     Effect.sync(() => {
-      // Two readers of one text can drift apart, and a marked line would then
-      // not be the dropped rule. This test holds the two together.
-      const texts = [
-        "https://example.com/*",
-        "# a comment\n\nhttps://a.test/*  jk\n  /(a+)+$/   x y  \n",
-        "  \n#\nhttps://b.test/*\n\t/x*/\tjk\n",
-      ];
-      pipe(
-        texts,
-        Array.forEach((text) => {
-          const numbered = pipe(
-            parseExclusionLines(text),
-            Array.map((entry) => entry.rule),
-          );
-          assert.deepEqual(
-            numbered,
-            parseExclusionText(text),
-            `the two readers disagree about ${JSON.stringify(text)}`,
-          );
-        }),
+      // The settings dialog marks the line of a dropped rule, so a rule keeps
+      // the number of its line. A blank line and a comment give no rule. The
+      // first space or tab ends the pattern, and the pass keys are trimmed.
+      const text = pipe(
+        [
+          "# a comment",
+          "",
+          "  ",
+          "#",
+          "https://a.test/*  jk",
+          "  /(a+)+$/   x y  ",
+          "\t/x*/\tjk",
+          "https://b.test/*",
+          "",
+        ],
+        Array.join("\n"),
       );
+      assert.deepEqual(parseExclusionLines(text), [
+        { line: 5, rule: { pattern: "https://a.test/*", passKeys: "jk" } },
+        { line: 6, rule: { pattern: "/(a+)+$/", passKeys: "x y" } },
+        { line: 7, rule: { pattern: "/x*/", passKeys: "jk" } },
+        { line: 8, rule: { pattern: "https://b.test/*", passKeys: "" } },
+      ]);
     }),
   );
 
@@ -304,20 +309,14 @@ describe("Exclusion", () => {
   it.effect("leaves us fully enabled when no rule matches", () =>
     Effect.sync(() => {
       const set = makeExclusionSet(rules({ pattern: "https://example.com/*", passKeys: "" }));
-      assert.deepEqual(set.match("https://other.test/"), {
-        enabled: true,
-        passKeys: "",
-      });
+      assert.deepEqual(set.match("https://other.test/"), passing(""));
     }),
   );
 
   it.effect("disables us entirely when passKeys is empty", () =>
     Effect.sync(() => {
       const set = makeExclusionSet(rules({ pattern: "https://mail.test/*", passKeys: "" }));
-      assert.deepEqual(set.match("https://mail.test/inbox"), {
-        enabled: false,
-        passKeys: "",
-      });
+      assert.deepEqual(set.match("https://mail.test/inbox"), EffectiveRule.cases.Disabled.make({}));
     }),
   );
 
@@ -329,15 +328,14 @@ describe("Exclusion", () => {
           { pattern: "https://app.test/editor*", passKeys: "kl" },
         ),
       );
-      const rule = set.match("https://app.test/editor/1");
       const passKeys = pipe(
-        rule.passKeys,
-        Array.fromIterable,
-        Array.sort(Str.Order),
-        Array.join(""),
+        set.match("https://app.test/editor/1"),
+        Option.liftPredicate(EffectiveRule.guards.Enabled),
+        Option.map(({ passKeys }) =>
+          pipe(passKeys, Array.fromIterable, Array.sort(Str.Order), Array.join("")),
+        ),
       );
-      assert.isTrue(rule.enabled);
-      assert.strictEqual(passKeys, "jkl");
+      assert.deepEqual(passKeys, Option.some("jkl"));
     }),
   );
 
@@ -350,7 +348,7 @@ describe("Exclusion", () => {
           { pattern: "https://app.test/editor*", passKeys: "" },
         ),
       );
-      assert.isFalse(set.match("https://app.test/editor/1").enabled);
+      assert.isTrue(EffectiveRule.guards.Disabled(set.match("https://app.test/editor/1")));
     }),
   );
 
@@ -364,28 +362,13 @@ describe("Exclusion", () => {
         ),
       );
       assert.strictEqual(set.size, 1);
-      assert.strictEqual(set.match("https://app.test/x").passKeys, "j");
-    }),
-  );
-
-  it.effect("caches repeated lookups within a limit", () =>
-    Effect.sync(() => {
-      const set = makeExclusionSet(rules({ pattern: "*", passKeys: "j" }));
-      pipe(
-        Array.range(0, 199),
-        Array.forEach((index) => {
-          set.match(`https://spa.test/#/route/${index}`);
-        }),
-      );
-      // A single-page application makes unlimited URLs. The set must not grow
-      // without a limit, and it must still answer correctly.
-      assert.strictEqual(set.match("https://spa.test/#/route/0").passKeys, "j");
+      assert.deepEqual(set.match("https://app.test/x"), passing("j"));
     }),
   );
 
   it.effect("accepts only a single character as a pass key", () =>
     Effect.sync(() => {
-      const rule = { enabled: true, passKeys: "jk" };
+      const rule = passing("jk");
       assert.isTrue(isPassKey(rule, "j"));
       assert.isFalse(isPassKey(rule, "l"));
       // `passKeys` is a set of characters, so `<c-j>` can never be in it.
