@@ -9,7 +9,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Deferred, Effect, Fiber, Option, Ref, pipe } from "effect";
+import { Array, Deferred, Effect, Fiber, Option, Ref, pipe } from "effect";
 import { TestClock } from "effect/testing";
 import { type HintDescriptor, MAX_SESSION_DESCRIPTORS } from "~/domain/FrameMessage.ts";
 import {
@@ -17,19 +17,20 @@ import {
   collectFrameDescriptors,
   raceUntilAbort,
 } from "~/features/hints/Hints.ts";
-import type { FrameId } from "~/platform/Realm.ts";
+import { FrameId } from "~/platform/Realm.ts";
 
 const SAFETY_MS = 1000;
 
-const frameId = (value: string): FrameId => value as FrameId;
-
 const descriptors = (owner: FrameId, count: number): readonly HintDescriptor[] =>
-  Array.from({ length: count }, (_, localIndex) => ({
-    frameId: owner,
-    localIndex,
-    linkText: `link ${localIndex}`,
-    secondary: false,
-  }));
+  pipe(
+    count,
+    Array.makeBy((localIndex) => ({
+      frameId: owner,
+      localIndex,
+      linkText: `link ${localIndex}`,
+      secondary: false,
+    })),
+  );
 
 describe("the hint round", () => {
   it.effect("ends the round when the safety time runs out", () =>
@@ -40,14 +41,17 @@ describe("the hint round", () => {
       const stopped = yield* Ref.make(false);
 
       // One frame answers long after the timeout.
+      const answer = pipe(answered, Ref.set(true));
       const collect = pipe(
         Effect.sleep(5000),
-        Effect.andThen(pipe(Ref.set(answered, true), Effect.as(Option.some("hints")))),
-        Effect.onInterrupt(() => Ref.set(stopped, true)),
+        Effect.andThen(answer),
+        Effect.as(Option.some("hints")),
+        Effect.onInterrupt(() => pipe(stopped, Ref.set(true))),
       );
+      const release = pipe(released, Ref.set(true));
 
-      yield* Effect.forkScoped(abortAfterSafety(abort, Ref.set(released, true), SAFETY_MS));
-      const round = yield* Effect.forkChild(raceUntilAbort(collect, abort));
+      yield* pipe(abortAfterSafety(abort, release, SAFETY_MS), Effect.forkScoped);
+      const round = yield* pipe(raceUntilAbort(collect, abort), Effect.forkChild);
 
       yield* TestClock.adjust(SAFETY_MS);
       assert.isTrue(yield* Ref.get(released), "the keyboard stayed captured");
@@ -65,10 +69,11 @@ describe("the hint round", () => {
       const abort = yield* Deferred.make<void>();
       const released = yield* Ref.make(false);
 
-      const collect = pipe(Effect.sleep(100), Effect.andThen(Effect.succeed(Option.some("hints"))));
+      const collect = pipe(Effect.sleep(100), Effect.as(Option.some("hints")));
+      const release = pipe(released, Ref.set(true));
 
-      yield* Effect.forkScoped(abortAfterSafety(abort, Ref.set(released, true), SAFETY_MS));
-      const round = yield* Effect.forkChild(raceUntilAbort(collect, abort));
+      yield* pipe(abortAfterSafety(abort, release, SAFETY_MS), Effect.forkScoped);
+      const round = yield* pipe(raceUntilAbort(collect, abort), Effect.forkChild);
 
       yield* TestClock.adjust(100);
       const outcome = yield* Fiber.join(round);
@@ -79,15 +84,12 @@ describe("the hint round", () => {
 
   it.effect("bounds the merged replies before the coordinator sends them", () =>
     Effect.gen(function* () {
-      const first = frameId("1111111111111111");
-      const second = frameId("2222222222222222");
-      const replies = new Map<FrameId, readonly HintDescriptor[]>([
-        [first, descriptors(first, 5000)],
-        [second, descriptors(second, 5000)],
-      ]);
+      const first = FrameId.make("1111111111111111");
+      const second = FrameId.make("2222222222222222");
 
+      // Each frame answers with 5000 descriptors of its own.
       const result = yield* collectFrameDescriptors([first, second], (owner) =>
-        Effect.succeed(replies.get(owner) ?? []),
+        Effect.succeed(descriptors(owner, 5000)),
       );
       assert.strictEqual(result.descriptors.length, MAX_SESSION_DESCRIPTORS);
       assert.strictEqual(result.dropped, 2000);
@@ -97,13 +99,10 @@ describe("the hint round", () => {
   it.effect("ends the round when the user presses Escape", () =>
     Effect.gen(function* () {
       const abort = yield* Deferred.make<void>();
-      const collect = pipe(
-        Effect.sleep(5000),
-        Effect.andThen(Effect.succeed(Option.some("hints"))),
-      );
-      const round = yield* Effect.forkChild(raceUntilAbort(collect, abort));
+      const collect = pipe(Effect.sleep(5000), Effect.as(Option.some("hints")));
+      const round = yield* pipe(raceUntilAbort(collect, abort), Effect.forkChild);
 
-      yield* Deferred.succeed(abort, undefined);
+      yield* pipe(abort, Deferred.succeed<void>(undefined));
       const outcome = yield* Fiber.join(round);
       assert.isTrue(Option.isNone(outcome));
     }),

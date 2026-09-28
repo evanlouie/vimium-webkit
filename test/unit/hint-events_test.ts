@@ -8,7 +8,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Array, Effect, pipe } from "effect";
 import { buttonStateFor } from "~/features/hints/Hints.ts";
 
 describe("buttonStateFor", () => {
@@ -17,25 +17,30 @@ describe("buttonStateFor", () => {
       assert.strictEqual(buttonStateFor("pointerdown").buttons, 1);
       assert.strictEqual(buttonStateFor("mousedown").buttons, 1);
 
-      for (const type of [
-        "pointerover",
-        "mouseover",
-        "pointerup",
-        "mouseup",
-        "click",
-        "pointerout",
-        "mouseout",
-      ]) {
-        assert.strictEqual(buttonStateFor(type).buttons, 0, `${type} must report no button down`);
-      }
+      // Each type with the buttons that it reports, so a failure names the type.
+      const released = pipe(
+        ["pointerover", "mouseover", "pointerup", "mouseup", "click", "pointerout", "mouseout"],
+        Array.map((type) => ({ type, buttons: buttonStateFor(type).buttons })),
+      );
+      const expected = pipe(
+        released,
+        Array.map(({ type }) => ({ type, buttons: 0 })),
+      );
+      assert.deepEqual(released, expected, "an event after the press reports a button down");
     }),
   );
 
   it.effect("names the primary button on every event that changes it", () =>
     Effect.sync(() => {
-      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
-        assert.strictEqual(buttonStateFor(type).button, 0, `${type} must name the primary button`);
-      }
+      const changes = pipe(
+        ["pointerdown", "mousedown", "pointerup", "mouseup", "click"],
+        Array.map((type) => ({ type, button: buttonStateFor(type).button })),
+      );
+      const expected = pipe(
+        changes,
+        Array.map(({ type }) => ({ type, button: 0 })),
+      );
+      assert.deepEqual(changes, expected, "an event that changes the button names another one");
     }),
   );
 
