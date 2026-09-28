@@ -832,7 +832,7 @@ export class FrameBus extends Context.Service<
        * fails and every routed message is dropped, because a guessable nonce is
        * worse than no session at all.
        */
-      const randomId = dom.probeOr(() => {
+      const randomId = dom.probeOrElse(() => {
         const bytes = new Uint8Array(16);
         crypto.getRandomValues(bytes);
         return pipe(
@@ -842,7 +842,7 @@ export class FrameBus extends Context.Service<
           Array.join(""),
           Option.some,
         );
-      }, Option.none<string>());
+      }, Option.none);
 
       const freshId: Effect.Effect<string, FrameError> = pipe(
         randomId,
@@ -1083,7 +1083,7 @@ export class FrameBus extends Context.Service<
        * coordinator itself.
        */
       const knownWindow = (source: unknown): Effect.Effect<Option.Option<Window>> =>
-        dom.probeOr(
+        dom.probeOrElse(
           () =>
             pipe(
               source,
@@ -1095,7 +1095,7 @@ export class FrameBus extends Context.Service<
                 ),
               ),
             ),
-          Option.none<Window>(),
+          Option.none,
         );
 
       const expireChallenges = Effect.gen(function* () {
@@ -1446,7 +1446,7 @@ export class FrameBus extends Context.Service<
       // The child: the handshake
       // ---------------------------------------------------------------------
 
-      const topWindow: Effect.Effect<Option.Option<Window>> = dom.probeOr(
+      const topWindow: Effect.Effect<Option.Option<Window>> = dom.probeOrElse(
         () =>
           pipe(
             dom.window.top,
@@ -1456,7 +1456,7 @@ export class FrameBus extends Context.Service<
             // a port to.
             Option.filter((view) => view !== dom.window),
           ),
-        Option.none<Window>(),
+        Option.none,
       );
 
       const postHello = (top: Window): Effect.Effect<void> =>

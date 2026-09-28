@@ -9,7 +9,7 @@
  *    behaviour, the first attempt must give a HUD message.
  * 3. **No probe may throw.** A userscript does not own its globals, and this
  *    service is built early. One hostile accessor must cost one capability,
- *    and not the whole start. Every read below is inside `dom.probeOr`.
+ *    and not the whole start. Every read below is inside `dom.probeOrElse`.
  *
  * The old module built the manager surface and chose the value backend itself.
  * It does not do that now. It reads `Gm`, `KeyValueStore` and `Dom`, which are
@@ -184,7 +184,7 @@ const isWebKitAgent = (ua: string): boolean =>
 /**
  * Read the report.
  *
- * Every browser read is inside `dom.probeOr`, so a poisoned global gives
+ * Every browser read is inside `dom.probeOrElse`, so a poisoned global gives
  * `false` and not a defect.
  */
 export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyValueStore | Dom> =
@@ -195,7 +195,7 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
     const win = dom.window;
     const doc = dom.document;
 
-    const flag = (read: () => boolean): Effect.Effect<boolean> => dom.probeOr(read, false);
+    const flag = (read: () => boolean): Effect.Effect<boolean> => dom.probeOrElse(read, constFalse);
 
     /**
      * Constructable stylesheets, and a shadow root that accepts them.

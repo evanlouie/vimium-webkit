@@ -31,6 +31,7 @@ import {
   flow,
   pipe,
 } from "effect";
+import { constFalse } from "effect/Function";
 import { Dom } from "~/platform/Dom.ts";
 import { isEditable } from "~/platform/Elements.ts";
 import { FrameRole, Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
@@ -120,7 +121,7 @@ export const claimRealm: Effect.Effect<boolean, never, Dom> = Effect.gen(functio
       onTrue: () => Effect.succeed(false),
       onFalse: () =>
         pipe(
-          dom.probeOr(() => mark(dom.window), false),
+          dom.probeOrElse(() => mark(dom.window), constFalse),
           Effect.as(true),
         ),
     }),
@@ -234,7 +235,10 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
       // root names the host at a window listener. The call belongs to the
       // page, so it goes through the probe. A page that poisons `composedPath`
       // then costs us the shadow case only, and not the whole guard.
-      const source = yield* dom.probeOr(() => composedSource(event), event.target);
+      const source = yield* dom.probeOrElse(
+        () => composedSource(event),
+        () => event.target,
+      );
       yield* pipe(
         typed,
         Ref.update((before) => before || isEditable(source)),
