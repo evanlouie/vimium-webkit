@@ -25,7 +25,7 @@
  *    where `navigator.clipboard` is `undefined`.
  */
 
-import { Context, Effect, Layer, Predicate, Schema, pipe } from "effect";
+import { Boolean, Context, Effect, Layer, Match, Option, Predicate, Schema, pipe } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 import { Gm } from "~/platform/Gm.ts";
 
@@ -50,22 +50,17 @@ export class ClipboardError extends Schema.TaggedError<ClipboardError>()("Clipbo
   cause: Schema.optional(Schema.Defect()),
 }) {}
 
-const clipboardError = (
-  reason: ClipboardFailureReason,
-  detail: string,
-  cause?: unknown,
-): ClipboardError =>
-  new ClipboardError({
-    reason,
-    detail,
-    ...(cause === undefined ? {} : { cause }),
-  });
+const describe = (cause: unknown): string =>
+  pipe(
+    Match.value(cause),
+    Match.when(Predicate.isError, (error) => error.message),
+    Match.when(Predicate.isString, (text) => text),
+    Match.orElse((other) => String(other)),
+  );
 
-const describe = (cause: unknown): string => {
-  if (Predicate.isError(cause)) return cause.message;
-  if (Predicate.isString(cause)) return cause;
-  return String(cause);
-};
+/** The browser or the user refused a clipboard promise. */
+const denied = (cause: unknown): ClipboardError =>
+  new ClipboardError({ reason: "denied", detail: describe(cause), cause });
 
 // ---------------------------------------------------------------------------
 // The bound browser accessors
@@ -83,23 +78,108 @@ export type ClipboardReader = () => Promise<string>;
  * This read can throw, because a userscript does not own its globals. Call it
  * inside `Dom.probeOr`.
  */
-export const clipboardWriter = (window: Window & typeof globalThis): ClipboardWriter | null => {
-  const clipboard: unknown = window.navigator.clipboard;
-  if (!Predicate.hasProperty(clipboard, "writeText")) return null;
-  const write: unknown = Reflect.get(clipboard, "writeText");
-  if (!Predicate.isFunction(write)) return null;
-  const call = write as (this: unknown, text: string) => Promise<void>;
-  return (text) => Reflect.apply(call, clipboard, [text]);
-};
+export const clipboardWriter = (
+  window: Window & typeof globalThis,
+): Option.Option<ClipboardWriter> =>
+  pipe(
+    window.navigator.clipboard,
+    Option.fromNullishOr,
+    Option.filter((clipboard) => typeof clipboard.writeText === "function"),
+    Option.map((clipboard): ClipboardWriter => clipboard.writeText.bind(clipboard)),
+  );
 
 /** `navigator.clipboard.readText`, already bound. The same rules apply. */
-export const clipboardReader = (window: Window & typeof globalThis): ClipboardReader | null => {
-  const clipboard: unknown = window.navigator.clipboard;
-  if (!Predicate.hasProperty(clipboard, "readText")) return null;
-  const read: unknown = Reflect.get(clipboard, "readText");
-  if (!Predicate.isFunction(read)) return null;
-  const call = read as (this: unknown) => Promise<string>;
-  return () => Reflect.apply(call, clipboard, []);
+export const clipboardReader = (
+  window: Window & typeof globalThis,
+): Option.Option<ClipboardReader> =>
+  pipe(
+    window.navigator.clipboard,
+    Option.fromNullishOr,
+    Option.filter((clipboard) => typeof clipboard.readText === "function"),
+    Option.map((clipboard): ClipboardReader => clipboard.readText.bind(clipboard)),
+  );
+
+// ---------------------------------------------------------------------------
+// The `document.execCommand("copy")` path
+// ---------------------------------------------------------------------------
+
+/**
+ * A text area that holds the text, off screen and not `display:none`.
+ *
+ * An element that is not rendered cannot be selected. `position:fixed` keeps
+ * the focus call from scrolling the page.
+ */
+const offscreenArea = (doc: Document, text: string): HTMLTextAreaElement => {
+  const area = doc.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.setAttribute("aria-hidden", "true");
+  area.style.cssText =
+    "position:fixed;top:0;left:0;width:1px;height:1px;padding:0;" +
+    "border:0;opacity:0;pointer-events:none;";
+  doc.body.appendChild(area);
+  return area;
+};
+
+/** Give the focus back. The page can have removed the element in the meantime. */
+const restoreFocus = (previous: Element | null): Effect.Effect<void> =>
+  pipe(
+    previous,
+    Option.liftPredicate((element) => element instanceof HTMLElement),
+    Option.match({
+      onNone: () => Effect.void,
+      onSome: (element) =>
+        pipe(
+          Effect.try(() => element.focus({ preventScroll: true })),
+          Effect.ignore,
+        ),
+    }),
+  );
+
+/**
+ * Copy through a selected text area.
+ *
+ * Still necessary, because `navigator.clipboard` is `undefined` on an insecure
+ * origin. The area is removed, and the focus given back, whatever the copy
+ * gives.
+ */
+const execCommandCopy = (doc: Document, text: string): Effect.Effect<void, ClipboardError> => {
+  const acquire = Effect.sync(() => {
+    const previous = doc.activeElement;
+    return { previous, area: offscreenArea(doc, text) };
+  });
+  return Effect.acquireUseRelease(
+    acquire,
+    ({ area }) =>
+      pipe(
+        Effect.try({
+          try: () => {
+            area.select();
+            area.setSelectionRange(0, text.length);
+            return doc.execCommand("copy");
+          },
+          catch: (cause) =>
+            new ClipboardError({ reason: "failed", detail: describe(cause), cause }),
+        }),
+        Effect.flatMap(
+          Boolean.match({
+            onFalse: () =>
+              Effect.fail(
+                new ClipboardError({
+                  reason: "failed",
+                  detail: "document.execCommand('copy') gave false",
+                }),
+              ),
+            onTrue: () => Effect.void,
+          }),
+        ),
+      ),
+    ({ area, previous }) =>
+      pipe(
+        Effect.sync(() => area.remove()),
+        Effect.andThen(restoreFocus(previous)),
+      ),
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -138,120 +218,85 @@ export class Clipboard extends Context.Service<
       const dom = yield* Dom;
 
       // The accessors are read once, when the layer is built. The key path
-      // then holds two plain values, and it does no global read of its own.
-      const writer = yield* dom.probeOr(() => clipboardWriter(dom.window), null);
-      const reader = yield* dom.probeOr(() => clipboardReader(dom.window), null);
-      const canExec = yield* dom.probeOr(() => {
-        const exec: unknown = Reflect.get(dom.document, "execCommand");
-        return Predicate.isFunction(exec);
-      }, false);
+      // then holds plain values, and it does no global read of its own.
+      const writer = yield* dom.probeOr(() => clipboardWriter(dom.window), Option.none());
+      const reader = yield* dom.probeOr(() => clipboardReader(dom.window), Option.none());
+      const execDocument = yield* dom.probeOr(
+        () =>
+          pipe(
+            dom.document,
+            Option.liftPredicate((doc) => Predicate.isFunction(Reflect.get(doc, "execCommand"))),
+          ),
+        Option.none(),
+      );
 
-      /**
-       * The `document.execCommand("copy")` path.
-       *
-       * Still necessary, because `navigator.clipboard` is `undefined` on an
-       * insecure origin. The element is off screen and not `display:none`,
-       * because an element that is not rendered cannot be selected.
-       * `position:fixed` keeps the focus call from scrolling the page.
-       */
-      const execCommandCopy = (text: string): Effect.Effect<void, ClipboardError> =>
-        Effect.suspend(() => {
-          if (!canExec) {
-            return Effect.fail(clipboardError("unavailable", "document.execCommand is absent"));
-          }
-          const doc = dom.document;
-          const previous = doc.activeElement;
-          const area = doc.createElement("textarea");
-          area.value = text;
-          area.setAttribute("readonly", "");
-          area.setAttribute("aria-hidden", "true");
-          area.style.cssText =
-            "position:fixed;top:0;left:0;width:1px;height:1px;padding:0;" +
-            "border:0;opacity:0;pointer-events:none;";
-          doc.body.appendChild(area);
-
-          try {
-            area.select();
-            area.setSelectionRange(0, text.length);
-            const copied = doc.execCommand("copy");
-            return copied
-              ? Effect.void
-              : Effect.fail(clipboardError("failed", "document.execCommand('copy') gave false"));
-          } catch (cause) {
-            return Effect.fail(clipboardError("failed", describe(cause), cause));
-          } finally {
-            area.remove();
-            if (previous instanceof HTMLElement) {
-              try {
-                previous.focus({ preventScroll: true });
-              } catch {
-                // The page can have removed the element in the meantime.
-              }
-            }
-          }
-        });
+      /** The `document.execCommand("copy")` path. */
+      const execCopy = (text: string): Effect.Effect<void, ClipboardError> =>
+        pipe(
+          execDocument,
+          Effect.fromOption(
+            () =>
+              new ClipboardError({
+                reason: "unavailable",
+                detail: "document.execCommand is absent",
+              }),
+          ),
+          Effect.flatMap((doc) => execCommandCopy(doc, text)),
+        );
 
       /**
        * The `navigator.clipboard.writeText` path.
        *
-       * `Effect.suspend` does not suspend the fiber, so the promise starts in
-       * the same synchronous task as the caller. Only the wait for the promise
-       * suspends, and the activation is already spent by then.
+       * `flatMap` does not suspend the fiber, so the promise starts in the same
+       * synchronous task as the caller. Only the wait for the promise suspends,
+       * and the activation is already spent by then.
        */
       const asyncCopy = (text: string): Effect.Effect<void, ClipboardError> =>
-        Effect.suspend(() => {
-          if (writer === null) {
-            return Effect.fail(
-              clipboardError("unavailable", "navigator.clipboard.writeText is absent"),
-            );
-          }
-          const started = writer(text);
-          return pipe(
-            Effect.tryPromise({
-              try: () => started,
-              catch: (cause) => clipboardError("denied", describe(cause), cause),
-            }),
-            Effect.asVoid,
-          );
-        });
+        pipe(
+          writer,
+          Effect.fromOption(
+            () =>
+              new ClipboardError({
+                reason: "unavailable",
+                detail: "navigator.clipboard.writeText is absent",
+              }),
+          ),
+          Effect.flatMap((writeText) => {
+            const started = writeText(text);
+            return Effect.tryPromise({ try: () => started, catch: denied });
+          }),
+        );
 
       const write = (text: string): Effect.Effect<void, ClipboardError> =>
         // The manager write is first, and nothing goes in front of it. It is
         // `Effect.try`, it does not suspend, and it needs no activation.
         pipe(
           gm.setClipboard(text),
-          Effect.mapError((cause) =>
-            clipboardError(
-              cause.reason === "unavailable" ? "unavailable" : "failed",
-              cause.detail,
-              cause,
-            ),
-          ),
           Effect.catch(() => asyncCopy(text)),
           // The last try. The activation is spent if the asynchronous write
           // ran first, so this usually succeeds only on an insecure origin,
           // where the asynchronous API is absent and nothing suspended. The
           // reported error stays the one from the asynchronous write, because
           // that path is the only one that gives a true reason.
-          Effect.catch((denied) =>
+          Effect.catch((failure) =>
             pipe(
-              execCommandCopy(text),
-              Effect.mapError(() => denied),
+              execCopy(text),
+              Effect.mapError(() => failure),
             ),
           ),
         );
 
-      const read: Effect.Effect<string, ClipboardError> = Effect.suspend(() => {
-        if (reader === null) {
-          return Effect.fail(
-            clipboardError("unavailable", "navigator.clipboard.readText is absent"),
-          );
-        }
-        return Effect.tryPromise({
-          try: () => reader(),
-          catch: (cause) => clipboardError("denied", describe(cause), cause),
-        });
-      });
+      const read: Effect.Effect<string, ClipboardError> = pipe(
+        reader,
+        Effect.fromOption(
+          () =>
+            new ClipboardError({
+              reason: "unavailable",
+              detail: "navigator.clipboard.readText is absent",
+            }),
+        ),
+        Effect.flatMap((readText) => Effect.tryPromise({ try: () => readText(), catch: denied })),
+      );
 
       // Plain delegation, and not `Effect.fn`. The span costs about 3 µs for
       // each call, and nothing exports the spans in a release build. On the
@@ -259,8 +304,8 @@ export class Clipboard extends Context.Service<
       return Clipboard.of({
         write,
         read,
-        canRead: reader !== null,
-        canWrite: gm.canSetClipboard || writer !== null || canExec,
+        canRead: Option.isSome(reader),
+        canWrite: gm.canSetClipboard || Option.isSome(writer) || Option.isSome(execDocument),
       });
     }),
   );

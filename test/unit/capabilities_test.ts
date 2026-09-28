@@ -121,11 +121,9 @@ const AGENTS: readonly {
 ];
 
 describe("Capabilities", () => {
-  for (const row of AGENTS) {
-    it.effect(`names the platform: ${row.name}`, () =>
-      Effect.sync(() => {
-        assert.strictEqual(isApplePlatform(row.userAgent, row.platform), row.apple);
-      }),
-    );
-  }
+  it.effect.each(AGENTS)("names the platform: $name", ({ userAgent, platform, apple }) =>
+    Effect.sync(() => {
+      assert.strictEqual(isApplePlatform(userAgent, platform), apple);
+    }),
+  );
 });

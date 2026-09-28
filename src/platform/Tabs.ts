@@ -6,9 +6,11 @@
  * nothing quietly.
  */
 
-import { Context, Effect, Layer, Option, Schema, pipe } from "effect";
+import { Array, Boolean, Context, Effect, Layer, Match, Option, Schema, pipe } from "effect";
+import { flow } from "effect/Function";
 import { Dom } from "./Dom.ts";
-import { Gm } from "./Gm.ts";
+import { Gm, type GmError, OpenInTabResult } from "./Gm.ts";
+import type { GmTabHandle } from "./GmApi.ts";
 
 export const TabFailureReason = Schema.Literals(["unavailable", "blocked", "failed", "unsafe-url"]);
 
@@ -20,13 +22,6 @@ export class TabError extends Schema.TaggedError<TabError>()("TabError", {
   /** Shown in the HUD when the failure is a permanent gap in the manager. */
   nativeAlternative: Schema.optional(Schema.String),
 }) {}
-
-const tabError = (reason: TabFailureReason, detail: string, nativeAlternative?: string): TabError =>
-  new TabError({
-    reason,
-    detail,
-    ...(nativeAlternative === undefined ? {} : { nativeAlternative }),
-  });
 
 /**
  * Where a URL came from, which decides how much we trust it.
@@ -48,7 +43,7 @@ export type UrlTrust = "page" | "internal";
  * `javascript:` and `data:` are in neither set. `GM_openInTab` runs both, and
  * page content can reach both with no difficulty.
  */
-const PAGE_SCHEMES: ReadonlySet<string> = new Set(["http:", "https:", "ftp:"]);
+const PAGE_SCHEMES: ReadonlyArray<string> = ["http:", "https:", "ftp:"];
 
 /**
  * The wider set, for a URL that we built.
@@ -56,25 +51,81 @@ const PAGE_SCHEMES: ReadonlySet<string> = new Set(["http:", "https:", "ftp:"]);
  * `view-source:` is here because the `gs` command needs it. A manager can still
  * refuse, and that refusal becomes a normal failure.
  */
-const INTERNAL_SCHEMES: ReadonlySet<string> = new Set([
-  ...PAGE_SCHEMES,
-  "file:",
-  "about:",
-  "view-source:",
-  "chrome:",
-  "safari-web-extension:",
-]);
+const INTERNAL_SCHEMES: ReadonlyArray<string> = pipe(
+  PAGE_SCHEMES,
+  Array.appendAll(["file:", "about:", "view-source:", "chrome:", "safari-web-extension:"]),
+);
 
-/** Is this URL one that we will go to, given where it came from? */
-export const isNavigableUrl = (url: string, baseUri: string, trust: UrlTrust = "page"): boolean => {
-  try {
-    const parsed = new URL(url, baseUri);
-    const allowed = trust === "internal" ? INTERNAL_SCHEMES : PAGE_SCHEMES;
-    return allowed.has(parsed.protocol);
-  } catch {
-    return false;
-  }
-};
+const schemesFor = (trust: UrlTrust): ReadonlyArray<string> =>
+  pipe(
+    Match.value(trust),
+    Match.when("page", () => PAGE_SCHEMES),
+    Match.when("internal", () => INTERNAL_SCHEMES),
+    Match.exhaustive,
+  );
+
+const parseUrl = Option.liftThrowable((url: string, baseUri: string) => new URL(url, baseUri));
+
+/** The URL, resolved, when it is one that we will go to, given where it came from. */
+const navigableUrl =
+  (baseUri: string, trust: UrlTrust) =>
+  (url: string): Option.Option<URL> =>
+    pipe(
+      parseUrl(url, baseUri),
+      Option.filter((parsed) => pipe(schemesFor(trust), Array.contains(parsed.protocol))),
+    );
+
+/** A manager with no tab API is a gap. Any other failure means that the tab was stopped. */
+const openFailure = (cause: GmError): TabError =>
+  new TabError({
+    reason: pipe(
+      Match.value(cause.reason),
+      Match.withReturnType<TabFailureReason>(),
+      Match.when("unavailable", () => "unavailable"),
+      Match.whenOr("failed", "invalid", () => "blocked"),
+      Match.exhaustive,
+    ),
+    detail: cause.detail,
+  });
+
+const closeFailure = (cause: GmError): TabError =>
+  pipe(
+    Match.value(cause.reason),
+    Match.when(
+      "unavailable",
+      () =>
+        new TabError({
+          reason: "unavailable",
+          detail: "closing a tab needs Tampermonkey or Violentmonkey",
+          nativeAlternative: "⌘W",
+        }),
+    ),
+    Match.whenOr(
+      "failed",
+      "invalid",
+      () => new TabError({ reason: "failed", detail: cause.detail, nativeAlternative: "⌘W" }),
+    ),
+    Match.exhaustive,
+  );
+
+/** The effect that closes a tab, when the manager gave a handle that can. */
+const closeOf = flow(
+  OpenInTabResult.$match({
+    Manager: ({ handle }) => handle,
+    Window: () => Option.none<GmTabHandle>(),
+  }),
+  Option.flatMap((tab) =>
+    pipe(
+      tab.close,
+      Option.fromNullishOr,
+      Option.map((close) =>
+        Effect.sync(() => {
+          close.call(tab);
+        }),
+      ),
+    ),
+  ),
+);
 
 export interface OpenTabOptions {
   /** `false` asks for a background tab. Violentmonkey and Tampermonkey obey. */
@@ -129,66 +180,60 @@ export class Tabs extends Context.Service<
       const gm = yield* Gm;
       const dom = yield* Dom;
 
-      const open = Effect.fn("Tabs.open")(function* (url: string, options: OpenTabOptions = {}) {
-        const base = dom.document.baseURI;
-        if (!isNavigableUrl(url, base, options.trust ?? "page")) {
-          return yield* tabError("unsafe-url", `refusing to open ${url.slice(0, 60)}`);
-        }
+      /** The URL, resolved against this document, or the refusal that names it. */
+      const checked = (
+        url: string,
+        trust: UrlTrust,
+        refusal: string,
+      ): Effect.Effect<URL, TabError> =>
+        pipe(
+          url,
+          navigableUrl(dom.document.baseURI, trust),
+          Effect.fromOption(
+            () => new TabError({ reason: "unsafe-url", detail: `${refusal} ${url.slice(0, 60)}` }),
+          ),
+        );
 
-        const absolute = new URL(url, base).href;
+      const open = Effect.fn("Tabs.open")(function* (url: string, options: OpenTabOptions = {}) {
+        const target = yield* checked(url, options.trust ?? "page", "refusing to open");
         const active = options.active ?? true;
 
-        const result = yield* pipe(
-          gm.openInTab(absolute, {
+        const opened = yield* pipe(
+          gm.openInTab(target.href, {
             active,
             insert: options.insert ?? true,
             setParent: true,
             // Tampermonkey's older spelling. Others ignore it.
             loadInBackground: !active,
           }),
-          Effect.mapError((cause) =>
-            tabError(cause.reason === "unavailable" ? "unavailable" : "blocked", cause.detail),
-          ),
+          Effect.mapError(openFailure),
         );
 
-        const handle = result.handle;
         return {
-          url: absolute,
-          viaManager: result.viaManager,
-          close:
-            handle?.close === undefined
-              ? Option.none()
-              : Option.some(
-                  Effect.sync(() => {
-                    handle.close?.();
-                  }),
-                ),
+          url: target.href,
+          viaManager: OpenInTabResult.$is("Manager")(opened),
+          close: closeOf(opened),
         };
       });
 
-      const closeCurrent = pipe(
-        gm.closeWindow,
-        Effect.mapError((cause) =>
-          cause.reason === "unavailable"
-            ? tabError("unavailable", "closing a tab needs Tampermonkey or Violentmonkey", "⌘W")
-            : tabError("failed", cause.detail, "⌘W"),
-        ),
-      );
+      const closeCurrent = pipe(gm.closeWindow, Effect.mapError(closeFailure));
 
       const navigate = Effect.fn("Tabs.navigate")(function* (
         url: string,
         options: { readonly replace?: boolean; readonly trust?: UrlTrust } = {},
       ) {
-        const base = dom.document.baseURI;
-        if (!isNavigableUrl(url, base, options.trust ?? "page")) {
-          return yield* tabError("unsafe-url", `refusing to go to ${url.slice(0, 60)}`);
-        }
+        yield* checked(url, options.trust ?? "page", "refusing to go to");
         return yield* pipe(
-          dom.attempt("location.assign", () => {
-            if (options.replace === true) dom.window.location.replace(url);
-            else dom.window.location.assign(url);
-          }),
-          Effect.mapError((cause) => tabError("failed", cause.detail)),
+          dom.attempt("location.assign", () =>
+            pipe(
+              options.replace === true,
+              Boolean.match({
+                onFalse: () => dom.window.location.assign(url),
+                onTrue: () => dom.window.location.replace(url),
+              }),
+            ),
+          ),
+          Effect.mapError((cause) => new TabError({ reason: "failed", detail: cause.detail })),
         );
       });
 

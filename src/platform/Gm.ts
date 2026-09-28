@@ -13,7 +13,22 @@
  * poisoned name must cost one API, not the whole surface.
  */
 
-import { Context, Effect, Layer, Option, Queue, Schema, Stream, pipe } from "effect";
+import {
+  Context,
+  Data,
+  Effect,
+  Layer,
+  Match,
+  MutableRef,
+  Option,
+  Predicate,
+  Queue,
+  Result,
+  Schema,
+  Stream,
+  pipe,
+} from "effect";
+import { constVoid, flow } from "effect/Function";
 import { Dom } from "./Dom.ts";
 import type {
   GmNamespace,
@@ -65,11 +80,13 @@ export const gmUnavailable = (api: string): GmError =>
     detail: `${api} is not provided by this userscript manager`,
   });
 
-const describe = (cause: unknown): string => {
-  if (cause instanceof Error) return cause.message;
-  if (typeof cause === "string") return cause;
-  return String(cause);
-};
+const describe = (cause: unknown): string =>
+  pipe(
+    Match.value(cause),
+    Match.when(Predicate.isError, (error) => error.message),
+    Match.when(Predicate.isString, (text) => text),
+    Match.orElse((other) => String(other)),
+  );
 
 const gmFailed =
   (api: string) =>
@@ -112,60 +129,131 @@ type AddValueChangeListener = (
     remote: boolean,
   ) => void,
 ) => string | number;
+type RemoveValueChangeListener = (listenerId: string | number) => void;
 type RegisterMenuCommand = (
   caption: string,
   onClick: () => void,
   accessKey?: string,
 ) => string | number;
 
+/** Every binding of the manager that this module can use. `None` is an absent binding. */
 interface GmSurface {
-  readonly namespace: GmNamespace | null;
+  readonly namespace: Option.Option<GmNamespace>;
   readonly info: unknown;
-  readonly getValueSync: SyncGetValue | null;
-  readonly setValueSync: SyncSetValue | null;
-  readonly deleteValueSync: SyncDeleteValue | null;
-  readonly openInTabSync: OpenInTabSync | null;
-  readonly setClipboardSync: SetClipboardSync | null;
-  readonly xhrSync: XhrSync | null;
-  readonly addValueChangeListener: AddValueChangeListener | null;
-  readonly registerMenuCommand: RegisterMenuCommand | null;
-  readonly addStyle: ((css: string) => unknown) | null;
+  readonly getValueSync: Option.Option<SyncGetValue>;
+  readonly setValueSync: Option.Option<SyncSetValue>;
+  readonly deleteValueSync: Option.Option<SyncDeleteValue>;
+  readonly openInTabSync: Option.Option<OpenInTabSync>;
+  readonly setClipboardSync: Option.Option<SetClipboardSync>;
+  readonly xhrSync: Option.Option<XhrSync>;
+  readonly addValueChangeListener: Option.Option<AddValueChangeListener>;
+  readonly removeValueChangeListener: Option.Option<RemoveValueChangeListener>;
+  readonly registerMenuCommand: Option.Option<RegisterMenuCommand>;
+  readonly addStyle: Option.Option<(css: string) => unknown>;
   readonly hasUnsafeWindow: boolean;
-  readonly windowClose: (() => void) | null;
+  readonly windowClose: Option.Option<() => void>;
 }
 
-const detectSurface = (probeOr: <A>(read: () => A, fallback: A) => A): GmSurface => {
-  const binding = <A>(read: () => A | undefined): A | null => probeOr(() => read() ?? null, null);
+/** Read a binding that may throw, and give `fallback` when it does. */
+const probeOr = <A>(read: () => A, fallback: A): A =>
+  pipe(
+    Result.try(read),
+    Result.getOrElse(() => fallback),
+  );
 
-  const namespace = binding<GmNamespace>(() =>
-    typeof GM !== "undefined" && GM !== null && typeof GM === "object" ? GM : undefined,
+/**
+ * A binding that the manager may not declare.
+ *
+ * `kind` gives the `typeof` of the binding, and the binding is read only when
+ * that is `expected`. A nullish binding and a read that throws both give `None`.
+ */
+const binding = <A>(
+  kind: () => string,
+  expected: string,
+  read: () => A | null | undefined,
+): Option.Option<A> =>
+  probeOr(
+    () =>
+      pipe(
+        kind(),
+        Option.liftPredicate((actual) => actual === expected),
+        Option.flatMapNullishOr(read),
+      ),
+    Option.none(),
+  );
+
+/** A manager function, when the manager declares one. */
+const callable = <A>(kind: () => string, read: () => A): Option.Option<A> =>
+  binding(kind, "function", read);
+
+const detectSurface = (): GmSurface => {
+  // `typeof null` is `"object"` too, and `binding` gives `None` for it.
+  const namespace = binding(
+    () => typeof GM,
+    "object",
+    () => GM,
   );
 
   return {
     namespace,
     info: probeOr(
-      () => (typeof GM_info !== "undefined" ? GM_info : (namespace?.info ?? null)),
+      () =>
+        pipe(
+          typeof GM_info,
+          Option.liftPredicate((kind) => kind !== "undefined"),
+          Option.map((): unknown => GM_info),
+          Option.orElse(() =>
+            pipe(
+              namespace,
+              Option.flatMapNullishOr((ns) => ns.info),
+            ),
+          ),
+          Option.getOrNull,
+        ),
       null,
     ),
-    getValueSync: binding(() => (typeof GM_getValue === "function" ? GM_getValue : undefined)),
-    setValueSync: binding(() => (typeof GM_setValue === "function" ? GM_setValue : undefined)),
-    deleteValueSync: binding(() =>
-      typeof GM_deleteValue === "function" ? GM_deleteValue : undefined,
+    getValueSync: callable(
+      () => typeof GM_getValue,
+      () => GM_getValue,
     ),
-    openInTabSync: binding(() => (typeof GM_openInTab === "function" ? GM_openInTab : undefined)),
-    setClipboardSync: binding(() =>
-      typeof GM_setClipboard === "function" ? GM_setClipboard : undefined,
+    setValueSync: callable(
+      () => typeof GM_setValue,
+      () => GM_setValue,
     ),
-    xhrSync: binding(() =>
-      typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : undefined,
+    deleteValueSync: callable(
+      () => typeof GM_deleteValue,
+      () => GM_deleteValue,
     ),
-    addValueChangeListener: binding(() =>
-      typeof GM_addValueChangeListener === "function" ? GM_addValueChangeListener : undefined,
+    openInTabSync: callable(
+      () => typeof GM_openInTab,
+      () => GM_openInTab,
     ),
-    registerMenuCommand: binding(() =>
-      typeof GM_registerMenuCommand === "function" ? GM_registerMenuCommand : undefined,
+    setClipboardSync: callable(
+      () => typeof GM_setClipboard,
+      () => GM_setClipboard,
     ),
-    addStyle: binding(() => (typeof GM_addStyle === "function" ? GM_addStyle : undefined)),
+    xhrSync: callable(
+      () => typeof GM_xmlhttpRequest,
+      () => GM_xmlhttpRequest,
+    ),
+    addValueChangeListener: callable(
+      () => typeof GM_addValueChangeListener,
+      () => GM_addValueChangeListener,
+    ),
+    // Not in the compatibility floor, so a manager can watch values and still
+    // have no way to stop.
+    removeValueChangeListener: callable(
+      () => typeof GM_removeValueChangeListener,
+      () => GM_removeValueChangeListener,
+    ),
+    registerMenuCommand: callable(
+      () => typeof GM_registerMenuCommand,
+      () => GM_registerMenuCommand,
+    ),
+    addStyle: callable(
+      () => typeof GM_addStyle,
+      () => GM_addStyle,
+    ),
     hasUnsafeWindow: probeOr(
       () => typeof unsafeWindow !== "undefined" && unsafeWindow !== undefined,
       false,
@@ -173,10 +261,12 @@ const detectSurface = (probeOr: <A>(read: () => A, fallback: A) => A): GmSurface
     // `window.close()` works from a userscript only when the manager honoured
     // `@grant window.close`. Violentmonkey and Tampermonkey do. Others do not,
     // and there is no way to tell "granted" from "silently does nothing".
-    windowClose: probeOr(() => {
-      const fn: unknown = globalThis.close;
-      return typeof fn === "function" ? () => globalThis.close() : null;
-    }, null),
+    windowClose: callable(
+      () => typeof globalThis.close,
+      () => (): void => {
+        globalThis.close();
+      },
+    ),
   };
 };
 
@@ -185,33 +275,41 @@ const detectSurface = (probeOr: <A>(read: () => A, fallback: A) => A): GmSurface
 // ---------------------------------------------------------------------------
 
 export interface ManagerIdentity {
-  readonly handler: string | null;
-  readonly handlerVersion: string | null;
-  readonly scriptVersion: string | null;
-  readonly injectInto: string | null;
-  readonly sandboxMode: string | null;
+  readonly handler: Option.Option<string>;
+  readonly handlerVersion: Option.Option<string>;
+  readonly scriptVersion: Option.Option<string>;
+  readonly injectInto: Option.Option<string>;
+  readonly sandboxMode: Option.Option<string>;
 }
 
-const readString = (source: unknown, key: string): string | null => {
-  if (typeof source !== "object" || source === null) return null;
-  const value: unknown = (source as Record<string, unknown>)[key];
-  return typeof value === "string" ? value : null;
-};
+/** A property of a value that the manager gave, when that value is an object. */
+const propertyOf =
+  (key: string) =>
+  (source: unknown): Option.Option<unknown> =>
+    pipe(
+      source,
+      Option.liftPredicate(Predicate.isObjectOrArray),
+      Option.map((object): unknown => Reflect.get(object, key)),
+    );
 
-const readObject = (source: unknown, key: string): unknown => {
-  if (typeof source !== "object" || source === null) return null;
-  return (source as Record<string, unknown>)[key];
-};
+/** A string property of a value that the manager gave. */
+const stringOf = (key: string) => flow(propertyOf(key), Option.filter(Predicate.isString));
 
 /** For a bug report only. Never take a decision from this. Probe instead. */
 const readIdentity = (info: unknown): ManagerIdentity => {
-  const script = readObject(info, "script");
+  const script = pipe(info, propertyOf("script"));
+  const ofScript = (key: string): Option.Option<string> =>
+    pipe(script, Option.flatMap(stringOf(key)));
   return {
-    handler: readString(info, "scriptHandler"),
-    handlerVersion: readString(info, "version"),
-    scriptVersion: readString(script, "version"),
-    injectInto: readString(info, "injectInto") ?? readString(script, "injectInto"),
-    sandboxMode: readString(info, "sandboxMode"),
+    handler: pipe(info, stringOf("scriptHandler")),
+    handlerVersion: pipe(info, stringOf("version")),
+    scriptVersion: ofScript("version"),
+    injectInto: pipe(
+      info,
+      stringOf("injectInto"),
+      Option.orElse(() => ofScript("injectInto")),
+    ),
+    sandboxMode: pipe(info, stringOf("sandboxMode")),
   };
 };
 
@@ -219,7 +317,12 @@ const readIdentity = (info: unknown): ManagerIdentity => {
 // The value API
 // ---------------------------------------------------------------------------
 
-export type GmValueApiKind = "gm-async" | "gm-sync";
+/** The calls that every value API gives. */
+type GmValueCalls = {
+  readonly get: (key: string) => Effect.Effect<Option.Option<string>, GmError>;
+  readonly set: (key: string, value: string) => Effect.Effect<void, GmError>;
+  readonly remove: (key: string) => Effect.Effect<void, GmError>;
+};
 
 /**
  * A string-in, string-out value API.
@@ -232,106 +335,120 @@ export type GmValueApiKind = "gm-async" | "gm-sync";
  * `get` gives an `Option`. "Absent" is a normal answer here, not a failure, and
  * it must not be confused with a stored empty string.
  */
-export interface GmValueApi {
-  readonly kind: GmValueApiKind;
-  readonly get: (key: string) => Effect.Effect<Option.Option<string>, GmError>;
-  readonly set: (key: string, value: string) => Effect.Effect<void, GmError>;
-  readonly remove: (key: string) => Effect.Effect<void, GmError>;
-  /** A synchronous API binding, when the manager gives one. */
-  readonly setUnsafe: ((key: string, value: string) => void) | null;
-  /** Changes made in another tab. `None` when the manager has no such API. */
-  readonly changes: Option.Option<(key: string) => Stream.Stream<Option.Option<string>>>;
-}
+export type GmValueApi = Data.TaggedEnum<{
+  /** The promise form, `GM.getValue` and the rest. */
+  Async: GmValueCalls;
+  /** The synchronous form, `GM_getValue` and the rest. */
+  Sync: GmValueCalls & {
+    /** The write of `set`, as a plain call that completes before it returns. */
+    readonly setUnsafe: (key: string, value: string) => void;
+    /** Changes made in another tab. `None` when the manager has no such API. */
+    readonly changes: Option.Option<(key: string) => Stream.Stream<Option.Option<string>>>;
+  };
+}>;
 
-const asString = (value: GmValue | undefined): string | undefined =>
-  typeof value === "string"
-    ? value
-    : value === undefined || value === null
-      ? undefined
-      : String(value);
+export const GmValueApi = Data.taggedEnum<GmValueApi>();
 
+/** A stored value as text. A manager that gives another primitive gives its text. */
 const asOption = (value: GmValue | undefined): Option.Option<string> =>
-  Option.fromNullishOr(asString(value) ?? null);
+  pipe(value, Option.fromNullishOr, Option.map(String));
 
-const asyncValueApi = (surface: GmSurface): Option.Option<GmValueApi> => {
-  const ns = surface.namespace;
-  if (!ns?.getValue || !ns.setValue || !ns.deleteValue) return Option.none();
-  const { getValue, setValue, deleteValue } = ns;
-  // Some managers give both forms. Stay 2.1.0 is one example. This field
-  // describes the API surface. It does not describe disk durability.
-  const sync = surface.setValueSync;
-  return Option.some({
-    kind: "gm-async",
-    get: (key) => gmAttemptAsync("GM.getValue", () => getValue(key).then(asOption)),
-    set: (key, value) => gmAttemptAsync("GM.setValue", () => setValue(key, value)),
-    remove: (key) => gmAttemptAsync("GM.deleteValue", () => deleteValue(key)),
-    setUnsafe:
-      sync === null
-        ? null
-        : (key, value) => {
-            sync(key, value);
-          },
-    changes: Option.none(),
-  });
-};
-
-const syncValueApi = (surface: GmSurface): Option.Option<GmValueApi> => {
-  const { getValueSync, setValueSync, deleteValueSync } = surface;
-  if (!getValueSync || !setValueSync || !deleteValueSync) return Option.none();
-  const watcher = surface.addValueChangeListener;
-
-  return Option.some({
-    kind: "gm-sync",
-    get: (key) => gmAttempt("GM_getValue", () => asOption(getValueSync(key))),
-    set: (key, value) =>
-      gmAttempt("GM_setValue", () => {
-        setValueSync(key, value);
+const asyncValueApi = (surface: GmSurface): Option.Option<GmValueApi> =>
+  pipe(
+    surface.namespace,
+    Option.flatMap((ns) =>
+      Option.all({
+        getValue: Option.fromNullishOr(ns.getValue),
+        setValue: Option.fromNullishOr(ns.setValue),
+        deleteValue: Option.fromNullishOr(ns.deleteValue),
       }),
-    remove: (key) =>
-      gmAttempt("GM_deleteValue", () => {
-        deleteValueSync(key);
+    ),
+    Option.map(({ getValue, setValue, deleteValue }) =>
+      GmValueApi.Async({
+        get: (key) => gmAttemptAsync("GM.getValue", () => getValue(key).then(asOption)),
+        set: (key, value) => gmAttemptAsync("GM.setValue", () => setValue(key, value)),
+        remove: (key) => gmAttemptAsync("GM.deleteValue", () => deleteValue(key)),
       }),
-    setUnsafe: (key, value) => {
-      setValueSync(key, value);
-    },
-    changes:
-      watcher === null
-        ? Option.none()
-        : Option.some((key: string) =>
-            Stream.callback<Option.Option<string>>((queue) =>
-              Effect.acquireRelease(
-                Effect.sync(() =>
-                  watcher(key, (_name, _old, next) => {
-                    Queue.offerUnsafe(queue, asOption(next));
-                  }),
-                ),
-                (id) =>
-                  Effect.sync(() => {
-                    // Not in the compatibility floor, so this is best effort. A
-                    // listener that stays is better than a throw during teardown.
-                    try {
-                      if (typeof GM_removeValueChangeListener === "function") {
-                        GM_removeValueChangeListener(id);
-                      }
-                    } catch {
-                      // Nothing else can be done.
-                    }
-                  }),
-              ),
-            ),
-          ),
-  });
-};
+    ),
+  );
+
+/**
+ * Remove a value listener, as far as the manager allows.
+ *
+ * Not in the compatibility floor, so this is best effort. A listener that stays
+ * is better than a throw during teardown.
+ */
+const stopWatching = (
+  unwatch: Option.Option<RemoveValueChangeListener>,
+  id: string | number,
+): Effect.Effect<void> =>
+  pipe(
+    unwatch,
+    Option.match({
+      onNone: () => Effect.void,
+      onSome: (remove) =>
+        pipe(
+          Effect.try(() => remove(id)),
+          Effect.ignore,
+        ),
+    }),
+  );
+
+/** The values that another tab writes to one key, for the life of the stream. */
+const watchValue =
+  (watch: AddValueChangeListener, unwatch: Option.Option<RemoveValueChangeListener>) =>
+  (key: string): Stream.Stream<Option.Option<string>> =>
+    Stream.callback<Option.Option<string>>((queue) => {
+      const listen = Effect.sync(() =>
+        watch(key, (_name, _old, next) => {
+          Queue.offerUnsafe(queue, asOption(next));
+        }),
+      );
+      return Effect.acquireRelease(listen, (id) => stopWatching(unwatch, id));
+    });
+
+const syncValueApi = (surface: GmSurface): Option.Option<GmValueApi> =>
+  pipe(
+    Option.all({
+      getValue: surface.getValueSync,
+      setValue: surface.setValueSync,
+      deleteValue: surface.deleteValueSync,
+    }),
+    Option.map(({ getValue, setValue, deleteValue }) =>
+      GmValueApi.Sync({
+        get: (key) => gmAttempt("GM_getValue", () => asOption(getValue(key))),
+        set: (key, value) =>
+          gmAttempt("GM_setValue", () => {
+            setValue(key, value);
+          }),
+        remove: (key) =>
+          gmAttempt("GM_deleteValue", () => {
+            deleteValue(key);
+          }),
+        setUnsafe: (key, value) => {
+          setValue(key, value);
+        },
+        changes: pipe(
+          surface.addValueChangeListener,
+          Option.map((watch) => watchValue(watch, surface.removeValueChangeListener)),
+        ),
+      }),
+    ),
+  );
 
 // ---------------------------------------------------------------------------
 // Tabs, clipboard and network
 // ---------------------------------------------------------------------------
 
-export interface OpenInTabResult {
-  readonly handle: GmTabHandle | null;
-  /** `false` when the manager had no API and `window.open` was used. */
-  readonly viaManager: boolean;
-}
+/** How a tab was opened. */
+export type OpenInTabResult = Data.TaggedEnum<{
+  /** The manager opened it. Some managers give a handle that can close it. */
+  Manager: { readonly handle: Option.Option<GmTabHandle> };
+  /** The manager had no API, and `window.open` was used. */
+  Window: Record<never, never>;
+}>;
+
+export const OpenInTabResult = Data.taggedEnum<OpenInTabResult>();
 
 export interface XhrRequest {
   readonly url: string;
@@ -340,6 +457,217 @@ export interface XhrRequest {
   readonly data?: string;
   readonly timeoutMs?: number;
 }
+
+type XhrSend = (
+  details: GmXhrDetails,
+) => GmXhrHandle | undefined | Promise<GmXhrHandle | undefined>;
+
+/** What an interrupt of a request can reach. */
+type XhrLink = Data.TaggedEnum<{
+  /** The manager has given no handle yet. */
+  Waiting: Record<never, never>;
+  /** The manager gave a handle, and the request can be aborted through it. */
+  Attached: { readonly handle: GmXhrHandle };
+  /** The caller stopped waiting. A handle that arrives now is aborted at once. */
+  Cancelled: Record<never, never>;
+}>;
+
+const XhrLink = Data.taggedEnum<XhrLink>();
+
+const abortRequest = (handle: GmXhrHandle): void =>
+  pipe(
+    handle.abort,
+    Option.fromNullishOr,
+    Option.match({
+      onNone: constVoid,
+      onSome: (abort) => {
+        abort.call(handle);
+      },
+    }),
+  );
+
+/** A handle arrives. It is kept, or aborted when the caller already stopped waiting. */
+const attachRequest = (
+  link: MutableRef.MutableRef<XhrLink>,
+  arrived: Option.Option<GmXhrHandle>,
+): void =>
+  pipe(
+    arrived,
+    Option.match({
+      onNone: constVoid,
+      onSome: (handle) => {
+        const keep = (): void => {
+          pipe(link, MutableRef.set<XhrLink>(XhrLink.Attached({ handle })));
+        };
+        return pipe(
+          MutableRef.get(link),
+          XhrLink.$match({
+            Waiting: keep,
+            Attached: keep,
+            Cancelled: () => abortRequest(handle),
+          }),
+        );
+      },
+    }),
+  );
+
+const cancelRequest = flow(
+  MutableRef.getAndSet<XhrLink>(XhrLink.Cancelled()),
+  XhrLink.$match({
+    Waiting: constVoid,
+    Attached: ({ handle }) => abortRequest(handle),
+    Cancelled: constVoid,
+  }),
+);
+
+/** A handle that the manager gave at once, and not the promise of one. */
+const isImmediateHandle = (returned: ReturnType<XhrSend>): returned is GmXhrHandle =>
+  typeof returned === "object" && returned !== null && !Predicate.isPromise(returned);
+
+/**
+ * Start one request, and give the effect that aborts it.
+ *
+ * A manager can give the handle at once, give it later through a promise, or
+ * give none at all.
+ */
+const startRequest = (
+  send: XhrSend,
+  input: XhrRequest,
+  resume: (effect: Effect.Effect<GmXhrResponse, GmError>) => void,
+): Effect.Effect<void> => {
+  const link = MutableRef.make<XhrLink>(XhrLink.Waiting());
+
+  const fail = (detail: string) => (): void => {
+    resume(
+      Effect.fail(
+        new GmError({
+          reason: "failed",
+          api: "GM_xmlhttpRequest",
+          detail: `${detail} for ${input.url}`,
+        }),
+      ),
+    );
+  };
+
+  const details: GmXhrDetails = {
+    method: input.method ?? "GET",
+    url: input.url,
+    headers: input.headers,
+    data: input.data,
+    timeout: input.timeoutMs,
+    responseType: "text",
+    onload: (response) => {
+      resume(Effect.succeed(response));
+    },
+    onerror: fail("network error"),
+    ontimeout: fail("timeout"),
+    onabort: fail("aborted"),
+  };
+
+  const returned = send(details);
+  const immediate = pipe(returned, Option.liftPredicate(isImmediateHandle));
+  attachRequest(link, immediate);
+  pipe(
+    returned,
+    Option.liftPredicate(Predicate.isPromise),
+    Option.match({
+      onNone: constVoid,
+      onSome: (pending) => {
+        pending.then(
+          (handle) => attachRequest(link, Option.fromNullishOr(handle)),
+          (cause: unknown) => {
+            resume(Effect.fail(gmFailed("GM_xmlhttpRequest")(cause)));
+          },
+        );
+      },
+    }),
+  );
+
+  return Effect.sync(() => cancelRequest(link));
+};
+
+type TabOpener = (
+  url: string,
+  options: GmOpenInTabOptions,
+) => Effect.Effect<OpenInTabResult, GmError>;
+
+const openedByManager = (handle: GmTabHandle | undefined): OpenInTabResult =>
+  OpenInTabResult.Manager({ handle: Option.fromNullishOr(handle) });
+
+/** `GM.openInTab`. Some managers give the handle through a promise. */
+const namespaceOpener =
+  (open: NonNullable<GmNamespace["openInTab"]>): TabOpener =>
+  (url, options) =>
+    pipe(
+      gmAttemptAsync("GM.openInTab", async () => open(url, options)),
+      Effect.map(openedByManager),
+    );
+
+/** `GM_openInTab`, which gives the handle at once. */
+const syncOpener =
+  (open: OpenInTabSync): TabOpener =>
+  (url, options) =>
+    pipe(
+      gmAttempt("GM_openInTab", () => open(url, options)),
+      Effect.map(openedByManager),
+    );
+
+/** A rejection that nobody waits for must not become an unhandled rejection. */
+const detachRejection = (result: unknown): void =>
+  pipe(
+    result,
+    Option.liftPredicate(Predicate.isPromise),
+    Option.match({
+      onNone: constVoid,
+      onSome: (promise) => {
+        promise.catch(constVoid);
+      },
+    }),
+  );
+
+type ClipboardWrite = (text: string) => Effect.Effect<void, GmError>;
+
+/**
+ * `GM.setClipboard`.
+ *
+ * Some managers give a promise. We do not wait for it: the caller is inside an
+ * activation-sensitive synchronous task.
+ */
+const namespaceClipboard =
+  (write: NonNullable<GmNamespace["setClipboard"]>): ClipboardWrite =>
+  (text) =>
+    gmAttempt("GM.setClipboard", () => detachRejection(write(text, "text/plain")));
+
+const syncClipboard =
+  (write: SetClipboardSync): ClipboardWrite =>
+  (text) =>
+    gmAttempt("GM_setClipboard", () => write(text, "text/plain"));
+
+/** `GM.xmlHttpRequest`, called on its namespace. */
+const namespaceRequest = (ns: GmNamespace): Option.Option<XhrSend> =>
+  pipe(
+    ns.xmlHttpRequest,
+    Option.fromNullishOr,
+    Option.map(
+      (send): XhrSend =>
+        (details) =>
+          send.call(ns, details),
+    ),
+  );
+
+type MenuRegister = (caption: string, onClick: () => void) => unknown;
+
+/** `GM.registerMenuCommand`, called on its namespace. */
+const namespaceMenu = (ns: GmNamespace): Option.Option<MenuRegister> =>
+  pipe(
+    ns.registerMenuCommand,
+    Option.fromNullishOr,
+    Option.map(
+      (add): MenuRegister =>
+        (caption, onClick) =>
+          add.call(ns, caption, onClick),
+    ),
+  );
 
 // ---------------------------------------------------------------------------
 // The service
@@ -409,14 +737,7 @@ export class Gm extends Context.Service<
     Gm,
     Effect.gen(function* () {
       const dom = yield* Dom;
-      const surface = detectSurface(<A>(read: () => A, fallback: A): A => {
-        try {
-          return read();
-        } catch {
-          return fallback;
-        }
-      });
-      return makeGm(surface, dom);
+      return makeGm(detectSurface(), dom);
     }),
   );
 
@@ -432,142 +753,95 @@ export class Gm extends Context.Service<
 }
 
 const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
-  const ns = surface.namespace;
+  /** A member of the `GM.*` namespace, when the manager gives both. */
+  const member = <A>(read: (ns: GmNamespace) => A | null | undefined): Option.Option<A> =>
+    pipe(surface.namespace, Option.flatMapNullishOr(read));
+
+  const managerOpen: Option.Option<TabOpener> = pipe(
+    member((ns) => ns.openInTab),
+    Option.map(namespaceOpener),
+    Option.orElse(() => pipe(surface.openInTabSync, Option.map(syncOpener))),
+  );
+
+  const windowOpen = (url: string): Effect.Effect<OpenInTabResult, GmError> =>
+    pipe(
+      gmAttempt("window.open", () => dom.window.open(url, "_blank", "noopener,noreferrer")),
+      Effect.filterOrFail(Predicate.isNotNull, () =>
+        gmFailed("window.open")(new Error("window.open was blocked (no transient activation?)")),
+      ),
+      Effect.as(OpenInTabResult.Window()),
+    );
+
+  const openTab = pipe(
+    managerOpen,
+    Option.getOrElse(() => windowOpen),
+  );
 
   const openInTab = Effect.fn("Gm.openInTab")(function* (url: string, options: GmOpenInTabOptions) {
-    if (ns?.openInTab) {
-      const open = ns.openInTab;
-      return yield* gmAttemptAsync("GM.openInTab", async () => {
-        const handle = await open(url, options);
-        return { handle: handle ?? null, viaManager: true };
-      });
-    }
-    if (surface.openInTabSync) {
-      const open = surface.openInTabSync;
-      return yield* gmAttempt("GM_openInTab", () => ({
-        handle: open(url, options) ?? null,
-        viaManager: true,
-      }));
-    }
-    return yield* gmAttempt("window.open", () => {
-      const opened = dom.window.open(url, "_blank", "noopener,noreferrer");
-      if (opened === null) {
-        throw new Error("window.open was blocked (no transient activation?)");
-      }
-      return { handle: null, viaManager: false };
-    });
+    return yield* openTab(url, options);
   });
 
-  const setClipboard = (text: string): Effect.Effect<void, GmError> => {
-    if (ns?.setClipboard) {
-      const write = ns.setClipboard;
-      return gmAttempt("GM.setClipboard", () => {
-        // Some managers give a promise. We do not wait for it: the caller is
-        // inside an activation-sensitive synchronous task. A rejection handler
-        // keeps it from becoming an unhandled rejection.
-        const result = write(text, "text/plain");
-        if (result instanceof Promise) result.catch(() => {});
-      });
-    }
-    if (surface.setClipboardSync) {
-      const write = surface.setClipboardSync;
-      return gmAttempt("GM_setClipboard", () => write(text, "text/plain"));
-    }
-    return Effect.fail(gmUnavailable("GM_setClipboard"));
-  };
+  const clipboardWrite: Option.Option<ClipboardWrite> = pipe(
+    member((ns) => ns.setClipboard),
+    Option.map(namespaceClipboard),
+    Option.orElse(() => pipe(surface.setClipboardSync, Option.map(syncClipboard))),
+  );
+
+  const setClipboard = pipe(
+    clipboardWrite,
+    Option.getOrElse((): ClipboardWrite => () => Effect.fail(gmUnavailable("GM_setClipboard"))),
+  );
+
+  const send: Option.Option<XhrSend> = pipe(
+    surface.namespace,
+    Option.flatMap(namespaceRequest),
+    Option.orElse(() => surface.xhrSync),
+  );
 
   const request = Effect.fn("Gm.request")(function* (input: XhrRequest) {
-    const impl: ((details: GmXhrDetails) => unknown) | null = ns?.xmlHttpRequest
-      ? (details) => ns.xmlHttpRequest?.(details)
-      : surface.xhrSync;
-    if (impl === null) return yield* gmUnavailable("GM_xmlhttpRequest");
-
-    return yield* Effect.callback<GmXhrResponse, GmError>((resume) => {
-      let handle: GmXhrHandle | undefined;
-      let aborted = false;
-
-      const fail = (detail: string) => (): void => {
-        resume(
-          Effect.fail(
-            new GmError({
-              reason: "failed",
-              api: "GM_xmlhttpRequest",
-              detail: `${detail} for ${input.url}`,
-            }),
-          ),
-        );
-      };
-
-      const details: GmXhrDetails = {
-        method: input.method ?? "GET",
-        url: input.url,
-        headers: input.headers,
-        data: input.data,
-        timeout: input.timeoutMs,
-        responseType: "text",
-        onload: (response) => {
-          resume(Effect.succeed(response));
-        },
-        onerror: fail("network error"),
-        ontimeout: fail("timeout"),
-        onabort: fail("aborted"),
-      };
-
-      const returned: unknown = impl(details);
-      if (returned instanceof Promise) {
-        returned.then(
-          (value: unknown) => {
-            handle = (value ?? undefined) as GmXhrHandle | undefined;
-            if (aborted) handle?.abort?.();
-          },
-          (cause: unknown) => {
-            resume(Effect.fail(gmFailed("GM_xmlhttpRequest")(cause)));
-          },
-        );
-      } else if (returned !== null && typeof returned === "object") {
-        handle = returned as GmXhrHandle;
-      }
-
-      return Effect.sync(() => {
-        aborted = true;
-        handle?.abort?.();
-      });
-    });
+    const start = yield* pipe(
+      send,
+      Effect.fromOption(() => gmUnavailable("GM_xmlhttpRequest")),
+    );
+    return yield* Effect.callback<GmXhrResponse, GmError>((resume) =>
+      startRequest(start, input, resume),
+    );
   });
+
+  const register: Option.Option<MenuRegister> = pipe(
+    surface.registerMenuCommand,
+    Option.orElse(() => pipe(surface.namespace, Option.flatMap(namespaceMenu))),
+  );
 
   const registerMenuCommand = (
     caption: string,
     onClick: Effect.Effect<void>,
-  ): Effect.Effect<void, GmError> => {
-    const register =
-      surface.registerMenuCommand ??
-      (ns?.registerMenuCommand
-        ? (text: string, callback: () => void) => {
-            ns.registerMenuCommand?.(text, callback);
-            return 0;
-          }
-        : null);
-    if (register === null) {
-      return Effect.fail(gmUnavailable("GM_registerMenuCommand"));
-    }
-    return gmAttempt("GM_registerMenuCommand", () => {
-      register(caption, () => {
-        Effect.runFork(onClick);
-      });
-    });
-  };
+  ): Effect.Effect<void, GmError> =>
+    pipe(
+      register,
+      Option.match({
+        onNone: () => Effect.fail(gmUnavailable("GM_registerMenuCommand")),
+        onSome: (add) =>
+          gmAttempt("GM_registerMenuCommand", () => {
+            add(caption, () => {
+              Effect.runFork(onClick);
+            });
+          }),
+      }),
+    );
 
-  const closeWindow = Effect.suspend(() => {
-    const close = surface.windowClose;
-    if (close === null) return Effect.fail(gmUnavailable("window.close"));
-    return gmAttempt("window.close", close);
-  });
+  const closeWindow = pipe(
+    surface.windowClose,
+    Effect.fromOption(() => gmUnavailable("window.close")),
+    Effect.flatMap((close) => gmAttempt("window.close", close)),
+  );
 
   return Gm.of({
     identity: readIdentity(surface.info),
     info: surface.info,
     values: pipe(
-      syncValueApi(surface),
+      surface,
+      syncValueApi,
       Option.orElse(
         // Prefer a complete synchronous surface. This changes Stay and other
         // managers that give both forms. Storage debounces the selected kind.
@@ -575,13 +849,12 @@ const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
       ),
     ),
     hasUnsafeWindow: surface.hasUnsafeWindow,
-    canOpenInTab: ns?.openInTab !== undefined || surface.openInTabSync !== null,
-    canSetClipboard: ns?.setClipboard !== undefined || surface.setClipboardSync !== null,
-    canRequest: ns?.xmlHttpRequest !== undefined || surface.xhrSync !== null,
-    canRegisterMenuCommand:
-      ns?.registerMenuCommand !== undefined || surface.registerMenuCommand !== null,
-    canCloseWindow: surface.windowClose !== null,
-    canAddStyle: surface.addStyle !== null,
+    canOpenInTab: Option.isSome(managerOpen),
+    canSetClipboard: Option.isSome(clipboardWrite),
+    canRequest: Option.isSome(send),
+    canRegisterMenuCommand: Option.isSome(register),
+    canCloseWindow: Option.isSome(surface.windowClose),
+    canAddStyle: Option.isSome(surface.addStyle),
     openInTab,
     setClipboard,
     request,

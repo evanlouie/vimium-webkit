@@ -4,14 +4,11 @@
  * NOTHING declared here may be dereferenced directly. Every identifier is
  * *optionally* present depending on the manager, the `@grant` lines the user's
  * manager honoured, and the injection world. The only safe access pattern is a
- * `typeof` guard, which — unlike a bare reference — does not throw a
- * `ReferenceError` for an undeclared binding:
+ * `typeof` guard, such as `typeof GM_setValue === "function"`, which — unlike
+ * a bare reference — does not throw a `ReferenceError` for an undeclared
+ * binding.
  *
- * ```ts
- * if (typeof GM_setValue === "function") { ... }
- * ```
- *
- * All consumers must go through `platform/gm.ts`.
+ * All consumers must go through `platform/Gm.ts`.
  */
 
 export type GmValue = string | number | boolean | null;

@@ -1,65 +1,76 @@
 /** The userscript manager capability selection. */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option, pipe } from "effect";
+import { Array, Effect, MutableRef, Option, pipe } from "effect";
 import { Dom } from "~/platform/Dom.ts";
-import { Gm, type GmSurface } from "~/platform/Gm.ts";
+import { Gm, type GmSurface, GmValueApi } from "~/platform/Gm.ts";
+
+/** The calls that one form of the value API received, in order. */
+const callLog = () => {
+  const calls = MutableRef.make<ReadonlyArray<string>>([]);
+  return {
+    record: (call: string): void => {
+      pipe(calls, MutableRef.update(Array.append(call)));
+    },
+    calls: (): ReadonlyArray<string> => MutableRef.get(calls),
+  };
+};
 
 describe("Gm value API selection", () => {
   it.effect("prefers a complete synchronous surface when both forms exist", () =>
     Effect.gen(function* () {
-      const syncCalls: string[] = [];
-      const asyncCalls: string[] = [];
+      const sync = callLog();
+      const async = callLog();
       const surface: GmSurface = {
-        namespace: {
+        namespace: Option.some({
           getValue: (key) => {
-            asyncCalls.push(`get:${key}`);
+            async.record(`get:${key}`);
             return Promise.resolve("async");
           },
           setValue: (key, value) => {
-            asyncCalls.push(`set:${key}:${String(value)}`);
+            async.record(`set:${key}:${String(value)}`);
             return Promise.resolve();
           },
           deleteValue: (key) => {
-            asyncCalls.push(`delete:${key}`);
+            async.record(`delete:${key}`);
             return Promise.resolve();
           },
-        },
+        }),
         info: null,
-        getValueSync: (key) => {
-          syncCalls.push(`get:${key}`);
+        getValueSync: Option.some((key) => {
+          sync.record(`get:${key}`);
           return "sync";
-        },
-        setValueSync: (key, value) => {
-          syncCalls.push(`set:${key}:${String(value)}`);
-        },
-        deleteValueSync: (key) => {
-          syncCalls.push(`delete:${key}`);
-        },
-        openInTabSync: null,
-        setClipboardSync: null,
-        xhrSync: null,
-        addValueChangeListener: null,
-        registerMenuCommand: null,
-        addStyle: null,
+        }),
+        setValueSync: Option.some((key, value) => {
+          sync.record(`set:${key}:${String(value)}`);
+        }),
+        deleteValueSync: Option.some((key) => {
+          sync.record(`delete:${key}`);
+        }),
+        openInTabSync: Option.none(),
+        setClipboardSync: Option.none(),
+        xhrSync: Option.none(),
+        addValueChangeListener: Option.none(),
+        removeValueChangeListener: Option.none(),
+        registerMenuCommand: Option.none(),
+        addStyle: Option.none(),
         hasUnsafeWindow: false,
-        windowClose: null,
+        windowClose: Option.none(),
       };
 
       yield* pipe(
         Effect.gen(function* () {
           const gm = yield* Gm;
           assert.isTrue(Option.isSome(gm.values));
-          if (Option.isNone(gm.values)) return;
 
-          const values = gm.values.value;
-          assert.strictEqual(values.kind, "gm-sync");
+          const values = yield* pipe(gm.values, Effect.fromOption);
+          assert.isTrue(GmValueApi.$is("Sync")(values));
           assert.deepEqual(yield* values.get("one"), Option.some("sync"));
           yield* values.set("two", "value");
           yield* values.remove("three");
 
-          assert.deepEqual(syncCalls, ["get:one", "set:two:value", "delete:three"]);
-          assert.deepEqual(asyncCalls, []);
+          assert.deepEqual(sync.calls(), ["get:one", "set:two:value", "delete:three"]);
+          assert.deepEqual(async.calls(), []);
         }),
         Effect.provide(Gm.layerFrom(surface)),
         Effect.provide(Dom.layer),
