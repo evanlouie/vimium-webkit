@@ -39,7 +39,8 @@ export interface FixturePorts {
  * and `address()` answers `null` until it completes, so the bind happens in a
  * short-lived child process that this call blocks on.
  */
-const RESERVE_SCRIPT = `const s=require("node:net").createServer();` +
+const RESERVE_SCRIPT =
+  `const s=require("node:net").createServer();` +
   `s.listen(0,process.argv[1],()=>{const a=s.address();` +
   `process.stdout.write(String(a.port));s.close()});`;
 
@@ -91,8 +92,6 @@ export const fixturePorts = (): FixturePorts => {
   return cached;
 };
 
-export const primaryOrigin = (): string =>
-  `http://${FIXTURE_HOST}:${fixturePorts().primary}`;
+export const primaryOrigin = (): string => `http://${FIXTURE_HOST}:${fixturePorts().primary}`;
 
-export const secondaryOrigin = (): string =>
-  `http://${FIXTURE_HOST}:${fixturePorts().secondary}`;
+export const secondaryOrigin = (): string => `http://${FIXTURE_HOST}:${fixturePorts().secondary}`;

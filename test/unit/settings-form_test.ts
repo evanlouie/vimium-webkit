@@ -23,8 +23,7 @@ import {
   SETTINGS_SECTIONS,
 } from "~/ui/Dialog.ts";
 
-const settingKeys = (): readonly string[] =>
-  Object.keys(defaultSettings()).toSorted();
+const settingKeys = (): readonly string[] => Object.keys(defaultSettings()).toSorted();
 
 const fieldKeys = (): readonly string[] =>
   SETTINGS_FIELDS.map((field) => String(field.key)).toSorted();
@@ -44,7 +43,8 @@ describe("the settings form", () => {
         settingKeys(),
         "the form and the schema must hold the same settings",
       );
-    }));
+    }),
+  );
 
   it.effect("gives each setting exactly one control", () =>
     Effect.sync(() => {
@@ -54,26 +54,20 @@ describe("the settings form", () => {
         assert.isFalse(seen.has(key), `${key} has two controls`);
         seen.add(key);
       }
-    }));
+    }),
+  );
 
   it.effect("labels every field and every section", () =>
     Effect.sync(() => {
       for (const section of SETTINGS_SECTIONS) {
         assert.isAbove(section.title.length, 0, "a section has no title");
-        assert.isAbove(
-          section.fields.length,
-          0,
-          `the section "${section.title}" has no field`,
-        );
+        assert.isAbove(section.fields.length, 0, `the section "${section.title}" has no field`);
       }
       for (const field of SETTINGS_FIELDS) {
-        assert.isAbove(
-          field.label.length,
-          0,
-          `the field for ${String(field.key)} has no label`,
-        );
+        assert.isAbove(field.label.length, 0, `the field for ${String(field.key)} has no label`);
       }
-    }));
+    }),
+  );
 
   it.effect("reads back what it writes", () =>
     Effect.sync(() => {
@@ -97,7 +91,8 @@ describe("the settings form", () => {
           `the field for ${String(field.key)} did not round-trip`,
         );
       }
-    }));
+    }),
+  );
 
   it.effect("keeps the stored value when a number is not a number", () =>
     Effect.sync(() => {
@@ -110,7 +105,8 @@ describe("the settings form", () => {
           `the field for ${String(field.key)} accepted text as a number`,
         );
       }
-    }));
+    }),
+  );
 
   it.effect("names the fields that storage changed", () =>
     Effect.sync(() => {
@@ -122,7 +118,8 @@ describe("the settings form", () => {
         ["Hide the HUD", "Page that a new tab opens"].toSorted(),
       );
       assert.deepEqual(adjustedFields(base, base), []);
-    }));
+    }),
+  );
 
   it.effect("names a field whose text it refused", () =>
     Effect.sync(() => {
@@ -144,19 +141,23 @@ describe("the settings form", () => {
       ]);
       assert.deepEqual(notes.clamped, []);
       assert.deepEqual(notes.truncated, []);
-    }));
+    }),
+  );
 
   it.effect("lists an exclusion rule that gives no matcher", () =>
     Effect.sync(() => {
-      const notes = formNotes([{
-        field: field("exclusionRules"),
-        text: "https://good.test/*\n/(a+)+$/",
-      }]);
+      const notes = formNotes([
+        {
+          field: field("exclusionRules"),
+          text: "https://good.test/*\n/(a+)+$/",
+        },
+      ]);
       assert.strictEqual(notes.dropped.length, 1);
       assert.include(notes.dropped[0] ?? "", "line 2");
       assert.include(notes.dropped[0] ?? "", "/(a+)+$/");
       assert.include(notes.dropped[0] ?? "", "can hang the page");
-    }));
+    }),
+  );
 
   it.effect("says that it brought a number into range", () =>
     Effect.sync(() => {
@@ -169,10 +170,7 @@ describe("the settings form", () => {
         { field: field("historyIndexLimit"), text: "90000" },
       ]);
       assert.deepEqual(notes.refused, []);
-      assert.deepEqual(notes.clamped, [
-        "Scroll step size (px)",
-        "Entries kept in the index",
-      ]);
+      assert.deepEqual(notes.clamped, ["Scroll step size (px)", "Entries kept in the index"]);
       // What the message claims must be what the write function does.
       const control = field("scrollStepSize");
       assert.notStrictEqual(control.kind, "toggle");
@@ -180,16 +178,15 @@ describe("the settings form", () => {
       const stored = control.write(base, "20000");
       assert.strictEqual(control.read(stored), "10000");
       assert.notStrictEqual(control.read(stored), control.read(base));
-    }));
+    }),
+  );
 
   it.effect("says nothing about a value that it can use", () =>
     Effect.sync(() => {
       const base = defaultSettings();
       const offered = SETTINGS_FIELDS.map((one) => ({
         field: one,
-        text: one.kind === "toggle"
-          ? String(one.read(base))
-          : one.read(base),
+        text: one.kind === "toggle" ? String(one.read(base)) : one.read(base),
       }));
       assert.deepEqual(formNotes(offered), {
         refused: [],
@@ -197,7 +194,8 @@ describe("the settings form", () => {
         truncated: [],
         dropped: [],
       });
-    }));
+    }),
+  );
 
   it.effect("says that it dropped the decimals of a number", () =>
     Effect.sync(() => {
@@ -206,9 +204,7 @@ describe("the settings form", () => {
       // value is neither refused nor out of range, so this input fell into no
       // report at all and the user saw 50 with no reason for it.
       const base = defaultSettings();
-      const notes = formNotes([
-        { field: field("scrollStepSize"), text: "50.7" },
-      ]);
+      const notes = formNotes([{ field: field("scrollStepSize"), text: "50.7" }]);
       assert.deepEqual(notes.refused, []);
       assert.deepEqual(notes.clamped, []);
       assert.deepEqual(notes.truncated, ["Scroll step size (px)"]);
@@ -218,7 +214,8 @@ describe("the settings form", () => {
       assert.notStrictEqual(control.kind, "toggle");
       if (control.kind === "toggle") return;
       assert.strictEqual(control.read(control.write(base, "50.7")), "50");
-    }));
+    }),
+  );
 
   it.effect("lets every number control report a truncation", () =>
     Effect.sync(() => {
@@ -241,24 +238,19 @@ describe("the settings form", () => {
           `the field for ${String(one.key)} called a refusal a truncation`,
         );
       }
-    }));
+    }),
+  );
 
   it.effect("lets every number control say what it refuses", () =>
     Effect.sync(() => {
       for (const one of SETTINGS_FIELDS) {
         if (one.kind !== "number") continue;
-        assert.isDefined(
-          one.refuses,
-          `the field for ${String(one.key)} cannot report a refusal`,
-        );
+        assert.isDefined(one.refuses, `the field for ${String(one.key)} cannot report a refusal`);
         assert.isTrue(
           one.refuses?.("not a number") ?? false,
           `the field for ${String(one.key)} accepted text as a number`,
         );
-        assert.isDefined(
-          one.clamps,
-          `the field for ${String(one.key)} cannot report a clamp`,
-        );
+        assert.isDefined(one.clamps, `the field for ${String(one.key)} cannot report a clamp`);
         // A refusal and a clamp are two results. Text that holds no number
         // keeps the stored value, so it is not a clamp.
         assert.isFalse(
@@ -266,25 +258,25 @@ describe("the settings form", () => {
           `the field for ${String(one.key)} called a refusal a clamp`,
         );
       }
-    }));
+    }),
+  );
 
   it.effect("reads a list of lines, and drops the empty ones", () =>
     Effect.sync(() => {
-      assert.deepEqual(
-        parseLines("  https://a.example/*  \n\n https://b.example/* \n"),
-        ["https://a.example/*", "https://b.example/*"],
-      );
+      assert.deepEqual(parseLines("  https://a.example/*  \n\n https://b.example/* \n"), [
+        "https://a.example/*",
+        "https://b.example/*",
+      ]);
       assert.deepEqual(parseLines("   \n\n"), []);
-    }));
+    }),
+  );
 
   it.effect("reads one exclusion rule for each line", () =>
     Effect.sync(() => {
-      assert.deepEqual(
-        parseExclusionText("# a comment\nhttps://a.example/* jk\nhttps://b/*"),
-        [
-          { pattern: "https://a.example/*", passKeys: "jk" },
-          { pattern: "https://b/*", passKeys: "" },
-        ],
-      );
-    }));
+      assert.deepEqual(parseExclusionText("# a comment\nhttps://a.example/* jk\nhttps://b/*"), [
+        { pattern: "https://a.example/*", passKeys: "jk" },
+        { pattern: "https://b/*", passKeys: "" },
+      ]);
+    }),
+  );
 });

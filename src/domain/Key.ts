@@ -26,12 +26,10 @@ import { Option, Result, Schema } from "effect";
  * it. The mapping parser adds the line number, which this module does not
  * know.
  */
-export class KeyNotationError
-  extends Schema.TaggedError<KeyNotationError>()("KeyNotationError", {
-    input: Schema.String,
-    detail: Schema.String,
-  })
-{}
+export class KeyNotationError extends Schema.TaggedError<KeyNotationError>()("KeyNotationError", {
+  input: Schema.String,
+  detail: Schema.String,
+}) {}
 
 // ---------------------------------------------------------------------------
 // Named keys
@@ -74,8 +72,7 @@ const NAME_ALIASES: ReadonlyMap<string, string> = new Map([
   ["lt", "<"],
 ]);
 
-const isFunctionKey = (key: string): boolean =>
-  /^f([1-9]|1\d|2[0-4])$/.test(key);
+const isFunctionKey = (key: string): boolean => /^f([1-9]|1\d|2[0-4])$/.test(key);
 
 // ---------------------------------------------------------------------------
 // Code points
@@ -169,8 +166,7 @@ const MODIFIER_KEYS: ReadonlySet<string> = new Set([
   "SymbolLock",
 ]);
 
-export const isModifierKey = (event: KeyEventLike): boolean =>
-  MODIFIER_KEYS.has(event.key);
+export const isModifierKey = (event: KeyEventLike): boolean => MODIFIER_KEYS.has(event.key);
 
 /**
  * Is the user in an IME composition or a dead-key composition?
@@ -241,8 +237,7 @@ const CODE_CHARACTERS: ReadonlyMap<string, string> = new Map([
 ]);
 
 /** Is this one ASCII letter? */
-const isAsciiLetter = (key: string): boolean =>
-  key.length === 1 && key >= "a" && key <= "z";
+const isAsciiLetter = (key: string): boolean => key.length === 1 && key >= "a" && key <= "z";
 
 /**
  * The character of the layout, from the legacy `event.keyCode`.
@@ -311,10 +306,7 @@ const codeCharacter = (code: string | undefined): string | null => {
  *
  * `Option.none()` means that the event is not such a chord.
  */
-const appleAltKey = (
-  event: KeyEventLike,
-  applePlatform: boolean,
-): Option.Option<string> => {
+const appleAltKey = (event: KeyEventLike, applePlatform: boolean): Option.Option<string> => {
   if (!applePlatform || !event.altKey || event.ctrlKey) return Option.none();
   if (event.code === "IntlBackslash") return Option.none();
 
@@ -351,9 +343,7 @@ export const PLAIN_KEY_CONTEXT: KeyContext = {
 
 /** Keep the old layout flag for callers that do not read platform data. */
 const readKeyContext = (context: KeyContext | boolean): KeyContext =>
-  typeof context === "boolean"
-    ? { ignoreKeyboardLayout: context, applePlatform: false }
-    : context;
+  typeof context === "boolean" ? { ignoreKeyboardLayout: context, applePlatform: false } : context;
 
 /**
  * Give the base character. The active keyboard layout can be ignored.
@@ -388,18 +378,13 @@ export const keyChar = (
       const suffix = code.slice(6);
       // `NumpadDivide` and its kind are named keys, and not characters. A
       // lowercase of them gave `"divide"`, which no notation can write.
-      return Option.some(
-        /^\d$/.test(suffix) ? suffix : normaliseAppKitKey(event.key),
-      );
+      return Option.some(/^\d$/.test(suffix) ? suffix : normaliseAppKitKey(event.key));
     }
   }
 
   // An Option chord on macOS reports a glyph. The character of the layout
   // decides there, so `map <a-f> ...` still names the F key of the user.
-  const raw = Option.getOrElse(
-    appleAltKey(event, context.applePlatform),
-    () => event.key,
-  );
+  const raw = Option.getOrElse(appleAltKey(event, context.applePlatform), () => event.key);
 
   const key = normaliseAppKitKey(raw);
   if (key.length === 0 || key === "Unidentified") return Option.none();
@@ -557,9 +542,7 @@ const parseAngleKey = (
   }
 
   const lowered = last.toLowerCase();
-  const char = charCount(last) === 1
-    ? last
-    : NAME_ALIASES.get(lowered) ?? lowered;
+  const char = charCount(last) === 1 ? last : (NAME_ALIASES.get(lowered) ?? lowered);
 
   if (charCount(char) > 1 && !NAMED_VALUES.has(char) && !isFunctionKey(char)) {
     return Result.fail(
@@ -645,10 +628,7 @@ export const parseKeySequence = (
       }
       // A `<x>` with no modifier is a named key, for example `<esc>`. The same
       // parser reads it, because a split on `-` gives one segment.
-      const parsed = parseAngleKey(
-        body,
-        chars.slice(index, close + 1).join(""),
-      );
+      const parsed = parseAngleKey(body, chars.slice(index, close + 1).join(""));
       if (Result.isFailure(parsed)) return Result.fail(parsed.failure);
       keys.push(parsed.success);
       index = close + 1;
@@ -660,9 +640,7 @@ export const parseKeySequence = (
   }
 
   if (keys.length === 0) {
-    return Result.fail(
-      new KeyNotationError({ input, detail: "empty key sequence" }),
-    );
+    return Result.fail(new KeyNotationError({ input, detail: "empty key sequence" }));
   }
   return Result.succeed(keys);
 };
@@ -671,10 +649,7 @@ export const parseKeySequence = (
 export const normaliseKeySequence = (
   input: string,
 ): Result.Result<readonly string[], KeyNotationError> =>
-  Result.map(
-    parseKeySequence(input),
-    (keys) => keys.map((key) => key.notation),
-  );
+  Result.map(parseKeySequence(input), (keys) => keys.map((key) => key.notation));
 
 // ---------------------------------------------------------------------------
 // Safari reserved shortcuts
@@ -739,12 +714,7 @@ export const shiftedNonLetter = (notation: string): boolean => {
  * can be unpreventable on iOS. They are permitted, and marked in the help
  * dialog.
  */
-export const IOS_UNCERTAIN: ReadonlySet<string> = new Set([
-  "<m-s>",
-  "<m-p>",
-  "<m-f>",
-  "<m-d>",
-]);
+export const IOS_UNCERTAIN: ReadonlySet<string> = new Set(["<m-s>", "<m-p>", "<m-f>", "<m-d>"]);
 
 // ---------------------------------------------------------------------------
 // The count prefix
@@ -768,9 +738,7 @@ export const MAX_COUNT = 9999;
  */
 export const isCountDigit = (notation: string, started: boolean): boolean => {
   if (charCount(notation) !== 1) return false;
-  return started
-    ? notation >= "0" && notation <= "9"
-    : notation >= "1" && notation <= "9";
+  return started ? notation >= "0" && notation <= "9" : notation >= "1" && notation <= "9";
 };
 
 /** Add one digit to a count. The result stops at `MAX_COUNT`. */

@@ -68,10 +68,10 @@ import { Dom } from "~/platform/Dom.ts";
 export type LifecycleEvent =
   /** The URL changed with no document load. */
   | {
-    readonly _tag: "UrlChange";
-    readonly url: string;
-    readonly previous: string;
-  }
+      readonly _tag: "UrlChange";
+      readonly url: string;
+      readonly previous: string;
+    }
   /** The page came back from the back/forward cache. */
   | { readonly _tag: "Restore" }
   /** The page is going away for good. */
@@ -113,43 +113,40 @@ const URL_POLL_MS = 900;
 /** The delay after a click, to let the page's router run. */
 const CLICK_SETTLE_MS = 60;
 
-export class Lifecycle extends Context.Service<Lifecycle, {
-  readonly events: Stream.Stream<LifecycleEvent>;
+export class Lifecycle extends Context.Service<
+  Lifecycle,
+  {
+    readonly events: Stream.Stream<LifecycleEvent>;
 
-  /**
-   * Run this work when the page goes away or goes to the background.
-   *
-   * The hook belongs to the enclosing scope, and it goes when that scope
-   * closes.
-   */
-  readonly onExit: (
-    hook: ExitHook,
-  ) => Effect.Effect<void, never, Scope.Scope>;
-}>()("vimium/boot/Lifecycle") {
+    /**
+     * Run this work when the page goes away or goes to the background.
+     *
+     * The hook belongs to the enclosing scope, and it goes when that scope
+     * closes.
+     */
+    readonly onExit: (hook: ExitHook) => Effect.Effect<void, never, Scope.Scope>;
+  }
+>()("vimium/boot/Lifecycle") {
   static readonly layer: Layer.Layer<Lifecycle, never, Dom> = Layer.effect(
     Lifecycle,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const dom = yield* Dom;
       const bus = yield* PubSub.unbounded<LifecycleEvent>();
       const url = yield* Ref.make(yield* dom.href);
-      const poller = yield* Ref.make<
-        Option.Option<Fiber.Fiber<unknown, never>>
-      >(
-        Option.none(),
-      );
+      const poller = yield* Ref.make<Option.Option<Fiber.Fiber<unknown, never>>>(Option.none());
       const exitHooks = yield* Ref.make<ReadonlyArray<Registration>>([]);
 
       const emit = (event: LifecycleEvent): Effect.Effect<void> =>
         Effect.asVoid(PubSub.publish(bus, event));
 
-      const check = Effect.gen(function*() {
+      const check = Effect.gen(function* () {
         const next = yield* dom.href;
         const previous = yield* Ref.getAndSet(url, next);
         if (next === previous) return;
         yield* emit({ _tag: "UrlChange", url: next, previous });
       });
 
-      const startPolling = Effect.gen(function*() {
+      const startPolling = Effect.gen(function* () {
         if (Option.isSome(yield* Ref.get(poller))) return;
         const fiber = yield* Effect.forkScoped(
           Effect.repeat(check, Schedule.spaced(`${URL_POLL_MS} millis`)),
@@ -157,27 +154,19 @@ export class Lifecycle extends Context.Service<Lifecycle, {
         yield* Ref.set(poller, Option.some(fiber));
       });
 
-      const stopPolling = Effect.gen(function*() {
+      const stopPolling = Effect.gen(function* () {
         const running = yield* Ref.getAndSet(poller, Option.none());
         if (Option.isSome(running)) yield* Fiber.interrupt(running.value);
       });
 
-      const isVisible = Effect.sync(() =>
-        dom.document.visibilityState === "visible"
-      );
+      const isVisible = Effect.sync(() => dom.document.visibilityState === "visible");
 
-      const onExit = (
-        hook: ExitHook,
-      ): Effect.Effect<void, never, Scope.Scope> =>
+      const onExit = (hook: ExitHook): Effect.Effect<void, never, Scope.Scope> =>
         Effect.suspend(() => {
           const entry: Registration = { hook };
           return Effect.acquireRelease(
             Ref.update(exitHooks, (current) => [...current, entry]),
-            () =>
-              Ref.update(
-                exitHooks,
-                (current) => current.filter((other) => other !== entry),
-              ),
+            () => Ref.update(exitHooks, (current) => current.filter((other) => other !== entry)),
           );
         });
 
@@ -192,17 +181,15 @@ export class Lifecycle extends Context.Service<Lifecycle, {
        * instead of work.
        */
       const startExitHooks = (exit: PageExit): Effect.Effect<void> =>
-        Effect.flatMap(
-          Ref.get(exitHooks),
-          (entries) =>
-            Effect.forEach(
-              entries,
-              (entry) =>
-                Effect.forkDetach(entry.hook(exit), {
-                  startImmediately: true,
-                }),
-              { discard: true },
-            ),
+        Effect.flatMap(Ref.get(exitHooks), (entries) =>
+          Effect.forEach(
+            entries,
+            (entry) =>
+              Effect.forkDetach(entry.hook(exit), {
+                startImmediately: true,
+              }),
+            { discard: true },
+          ),
         );
 
       yield* dom.listen("window", "popstate", () => check);
@@ -214,61 +201,49 @@ export class Lifecycle extends Context.Service<Lifecycle, {
         "window",
         "click",
         () =>
-          Effect.asVoid(Effect.forkDetach(
-            Effect.andThen(
-              Effect.sleep(`${CLICK_SETTLE_MS} millis`),
-              check,
-            ),
-          )),
+          Effect.asVoid(
+            Effect.forkDetach(Effect.andThen(Effect.sleep(`${CLICK_SETTLE_MS} millis`), check)),
+          ),
         { capture: true, passive: true },
       );
 
-      yield* dom.listen(
-        "window",
-        "pageshow",
-        (event) =>
-          Effect.gen(function*() {
-            if (event.persisted) yield* emit({ _tag: "Restore" });
-            // `pagehide` stopped the poll. Nothing else starts it again, so a
-            // restored page would lose the one detector that does not depend on
-            // `popstate`, on `hashchange` or on a click.
-            if (yield* isVisible) yield* startPolling;
+      yield* dom.listen("window", "pageshow", (event) =>
+        Effect.gen(function* () {
+          if (event.persisted) yield* emit({ _tag: "Restore" });
+          // `pagehide` stopped the poll. Nothing else starts it again, so a
+          // restored page would lose the one detector that does not depend on
+          // `popstate`, on `hashchange` or on a click.
+          if (yield* isVisible) yield* startPolling;
+          yield* check;
+        }),
+      );
+
+      yield* dom.listen("window", "pagehide", (event) =>
+        Effect.gen(function* () {
+          // The hooks come first, and everything else comes second. They are
+          // the work that the page may have no time for. The bus is last: a
+          // subscriber reads it on another fiber, which can run after the
+          // page is gone.
+          yield* startExitHooks({ final: !event.persisted });
+          yield* stopPolling;
+          if (!event.persisted) yield* emit({ _tag: "Leave" });
+        }),
+      );
+
+      yield* dom.listen("document", "visibilitychange", () =>
+        Effect.gen(function* () {
+          if (yield* isVisible) {
+            yield* startPolling;
             yield* check;
-          }),
-      );
-
-      yield* dom.listen(
-        "window",
-        "pagehide",
-        (event) =>
-          Effect.gen(function*() {
-            // The hooks come first, and everything else comes second. They are
-            // the work that the page may have no time for. The bus is last: a
-            // subscriber reads it on another fiber, which can run after the
-            // page is gone.
-            yield* startExitHooks({ final: !event.persisted });
-            yield* stopPolling;
-            if (!event.persisted) yield* emit({ _tag: "Leave" });
-          }),
-      );
-
-      yield* dom.listen(
-        "document",
-        "visibilitychange",
-        () =>
-          Effect.gen(function*() {
-            if (yield* isVisible) {
-              yield* startPolling;
-              yield* check;
-              yield* emit({ _tag: "Visible" });
-              return;
-            }
-            yield* stopPolling;
-            // The last moment that mobile WebKit reliably gives us. A tab that
-            // goes to the background may never see `pagehide`. The tab can come
-            // forward again, so this exit is never final.
-            yield* startExitHooks({ final: false });
-          }),
+            yield* emit({ _tag: "Visible" });
+            return;
+          }
+          yield* stopPolling;
+          // The last moment that mobile WebKit reliably gives us. A tab that
+          // goes to the background may never see `pagehide`. The tab can come
+          // forward again, so this exit is never final.
+          yield* startExitHooks({ final: false });
+        }),
       );
 
       if (yield* isVisible) yield* startPolling;

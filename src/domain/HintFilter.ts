@@ -106,9 +106,7 @@ export const filterHints = (
 ): FilterOutcome => {
   const searchWords = linkWords(query.text);
 
-  let ordered: Array<
-    { readonly candidate: FilterCandidate; readonly score: number }
-  >;
+  let ordered: Array<{ readonly candidate: FilterCandidate; readonly score: number }>;
   if (searchWords.length === 0) {
     ordered = candidates.map((candidate) => ({ candidate, score: 0 }));
   } else {
@@ -128,18 +126,19 @@ export const filterHints = (
     score: entry.score,
   }));
 
-  const candidateMatches = query.digits.length === 0
-    ? matched
-    : matched.filter((match) => match.hintString.startsWith(query.digits));
+  const candidateMatches =
+    query.digits.length === 0
+      ? matched
+      : matched.filter((match) => match.hintString.startsWith(query.digits));
 
-  const exact = query.digits.length === 0
-    ? (candidateMatches.length === 1
-      ? Option.fromNullishOr(candidateMatches[0] ?? null)
-      : Option.none())
-    : Option.fromNullishOr(
-      candidateMatches.find((match) => match.hintString === query.digits) ??
-        null,
-    );
+  const exact =
+    query.digits.length === 0
+      ? candidateMatches.length === 1
+        ? Option.fromNullishOr(candidateMatches[0] ?? null)
+        : Option.none()
+      : Option.fromNullishOr(
+          candidateMatches.find((match) => match.hintString === query.digits) ?? null,
+        );
 
   return { matched, candidates: candidateMatches, exact };
 };
@@ -153,7 +152,5 @@ export const filterHints = (
  * string that it came from, and `startsWith` compares whole units, so the cut
  * can never fall inside a character.
  */
-export const matchedPrefixLength = (
-  hintString: string,
-  digits: string,
-): number => (hintString.startsWith(digits) ? digits.length : 0);
+export const matchedPrefixLength = (hintString: string, digits: string): number =>
+  hintString.startsWith(digits) ? digits.length : 0;

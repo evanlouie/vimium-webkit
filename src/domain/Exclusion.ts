@@ -34,8 +34,7 @@ export interface EffectiveRule {
 
 export const FULLY_ENABLED: EffectiveRule = { enabled: true, passKeys: "" };
 
-const escapeRegExp = (input: string): string =>
-  input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const escapeRegExp = (input: string): string => input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * The longest URL that we test a glob against.
@@ -112,8 +111,7 @@ const globMatcher = (pattern: string): UrlMatcher => {
 /** Is this pattern a raw regular expression, and not a glob? */
 export const isRawPattern = (pattern: string): boolean => {
   const trimmed = pattern.trim();
-  return trimmed.length > 1 && trimmed.startsWith("/") &&
-    trimmed.endsWith("/");
+  return trimmed.length > 1 && trimmed.startsWith("/") && trimmed.endsWith("/");
 };
 
 /** What one pattern gave: a matcher, or the reason that we dropped it. */
@@ -160,16 +158,14 @@ const compile = (pattern: string): Compiled => {
     if (Option.isSome(problem)) return { ok: false, reason: problem.value };
     return {
       ok: true,
-      matches: (url: string): boolean =>
-        url.length <= MAX_REGEX_URL_LENGTH && regexp.test(url),
+      matches: (url: string): boolean => url.length <= MAX_REGEX_URL_LENGTH && regexp.test(url),
     };
   }
 
   const match = globMatcher(trimmed);
   return {
     ok: true,
-    matches: (url: string): boolean =>
-      url.length <= MAX_URL_LENGTH && match(url),
+    matches: (url: string): boolean => url.length <= MAX_URL_LENGTH && match(url),
   };
 };
 
@@ -207,9 +203,7 @@ export interface NumberedRule {
  * An empty line gives no rule, and `#` starts a comment. The line number comes
  * with each rule, so that a caller can mark the line that holds a bad rule.
  */
-export const parseExclusionLines = (
-  text: string,
-): ReadonlyArray<NumberedRule> => {
+export const parseExclusionLines = (text: string): ReadonlyArray<NumberedRule> => {
   const out: NumberedRule[] = [];
   const lines = text.split(/\r?\n/);
   for (let index = 0; index < lines.length; index++) {
@@ -218,10 +212,13 @@ export const parseExclusionLines = (
     const space = trimmed.search(/\s/);
     out.push({
       line: index + 1,
-      rule: space === -1 ? { pattern: trimmed, passKeys: "" } : {
-        pattern: trimmed.slice(0, space),
-        passKeys: trimmed.slice(space + 1).trim(),
-      },
+      rule:
+        space === -1
+          ? { pattern: trimmed, passKeys: "" }
+          : {
+              pattern: trimmed.slice(0, space),
+              passKeys: trimmed.slice(space + 1).trim(),
+            },
     });
   }
   return out;
@@ -265,9 +262,9 @@ export const patternToRegExp = (pattern: string): Option.Option<RegExp> => {
   const raw = isRawPattern(trimmed);
   const body = raw
     ? trimmed.slice(1, -1)
-    // A run of `*` means what one `*` means, and `.*.*` is a shape that the
-    // safety check refuses. Collapse the run before the translation.
-    : trimmed.replace(/\*+/g, "*").split("*").map(escapeRegExp).join(".*");
+    : // A run of `*` means what one `*` means, and `.*.*` is a shape that the
+      // safety check refuses. Collapse the run before the translation.
+      trimmed.replace(/\*+/g, "*").split("*").map(escapeRegExp).join(".*");
   const source = `^${body}$`;
 
   if (raw && !isLinearRegex(source, "")) return Option.none();
@@ -322,9 +319,7 @@ export interface ExclusionSet {
  * every URL in the same way. The result is therefore the same as a set with no
  * cache.
  */
-export const makeExclusionSet = (
-  rules: readonly ExclusionRule[],
-): ExclusionSet => {
+export const makeExclusionSet = (rules: readonly ExclusionRule[]): ExclusionSet => {
   const compiled: CompiledRule[] = [];
   const dropped: DroppedRule[] = [];
   for (const rule of rules) {

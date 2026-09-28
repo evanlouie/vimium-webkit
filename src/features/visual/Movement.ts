@@ -89,17 +89,14 @@ interface ModifiableSelection {
   modify(alter: string, direction: string, granularity: string): void;
 }
 
-const modifiable = (
-  selection: Selection,
-): Option.Option<ModifiableSelection> => {
+const modifiable = (selection: Selection): Option.Option<ModifiableSelection> => {
   const candidate = selection as unknown as Partial<ModifiableSelection>;
   return typeof candidate.modify === "function"
     ? Option.some(candidate as ModifiableSelection)
     : Option.none();
 };
 
-export const canModify = (selection: Selection): boolean =>
-  Option.isSome(modifiable(selection));
+export const canModify = (selection: Selection): boolean => Option.isSome(modifiable(selection));
 
 const modify = (
   selection: Selection,
@@ -183,12 +180,7 @@ export const reverseSelection = (selection: Selection): void => {
   const { anchorNode, anchorOffset, focusNode, focusOffset } = selection;
   if (anchorNode === null || focusNode === null) return;
   try {
-    selection.setBaseAndExtent(
-      focusNode,
-      focusOffset,
-      anchorNode,
-      anchorOffset,
-    );
+    selection.setBaseAndExtent(focusNode, focusOffset, anchorNode, anchorOffset);
   } catch {
     // The two boundaries are in different trees. Safari refuses, and the
     // selection stays as it is.
@@ -265,10 +257,7 @@ export interface CaretPoint {
 }
 
 interface CaretCapableDocument {
-  caretPositionFromPoint?: (
-    x: number,
-    y: number,
-  ) => { offsetNode: Node; offset: number } | null;
+  caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
   caretRangeFromPoint?: (x: number, y: number) => Range | null;
 }
 
@@ -295,19 +284,14 @@ export const caretAtPoint = (
 ): Option.Option<CaretPoint> => {
   const doc = document as unknown as CaretCapableDocument;
 
-  if (
-    capabilities.caretPositionFromPoint &&
-    typeof doc.caretPositionFromPoint === "function"
-  ) {
+  if (capabilities.caretPositionFromPoint && typeof doc.caretPositionFromPoint === "function") {
     const position = doc.caretPositionFromPoint(x, y);
-    return position === null || position === undefined ? Option.none() : Option
-      .some({ node: position.offsetNode, offset: position.offset });
+    return position === null || position === undefined
+      ? Option.none()
+      : Option.some({ node: position.offsetNode, offset: position.offset });
   }
 
-  if (
-    capabilities.caretRangeFromPoint &&
-    typeof doc.caretRangeFromPoint === "function"
-  ) {
+  if (capabilities.caretRangeFromPoint && typeof doc.caretRangeFromPoint === "function") {
     const range = doc.caretRangeFromPoint(x, y);
     return range === null
       ? Option.none()
@@ -322,9 +306,7 @@ export const caretAtPoint = (
 // ---------------------------------------------------------------------------
 
 interface ComposedRangeCapableSelection {
-  getComposedRanges(
-    options?: { shadowRoots?: ReadonlyArray<ShadowRoot> },
-  ): ReadonlyArray<{
+  getComposedRanges(options?: { shadowRoots?: ReadonlyArray<ShadowRoot> }): ReadonlyArray<{
     startContainer: Node;
     startOffset: number;
     endContainer: Node;
@@ -370,12 +352,8 @@ export const readBoundaries = (
   });
 };
 
-const composedBoundaries = (
-  selection: Selection,
-): Option.Option<SelectionBoundaries> => {
-  const capable = selection as unknown as Partial<
-    ComposedRangeCapableSelection
-  >;
+const composedBoundaries = (selection: Selection): Option.Option<SelectionBoundaries> => {
+  const capable = selection as unknown as Partial<ComposedRangeCapableSelection>;
   if (typeof capable.getComposedRanges !== "function") return Option.none();
 
   try {
@@ -388,8 +366,8 @@ const composedBoundaries = (
     return Option.some({
       start: { node: range.startContainer, offset: range.startOffset },
       end: { node: range.endContainer, offset: range.endOffset },
-      collapsed: range.startContainer === range.endContainer &&
-        range.startOffset === range.endOffset,
+      collapsed:
+        range.startContainer === range.endContainer && range.startOffset === range.endOffset,
     });
   } catch {
     return Option.none();
@@ -403,14 +381,10 @@ const composedBoundaries = (
  */
 const MAX_SHADOW_DEPTH = 8;
 
-const shadowRootsNear = (
-  selection: Selection,
-): ReadonlyArray<ShadowRoot> => {
+const shadowRootsNear = (selection: Selection): ReadonlyArray<ShadowRoot> => {
   const roots: ShadowRoot[] = [];
   for (const node of [selection.anchorNode, selection.focusNode]) {
-    let host: Element | null = node instanceof Element
-      ? node
-      : node?.parentElement ?? null;
+    let host: Element | null = node instanceof Element ? node : (node?.parentElement ?? null);
     for (let depth = 0; host !== null && depth < MAX_SHADOW_DEPTH; depth++) {
       const shadow: ShadowRoot | null = host.shadowRoot;
       if (shadow === null) break;
@@ -489,25 +463,25 @@ export interface ViewportSize {
  * and during a pinch zoom, that is the part of the page that the user sees, and
  * `innerHeight` is not.
  */
-export const scrollSelectionIntoView = (
-  selection: Selection,
-  viewport: ViewportSize,
-): void => {
+export const scrollSelectionIntoView = (selection: Selection, viewport: ViewportSize): void => {
   if (selection.rangeCount === 0) return;
   const range = selection.getRangeAt(selection.rangeCount - 1);
   const rect = range.getBoundingClientRect();
   if (rect.width === 0 && rect.height === 0) return;
 
   if (
-    rect.top >= 0 && rect.bottom <= viewport.height && rect.left >= 0 &&
+    rect.top >= 0 &&
+    rect.bottom <= viewport.height &&
+    rect.left >= 0 &&
     rect.right <= viewport.width
   ) {
     return;
   }
 
-  const element = range.startContainer instanceof Element
-    ? range.startContainer
-    : range.startContainer.parentElement;
+  const element =
+    range.startContainer instanceof Element
+      ? range.startContainer
+      : range.startContainer.parentElement;
   element?.scrollIntoView({
     block: "nearest",
     inline: "nearest",
@@ -516,5 +490,4 @@ export const scrollSelectionIntoView = (
 };
 
 /** The selected text. `Selection.toString()` is the only portable reader. */
-export const selectionText = (selection: Selection): string =>
-  selection.toString();
+export const selectionText = (selection: Selection): string => selection.toString();

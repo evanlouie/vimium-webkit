@@ -134,8 +134,7 @@ export const MAX_MATCH_LENGTH = 65_536;
  *
  * `performance` is absent in some hosts.
  */
-const now = (): number =>
-  typeof performance !== "undefined" ? performance.now() : Date.now();
+const now = (): number => (typeof performance !== "undefined" ? performance.now() : Date.now());
 
 /** What one search of a haystack gave, and whether it read all of it. */
 export interface SpanSearch {
@@ -174,9 +173,7 @@ export const collectSpans = (
 ): SpanSearch => {
   if (limit <= 0 || haystack.length === 0) return { spans: [], stopped: false };
 
-  const flags = pattern.flags.includes("g")
-    ? pattern.flags
-    : `${pattern.flags}g`;
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
   const regex = new RegExp(pattern.source, flags);
   const spans: MatchSpan[] = [];
   // Where the next match may begin. A match can end after the window that
@@ -192,10 +189,7 @@ export const collectSpans = (
     const started = now();
     const windowEnd = Math.min(cursor + window, haystack.length);
     const sliceStart = Math.max(0, cursor - WINDOW_CONTEXT);
-    let sliceEnd = Math.min(
-      haystack.length,
-      windowEnd + WINDOW_CONTEXT,
-    );
+    let sliceEnd = Math.min(haystack.length, windowEnd + WINDOW_CONTEXT);
     let slice = haystack.slice(sliceStart, sliceEnd);
     regex.lastIndex = cursor - sliceStart;
 
@@ -232,10 +226,7 @@ export const collectSpans = (
         }
         sliceEnd = Math.min(
           haystack.length,
-          sliceStart + Math.min(
-            (sliceEnd - sliceStart) * SLICE_GROWTH,
-            MAX_MATCH_LENGTH,
-          ),
+          sliceStart + Math.min((sliceEnd - sliceStart) * SLICE_GROWTH, MAX_MATCH_LENGTH),
         );
         slice = haystack.slice(sliceStart, sliceEnd);
         regex.lastIndex = start - sliceStart;
@@ -265,9 +256,7 @@ const nextWindow = (size: number, elapsed: number): number => {
   if (elapsed > WINDOW_BUDGET_MS) {
     return Math.max(FIRST_WINDOW, Math.floor(size / 2));
   }
-  return elapsed * 4 <= WINDOW_BUDGET_MS
-    ? Math.min(SEARCH_WINDOW, size * 2)
-    : size;
+  return elapsed * 4 <= WINDOW_BUDGET_MS ? Math.min(SEARCH_WINDOW, size * 2) : size;
 };
 
 // ---------------------------------------------------------------------------
@@ -286,9 +275,7 @@ export interface ChunkPosition {
  *
  * `starts[i]` is where chunk `i` begins.
  */
-export const chunkStarts = (
-  lengths: ReadonlyArray<number>,
-): ReadonlyArray<number> => {
+export const chunkStarts = (lengths: ReadonlyArray<number>): ReadonlyArray<number> => {
   const starts: number[] = [];
   let total = 0;
   for (const length of lengths) {
@@ -372,7 +359,8 @@ export const wordAt = (text: string, offset: number): string => {
   let start = clamped;
   if (
     (start >= text.length || !WORD_CHARACTER.test(text[start] ?? "")) &&
-    start > 0 && WORD_CHARACTER.test(text[start - 1] ?? "")
+    start > 0 &&
+    WORD_CHARACTER.test(text[start - 1] ?? "")
   ) {
     start--;
   }
@@ -452,10 +440,7 @@ interface VisibilityCache {
  * through a narrowed `unknown`, because the DOM library that we compile against
  * does not agree with every Safari version about the option names.
  */
-const visibilityCache = (
-  view: Window,
-  capabilities: CapabilityReport,
-): VisibilityCache => {
+const visibilityCache = (view: Window, capabilities: CapabilityReport): VisibilityCache => {
   const cache = new WeakMap<Element, boolean>();
 
   const check = (element: Element): boolean => {
@@ -505,16 +490,12 @@ const visibilityCache = (
  * because those are not its children. Nothing is counted twice, and nothing is
  * lost.
  */
-export const collectTextRuns = (
-  options: CollectOptions,
-): ReadonlyArray<TextRun> => {
+export const collectTextRuns = (options: CollectOptions): ReadonlyArray<TextRun> => {
   const budget = options.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
   const visibility = visibilityCache(options.view, options.capabilities);
 
   const runs: TextRun[] = [];
-  const pending: Array<Document | ShadowRoot> = [
-    options.root ?? options.document,
-  ];
+  const pending: Array<Document | ShadowRoot> = [options.root ?? options.document];
   const seen = new Set<Document | ShadowRoot>();
   let remaining = budget;
 
@@ -550,10 +531,7 @@ interface RootContext {
   readonly remaining: number;
 }
 
-const collectFromRoot = (
-  root: Document | ShadowRoot,
-  context: RootContext,
-): RootCollection => {
+const collectFromRoot = (root: Document | ShadowRoot, context: RootContext): RootCollection => {
   const shadowRoots: ShadowRoot[] = [];
   const nodes: Text[] = [];
   const lengths: number[] = [];
@@ -575,10 +553,7 @@ const collectFromRoot = (
             : NodeFilter.FILTER_REJECT;
         }
         const element = node as Element;
-        if (
-          Option.isSome(context.excludeHost) &&
-          element === context.excludeHost.value
-        ) {
+        if (Option.isSome(context.excludeHost) && element === context.excludeHost.value) {
           return NodeFilter.FILTER_REJECT;
         }
         if (OPAQUE_TAGS.has(element.tagName)) return NodeFilter.FILTER_REJECT;
@@ -591,9 +566,7 @@ const collectFromRoot = (
         }
         // Accepted only so that the loop below can queue the shadow root. The
         // light children are still walked, and that is where slotted text is.
-        return element.shadowRoot !== null
-          ? NodeFilter.FILTER_ACCEPT
-          : NodeFilter.FILTER_SKIP;
+        return element.shadowRoot !== null ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
       },
     },
   );
@@ -706,12 +679,7 @@ export const matchesInRuns = (
       stopped = true;
       break;
     }
-    const found = collectSpans(
-      run.haystack,
-      pattern,
-      limit - matches.length,
-      deadline,
-    );
+    const found = collectSpans(run.haystack, pattern, limit - matches.length, deadline);
     if (found.stopped) stopped = true;
     for (const span of found.spans) {
       const range = rangeForSpan(document, run, span);

@@ -15,19 +15,9 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Layer, Logger, Option, Queue, Scope, Stream } from "effect";
 import { References } from "effect";
-import {
-  ENVELOPE,
-  type FrameWire,
-  NO_REQUEST_ID,
-  WIRE_TARGET_TOP,
-} from "~/domain/FrameMessage.ts";
+import { ENVELOPE, type FrameWire, NO_REQUEST_ID, WIRE_TARGET_TOP } from "~/domain/FrameMessage.ts";
 import { FrameAuth, type FrameHandshake } from "~/frames/Auth.ts";
-import {
-  type Link,
-  MAILBOX_CAPACITY,
-  makeSealedLink,
-  type PortHost,
-} from "~/frames/Bus.ts";
+import { type Link, MAILBOX_CAPACITY, makeSealedLink, type PortHost } from "~/frames/Bus.ts";
 import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 import { type FrameId, Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
@@ -54,32 +44,28 @@ const wire = (notation: string): FrameWire => ({
 });
 
 /** The store that every frame of the page reads. */
-const storeLayer: Layer.Layer<KeyValueStore> = Layer.sync(
-  KeyValueStore,
-  () => {
-    const map = new Map<string, string>();
-    return KeyValueStore.of({
-      kind: "gm-sync",
-      durable: true,
-      watchable: false,
-      managerPrivate: true,
-      get: (key) =>
-        Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
-      set: (key, value) =>
-        Effect.sync(() => {
-          map.set(key, value);
-        }),
-      remove: (key) =>
-        Effect.sync(() => {
-          map.delete(key);
-        }),
-      setUnsafe: (key, value) => {
+const storeLayer: Layer.Layer<KeyValueStore> = Layer.sync(KeyValueStore, () => {
+  const map = new Map<string, string>();
+  return KeyValueStore.of({
+    kind: "gm-sync",
+    durable: true,
+    watchable: false,
+    managerPrivate: true,
+    get: (key) => Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
+    set: (key, value) =>
+      Effect.sync(() => {
         map.set(key, value);
-      },
-      changes: () => Stream.empty,
-    });
-  },
-);
+      }),
+    remove: (key) =>
+      Effect.sync(() => {
+        map.delete(key);
+      }),
+    setUnsafe: (key, value) => {
+      map.set(key, value);
+    },
+    changes: () => Stream.empty,
+  });
+});
 
 const realmLayer = (isTop: boolean, frameId: string): Layer.Layer<Realm> =>
   Layer.succeed(
@@ -106,11 +92,13 @@ const frameLayer = (
   frameId: string,
 ): Layer.Layer<FrameAuth> =>
   Layer.fresh(FrameAuth.layer).pipe(
-    Layer.provide(Layer.mergeAll(
-      Layer.fresh(Storage.layer).pipe(Layer.provide(kv)),
-      kv,
-      realmLayer(isTop, frameId),
-    )),
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.fresh(Storage.layer).pipe(Layer.provide(kv)),
+        kv,
+        realmLayer(isTop, frameId),
+      ),
+    ),
   );
 
 /** A host for a port, with no document. The listener runs to completion. */
@@ -120,7 +108,7 @@ const host: PortHost = {
     type: string,
     handler: (event: Event) => Effect.Effect<void, never, R>,
   ): Effect.Effect<void, never, R | Scope.Scope> =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const context = yield* Effect.context<R>();
       const run = Effect.runSyncExitWith(context);
       const listen = (event: Event): void => {
@@ -144,7 +132,7 @@ interface Watch {
   readonly delivered: Queue.Queue<unknown>;
 }
 
-const makeWatch: Effect.Effect<Watch> = Effect.gen(function*() {
+const makeWatch: Effect.Effect<Watch> = Effect.gen(function* () {
   const raw = yield* Queue.unbounded<unknown>();
   const delivered = yield* Queue.unbounded<unknown>();
   return { raw, delivered };
@@ -166,15 +154,15 @@ const nothingOf = <A>(queue: Queue.Queue<A>): Effect.Effect<boolean> =>
 
 describe("the sealed link of a port", () => {
   it.live("carries a message that only the other end can read", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const kv = storeLayer;
       const watch = yield* makeWatch;
 
-      yield* Effect.gen(function*() {
+      yield* Effect.gen(function* () {
         const top = yield* FrameAuth;
         const topCipher = yield* top.cipher(HANDSHAKE);
 
-        yield* Effect.gen(function*() {
+        yield* Effect.gen(function* () {
           const child = yield* FrameAuth;
           const childCipher = yield* child.cipher(HANDSHAKE);
 
@@ -226,29 +214,27 @@ describe("the sealed link of a port", () => {
           const second = yield* nextOf(watch.raw);
           assert.isTrue(Option.isSome(second));
           if (Option.isNone(second)) return;
-          assert.strictEqual(
-            (second.value as Record<string, unknown>)["seq"],
-            1,
-          );
+          assert.strictEqual((second.value as Record<string, unknown>)["seq"], 1);
 
           // The link of the top frame answers on the same port.
           yield* topLink.send(wire("c"));
         }).pipe(Effect.provide(frameLayer(kv, false, CHILD_FRAME)));
       }).pipe(Effect.provide(frameLayer(kv, true, TOP_FRAME)));
-    }));
+    }),
+  );
 
   it.live("refuses a forged, a repeated and a reflected message", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const kv = storeLayer;
       const watch = yield* makeWatch;
       /** What the page saw on the wire. */
       const onWire = yield* Queue.unbounded<unknown>();
 
-      yield* Effect.gen(function*() {
+      yield* Effect.gen(function* () {
         const top = yield* FrameAuth;
         const topCipher = yield* top.cipher(HANDSHAKE);
 
-        yield* Effect.gen(function*() {
+        yield* Effect.gen(function* () {
           const child = yield* FrameAuth;
           const childCipher = yield* child.cipher(HANDSHAKE);
 
@@ -257,25 +243,15 @@ describe("the sealed link of a port", () => {
             Queue.offerUnsafe(onWire, (event as MessageEvent).data);
           });
 
-          const childLink = yield* makeSealedLink(
-            host,
-            channel.port1,
-            childCipher,
-            "up",
-            (data) =>
-              Effect.sync(() => {
-                Queue.offerUnsafe(watch.delivered, data);
-              }),
+          const childLink = yield* makeSealedLink(host, channel.port1, childCipher, "up", (data) =>
+            Effect.sync(() => {
+              Queue.offerUnsafe(watch.delivered, data);
+            }),
           );
-          yield* makeSealedLink(
-            host,
-            channel.port2,
-            topCipher,
-            "down",
-            (data) =>
-              Effect.sync(() => {
-                Queue.offerUnsafe(watch.raw, data);
-              }),
+          yield* makeSealedLink(host, channel.port2, topCipher, "down", (data) =>
+            Effect.sync(() => {
+              Queue.offerUnsafe(watch.raw, data);
+            }),
           );
 
           // 1. A message that is not sealed. This is the shape that a page
@@ -311,16 +287,14 @@ describe("the sealed link of a port", () => {
           //    on `port2` reaches the link of the child. The direction is part
           //    of what the seal binds, so the message does not open there.
           channel.port2.postMessage(kept.value);
-          assert.isTrue(
-            yield* nothingOf(watch.delivered),
-            "a message came back to its sender",
-          );
+          assert.isTrue(yield* nothingOf(watch.delivered), "a message came back to its sender");
         }).pipe(Effect.provide(frameLayer(kv, false, CHILD_FRAME)));
       }).pipe(Effect.provide(frameLayer(kv, true, TOP_FRAME)));
-    }));
+    }),
+  );
 
   it.live("drops a flood, keeps the memory bounded and says so", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const kv = storeLayer;
       const delivered = yield* Queue.unbounded<unknown>();
       /** Every line that the link logged. */
@@ -332,24 +306,19 @@ describe("the sealed link of a port", () => {
       /** More messages than the mailbox holds, in one synchronous burst. */
       const FLOOD = MAILBOX_CAPACITY + 40;
 
-      yield* Effect.gen(function*() {
+      yield* Effect.gen(function* () {
         const top = yield* FrameAuth;
         const topCipher = yield* top.cipher(HANDSHAKE);
 
-        yield* Effect.gen(function*() {
+        yield* Effect.gen(function* () {
           const child = yield* FrameAuth;
           const childCipher = yield* child.cipher(HANDSHAKE);
 
           const channel = new MessageChannel();
-          yield* makeSealedLink(
-            host,
-            channel.port2,
-            topCipher,
-            "down",
-            (data) =>
-              Effect.sync(() => {
-                Queue.offerUnsafe(delivered, data);
-              }),
+          yield* makeSealedLink(host, channel.port2, topCipher, "down", (data) =>
+            Effect.sync(() => {
+              Queue.offerUnsafe(delivered, data);
+            }),
           );
 
           // The page holds a copy of the port, so it decides how fast messages
@@ -357,18 +326,14 @@ describe("the sealed link of a port", () => {
           // here is refused for any reason but the ceiling of the mailbox.
           const flood: unknown[] = [];
           for (let seq = 0; seq < FLOOD; seq += 1) {
-            flood.push(
-              yield* childCipher.seal("up", seq, JSON.stringify(wire("a"))),
-            );
+            flood.push(yield* childCipher.seal("up", seq, JSON.stringify(wire("a"))));
           }
 
           // One synchronous burst. No fiber of the link can run inside this
           // loop, so the mailbox holds everything that it accepts.
           yield* Effect.sync(() => {
             for (const sealed of flood) {
-              channel.port2.dispatchEvent(
-                new MessageEvent("message", { data: sealed }),
-              );
+              channel.port2.dispatchEvent(new MessageEvent("message", { data: sealed }));
             }
           });
 
@@ -388,19 +353,10 @@ describe("the sealed link of a port", () => {
 
           // A drop leaves a gap in the counter, and a gap is safe. The counter
           // only has to rise, so the next true message still opens.
-          const later = yield* childCipher.seal(
-            "up",
-            FLOOD + 1,
-            JSON.stringify(wire("b")),
-          );
-          channel.port2.dispatchEvent(
-            new MessageEvent("message", { data: later }),
-          );
+          const later = yield* childCipher.seal("up", FLOOD + 1, JSON.stringify(wire("b")));
+          channel.port2.dispatchEvent(new MessageEvent("message", { data: later }));
           const arrived = yield* nextOf(delivered);
-          assert.isTrue(
-            Option.isSome(arrived),
-            "a message after the flood did not arrive",
-          );
+          assert.isTrue(Option.isSome(arrived), "a message after the flood did not arrive");
           if (Option.isNone(arrived)) return;
           assert.deepEqual(arrived.value, wire("b"));
         }).pipe(Effect.provide(frameLayer(kv, false, CHILD_FRAME)));
@@ -409,5 +365,6 @@ describe("the sealed link of a port", () => {
         Effect.provide(Logger.layer([capture])),
         Effect.provideService(References.MinimumLogLevel, "Debug"),
       );
-    }));
+    }),
+  );
 });

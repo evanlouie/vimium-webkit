@@ -51,15 +51,15 @@ const recordingDom = (
             ...current,
             { type: String(type), run: handler },
           ])) as unknown as Dom["Service"]["listen"],
-      })),
+      }),
+    ),
   ).pipe(Layer.provide(Dom.layer));
 
 /** A `pagehide` event, with the one field that the code reads. */
 const pageHide = (persisted: boolean): Event =>
   ({ type: "pagehide", persisted }) as unknown as Event;
 
-const visibilityChange = (): Event =>
-  ({ type: "visibilitychange" }) as unknown as Event;
+const visibilityChange = (): Event => ({ type: "visibilitychange" }) as unknown as Event;
 
 /**
  * Dispatch an event exactly as the browser does.
@@ -114,264 +114,229 @@ interface Harness {
 const withLifecycle = (
   body: (harness: Harness) => Effect.Effect<void, never, Scope.Scope>,
 ): Effect.Effect<void> =>
-  Effect.gen(function*() {
+  Effect.gen(function* () {
     const attached = yield* Ref.make<ReadonlyArray<Attached>>([]);
     const document: FakeDocument = { visibilityState: "visible" };
 
     yield* Effect.provide(
-      Effect.scoped(Effect.gen(function*() {
-        const lifecycle = yield* Lifecycle;
-        yield* body({
-          attached: yield* Ref.get(attached),
-          lifecycle,
-          document,
-        });
-      })),
+      Effect.scoped(
+        Effect.gen(function* () {
+          const lifecycle = yield* Lifecycle;
+          yield* body({
+            attached: yield* Ref.get(attached),
+            lifecycle,
+            document,
+          });
+        }),
+      ),
       Lifecycle.layer.pipe(Layer.provide(recordingDom(attached, document))),
     );
   });
 
 /** A hook that records the exit that it received. */
-const record = (started: PageExit[]): ExitHook => (exit) =>
-  Effect.sync(() => {
-    started.push(exit);
-  });
+const record =
+  (started: PageExit[]): ExitHook =>
+  (exit) =>
+    Effect.sync(() => {
+      started.push(exit);
+    });
 
 // ---------------------------------------------------------------------------
 // The tests
 // ---------------------------------------------------------------------------
 
 describe("the pagehide dispatch", () => {
-  it.effect(
-    "runs a hook that cannot suspend inside the dispatch",
-    () =>
-      withLifecycle(({ attached, lifecycle }) =>
-        Effect.gen(function*() {
-          // What the hook does is a plain synchronous step, which is what the
-          // exit path of storage is. `test/unit/exit-write_test.ts` drives the
-          // real `Storage` over a real backend.
-          const written: string[] = [];
-          const pending = "the mark that the user just set";
+  it.effect("runs a hook that cannot suspend inside the dispatch", () =>
+    withLifecycle(({ attached, lifecycle }) =>
+      Effect.gen(function* () {
+        // What the hook does is a plain synchronous step, which is what the
+        // exit path of storage is. `test/unit/exit-write_test.ts` drives the
+        // real `Storage` over a real backend.
+        const written: string[] = [];
+        const pending = "the mark that the user just set";
 
-          yield* lifecycle.onExit(() =>
-            Effect.sync(() => {
-              written.push(pending);
-            })
-          );
+        yield* lifecycle.onExit(() =>
+          Effect.sync(() => {
+            written.push(pending);
+          }),
+        );
 
-          const outcome = yield* dispatch(
-            attached,
-            "pagehide",
-            pageHide(false),
-          );
+        const outcome = yield* dispatch(attached, "pagehide", pageHide(false));
 
-          // Both assertions matter. The work happened, and the listener did
-          // not become a defect on the way to it.
-          assert.deepStrictEqual(
-            written,
-            [pending],
-            "the work must start inside the dispatch",
-          );
-          assert.isTrue(
-            Exit.isSuccess(outcome),
-            "the pagehide listener must not fail",
-          );
-        })
-      ),
+        // Both assertions matter. The work happened, and the listener did
+        // not become a defect on the way to it.
+        assert.deepStrictEqual(written, [pending], "the work must start inside the dispatch");
+        assert.isTrue(Exit.isSuccess(outcome), "the pagehide listener must not fail");
+      }),
+    ),
   );
 
-  it.effect(
-    "starts a hook on the caller's stack, and not on a scheduler turn",
-    () =>
-      withLifecycle(({ attached, lifecycle }) =>
-        Effect.gen(function*() {
-          // The fork uses `startImmediately`, so the hook runs before the fork
-          // returns. Without it the hook waits for a task of the scheduler,
-          // and in a page that task is `setTimeout(f, 0)`. A `pagehide`
-          // handler never sees one.
-          const written: string[] = [];
-          yield* lifecycle.onExit(() =>
-            Effect.sync(() => {
-              written.push("the held value");
-            })
-          );
+  it.effect("starts a hook on the caller's stack, and not on a scheduler turn", () =>
+    withLifecycle(({ attached, lifecycle }) =>
+      Effect.gen(function* () {
+        // The fork uses `startImmediately`, so the hook runs before the fork
+        // returns. Without it the hook waits for a task of the scheduler,
+        // and in a page that task is `setTimeout(f, 0)`. A `pagehide`
+        // handler never sees one.
+        const written: string[] = [];
+        yield* lifecycle.onExit(() =>
+          Effect.sync(() => {
+            written.push("the held value");
+          }),
+        );
 
-          yield* dispatchOnStack(attached, "pagehide", pageHide(false));
+        yield* dispatchOnStack(attached, "pagehide", pageHide(false));
 
-          assert.deepStrictEqual(
-            written,
-            ["the held value"],
-            "the hook must not wait for the scheduler",
-          );
-        })
-      ),
+        assert.deepStrictEqual(
+          written,
+          ["the held value"],
+          "the hook must not wait for the scheduler",
+        );
+      }),
+    ),
   );
 
-  it.effect(
-    "starts every hook, in the order that they were registered",
-    () =>
-      withLifecycle(({ attached, lifecycle }) =>
-        Effect.gen(function*() {
-          const order: string[] = [];
-          yield* lifecycle.onExit(() =>
-            Effect.sync(() => {
-              order.push("first");
-            })
-          );
-          yield* lifecycle.onExit(() =>
-            Effect.sync(() => {
-              order.push("second");
-            })
-          );
+  it.effect("starts every hook, in the order that they were registered", () =>
+    withLifecycle(({ attached, lifecycle }) =>
+      Effect.gen(function* () {
+        const order: string[] = [];
+        yield* lifecycle.onExit(() =>
+          Effect.sync(() => {
+            order.push("first");
+          }),
+        );
+        yield* lifecycle.onExit(() =>
+          Effect.sync(() => {
+            order.push("second");
+          }),
+        );
 
-          yield* dispatch(attached, "pagehide", pageHide(false));
+        yield* dispatch(attached, "pagehide", pageHide(false));
 
-          assert.deepStrictEqual(order, ["first", "second"]);
-        })
-      ),
+        assert.deepStrictEqual(order, ["first", "second"]);
+      }),
+    ),
   );
 
-  it.effect(
-    "keeps going when one hook fails",
-    () =>
-      withLifecycle(({ attached, lifecycle }) =>
-        Effect.gen(function*() {
-          const written: string[] = [];
-          yield* lifecycle.onExit(() => Effect.die("a broken hook"));
-          yield* lifecycle.onExit(() =>
-            Effect.sync(() => {
-              written.push("the good hook");
-            })
-          );
+  it.effect("keeps going when one hook fails", () =>
+    withLifecycle(({ attached, lifecycle }) =>
+      Effect.gen(function* () {
+        const written: string[] = [];
+        yield* lifecycle.onExit(() => Effect.die("a broken hook"));
+        yield* lifecycle.onExit(() =>
+          Effect.sync(() => {
+            written.push("the good hook");
+          }),
+        );
 
-          const outcome = yield* dispatch(
-            attached,
-            "pagehide",
-            pageHide(false),
-          );
+        const outcome = yield* dispatch(attached, "pagehide", pageHide(false));
 
-          assert.deepStrictEqual(written, ["the good hook"]);
-          assert.isTrue(Exit.isSuccess(outcome));
-        })
-      ),
+        assert.deepStrictEqual(written, ["the good hook"]);
+        assert.isTrue(Exit.isSuccess(outcome));
+      }),
+    ),
   );
 });
 
 describe("what an exit means", () => {
-  it.effect(
-    "a page that will not come back is a final exit",
-    () =>
-      withLifecycle(({ attached, lifecycle }) =>
-        Effect.gen(function*() {
-          const started: PageExit[] = [];
-          yield* lifecycle.onExit(record(started));
+  it.effect("a page that will not come back is a final exit", () =>
+    withLifecycle(({ attached, lifecycle }) =>
+      Effect.gen(function* () {
+        const started: PageExit[] = [];
+        yield* lifecycle.onExit(record(started));
 
-          yield* dispatch(attached, "pagehide", pageHide(false));
+        yield* dispatch(attached, "pagehide", pageHide(false));
 
-          assert.deepStrictEqual(started, [{ final: true }]);
-        })
-      ),
+        assert.deepStrictEqual(started, [{ final: true }]);
+      }),
+    ),
   );
 
-  it.effect(
-    "a page that the browser keeps is not a final exit",
-    () =>
-      withLifecycle(({ attached, lifecycle }) =>
-        Effect.gen(function*() {
-          const started: PageExit[] = [];
-          yield* lifecycle.onExit(record(started));
+  it.effect("a page that the browser keeps is not a final exit", () =>
+    withLifecycle(({ attached, lifecycle }) =>
+      Effect.gen(function* () {
+        const started: PageExit[] = [];
+        yield* lifecycle.onExit(record(started));
 
-          // `persisted === true`: the page may come back from the
-          // back/forward cache, and it never runs its scripts again.
-          yield* dispatch(attached, "pagehide", pageHide(true));
+        // `persisted === true`: the page may come back from the
+        // back/forward cache, and it never runs its scripts again.
+        yield* dispatch(attached, "pagehide", pageHide(true));
 
-          assert.deepStrictEqual(started, [{ final: false }]);
-        })
-      ),
+        assert.deepStrictEqual(started, [{ final: false }]);
+      }),
+    ),
   );
 
-  it.effect(
-    "a tab that goes to the background starts the same work",
-    () =>
-      withLifecycle(({ attached, lifecycle, document }) =>
-        Effect.gen(function*() {
-          const started: PageExit[] = [];
-          yield* lifecycle.onExit(record(started));
+  it.effect("a tab that goes to the background starts the same work", () =>
+    withLifecycle(({ attached, lifecycle, document }) =>
+      Effect.gen(function* () {
+        const started: PageExit[] = [];
+        yield* lifecycle.onExit(record(started));
 
-          // The last moment that mobile WebKit reliably gives us.
-          document.visibilityState = "hidden";
-          const outcome = yield* dispatch(
-            attached,
-            "visibilitychange",
-            visibilityChange(),
-          );
+        // The last moment that mobile WebKit reliably gives us.
+        document.visibilityState = "hidden";
+        const outcome = yield* dispatch(attached, "visibilitychange", visibilityChange());
 
-          assert.deepStrictEqual(started, [{ final: false }]);
-          assert.isTrue(Exit.isSuccess(outcome));
-        })
-      ),
+        assert.deepStrictEqual(started, [{ final: false }]);
+        assert.isTrue(Exit.isSuccess(outcome));
+      }),
+    ),
   );
 
-  it.effect(
-    "a tab that comes forward starts nothing",
-    () =>
-      withLifecycle(({ attached, lifecycle, document }) =>
-        Effect.gen(function*() {
-          const started: PageExit[] = [];
-          yield* lifecycle.onExit(record(started));
+  it.effect("a tab that comes forward starts nothing", () =>
+    withLifecycle(({ attached, lifecycle, document }) =>
+      Effect.gen(function* () {
+        const started: PageExit[] = [];
+        yield* lifecycle.onExit(record(started));
 
-          document.visibilityState = "visible";
-          yield* dispatch(attached, "visibilitychange", visibilityChange());
+        document.visibilityState = "visible";
+        yield* dispatch(attached, "visibilitychange", visibilityChange());
 
-          assert.deepStrictEqual(started, []);
-        })
-      ),
+        assert.deepStrictEqual(started, []);
+      }),
+    ),
   );
 });
 
 describe("the life of a hook", () => {
-  it.effect(
-    "a hook goes when its own scope closes",
-    () =>
-      withLifecycle(({ attached, lifecycle }) =>
-        Effect.gen(function*() {
-          const started: PageExit[] = [];
-          const scope = yield* Scope.make();
-          yield* Scope.provide(lifecycle.onExit(record(started)), scope);
-          yield* Scope.close(scope, Exit.void);
+  it.effect("a hook goes when its own scope closes", () =>
+    withLifecycle(({ attached, lifecycle }) =>
+      Effect.gen(function* () {
+        const started: PageExit[] = [];
+        const scope = yield* Scope.make();
+        yield* Scope.provide(lifecycle.onExit(record(started)), scope);
+        yield* Scope.close(scope, Exit.void);
 
-          yield* dispatch(attached, "pagehide", pageHide(false));
+        yield* dispatch(attached, "pagehide", pageHide(false));
 
-          assert.deepStrictEqual(started, []);
-        })
-      ),
+        assert.deepStrictEqual(started, []);
+      }),
+    ),
   );
 
-  it.effect(
-    "one scope that closes leaves the other registration of the same hook",
-    () =>
-      withLifecycle(({ attached, lifecycle }) =>
-        Effect.gen(function*() {
-          // Two features may register the same function. A removal by the
-          // function reference would take both away.
-          const started: PageExit[] = [];
-          const shared = record(started);
+  it.effect("one scope that closes leaves the other registration of the same hook", () =>
+    withLifecycle(({ attached, lifecycle }) =>
+      Effect.gen(function* () {
+        // Two features may register the same function. A removal by the
+        // function reference would take both away.
+        const started: PageExit[] = [];
+        const shared = record(started);
 
-          const first = yield* Scope.make();
-          const second = yield* Scope.make();
-          yield* Scope.provide(lifecycle.onExit(shared), first);
-          yield* Scope.provide(lifecycle.onExit(shared), second);
-          yield* Scope.close(first, Exit.void);
+        const first = yield* Scope.make();
+        const second = yield* Scope.make();
+        yield* Scope.provide(lifecycle.onExit(shared), first);
+        yield* Scope.provide(lifecycle.onExit(shared), second);
+        yield* Scope.close(first, Exit.void);
 
-          yield* dispatch(attached, "pagehide", pageHide(false));
+        yield* dispatch(attached, "pagehide", pageHide(false));
 
-          assert.deepStrictEqual(
-            started,
-            [{ final: true }],
-            "the registration that is still open must run, and only once",
-          );
-          yield* Scope.close(second, Exit.void);
-        })
-      ),
+        assert.deepStrictEqual(
+          started,
+          [{ final: true }],
+          "the registration that is still open must run, and only once",
+        );
+        yield* Scope.close(second, Exit.void);
+      }),
+    ),
   );
 });

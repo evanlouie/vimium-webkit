@@ -28,9 +28,7 @@ const globalSetup = async (): Promise<void> => {
   await ensureBundle();
   // Both origins: the cross-origin frame fixtures are worthless if the second
   // one silently 404s, and a spec that loads nothing is a spec that passes.
-  await Promise.all(
-    [primaryOrigin(), secondaryOrigin()].map(assertFixtureServer),
-  );
+  await Promise.all([primaryOrigin(), secondaryOrigin()].map(assertFixtureServer));
 };
 
 export default globalSetup;

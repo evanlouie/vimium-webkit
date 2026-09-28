@@ -159,8 +159,7 @@ export const COMMANDS = {
     group: "navigation",
     description: "Reload, bypassing the cache",
     tier: "C",
-    unavailableReason:
-      "a userscript cannot ask the browser to bypass its cache",
+    unavailableReason: "a userscript cannot ask the browser to bypass its cache",
     nativeAlternative: "⇧⌘R",
   },
   goBack: {

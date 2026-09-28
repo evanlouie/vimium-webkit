@@ -51,14 +51,9 @@ const envelope = {
   requestId: NO_REQUEST_ID,
 };
 
-const wire = (message: FrameMessage): unknown =>
-  encodeMessage(envelope, message);
+const wire = (message: FrameMessage): unknown => encodeMessage(envelope, message);
 
-const descriptor = (
-  frameId: string,
-  localIndex: number,
-  secondary = false,
-): HintDescriptor => ({
+const descriptor = (frameId: string, localIndex: number, secondary = false): HintDescriptor => ({
   frameId,
   localIndex,
   linkText: `link ${localIndex}`,
@@ -74,7 +69,8 @@ describe("FrameMessage", () => {
       assert.strictEqual(encoded.kind, "GOODBYE");
       assert.strictEqual(encoded.nonce, NONCE);
       assert.strictEqual(ENVELOPE.magic, PROTOCOL_MAGIC);
-    }));
+    }),
+  );
 
   it.effect("accepts a message of a kind that carries a payload", () =>
     Effect.sync(() => {
@@ -88,7 +84,8 @@ describe("FrameMessage", () => {
       assert.isTrue(Option.isSome(parsed));
       if (Option.isNone(parsed)) return;
       assert.strictEqual(parsed.value.kind, "EXCLUSION_RESULT");
-    }));
+    }),
+  );
 
   it.effect("accepts a hint round message with its descriptors", () =>
     Effect.sync(() => {
@@ -103,25 +100,25 @@ describe("FrameMessage", () => {
         Option.some(NONCE),
       );
       assert.isTrue(Option.isSome(parsed));
-    }));
+    }),
+  );
 
   it.effect("refuses anything that is not our envelope", () =>
     Effect.sync(() => {
-      for (
-        const data of [
-          null,
-          "a string",
-          42,
-          {},
-          { magic: "somebody-else", v: PROTOCOL_VERSION, kind: "GOODBYE" },
-        ]
-      ) {
+      for (const data of [
+        null,
+        "a string",
+        42,
+        {},
+        { magic: "somebody-else", v: PROTOCOL_VERSION, kind: "GOODBYE" },
+      ]) {
         assert.isTrue(
           Option.isNone(parseWire(data, Option.some(NONCE))),
           `${JSON.stringify(data)} was accepted`,
         );
       }
-    }));
+    }),
+  );
 
   it.effect("refuses a protocol version that is not ours", () =>
     Effect.sync(() => {
@@ -132,13 +129,15 @@ describe("FrameMessage", () => {
         kind: "GOODBYE",
       };
       assert.isTrue(Option.isNone(parseWire(foreign, Option.some(NONCE))));
-    }));
+    }),
+  );
 
   it.effect("refuses an unknown kind", () =>
     Effect.sync(() => {
       const unknown = { ...ENVELOPE, ...envelope, kind: "NO_SUCH_KIND" };
       assert.isTrue(Option.isNone(parseWire(unknown, Option.some(NONCE))));
-    }));
+    }),
+  );
 
   it.effect("refuses a message whose payload is incomplete", () =>
     Effect.sync(() => {
@@ -150,13 +149,10 @@ describe("FrameMessage", () => {
         kind: "EXCLUSION_RESULT",
       };
       const withoutNotation = { ...ENVELOPE, ...envelope, kind: "KEYSTROKE" };
-      assert.isTrue(
-        Option.isNone(parseWire(withoutExclusion, Option.some(NONCE))),
-      );
-      assert.isTrue(
-        Option.isNone(parseWire(withoutNotation, Option.some(NONCE))),
-      );
-    }));
+      assert.isTrue(Option.isNone(parseWire(withoutExclusion, Option.some(NONCE))));
+      assert.isTrue(Option.isNone(parseWire(withoutNotation, Option.some(NONCE))));
+    }),
+  );
 
   it.effect("refuses a payload that is past its bound", () =>
     Effect.sync(() => {
@@ -176,10 +172,9 @@ describe("FrameMessage", () => {
         localIndex: -1,
         mode: "activate",
       };
-      assert.isTrue(
-        Option.isNone(parseWire(negativeIndex, Option.some(NONCE))),
-      );
-    }));
+      assert.isTrue(Option.isNone(parseWire(negativeIndex, Option.some(NONCE))));
+    }),
+  );
 
   it.effect("drops a message whose nonce is wrong or absent", () =>
     Effect.sync(() => {
@@ -188,7 +183,8 @@ describe("FrameMessage", () => {
       assert.isTrue(Option.isNone(parseWire(data, Option.some("other"))));
       // A frame that is not yet admitted has no session to talk in.
       assert.isTrue(Option.isNone(parseWire(data, Option.none())));
-    }));
+    }),
+  );
 
   it.effect("checks the nonce before it decodes", () =>
     Effect.sync(() => {
@@ -197,17 +193,16 @@ describe("FrameMessage", () => {
       assert.isFalse(preauthorize(data, Option.some("other")));
       assert.isFalse(preauthorize(data, Option.none()));
       assert.isFalse(preauthorize({ nonce: NONCE }, Option.some(NONCE)));
-    }));
+    }),
+  );
 
   it.effect("reads the kind without a decode", () =>
     Effect.sync(() => {
-      assert.deepEqual(
-        peekKind(wire({ kind: "GOODBYE" })),
-        Option.some("GOODBYE"),
-      );
+      assert.deepEqual(peekKind(wire({ kind: "GOODBYE" })), Option.some("GOODBYE"));
       assert.isTrue(Option.isNone(peekKind({ magic: "other", kind: "X" })));
       assert.isTrue(Option.isNone(peekKind({ ...ENVELOPE })));
-    }));
+    }),
+  );
 
   it.effect("lets the handshake through with no nonce", () =>
     Effect.sync(() => {
@@ -216,7 +211,8 @@ describe("FrameMessage", () => {
       assert.isTrue(Option.isSome(parsed));
       if (Option.isNone(parsed)) return;
       assert.strictEqual(parsed.value.kind, "HELLO");
-    }));
+    }),
+  );
 
   it.effect("refuses a JOIN that carries no proof", () =>
     Effect.sync(() => {
@@ -228,7 +224,8 @@ describe("FrameMessage", () => {
         frameId: "1111111111111111",
       };
       assert.isTrue(Option.isNone(parseWindowToTop(join)));
-    }));
+    }),
+  );
 
   it.effect("refuses a handshake value that is not hexadecimal", () =>
     Effect.sync(() => {
@@ -244,19 +241,14 @@ describe("FrameMessage", () => {
         proof: "cHJvb2Y",
       });
       assert.isTrue(Option.isSome(parseWindowToTop(join("0123456789abcdef"))));
-      for (
-        const token of [
-          "guessed",
-          "short",
-          "vimium-webkit/frames/link/v1:00000000",
-          "0123456789abcde:",
-          "0123456789ABCDEF",
-        ]
-      ) {
-        assert.isTrue(
-          Option.isNone(parseWindowToTop(join(token))),
-          `${token} was accepted`,
-        );
+      for (const token of [
+        "guessed",
+        "short",
+        "vimium-webkit/frames/link/v1:00000000",
+        "0123456789abcde:",
+        "0123456789ABCDEF",
+      ]) {
+        assert.isTrue(Option.isNone(parseWindowToTop(join(token))), `${token} was accepted`);
       }
 
       const challenge = {
@@ -265,7 +257,8 @@ describe("FrameMessage", () => {
         token: "not hexadecimal",
       };
       assert.isTrue(Option.isNone(parseWindowToTop(challenge)));
-    }));
+    }),
+  );
 
   it.effect("keeps the join proof and the link key apart", () =>
     Effect.sync(() => {
@@ -281,12 +274,11 @@ describe("FrameMessage", () => {
       // no handshake that the schema accepts can make the two texts meet. The
       // label carries the version of the protocol, and not a version of its
       // own, so one number names the wire.
-      assert.isTrue(
-        key.startsWith(`${PROTOCOL_MAGIC}/link/v${PROTOCOL_VERSION}:`),
-      );
+      assert.isTrue(key.startsWith(`${PROTOCOL_MAGIC}/link/v${PROTOCOL_VERSION}:`));
       assert.isFalse(/^[0-9a-f]/.test(key));
       assert.isTrue(/^[0-9a-f]/.test(proof));
-    }));
+    }),
+  );
 
   it.effect("binds a sealed message to its link, direction and counter", () =>
     Effect.sync(() => {
@@ -295,7 +287,8 @@ describe("FrameMessage", () => {
       assert.notStrictEqual(first, sealedAad("fedcba9876543210", "up", 4));
       assert.notStrictEqual(first, sealedAad("0123456789abcdef", "up", 3));
       assert.isTrue(first.startsWith(`${PROTOCOL_MAGIC}/${PROTOCOL_VERSION}/`));
-    }));
+    }),
+  );
 
   it.effect("parses a sealed envelope and refuses a broken one", () =>
     Effect.sync(() => {
@@ -305,23 +298,19 @@ describe("FrameMessage", () => {
       if (Option.isNone(parsed)) return;
       assert.strictEqual(parsed.value.seq, 0);
 
-      for (
-        const broken of [
-          { ...sealed, seq: -1 },
-          { ...sealed, seq: MAX_SEAL_SEQUENCE + 1 },
-          { ...sealed, seq: 1.5 },
-          { ...sealed, data: 42 },
-          { ...sealed, kind: "WELCOME" },
-          { ...ENVELOPE, kind: "SEALED", seq: 0 },
-          { magic: "somebody-else", v: PROTOCOL_VERSION, kind: "SEALED" },
-        ]
-      ) {
-        assert.isTrue(
-          Option.isNone(parseSealed(broken)),
-          `${JSON.stringify(broken)} was accepted`,
-        );
+      for (const broken of [
+        { ...sealed, seq: -1 },
+        { ...sealed, seq: MAX_SEAL_SEQUENCE + 1 },
+        { ...sealed, seq: 1.5 },
+        { ...sealed, data: 42 },
+        { ...sealed, kind: "WELCOME" },
+        { ...ENVELOPE, kind: "SEALED", seq: 0 },
+        { magic: "somebody-else", v: PROTOCOL_VERSION, kind: "SEALED" },
+      ]) {
+        assert.isTrue(Option.isNone(parseSealed(broken)), `${JSON.stringify(broken)} was accepted`);
       }
-    }));
+    }),
+  );
 
   it.effect("refuses a WELCOME that a routed message forged", () =>
     Effect.sync(() => {
@@ -336,12 +325,14 @@ describe("FrameMessage", () => {
         frames: ["1111111111111111"],
       });
       assert.isTrue(Option.isSome(parseWelcome(welcome)));
-    }));
+    }),
+  );
 
   it.effect("signs the token, the hello id and the frame id together", () =>
     Effect.sync(() => {
       assert.strictEqual(joinProofPayload("t", "h", "f"), "t:h:f");
-    }));
+    }),
+  );
 
   it.effect("orders descriptors by frame and then by local index", () =>
     Effect.sync(() => {
@@ -351,22 +342,20 @@ describe("FrameMessage", () => {
       assert.isBelow(compareDescriptors(first, second), 0);
       assert.isBelow(compareDescriptors(second, third), 0);
       assert.isAbove(compareDescriptors(third, first), 0);
-    }));
+    }),
+  );
 
   it.effect("sorts into one total order and does not change its input", () =>
     Effect.sync(() => {
-      const input = [
-        descriptor("bbbb", 1),
-        descriptor("aaaa", 2),
-        descriptor("aaaa", 1, true),
-      ];
+      const input = [descriptor("bbbb", 1), descriptor("aaaa", 2), descriptor("aaaa", 1, true)];
       const sorted = sortDescriptors(input);
       assert.deepEqual(
         sorted.map((entry) => `${entry.frameId}:${entry.localIndex}`),
         ["aaaa:1", "aaaa:2", "bbbb:1"],
       );
       assert.strictEqual(input[0]?.frameId, "bbbb");
-    }));
+    }),
+  );
 
   it.effect("carries every hint mode over the wire", () =>
     Effect.sync(() => {
@@ -382,7 +371,8 @@ describe("FrameMessage", () => {
         );
         assert.isTrue(Option.isSome(parsed), `${mode} did not survive`);
       }
-    }));
+    }),
+  );
 
   it.effect("keeps the two reserved routing targets apart", () =>
     Effect.sync(() => {
@@ -390,12 +380,14 @@ describe("FrameMessage", () => {
       // A frame id is 16 hexadecimal characters, so it is neither word.
       assert.isBelow(WIRE_TARGET_TOP.length, 16);
       assert.isBelow(WIRE_TARGET_ALL.length, 16);
-    }));
+    }),
+  );
 
   it.effect("stays enabled when the top frame never answers", () =>
     Effect.sync(() => {
       assert.deepEqual(DEFAULT_EXCLUSION, { enabled: true, passKeys: "" });
-    }));
+    }),
+  );
 });
 
 /**
@@ -407,10 +399,7 @@ describe("FrameMessage", () => {
  * shares that bound between the frames.
  */
 describe("the descriptors of a round", () => {
-  const listFor = (
-    frameId: string,
-    count: number,
-  ): readonly HintDescriptor[] =>
+  const listFor = (frameId: string, count: number): readonly HintDescriptor[] =>
     Array.from({ length: count }, (_, index) => descriptor(frameId, index));
 
   it.effect("keeps the merged answer of three frames", () =>
@@ -425,57 +414,73 @@ describe("the descriptors of a round", () => {
       // Each frame answered inside its own limit, so each `HINTS` message is
       // valid. The merged message must be valid as well.
       for (const frameId of ["1111111111111111", "2222222222222222"]) {
-        assert.isTrue(Option.isSome(parseWire(
-          wire({
-            kind: "HINTS",
-            roundId: ROUND_ID,
-            descriptors: listFor(frameId, 2000),
-          }),
-          Option.some(NONCE),
-        )));
+        assert.isTrue(
+          Option.isSome(
+            parseWire(
+              wire({
+                kind: "HINTS",
+                roundId: ROUND_ID,
+                descriptors: listFor(frameId, 2000),
+              }),
+              Option.some(NONCE),
+            ),
+          ),
+        );
       }
-      assert.isTrue(Option.isSome(parseWire(
-        wire({
-          kind: "HINTS_RESULT",
-          roundId: ROUND_ID,
-          droppedDescriptors: 0,
-          descriptors: merged,
-        }),
-        Option.some(NONCE),
-      )));
-      assert.isTrue(Option.isSome(parseWire(
-        wire({
-          kind: "ACTIVATE",
-          roundId: ROUND_ID,
-          originFrameId: "1111111111111111",
-          mode: "activate",
-          descriptors: merged,
-        }),
-        Option.some(NONCE),
-      )));
-    }));
+      assert.isTrue(
+        Option.isSome(
+          parseWire(
+            wire({
+              kind: "HINTS_RESULT",
+              roundId: ROUND_ID,
+              droppedDescriptors: 0,
+              descriptors: merged,
+            }),
+            Option.some(NONCE),
+          ),
+        ),
+      );
+      assert.isTrue(
+        Option.isSome(
+          parseWire(
+            wire({
+              kind: "ACTIVATE",
+              roundId: ROUND_ID,
+              originFrameId: "1111111111111111",
+              mode: "activate",
+              descriptors: merged,
+            }),
+            Option.some(NONCE),
+          ),
+        ),
+      );
+    }),
+  );
 
   it.effect("keeps the bound of one frame on the answer of one frame", () =>
     Effect.sync(() => {
       const tooMany = listFor("1111111111111111", MAX_FRAME_DESCRIPTORS + 1);
-      assert.isTrue(Option.isNone(parseWire(
-        wire({
-          kind: "HINTS",
-          roundId: ROUND_ID,
-          descriptors: tooMany,
-        }),
-        Option.some(NONCE),
-      )));
-    }));
+      assert.isTrue(
+        Option.isNone(
+          parseWire(
+            wire({
+              kind: "HINTS",
+              roundId: ROUND_ID,
+              descriptors: tooMany,
+            }),
+            Option.some(NONCE),
+          ),
+        ),
+      );
+    }),
+  );
 
   it.effect("changes nothing when the round fits", () =>
     Effect.sync(() => {
-      const merged = [
-        ...listFor("2222222222222222", 3),
-        ...listFor("1111111111111111", 2),
-      ];
+      const merged = [...listFor("2222222222222222", 3), ...listFor("1111111111111111", 2)];
       assert.deepEqual(limitDescriptors(merged), sortDescriptors(merged));
-    }));
+    }),
+  );
 
   it.effect("shares the bound between the frames that ask for more", () =>
     Effect.sync(() => {
@@ -498,7 +503,8 @@ describe("the descriptors of a round", () => {
       );
       // Every frame keeps a prefix of its own hints.
       assert.strictEqual(capped[0]?.localIndex, 0);
-    }));
+    }),
+  );
 
   it.effect("gives the unused share of a small frame to a large one", () =>
     Effect.sync(() => {
@@ -511,28 +517,17 @@ describe("the descriptors of a round", () => {
         kept.set(entry.frameId, (kept.get(entry.frameId) ?? 0) + 1);
       }
       assert.strictEqual(kept.get("1111111111111111"), 10);
-      assert.strictEqual(
-        kept.get("2222222222222222"),
-        MAX_SESSION_DESCRIPTORS - 10,
-      );
-    }));
+      assert.strictEqual(kept.get("2222222222222222"), MAX_SESSION_DESCRIPTORS - 10);
+    }),
+  );
 
   it.effect("keeps multibyte and escaped labels inside the sealed limit", () =>
     Effect.sync(() => {
-      const costly = Array.from(
-        { length: MAX_SESSION_DESCRIPTORS },
-        (_, index) => ({
-          ...descriptor("1111111111111111", index),
-          linkText: index % 2 === 0
-            ? "😀".repeat(128)
-            : "\\\n\t".repeat(64),
-        }),
-      );
-      const kept = limitDescriptors(
-        costly,
-        MAX_SESSION_DESCRIPTORS,
-        MAX_DESCRIPTOR_PAYLOAD_BYTES,
-      );
+      const costly = Array.from({ length: MAX_SESSION_DESCRIPTORS }, (_, index) => ({
+        ...descriptor("1111111111111111", index),
+        linkText: index % 2 === 0 ? "😀".repeat(128) : "\\\n\t".repeat(64),
+      }));
+      const kept = limitDescriptors(costly, MAX_SESSION_DESCRIPTORS, MAX_DESCRIPTOR_PAYLOAD_BYTES);
       assert.isBelow(kept.length, costly.length);
 
       const message = wire({
@@ -541,18 +536,22 @@ describe("the descriptors of a round", () => {
         droppedDescriptors: costly.length - kept.length,
         descriptors: kept,
       });
-      const plainBytes = new TextEncoder().encode(JSON.stringify(message))
-        .byteLength;
-      const sealedLength = Math.ceil((plainBytes + 16) * 4 / 3);
+      const plainBytes = new TextEncoder().encode(JSON.stringify(message)).byteLength;
+      const sealedLength = Math.ceil(((plainBytes + 16) * 4) / 3);
       assert.isAtMost(sealedLength, MAX_SEALED_LENGTH);
-      assert.isTrue(Option.isSome(parseSealed({
-        ...ENVELOPE,
-        kind: "SEALED",
-        seq: 0,
-        data: "A".repeat(sealedLength),
-      })));
+      assert.isTrue(
+        Option.isSome(
+          parseSealed({
+            ...ENVELOPE,
+            kind: "SEALED",
+            seq: 0,
+            data: "A".repeat(sealedLength),
+          }),
+        ),
+      );
       assert.isTrue(Option.isSome(parseWire(message, Option.some(NONCE))));
-    }));
+    }),
+  );
 
   it.effect("gives every frame the same list of the round", () =>
     Effect.sync(() => {
@@ -571,5 +570,6 @@ describe("the descriptors of a round", () => {
         ...mine,
       ];
       assert.deepEqual(limitDescriptors(asReceiverSees), capped);
-    }));
+    }),
+  );
 });

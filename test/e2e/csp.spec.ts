@@ -52,20 +52,16 @@ test.describe("strict CSP", () => {
     // unstyled div would be transparent, and an undefined custom property
     // would make the shorthand invalid — so an exact colour is the strongest
     // single signal that the adopted stylesheet is live.
-    expect(await overlayComputedStyle(page, ".vw-dialog", "background-color"))
-      .toBe("rgb(255, 255, 255)");
-    expect(await overlayComputedStyle(page, ".vw-dialog", "border-radius"))
-      .toBe("10px");
+    expect(await overlayComputedStyle(page, ".vw-dialog", "background-color")).toBe(
+      "rgb(255, 255, 255)",
+    );
+    expect(await overlayComputedStyle(page, ".vw-dialog", "border-radius")).toBe("10px");
 
     // The layer itself is `position: fixed` from the same stylesheet; without
     // it the dialog would be laid out in the flow of an inline custom element.
-    expect(
-      await overlayComputedStyle(
-        page,
-        '.vw-layer[data-layer="dialog"]',
-        "position",
-      ),
-    ).toBe("fixed");
+    expect(await overlayComputedStyle(page, '.vw-layer[data-layer="dialog"]', "position")).toBe(
+      "fixed",
+    );
   });
 
   test("no CSP violation is reported", async ({ vw, page }) => {
@@ -84,8 +80,9 @@ test.describe("strict CSP", () => {
     await page.keyboard.press("Escape");
 
     const snapshot = await vw.snapshot();
-    const reported = snapshot.violations.map((violation) =>
-      `${violation.directive} blocked=${violation.blockedUri} sample=${violation.sample}`
+    const reported = snapshot.violations.map(
+      (violation) =>
+        `${violation.directive} blocked=${violation.blockedUri} sample=${violation.sample}`,
     );
     expect(reported).toEqual([]);
   });
@@ -122,8 +119,9 @@ test.describe("strict CSP on the capability floor", () => {
     await vw.open("/strict-csp.html");
     await openHelp(page);
 
-    expect(await overlayComputedStyle(page, ".vw-dialog", "background-color"))
-      .toBe("rgb(255, 255, 255)");
+    expect(await overlayComputedStyle(page, ".vw-dialog", "background-color")).toBe(
+      "rgb(255, 255, 255)",
+    );
     // Violations are asserted in the sibling case above; the point here is
     // that the async storage hop does not change the styling outcome.
   });

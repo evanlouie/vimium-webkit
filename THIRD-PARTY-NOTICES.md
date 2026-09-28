@@ -91,7 +91,6 @@ validates the settings and the cross-frame message protocol, and `Layer` and
 - [esbuild](https://github.com/evanw/esbuild) — MIT © 2020 Evan Wallace
 - [TypeScript](https://github.com/microsoft/TypeScript) — Apache-2.0
 - [Vitest](https://github.com/vitest-dev/vitest) — MIT
-- [Oxlint](https://github.com/oxc-project/oxc) — MIT
+- [Oxlint and Oxfmt](https://github.com/oxc-project/oxc) — MIT
 - [Effect TypeScript-Go](https://github.com/Effect-TS/tsgo) — MIT
-- [dprint](https://github.com/dprint/dprint) — MIT
 - [Playwright](https://github.com/microsoft/playwright) — Apache-2.0

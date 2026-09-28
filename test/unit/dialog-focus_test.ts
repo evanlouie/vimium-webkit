@@ -21,14 +21,16 @@ describe("the focus trap of a dialog", () => {
       // landed on `document.body`.
       assert.strictEqual(nextFocusIndex(3, -1, false), 0);
       assert.strictEqual(nextFocusIndex(3, -1, true), 2);
-    }));
+    }),
+  );
 
   it.effect("walks the controls in order", () =>
     Effect.sync(() => {
       assert.strictEqual(nextFocusIndex(3, 0, false), 1);
       assert.strictEqual(nextFocusIndex(3, 1, false), 2);
       assert.strictEqual(nextFocusIndex(3, 2, true), 1);
-    }));
+    }),
+  );
 
   it.effect("wraps at both ends, and never leaves the dialog", () =>
     Effect.sync(() => {
@@ -36,7 +38,8 @@ describe("the focus trap of a dialog", () => {
       assert.strictEqual(nextFocusIndex(3, 0, true), 2);
       assert.strictEqual(nextFocusIndex(1, 0, false), 0);
       assert.strictEqual(nextFocusIndex(1, 0, true), 0);
-    }));
+    }),
+  );
 
   it.effect("keeps the focus on a dialog that holds no control", () =>
     Effect.sync(() => {
@@ -44,5 +47,6 @@ describe("the focus trap of a dialog", () => {
       // hold the focus while the trap has nothing else to give it.
       assert.strictEqual(nextFocusIndex(0, -1, false), -1);
       assert.strictEqual(nextFocusIndex(0, 2, true), -1);
-    }));
+    }),
+  );
 });

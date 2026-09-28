@@ -29,9 +29,7 @@ export type { CspViolation, GmVariant, HarnessSnapshot };
  * Keyboard input is inherently sequential; `no-await-in-loop` exists to catch
  * accidental serialisation, which this is the opposite of.
  */
-const inOrder = async (
-  steps: readonly (() => Promise<unknown>)[],
-): Promise<void> => {
+const inOrder = async (steps: readonly (() => Promise<unknown>)[]): Promise<void> => {
   for (const step of steps) {
     // oxlint-disable-next-line no-await-in-loop
     await step();
@@ -122,21 +120,18 @@ const hintLabelForText = (needle: string): string | null => {
       const map = element.closest("map");
       const name = map?.getAttribute("id") ?? map?.getAttribute("name") ?? "";
       const root = map?.getRootNode() as Document | ShadowRoot | undefined;
-      const image = name === "" || root === undefined
-        ? undefined
-        : [...root.querySelectorAll<HTMLImageElement>("img[usemap]")].find(
-          (candidate) => {
-            const usemap = candidate.getAttribute("usemap") ?? "";
-            const separator = usemap.indexOf("#");
-            return separator >= 0 && usemap.slice(separator + 1) === name;
-          },
-        );
+      const image =
+        name === "" || root === undefined
+          ? undefined
+          : [...root.querySelectorAll<HTMLImageElement>("img[usemap]")].find((candidate) => {
+              const usemap = candidate.getAttribute("usemap") ?? "";
+              const separator = usemap.indexOf("#");
+              return separator >= 0 && usemap.slice(separator + 1) === name;
+            });
       if (image === undefined) return element.getBoundingClientRect();
 
       const base = image.getBoundingClientRect();
-      const coords = element.coords.split(",").map((part) =>
-        Number.parseInt(part.trim(), 10)
-      );
+      const coords = element.coords.split(",").map((part) => Number.parseInt(part.trim(), 10));
       const shape = element.shape.toLowerCase();
       let left = coords[0] ?? 0;
       let top = coords[1] ?? 0;
@@ -157,7 +152,7 @@ const hintLabelForText = (needle: string): string | null => {
     return rect.width * rect.height;
   };
   const target = candidates.reduce((best, element) =>
-    area(element) < area(best) ? element : best
+    area(element) < area(best) ? element : best,
   );
   const rect = rectOf(target);
 
@@ -178,18 +173,13 @@ const hintLabelForText = (needle: string): string | null => {
   for (const marker of shadow.querySelectorAll(".vw-hint")) {
     if (marker.classList.contains("vw-hint--hidden")) continue;
     const box = marker.getBoundingClientRect();
-    const distance = Math.hypot(
-      box.left - expectedLeft,
-      box.top - expectedTop,
-    );
+    const distance = Math.hypot(box.left - expectedLeft, box.top - expectedTop);
     if (distance >= bestDistance) continue;
     bestDistance = distance;
     bestLabel = (marker.textContent ?? "").trim();
   }
 
-  return bestDistance <= 3 && bestLabel !== null && bestLabel.length > 0
-    ? bestLabel
-    : null;
+  return bestDistance <= 3 && bestLabel !== null && bestLabel.length > 0 ? bestLabel : null;
 };
 
 export class Vimium {
@@ -283,17 +273,17 @@ export class Vimium {
       visit(globalThis as unknown as Window, 0);
     });
 
-    const subframes = this.page.frames().filter(
-      (frame) => frame !== this.page.mainFrame(),
+    const subframes = this.page.frames().filter((frame) => frame !== this.page.mainFrame());
+    await Promise.all(
+      subframes.map(async (frame): Promise<void> => {
+        try {
+          await this.waitForOverlay(frame);
+        } catch {
+          // See the note above: an unreachable frame is a configuration, not a
+          // failure.
+        }
+      }),
     );
-    await Promise.all(subframes.map(async (frame): Promise<void> => {
-      try {
-        await this.waitForOverlay(frame);
-      } catch {
-        // See the note above: an unreachable frame is a configuration, not a
-        // failure.
-      }
-    }));
   }
 
   // -- input ----------------------------------------------------------------
@@ -324,9 +314,7 @@ export class Vimium {
         };
         const shadow = host.__vimiumHarness?.shadow ?? null;
         if (shadow === null) return false;
-        return shadow.querySelectorAll(".vw-hint:not(.vw-hint--hidden)")
-          .length >
-          0;
+        return shadow.querySelectorAll(".vw-hint:not(.vw-hint--hidden)").length > 0;
       },
       undefined,
       { timeout: BOOT_TIMEOUT_MS },
@@ -334,9 +322,7 @@ export class Vimium {
   }
 
   hintLabels(): Promise<readonly string[]> {
-    return visibleHintMarkers(this.page).then((markers) =>
-      markers.map((marker) => marker.text)
-    );
+    return visibleHintMarkers(this.page).then((markers) => markers.map((marker) => marker.text));
   }
 
   /** True while a hint session is drawing markers. */
@@ -354,8 +340,7 @@ export class Vimium {
         };
         const shadow = host.__vimiumHarness?.shadow ?? null;
         if (shadow === null) return true;
-        return shadow.querySelectorAll(".vw-hint:not(.vw-hint--hidden)")
-          .length === 0;
+        return shadow.querySelectorAll(".vw-hint:not(.vw-hint--hidden)").length === 0;
       },
       undefined,
       { timeout: timeoutMs },
@@ -405,11 +390,9 @@ export class Vimium {
     try {
       return await Promise.any(
         this.page.frames().map(async (frame) => {
-          const handle = await frame.waitForFunction(
-            hintLabelForText,
-            linkText,
-            { timeout: HINT_MARKER_TIMEOUT_MS },
-          );
+          const handle = await frame.waitForFunction(hintLabelForText, linkText, {
+            timeout: HINT_MARKER_TIMEOUT_MS,
+          });
           return (await handle.jsonValue()) as string;
         }),
       );
@@ -429,11 +412,11 @@ export class Vimium {
     // Every frame at once: the frames are independent and a sequential walk
     // would pay a round trip per frame on a page that has twenty.
     const labels = await Promise.all(
-      this.page.frames().map((frame) =>
-        frame.evaluate(hintLabelForText, linkText).catch(
-          (): string | null => null,
-        )
-      ),
+      this.page
+        .frames()
+        .map((frame) =>
+          frame.evaluate(hintLabelForText, linkText).catch((): string | null => null),
+        ),
     );
     return labels.find((label) => label !== null) ?? null;
   }
@@ -452,9 +435,7 @@ export class Vimium {
     } else {
       const label = await this.hintLabelFor(linkText);
       if (label !== null) {
-        throw new Error(
-          `expected no hint on "${linkText}", but marker "${label}" is drawn on it`,
-        );
+        throw new Error(`expected no hint on "${linkText}", but marker "${label}" is drawn on it`);
       }
     }
     await this.press("Escape");
@@ -475,8 +456,7 @@ export class Vimium {
           __vimiumHarness?: { shadow: ShadowRoot | null };
         };
         const shadow = host.__vimiumHarness?.shadow ?? null;
-        const hud = shadow?.querySelector('.vw-hud[data-visible="true"]') ??
-          null;
+        const hud = shadow?.querySelector('.vw-hud[data-visible="true"]') ?? null;
         return (hud?.textContent ?? "").includes(needle);
       },
       fragment,
@@ -513,20 +493,14 @@ export class Vimium {
   }
 
   /** The document selection, plus the nearest `data-region` it lands in. */
-  selection(): Promise<
-    { readonly text: string; readonly region: string | null }
-  > {
+  selection(): Promise<{ readonly text: string; readonly region: string | null }> {
     return this.page.evaluate(() => {
       const selection = globalThis.getSelection();
       const node = selection?.anchorNode ?? null;
-      const element = node instanceof Element
-        ? node
-        : node?.parentElement ?? null;
+      const element = node instanceof Element ? node : (node?.parentElement ?? null);
       return {
         text: selection?.toString() ?? "",
-        region:
-          element?.closest("[data-region]")?.getAttribute("data-region") ??
-            null,
+        region: element?.closest("[data-region]")?.getAttribute("data-region") ?? null,
       };
     });
   }
@@ -534,17 +508,16 @@ export class Vimium {
   /** `document.activeElement`'s id, or `null`. */
   focusedId(): Promise<string | null> {
     return this.page.evaluate(() =>
-      document.activeElement instanceof Element
-        ? document.activeElement.id || null
-        : null
+      document.activeElement instanceof Element ? document.activeElement.id || null : null,
     );
   }
 
   scrollOffsets(selector?: string): Promise<{ x: number; y: number }> {
     return this.page.evaluate((query: string | null) => {
-      const element = query === null
-        ? (document.scrollingElement ?? document.documentElement)
-        : document.querySelector(query);
+      const element =
+        query === null
+          ? (document.scrollingElement ?? document.documentElement)
+          : document.querySelector(query);
       if (element === null) return { x: -1, y: -1 };
       return { x: element.scrollLeft, y: element.scrollTop };
     }, selector ?? null);
@@ -578,8 +551,6 @@ export const test = base.extend<HarnessOptions & HarnessFixtures>({
       seed: seedWithSettings(settingsPatch),
     });
     await page.addInitScript({ content: readBundle() });
-    await use(
-      new Vimium(page, effectiveSettings(settingsPatch).filterLinkHints),
-    );
+    await use(new Vimium(page, effectiveSettings(settingsPatch).filterLinkHints));
   },
 });

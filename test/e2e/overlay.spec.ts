@@ -50,19 +50,23 @@ import {
 
 /** A resolved style property of the host itself, which is in the light DOM. */
 const hostStyle = (page: Page, property: string): Promise<string> =>
-  page.locator("vimium-webkit-overlay").first().evaluate(
-    (element: Element, name: string): string =>
-      getComputedStyle(element).getPropertyValue(name),
-    property,
-  );
+  page
+    .locator("vimium-webkit-overlay")
+    .first()
+    .evaluate(
+      (element: Element, name: string): string => getComputedStyle(element).getPropertyValue(name),
+      property,
+    );
 
 /** One inline declaration of the host, before the cascade resolves it. */
 const hostInlineStyle = (page: Page, property: string): Promise<string> =>
-  page.locator("vimium-webkit-overlay").first().evaluate(
-    (element: HTMLElement, name: string): string =>
-      element.style.getPropertyValue(name),
-    property,
-  );
+  page
+    .locator("vimium-webkit-overlay")
+    .first()
+    .evaluate(
+      (element: HTMLElement, name: string): string => element.style.getPropertyValue(name),
+      property,
+    );
 
 /** Add a rule that stays in the outer tree of the page. */
 const addPageStyle = (page: Page, css: string): Promise<void> =>
@@ -90,30 +94,35 @@ const openHelp = async (page: Page): Promise<void> => {
 /** Take the host out of the document, as the fixture script does. */
 const removeHost = (page: Page): Promise<boolean> =>
   page.evaluate((): boolean => {
-    const remover = (globalThis as unknown as {
-      removeVimiumHost?: () => boolean;
-    }).removeVimiumHost;
+    const remover = (
+      globalThis as unknown as {
+        removeVimiumHost?: () => boolean;
+      }
+    ).removeVimiumHost;
     return remover === undefined ? false : remover();
   });
 
 /** Take one declaration off the host, as one line of page script can. */
 const stripHostProperty = (page: Page, property: string): Promise<boolean> =>
   page.evaluate((name: string): boolean => {
-    const strip = (globalThis as unknown as {
-      stripVimiumHostProperty?: (property: string) => boolean;
-    }).stripVimiumHostProperty;
+    const strip = (
+      globalThis as unknown as {
+        stripVimiumHostProperty?: (property: string) => boolean;
+      }
+    ).stripVimiumHostProperty;
     return strip === undefined ? false : strip(name);
   }, property);
 
-const hostCount = (page: Page): Promise<number> =>
-  page.locator("vimium-webkit-overlay").count();
+const hostCount = (page: Page): Promise<number> => page.locator("vimium-webkit-overlay").count();
 
 /** Move the host into a container of the page, as one line of script can. */
 const cageHost = (page: Page): Promise<boolean> =>
   page.evaluate((): boolean => {
-    const cage = (globalThis as unknown as {
-      cageVimiumHost?: () => boolean;
-    }).cageVimiumHost;
+    const cage = (
+      globalThis as unknown as {
+        cageVimiumHost?: () => boolean;
+      }
+    ).cageVimiumHost;
     return cage === undefined ? false : cage();
   });
 
@@ -128,18 +137,22 @@ const hostParentTag = (page: Page): Promise<string | null> =>
 /** Move the host into a new container once for each task. */
 const cageHostTimes = (page: Page, times: number): Promise<number> =>
   page.evaluate((count: number): Promise<number> => {
-    const repeat = (globalThis as unknown as {
-      cageVimiumHostTimes?: (times: number) => Promise<number>;
-    }).cageVimiumHostTimes;
+    const repeat = (
+      globalThis as unknown as {
+        cageVimiumHostTimes?: (times: number) => Promise<number>;
+      }
+    ).cageVimiumHostTimes;
     return repeat === undefined ? Promise.resolve(0) : repeat(count);
   }, times);
 
 /** Let page script take the focus, as an autofocus or a script does. */
 const focusPageTarget = (page: Page): Promise<boolean> =>
   page.evaluate((): boolean => {
-    const focus = (globalThis as unknown as {
-      focusVimiumTarget?: () => boolean;
-    }).focusVimiumTarget;
+    const focus = (
+      globalThis as unknown as {
+        focusVimiumTarget?: () => boolean;
+      }
+    ).focusVimiumTarget;
     return focus === undefined ? false : focus();
   });
 
@@ -226,10 +239,10 @@ test.describe("the overlay host under hostile CSS", () => {
 
     await vw.press("n");
     await vw.waitForHud("No previous search");
-    expect(await overlayComputedStyle(page, ".vw-hud", "color"))
-      .not.toBe("rgba(0, 0, 0, 0)");
-    expect(await overlayComputedStyle(page, ".vw-hud", "background-color"))
-      .not.toBe("rgba(0, 0, 0, 0)");
+    expect(await overlayComputedStyle(page, ".vw-hud", "color")).not.toBe("rgba(0, 0, 0, 0)");
+    expect(await overlayComputedStyle(page, ".vw-hud", "background-color")).not.toBe(
+      "rgba(0, 0, 0, 0)",
+    );
   });
 
   test("keeps a size that the page cannot take away", async ({ vw, page }) => {
@@ -238,10 +251,12 @@ test.describe("the overlay host under hostile CSS", () => {
     // The stylesheet of the page writes `width: 0 !important` and
     // `height: 0 !important`. A zero-sized host draws nothing at all.
     const viewport = page.viewportSize();
-    expect(Number.parseFloat(await hostStyle(page, "width")))
-      .toBeGreaterThan((viewport?.width ?? 1280) / 2);
-    expect(Number.parseFloat(await hostStyle(page, "height")))
-      .toBeGreaterThan((viewport?.height ?? 800) / 2);
+    expect(Number.parseFloat(await hostStyle(page, "width"))).toBeGreaterThan(
+      (viewport?.width ?? 1280) / 2,
+    );
+    expect(Number.parseFloat(await hostStyle(page, "height"))).toBeGreaterThan(
+      (viewport?.height ?? 800) / 2,
+    );
   });
 });
 
@@ -271,21 +286,20 @@ test.describe("the overlay host where the engine has no visual viewport", () => 
     // the sync. The unit test holds that declaration; here we hold the result.
     expect(
       await page.evaluate(
-        () =>
-          (globalThis as { visualViewport?: unknown }).visualViewport ===
-            undefined,
+        () => (globalThis as { visualViewport?: unknown }).visualViewport === undefined,
       ),
     ).toBe(true);
 
     const viewport = page.viewportSize();
-    expect(Number.parseFloat(await hostStyle(page, "width")))
-      .toBeGreaterThan((viewport?.width ?? 1280) / 2);
-    expect(Number.parseFloat(await hostStyle(page, "height")))
-      .toBeGreaterThan((viewport?.height ?? 800) / 2);
+    expect(Number.parseFloat(await hostStyle(page, "width"))).toBeGreaterThan(
+      (viewport?.width ?? 1280) / 2,
+    );
+    expect(Number.parseFloat(await hostStyle(page, "height"))).toBeGreaterThan(
+      (viewport?.height ?? 800) / 2,
+    );
 
     await openHelp(page);
-    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
-      .toBeGreaterThan(300);
+    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0).toBeGreaterThan(300);
   });
 
   test("keeps its size after page script strips `all`", async ({ vw, page }) => {
@@ -299,10 +313,10 @@ test.describe("the overlay host where the engine has no visual viewport", () => 
     await openHelp(page);
 
     const viewport = page.viewportSize();
-    expect(Number.parseFloat(await hostStyle(page, "width")))
-      .toBeGreaterThan((viewport?.width ?? 1280) / 2);
-    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
-      .toBeGreaterThan(300);
+    expect(Number.parseFloat(await hostStyle(page, "width"))).toBeGreaterThan(
+      (viewport?.width ?? 1280) / 2,
+    );
+    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0).toBeGreaterThan(300);
   });
 });
 
@@ -311,17 +325,15 @@ test.describe("the overlay host after page script strips a declaration", () => {
   // of `style.removeProperty` gives the important page rule the win, and the
   // guard must see it. A removed declaration reads back with an empty value
   // and an empty priority.
-  for (
-    const [property, intact] of [
-      ["clip-path", "none"],
-      ["filter", "none"],
-      ["transform", "none"],
-      ["contain", "layout"],
-      ["display", "block"],
-      ["visibility", "visible"],
-      ["opacity", "1"],
-    ] as const
-  ) {
+  for (const [property, intact] of [
+    ["clip-path", "none"],
+    ["filter", "none"],
+    ["transform", "none"],
+    ["contain", "layout"],
+    ["display", "block"],
+    ["visibility", "visible"],
+    ["opacity", "1"],
+  ] as const) {
     test(`repairs ${property}`, async ({ vw, page }) => {
       await vw.open("/hostile-overlay.html");
       expect(await stripHostProperty(page, property)).toBe(true);
@@ -369,8 +381,7 @@ test.describe("the overlay host after a removal", () => {
     }
 
     await openHelp(page);
-    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
-      .toBeGreaterThan(300);
+    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0).toBeGreaterThan(300);
   });
 
   test("guards a page that lives longer than the cap", async ({ vw, page }) => {
@@ -399,8 +410,7 @@ test.describe("the overlay host after a removal", () => {
     await expect.poll(() => hostCount(page)).toBe(1);
 
     await openHelp(page);
-    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
-      .toBeGreaterThan(300);
+    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0).toBeGreaterThan(300);
   });
 });
 
@@ -444,8 +454,7 @@ test.describe("the overlay host after page script moves it", () => {
     }
 
     await openHelp(page);
-    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
-      .toBeGreaterThan(300);
+    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0).toBeGreaterThan(300);
   });
 });
 
@@ -502,9 +511,7 @@ test.describe("the overlay host when the page spends the repair budget", () => {
 
     // The guard still answers. One quiet second gives back the count and the
     // repair, and nothing else has to happen for that.
-    await expect.poll(() => hostParentTag(page), { timeout: 5_000 }).toBe(
-      "html",
-    );
+    await expect.poll(() => hostParentTag(page), { timeout: 5_000 }).toBe("html");
 
     // And it answers a further move at once. If `resumeGuard` did not reset
     // the count, this move waits for another full quiet second.
@@ -512,8 +519,7 @@ test.describe("the overlay host when the page spends the repair budget", () => {
     await expect.poll(() => hostParentTag(page), { timeout: 800 }).toBe("html");
 
     await openHelp(page);
-    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0)
-      .toBeGreaterThan(300);
+    expect((await overlayBox(page, ".vw-dialog"))?.width ?? 0).toBeGreaterThan(300);
   });
 
   test("gives the keyboard back while the page holds the host", async ({ vw, page }) => {
@@ -528,14 +534,13 @@ test.describe("the overlay host when the page spends the repair budget", () => {
     // The overlay is inside a container of the page, and the user can see
     // nothing of it. It must not keep the keys.
     await expect.poll(() => dialogCount(page), { timeout: 5_000 }).toBe(0);
-    await expect.poll(() =>
-      lines.some((line) => line.includes("gives the keyboard back"))
-    ).toBe(true);
+    await expect
+      .poll(() => lines.some((line) => line.includes("gives the keyboard back")))
+      .toBe(true);
 
     // The page has its keys again: `j` scrolls it, which no dialog allows.
     await vw.press("j");
-    await expect.poll(async () => (await vw.scrollOffsets()).y)
-      .toBeGreaterThan(before);
+    await expect.poll(async () => (await vw.scrollOffsets()).y).toBeGreaterThan(before);
   });
 });
 
@@ -545,14 +550,12 @@ test.describe("the overlay under an ancestor rule of class 1", () => {
   // scrolls away, and **the page stays fully readable**. I measured each rule
   // below in WebKit: with the page at 2759 px the dialog box sat at -2711.
   // `alignHost` measures the host box and puts it back on the viewport.
-  for (
-    const rule of [
-      "will-change: transform",
-      "transform: translateZ(0)",
-      "contain: paint",
-      "perspective: 1px",
-    ]
-  ) {
+  for (const rule of [
+    "will-change: transform",
+    "transform: translateZ(0)",
+    "contain: paint",
+    "perspective: 1px",
+  ]) {
     test(`draws the dialog in the viewport under ${rule}`, async ({ vw, page }) => {
       await vw.open("/long-text.html");
       await page.evaluate(() => globalThis.scrollTo(0, 2759));
@@ -606,9 +609,9 @@ test.describe("the overlay under an ancestor rule of class 1", () => {
     // Nothing opens, and nothing takes the keys for even one frame. The
     // dialog asks before it holds the keyboard, and not only afterwards.
     expect(await dialogCount(page)).toBe(0);
-    await expect.poll(() =>
-      lines.some((line) => line.includes("gives the keyboard back"))
-    ).toBe(true);
+    await expect
+      .poll(() => lines.some((line) => line.includes("gives the keyboard back")))
+      .toBe(true);
     expect(await dialogCount(page)).toBe(0);
   });
 
@@ -619,10 +622,12 @@ test.describe("the overlay under an ancestor rule of class 1", () => {
 
     // A scroll makes the class-1 correction active.
     await page.evaluate(() => globalThis.scrollBy(0, 1));
-    await expect.poll(async () => {
-      const box = await page.locator("vimium-webkit-overlay").boundingBox();
-      return Math.abs(box?.y ?? 1000) < 2;
-    }).toBe(true);
+    await expect
+      .poll(async () => {
+        const box = await page.locator("vimium-webkit-overlay").boundingBox();
+        return Math.abs(box?.y ?? 1000) < 2;
+      })
+      .toBe(true);
 
     // An honest page removes `will-change` after the animation. No scroll
     // follows. The next layer access must measure and remove the old shift.
@@ -642,18 +647,16 @@ test.describe("the overlay under an ancestor rule of class 1", () => {
     const markers = await visibleHintMarkers(page);
     expect(markers.length).toBeGreaterThan(0);
     expect(
-      markers.some(({ box }) =>
-        box.left >= 0 && box.top >= 0 && box.left < viewport.width &&
-        box.top < viewport.height
+      markers.some(
+        ({ box }) =>
+          box.left >= 0 && box.top >= 0 && box.left < viewport.width && box.top < viewport.height,
       ),
     ).toBe(true);
 
     // The host is back at the top of the viewport, whether the engine kept the
     // old shift or removed it itself.
     expect(
-      Math.abs(
-        (await page.locator("vimium-webkit-overlay").boundingBox())?.y ?? 1000,
-      ),
+      Math.abs((await page.locator("vimium-webkit-overlay").boundingBox())?.y ?? 1000),
     ).toBeLessThan(2);
 
     // Say which path this engine took, so a later reader knows the test still
@@ -666,15 +669,13 @@ test.describe("the overlay under an ancestor rule of class 1", () => {
 });
 
 test.describe("the overlay under a rule that prevents paint", () => {
-  for (
-    const rule of [
-      "opacity: 0",
-      "visibility: hidden",
-      "filter: opacity(0)",
-      "content-visibility: hidden",
-      "clip-path: inset(100%)",
-    ]
-  ) {
+  for (const rule of [
+    "opacity: 0",
+    "visibility: hidden",
+    "filter: opacity(0)",
+    "content-visibility: hidden",
+    "clip-path: inset(100%)",
+  ]) {
     test(`closes the dialog under ${rule}`, async ({ vw, page }) => {
       await vw.open("/long-text.html");
       await openHelp(page);

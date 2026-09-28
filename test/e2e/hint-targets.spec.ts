@@ -19,9 +19,7 @@ import { expect, test } from "./harness/fixtures.ts";
  * It runs inside the page. A marker is painted at the top left of its element,
  * so a marker more than a pixel or two away belongs to another element.
  */
-const markerSitsOn = (
-  [label, elementId]: readonly [string, string],
-): boolean => {
+const markerSitsOn = ([label, elementId]: readonly [string, string]): boolean => {
   const host = globalThis as unknown as {
     __vimiumHarness?: { shadow: ShadowRoot | null };
   };
@@ -33,20 +31,13 @@ const markerSitsOn = (
     if (marker.classList.contains("vw-hint--hidden")) continue;
     if ((marker.textContent ?? "").trim() !== label) continue;
     const rect = marker.getBoundingClientRect();
-    return Math.hypot(
-      rect.left - Math.max(2, box.left),
-      rect.top - Math.max(2, box.top),
-    ) <= 3;
+    return Math.hypot(rect.left - Math.max(2, box.left), rect.top - Math.max(2, box.top)) <= 3;
   }
   return false;
 };
 
 /** Wait until the marker with this label sits on this element. */
-const waitForMarkerOn = (
-  page: Page,
-  label: string,
-  elementId: string,
-): Promise<unknown> =>
+const waitForMarkerOn = (page: Page, label: string, elementId: string): Promise<unknown> =>
   page.waitForFunction(markerSitsOn, [label, elementId] as const, {
     timeout: 5_000,
   });
@@ -85,9 +76,11 @@ test.describe("a hint that moved is not activated", () => {
     const label = await vw.hintLabelFor("Shifty link");
     expect(label, "the shifty link took no hint").not.toBeNull();
     await page.evaluate(() => {
-      (globalThis as unknown as {
-        moveShiftyOnPointerover: () => void;
-      }).moveShiftyOnPointerover();
+      (
+        globalThis as unknown as {
+          moveShiftyOnPointerover: () => void;
+        }
+      ).moveShiftyOnPointerover();
     });
 
     await vw.type(label ?? "");
@@ -141,9 +134,7 @@ test.describe("a hint that moved is not activated", () => {
     const label = await vw.hintLabelFor("Left area");
     expect(label, "the area took no hint").not.toBeNull();
     await page.evaluate(() => {
-      const area = document.querySelector<HTMLAreaElement>(
-        'area[aria-label="Left area"]',
-      );
+      const area = document.querySelector<HTMLAreaElement>('area[aria-label="Left area"]');
       if (area !== null) area.replaceWith(area.cloneNode(true));
     });
 
@@ -169,8 +160,7 @@ test.describe("a completed font load", () => {
     const label = await vw.hintLabelFor("Font shifted link");
     expect(label, "the font link took no hint").not.toBeNull();
     await page.evaluate(() => {
-      (globalThis as unknown as { finishFontReflow: () => void })
-        .finishFontReflow();
+      (globalThis as unknown as { finishFontReflow: () => void }).finishFontReflow();
     });
 
     await waitForMarkerOn(page, label ?? "", "font-shifty");

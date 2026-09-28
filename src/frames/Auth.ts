@@ -98,13 +98,10 @@ export const FrameAuthFailureReason = Schema.Literals([
 
 export type FrameAuthFailureReason = typeof FrameAuthFailureReason.Type;
 
-export class FrameAuthError extends Schema.TaggedError<FrameAuthError>()(
-  "FrameAuthError",
-  {
-    reason: FrameAuthFailureReason,
-    detail: Schema.String,
-  },
-) {}
+export class FrameAuthError extends Schema.TaggedError<FrameAuthError>()("FrameAuthError", {
+  reason: FrameAuthFailureReason,
+  detail: Schema.String,
+}) {}
 
 const ALGORITHM = { name: "HMAC", hash: "SHA-256" } as const;
 
@@ -156,15 +153,12 @@ const describe = (cause: unknown): string => {
 const toBase64Url = (bytes: Uint8Array): string => {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary)
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replace(/=+$/, "");
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 };
 
 const fromBase64Url = (value: string): Uint8Array<ArrayBuffer> => {
-  const base64 = value.replaceAll("-", "+").replaceAll("_", "/") +
-    "=".repeat((4 - value.length % 4) % 4);
+  const base64 =
+    value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - (value.length % 4)) % 4);
   const binary = atob(base64);
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 };
@@ -186,9 +180,7 @@ const readSubtle = (): Option.Option<SubtleCrypto> => {
 };
 
 /** A value that is not base64 is a rejection, and not a failure of ours. */
-const decodeBase64Url = (
-  value: string,
-): Option.Option<Uint8Array<ArrayBuffer>> => {
+const decodeBase64Url = (value: string): Option.Option<Uint8Array<ArrayBuffer>> => {
   try {
     return Option.some(fromBase64Url(value));
   } catch {
@@ -203,10 +195,7 @@ const decodeBase64Url = (
  * a counter rises by one for each message in one direction, so the pair of the
  * direction and the counter is used once. That is exactly what AES-GCM needs.
  */
-const ivFor = (
-  direction: SealDirection,
-  seq: number,
-): Uint8Array<ArrayBuffer> => {
+const ivFor = (direction: SealDirection, seq: number): Uint8Array<ArrayBuffer> => {
   const bytes = new Uint8Array(IV_BYTES);
   bytes[0] = direction === "up" ? 1 : 2;
   new DataView(bytes.buffer).setUint32(IV_BYTES - 4, seq, false);
@@ -218,87 +207,78 @@ interface CachedKey {
   readonly key: CryptoKey;
 }
 
-export class FrameAuth extends Context.Service<FrameAuth, {
-  /** The proof that a `JOIN` must carry. */
-  readonly joinProof: (
-    handshake: FrameHandshake,
-  ) => Effect.Effect<string, FrameAuthError>;
+export class FrameAuth extends Context.Service<
+  FrameAuth,
+  {
+    /** The proof that a `JOIN` must carry. */
+    readonly joinProof: (handshake: FrameHandshake) => Effect.Effect<string, FrameAuthError>;
 
-  /**
-   * Check the proof of a `JOIN`.
-   *
-   * A proof that is not readable gives `false`, because a bad proof is the
-   * fault of the peer and not of this frame. The error channel reports the
-   * failures of this frame only.
-   */
-  readonly verifyJoin: (
-    handshake: FrameHandshake,
-    proof: string,
-  ) => Effect.Effect<boolean, FrameAuthError>;
+    /**
+     * Check the proof of a `JOIN`.
+     *
+     * A proof that is not readable gives `false`, because a bad proof is the
+     * fault of the peer and not of this frame. The error channel reports the
+     * failures of this frame only.
+     */
+    readonly verifyJoin: (
+      handshake: FrameHandshake,
+      proof: string,
+    ) => Effect.Effect<boolean, FrameAuthError>;
 
-  /** The cipher of one port. Both ends derive the same one. */
-  readonly cipher: (
-    handshake: FrameHandshake,
-  ) => Effect.Effect<FrameCipher, FrameAuthError>;
-}>()("vimium/frames/FrameAuth") {
-  static readonly layer: Layer.Layer<
+    /** The cipher of one port. Both ends derive the same one. */
+    readonly cipher: (handshake: FrameHandshake) => Effect.Effect<FrameCipher, FrameAuthError>;
+  }
+>()("vimium/frames/FrameAuth") {
+  static readonly layer: Layer.Layer<FrameAuth, never, Realm | KeyValueStore> = Layer.effect(
     FrameAuth,
-    never,
-    Realm | KeyValueStore
-  > = Layer
-    .effect(
-      FrameAuth,
-      Effect.gen(function*() {
-        const realm = yield* Realm;
-        const kv = yield* KeyValueStore;
-        const cache = yield* Ref.make(Option.none<CachedKey>());
+    Effect.gen(function* () {
+      const realm = yield* Realm;
+      const kv = yield* KeyValueStore;
+      const cache = yield* Ref.make(Option.none<CachedKey>());
 
-        /**
-         * The store of the credential, and of nothing else.
-         *
-         * This module builds the group, and it keeps it in this closure. No
-         * service publishes it, so a feature cannot read the credential. The
-         * group gives the same serial mailbox that every other group has, so a
-         * read and a write of the credential cannot interleave.
-         */
-        const issues = yield* Queue.unbounded<StorageError>();
-        const store = yield* makeGroup(frameCredentialGroup, kv, issues);
+      /**
+       * The store of the credential, and of nothing else.
+       *
+       * This module builds the group, and it keeps it in this closure. No
+       * service publishes it, so a feature cannot read the credential. The
+       * group gives the same serial mailbox that every other group has, so a
+       * read and a write of the credential cannot interleave.
+       */
+      const issues = yield* Queue.unbounded<StorageError>();
+      const store = yield* makeGroup(frameCredentialGroup, kv, issues);
 
-        // A failure of the store also reaches the caller as a
-        // `FrameAuthError`, so this line is a record and not the only signal.
-        yield* Effect.forkScoped(
-          Effect.forever(
-            Effect.flatMap(
-              Queue.take(issues),
-              (issue) =>
-                Effect.logDebug(
-                  `the credential store failed: ${issue.detail}`,
-                ),
-            ),
+      // A failure of the store also reaches the caller as a
+      // `FrameAuthError`, so this line is a record and not the only signal.
+      yield* Effect.forkScoped(
+        Effect.forever(
+          Effect.flatMap(Queue.take(issues), (issue) =>
+            Effect.logDebug(`the credential store failed: ${issue.detail}`),
           ),
-        );
+        ),
+      );
 
-        /** Web Crypto, read again for each call, and never held. */
-        const subtle: Effect.Effect<SubtleCrypto, FrameAuthError> = Effect
-          .suspend(() =>
-            Effect.fromOption(readSubtle(), () =>
-              new FrameAuthError({
-                reason: "unavailable",
-                detail: "web crypto is not in this realm",
-              }))
-          );
+      /** Web Crypto, read again for each call, and never held. */
+      const subtle: Effect.Effect<SubtleCrypto, FrameAuthError> = Effect.suspend(() =>
+        Effect.fromOption(
+          readSubtle(),
+          () =>
+            new FrameAuthError({
+              reason: "unavailable",
+              detail: "web crypto is not in this realm",
+            }),
+        ),
+      );
 
-        /**
-         * A store that the page can read is not a store for a credential.
-         *
-         * The frames of the page then stay apart. A same-origin child of a
-         * hostile page could otherwise read the credential out of
-         * `localStorage` and calculate a valid proof.
-         */
-        const privateStore: Effect.Effect<void, FrameAuthError> = kv
-            .managerPrivate
-          ? Effect.void
-          : Effect.fail(
+      /**
+       * A store that the page can read is not a store for a credential.
+       *
+       * The frames of the page then stay apart. A same-origin child of a
+       * hostile page could otherwise read the credential out of
+       * `localStorage` and calculate a valid proof.
+       */
+      const privateStore: Effect.Effect<void, FrameAuthError> = kv.managerPrivate
+        ? Effect.void
+        : Effect.fail(
             new FrameAuthError({
               reason: "unavailable",
               detail:
@@ -307,241 +287,220 @@ export class FrameAuth extends Context.Service<FrameAuth, {
             }),
           );
 
-        const createSecret = Effect.try({
-          try: (): string => {
-            const bytes = new Uint8Array(SECRET_BYTES);
-            crypto.getRandomValues(bytes);
-            return toBase64Url(bytes);
-          },
-          catch: (cause) =>
+      const createSecret = Effect.try({
+        try: (): string => {
+          const bytes = new Uint8Array(SECRET_BYTES);
+          crypto.getRandomValues(bytes);
+          return toBase64Url(bytes);
+        },
+        catch: (cause) =>
+          new FrameAuthError({
+            reason: "unavailable",
+            detail: `no random source: ${describe(cause)}`,
+          }),
+      });
+
+      /**
+       * The shared credential, as storage holds it.
+       *
+       * It is private to this module. The top frame creates one when storage
+       * holds none. Every call reads storage again, and does not trust the
+       * value in memory: the top frame can write the credential after a child
+       * frame has started.
+       */
+      const secret = Effect.fn("FrameAuth.secret")(function* () {
+        yield* privateStore;
+
+        const stored = yield* store.hydrate;
+        if (stored.secret.length > 0) return stored.secret;
+
+        if (!realm.isTop) {
+          return yield* new FrameAuthError({
+            reason: "unauthenticated",
+            detail: "this frame has no credential in manager storage",
+          });
+        }
+
+        const created = yield* createSecret;
+
+        // Read storage once more, immediately before the write. The top frame
+        // of another tab shares this store, and it can create the credential
+        // while this frame collects its random bytes. A credential that is
+        // already in use must not be replaced: the two ends of a live link
+        // derived their key from it, and a new value would break them.
+        //
+        // The value store gives no compare-and-set, so this makes the window
+        // small and does not close it. A frame that loses converges on the
+        // next read, and a join inside the window fails and is repeated.
+        const again = yield* store.hydrate;
+        if (again.secret.length > 0) return again.secret;
+
+        yield* Effect.mapError(
+          store.update((current) =>
+            // The same test again, against the value that the group holds.
+            // Another tab can reach this group through the change stream of
+            // the manager between the read and the write.
+            current.secret.length > 0
+              ? current
+              : {
+                  ...current,
+                  secret: created,
+                },
+          ),
+          (cause) =>
             new FrameAuthError({
               reason: "unavailable",
-              detail: `no random source: ${describe(cause)}`,
+              detail: `could not store the credential: ${cause.detail}`,
+            }),
+        );
+
+        // Keep the value that storage holds, and not the value that this
+        // frame made. The two differ when another tab wrote last.
+        const settled = yield* store.hydrate;
+        return settled.secret.length > 0 ? settled.secret : created;
+      });
+
+      const keyFor = Effect.fn("FrameAuth.key")(function* (value: string) {
+        const cached = yield* Ref.get(cache);
+        if (Option.isSome(cached) && cached.value.secret === value) {
+          return cached.value.key;
+        }
+        const api = yield* subtle;
+        const key = yield* Effect.tryPromise({
+          try: () =>
+            api.importKey(
+              "raw",
+              encoder.encode(value),
+              ALGORITHM,
+              // Not extractable. Nothing in this application reads the key
+              // back, and the flag removes one route out of the realm.
+              false,
+              ["sign", "verify"],
+            ),
+          catch: (cause) =>
+            new FrameAuthError({
+              reason: "failed",
+              detail: `could not import the credential: ${describe(cause)}`,
+            }),
+        });
+        yield* Ref.set(cache, Option.some({ secret: value, key }));
+        return key;
+      });
+
+      /**
+       * The HMAC over one payload.
+       *
+       * It is private to this module. A service method that signed a text of
+       * the caller's choice would be an oracle: a page that makes a child
+       * answer a false challenge could ask for the key of a link.
+       */
+      const mac = Effect.fn("FrameAuth.mac")(function* (payload: string) {
+        const value = yield* secret();
+        const key = yield* keyFor(value);
+        const api = yield* subtle;
+        return yield* Effect.tryPromise({
+          try: () => api.sign(ALGORITHM, key, encoder.encode(payload)),
+          catch: (cause) =>
+            new FrameAuthError({
+              reason: "failed",
+              detail: `could not sign: ${describe(cause)}`,
+            }),
+        });
+      });
+
+      const joinProof = Effect.fn("FrameAuth.joinProof")(function* (handshake: FrameHandshake) {
+        const signature = yield* mac(
+          joinProofPayload(handshake.token, handshake.helloId, handshake.frameId),
+        );
+        return toBase64Url(new Uint8Array(signature));
+      });
+
+      const verifyJoin = Effect.fn("FrameAuth.verifyJoin")(function* (
+        handshake: FrameHandshake,
+        proof: string,
+      ) {
+        const value = yield* secret();
+        const key = yield* keyFor(value);
+        const api = yield* subtle;
+        const bytes = decodeBase64Url(proof);
+        if (Option.isNone(bytes)) return false;
+
+        return yield* Effect.tryPromise({
+          try: () =>
+            api.verify(
+              ALGORITHM,
+              key,
+              bytes.value,
+              encoder.encode(
+                joinProofPayload(handshake.token, handshake.helloId, handshake.frameId),
+              ),
+            ),
+          catch: (cause) =>
+            new FrameAuthError({
+              reason: "failed",
+              detail: `could not verify: ${describe(cause)}`,
+            }),
+        });
+      });
+
+      const cipher = Effect.fn("FrameAuth.cipher")(function* (handshake: FrameHandshake) {
+        const material = yield* mac(
+          linkKeyPayload(handshake.token, handshake.helloId, handshake.frameId),
+        );
+        const api = yield* subtle;
+        const key = yield* Effect.tryPromise({
+          try: () =>
+            api.importKey("raw", material, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]),
+          catch: (cause) =>
+            new FrameAuthError({
+              reason: "failed",
+              detail: `could not import the link key: ${describe(cause)}`,
             }),
         });
 
-        /**
-         * The shared credential, as storage holds it.
-         *
-         * It is private to this module. The top frame creates one when storage
-         * holds none. Every call reads storage again, and does not trust the
-         * value in memory: the top frame can write the credential after a child
-         * frame has started.
-         */
-        const secret = Effect.fn("FrameAuth.secret")(function*() {
-          yield* privateStore;
-
-          const stored = yield* store.hydrate;
-          if (stored.secret.length > 0) return stored.secret;
-
-          if (!realm.isTop) {
-            return yield* new FrameAuthError({
-              reason: "unauthenticated",
-              detail: "this frame has no credential in manager storage",
-            });
-          }
-
-          const created = yield* createSecret;
-
-          // Read storage once more, immediately before the write. The top frame
-          // of another tab shares this store, and it can create the credential
-          // while this frame collects its random bytes. A credential that is
-          // already in use must not be replaced: the two ends of a live link
-          // derived their key from it, and a new value would break them.
-          //
-          // The value store gives no compare-and-set, so this makes the window
-          // small and does not close it. A frame that loses converges on the
-          // next read, and a join inside the window fails and is repeated.
-          const again = yield* store.hydrate;
-          if (again.secret.length > 0) return again.secret;
-
-          yield* Effect.mapError(
-            store.update((current) =>
-              // The same test again, against the value that the group holds.
-              // Another tab can reach this group through the change stream of
-              // the manager between the read and the write.
-              current.secret.length > 0 ? current : {
-                ...current,
-                secret: created,
-              }
-            ),
-            (cause) =>
-              new FrameAuthError({
-                reason: "unavailable",
-                detail: `could not store the credential: ${cause.detail}`,
-              }),
-          );
-
-          // Keep the value that storage holds, and not the value that this
-          // frame made. The two differ when another tab wrote last.
-          const settled = yield* store.hydrate;
-          return settled.secret.length > 0 ? settled.secret : created;
-        });
-
-        const keyFor = Effect.fn("FrameAuth.key")(function*(value: string) {
-          const cached = yield* Ref.get(cache);
-          if (Option.isSome(cached) && cached.value.secret === value) {
-            return cached.value.key;
-          }
-          const api = yield* subtle;
-          const key = yield* Effect.tryPromise({
-            try: () =>
-              api.importKey(
-                "raw",
-                encoder.encode(value),
-                ALGORITHM,
-                // Not extractable. Nothing in this application reads the key
-                // back, and the flag removes one route out of the realm.
-                false,
-                ["sign", "verify"],
-              ),
-            catch: (cause) =>
-              new FrameAuthError({
-                reason: "failed",
-                detail: `could not import the credential: ${describe(cause)}`,
-              }),
-          });
-          yield* Ref.set(cache, Option.some({ secret: value, key }));
-          return key;
-        });
-
-        /**
-         * The HMAC over one payload.
-         *
-         * It is private to this module. A service method that signed a text of
-         * the caller's choice would be an oracle: a page that makes a child
-         * answer a false challenge could ask for the key of a link.
-         */
-        const mac = Effect.fn("FrameAuth.mac")(function*(payload: string) {
-          const value = yield* secret();
-          const key = yield* keyFor(value);
-          const api = yield* subtle;
-          return yield* Effect.tryPromise({
-            try: () => api.sign(ALGORITHM, key, encoder.encode(payload)),
-            catch: (cause) =>
-              new FrameAuthError({
-                reason: "failed",
-                detail: `could not sign: ${describe(cause)}`,
-              }),
-          });
-        });
-
-        const joinProof = Effect.fn("FrameAuth.joinProof")(function*(
-          handshake: FrameHandshake,
+        const seal = Effect.fn("FrameCipher.seal")(function* (
+          direction: SealDirection,
+          seq: number,
+          plaintext: string,
         ) {
-          const signature = yield* mac(
-            joinProofPayload(
-              handshake.token,
-              handshake.helloId,
-              handshake.frameId,
-            ),
-          );
-          return toBase64Url(new Uint8Array(signature));
-        });
-
-        const verifyJoin = Effect.fn("FrameAuth.verifyJoin")(function*(
-          handshake: FrameHandshake,
-          proof: string,
-        ) {
-          const value = yield* secret();
-          const key = yield* keyFor(value);
-          const api = yield* subtle;
-          const bytes = decodeBase64Url(proof);
-          if (Option.isNone(bytes)) return false;
-
-          return yield* Effect.tryPromise({
+          const sealed = yield* Effect.tryPromise({
             try: () =>
-              api.verify(
-                ALGORITHM,
+              api.encrypt(
+                {
+                  name: "AES-GCM",
+                  iv: ivFor(direction, seq),
+                  additionalData: encoder.encode(sealedAad(handshake.helloId, direction, seq)),
+                },
                 key,
-                bytes.value,
-                encoder.encode(
-                  joinProofPayload(
-                    handshake.token,
-                    handshake.helloId,
-                    handshake.frameId,
-                  ),
-                ),
+                encoder.encode(plaintext),
               ),
             catch: (cause) =>
               new FrameAuthError({
                 reason: "failed",
-                detail: `could not verify: ${describe(cause)}`,
+                detail: `could not seal the message: ${describe(cause)}`,
               }),
           });
+          return {
+            ...ENVELOPE,
+            kind: "SEALED",
+            seq,
+            data: toBase64Url(new Uint8Array(sealed)),
+          } satisfies SealedMessage;
         });
 
-        const cipher = Effect.fn("FrameAuth.cipher")(function*(
-          handshake: FrameHandshake,
+        const open = Effect.fn("FrameCipher.open")(function* (
+          direction: SealDirection,
+          sealed: SealedMessage,
         ) {
-          const material = yield* mac(
-            linkKeyPayload(
-              handshake.token,
-              handshake.helloId,
-              handshake.frameId,
-            ),
-          );
-          const api = yield* subtle;
-          const key = yield* Effect.tryPromise({
-            try: () =>
-              api.importKey(
-                "raw",
-                material,
-                { name: "AES-GCM" },
-                false,
-                ["encrypt", "decrypt"],
-              ),
-            catch: (cause) =>
-              new FrameAuthError({
-                reason: "failed",
-                detail: `could not import the link key: ${describe(cause)}`,
-              }),
-          });
+          const bytes = decodeBase64Url(sealed.data);
+          if (Option.isNone(bytes)) return Option.none<string>();
 
-          const seal = Effect.fn("FrameCipher.seal")(function*(
-            direction: SealDirection,
-            seq: number,
-            plaintext: string,
-          ) {
-            const sealed = yield* Effect.tryPromise({
-              try: () =>
-                api.encrypt(
-                  {
-                    name: "AES-GCM",
-                    iv: ivFor(direction, seq),
-                    additionalData: encoder.encode(
-                      sealedAad(handshake.helloId, direction, seq),
-                    ),
-                  },
-                  key,
-                  encoder.encode(plaintext),
-                ),
-              catch: (cause) =>
-                new FrameAuthError({
-                  reason: "failed",
-                  detail: `could not seal the message: ${describe(cause)}`,
-                }),
-            });
-            return {
-              ...ENVELOPE,
-              kind: "SEALED",
-              seq,
-              data: toBase64Url(new Uint8Array(sealed)),
-            } satisfies SealedMessage;
-          });
-
-          const open = Effect.fn("FrameCipher.open")(function*(
-            direction: SealDirection,
-            sealed: SealedMessage,
-          ) {
-            const bytes = decodeBase64Url(sealed.data);
-            if (Option.isNone(bytes)) return Option.none<string>();
-
-            // Every failure of `decrypt` is one answer: this message is not
-            // ours. The API gives the same error for a changed byte, a wrong
-            // key and a wrong counter, and it must, because a peer that could
-            // tell them apart would learn about the key.
-            const plain = yield* Effect.option(Effect.tryPromise({
+          // Every failure of `decrypt` is one answer: this message is not
+          // ours. The API gives the same error for a changed byte, a wrong
+          // key and a wrong counter, and it must, because a peer that could
+          // tell them apart would learn about the key.
+          const plain = yield* Effect.option(
+            Effect.tryPromise({
               try: () =>
                 api.decrypt(
                   {
@@ -559,35 +518,29 @@ export class FrameAuth extends Context.Service<FrameAuth, {
                   reason: "unauthenticated",
                   detail: "the message did not open",
                 }),
-            }));
-            return Option.map(
-              plain,
-              (buffer) => decoder.decode(new Uint8Array(buffer)),
-            );
-          });
-
-          return { seal, open } satisfies FrameCipher;
-        });
-
-        // The credential must exist before the first child asks to join. Only
-        // the top frame can create it, and a child cannot wait for a value that
-        // nobody writes. A clean installation would otherwise keep every frame
-        // outside the session for the life of the page.
-        if (realm.isTop) {
-          yield* Effect.catch(
-            Effect.asVoid(secret()),
-            (error) =>
-              Effect.logDebug(
-                `no frame credential in this realm: ${error.detail}`,
-              ),
+            }),
           );
-        }
-
-        return FrameAuth.of({
-          joinProof,
-          verifyJoin,
-          cipher,
+          return Option.map(plain, (buffer) => decoder.decode(new Uint8Array(buffer)));
         });
-      }),
-    );
+
+        return { seal, open } satisfies FrameCipher;
+      });
+
+      // The credential must exist before the first child asks to join. Only
+      // the top frame can create it, and a child cannot wait for a value that
+      // nobody writes. A clean installation would otherwise keep every frame
+      // outside the session for the life of the page.
+      if (realm.isTop) {
+        yield* Effect.catch(Effect.asVoid(secret()), (error) =>
+          Effect.logDebug(`no frame credential in this realm: ${error.detail}`),
+        );
+      }
+
+      return FrameAuth.of({
+        joinProof,
+        verifyJoin,
+        cipher,
+      });
+    }),
+  );
 }

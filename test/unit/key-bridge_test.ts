@@ -28,9 +28,7 @@ interface Attached {
 }
 
 /** `Dom`, with `listen` recording instead of touching a window. */
-const recordingDom = (
-  attached: Ref.Ref<ReadonlyArray<Attached>>,
-): Layer.Layer<Dom> =>
+const recordingDom = (attached: Ref.Ref<ReadonlyArray<Attached>>): Layer.Layer<Dom> =>
   Layer.effect(
     Dom,
     Effect.map(Dom, (dom) =>
@@ -47,37 +45,29 @@ const recordingDom = (
             ...current,
             { type: String(type), run: handler },
           ])) as unknown as Dom["Service"]["listen"],
-      })),
+      }),
+    ),
   ).pipe(Layer.provide(Dom.layer));
 
 /** `Keyboard`, reduced to the one method that the bridge calls. */
-const stubKeyboard = (
-  forgotten: Ref.Ref<number>,
-): Layer.Layer<Keyboard> =>
+const stubKeyboard = (forgotten: Ref.Ref<number>): Layer.Layer<Keyboard> =>
   Layer.effect(
     Keyboard,
-    Effect.map(
-      SubscriptionRef.make<string | null>(null),
-      (pending) =>
-        Keyboard.of({
-          pending,
-          syncExclusion: Effect.void,
-          passNextKey: () => Effect.void,
-          forgetSuppressed: Ref.update(forgotten, (count) => count + 1),
-        }),
+    Effect.map(SubscriptionRef.make<string | null>(null), (pending) =>
+      Keyboard.of({
+        pending,
+        syncExclusion: Effect.void,
+        passNextKey: () => Effect.void,
+        forgetSuppressed: Ref.update(forgotten, (count) => count + 1),
+      }),
     ),
   );
 
 /** Everything that the bridge reads from an event. */
-const event = (isTrusted: boolean): Event =>
-  ({ isTrusted, type: "test" }) as unknown as Event;
+const event = (isTrusted: boolean): Event => ({ isTrusted, type: "test" }) as unknown as Event;
 
 /** Call every listener of this type, as the browser would. */
-const fire = (
-  attached: ReadonlyArray<Attached>,
-  type: string,
-  value: Event,
-): Effect.Effect<void> =>
+const fire = (attached: ReadonlyArray<Attached>, type: string, value: Event): Effect.Effect<void> =>
   Effect.forEach(
     attached.filter((entry) => entry.type === type),
     (entry) => entry.run(value),
@@ -96,98 +86,95 @@ const withBridge = (
     forgotten: Ref.Ref<number>,
   ) => Effect.Effect<void>,
 ): Effect.Effect<void> =>
-  Effect.gen(function*() {
+  Effect.gen(function* () {
     const attached = yield* Ref.make<ReadonlyArray<Attached>>([]);
     const forgotten = yield* Ref.make(0);
 
     yield* Effect.provide(
-      Effect.scoped(Effect.gen(function*() {
-        const stack = yield* HandlerStack;
-        const seen = yield* Ref.make<ReadonlyArray<string>>([]);
-        const record = (name: string) => () =>
-          Effect.as(
-            Ref.update(seen, (current) => [...current, name]),
-            CONTINUE_BUBBLING,
-          );
+      Effect.scoped(
+        Effect.gen(function* () {
+          const stack = yield* HandlerStack;
+          const seen = yield* Ref.make<ReadonlyArray<string>>([]);
+          const record = (name: string) => () =>
+            Effect.as(
+              Ref.update(seen, (current) => [...current, name]),
+              CONTINUE_BUBBLING,
+            );
 
-        yield* stack.push({
-          name: "probe",
-          keydown: record("keydown"),
-          keyup: record("keyup"),
-          click: record("click"),
-          focus: record("focus"),
-          blur: record("blur"),
-        });
+          yield* stack.push({
+            name: "probe",
+            keydown: record("keydown"),
+            keyup: record("keyup"),
+            click: record("click"),
+            focus: record("focus"),
+            blur: record("blur"),
+          });
 
-        yield* attachKeyBridge;
-        yield* body(yield* Ref.get(attached), seen, forgotten);
-      })),
-      Layer.mergeAll(
-        recordingDom(attached),
-        HandlerStack.layer,
-        stubKeyboard(forgotten),
+          yield* attachKeyBridge;
+          yield* body(yield* Ref.get(attached), seen, forgotten);
+        }),
       ),
+      Layer.mergeAll(recordingDom(attached), HandlerStack.layer, stubKeyboard(forgotten)),
     );
   });
 
 describe("the key bridge", () => {
   it.effect("gives the stack an event that the user made", () =>
     withBridge((attached, seen) =>
-      Effect.gen(function*() {
+      Effect.gen(function* () {
         for (const type of ["keydown", "keyup", "click", "focus", "blur"]) {
           yield* fire(attached, type, event(true));
         }
-        assert.deepEqual(yield* Ref.get(seen), [
-          "keydown",
-          "keyup",
-          "click",
-          "focus",
-          "blur",
-        ]);
-      })
-    ));
+        assert.deepEqual(yield* Ref.get(seen), ["keydown", "keyup", "click", "focus", "blur"]);
+      }),
+    ),
+  );
 
   it.effect("drops a key that the page made", () =>
     withBridge((attached, seen) =>
-      Effect.gen(function*() {
+      Effect.gen(function* () {
         yield* fire(attached, "keydown", event(false));
         yield* fire(attached, "keyup", event(false));
 
         assert.deepEqual(yield* Ref.get(seen), []);
-      })
-    ));
+      }),
+    ),
+  );
 
   it.effect("drops a focus and a blur that the page made", () =>
     withBridge((attached, seen) =>
-      Effect.gen(function*() {
+      Effect.gen(function* () {
         // A page-made `blur` would leave insert mode, and the next true key of
         // the user would then run a command inside a text field.
         yield* fire(attached, "focus", event(false));
         yield* fire(attached, "blur", event(false));
 
         assert.deepEqual(yield* Ref.get(seen), []);
-      })
-    ));
+      }),
+    ),
+  );
 
   it.effect("keeps a click that the page made", () =>
     withBridge((attached, seen) =>
-      Effect.gen(function*() {
+      Effect.gen(function* () {
         // Hint activation dispatches its own pointer events, and a mode that
         // exits on a click must still see them.
         yield* fire(attached, "click", event(false));
 
         assert.deepEqual(yield* Ref.get(seen), ["click"]);
-      })
-    ));
+      }),
+    ),
+  );
 
   it.effect("forgets the taken presses on a true window blur only", () =>
     withBridge((attached, _seen, forgotten) =>
-      Effect.gen(function*() {
+      Effect.gen(function* () {
         yield* fire(attached, "blur", event(false));
         assert.strictEqual(yield* Ref.get(forgotten), 0);
 
         yield* fire(attached, "blur", event(true));
         assert.strictEqual(yield* Ref.get(forgotten), 1);
-      })
-    ));
+      }),
+    ),
+  );
 });

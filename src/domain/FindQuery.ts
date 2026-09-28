@@ -74,8 +74,7 @@ export const hasUpperCase = (text: string): boolean => {
  * and this module never sets `u`, so that a pattern with a single escape such
  * as `\d` behaves as a user of Vim expects.
  */
-export const escapeRegExp = (text: string): string =>
-  text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+export const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** The engine changes each whitespace character in the page to U+0020. */
 const WHITESPACE_RUN = /\s+/;
@@ -90,10 +89,7 @@ const WHITESPACE_RUN = /\s+/;
  * spaces stay, which is why the pattern uses ` +` and not one space.
  */
 export const literalSource = (pattern: string): string =>
-  pattern
-    .split(WHITESPACE_RUN)
-    .map(escapeRegExp)
-    .join(" +");
+  pattern.split(WHITESPACE_RUN).map(escapeRegExp).join(" +");
 
 // ---------------------------------------------------------------------------
 // `/regex/` literals
@@ -115,9 +111,7 @@ export interface RegexLiteral {
  * be an allowed flag letter. A plain search for `and/or` is therefore still a
  * literal search, and not an empty regular expression with a false flag.
  */
-export const splitRegexLiteral = (
-  text: string,
-): Option.Option<RegexLiteral> => {
+export const splitRegexLiteral = (text: string): Option.Option<RegexLiteral> => {
   if (text.length < 2 || !text.startsWith("/")) return Option.none();
 
   let closing = -1;
@@ -212,43 +206,31 @@ const BASE_FLAGS = "g";
  * This function never fails. A pattern that does not compile comes back with
  * `error` set to a `Some`.
  */
-export const parseFindQuery = (
-  raw: string,
-  options: FindQueryOptions,
-): ParsedFindQuery => {
+export const parseFindQuery = (raw: string, options: FindQueryOptions): ParsedFindQuery => {
   const literal = splitRegexLiteral(raw);
 
   const directives: Directives = Option.isNone(literal)
     ? stripDirectives(raw)
     : {
-      text: literal.value.body,
-      isRegex: Option.some(true),
-      ignoreCase: Option.none(),
-    };
+        text: literal.value.body,
+        isRegex: Option.some(true),
+        ignoreCase: Option.none(),
+      };
 
   const pattern = directives.text;
-  const kind: FindQueryKind =
-    Option.getOrElse(directives.isRegex, () => options.regexFindMode)
-      ? "regex"
-      : "literal";
+  const kind: FindQueryKind = Option.getOrElse(directives.isRegex, () => options.regexFindMode)
+    ? "regex"
+    : "literal";
 
-  const literalIgnoreCase = Option.isSome(literal) &&
-      literal.value.flags.includes("i")
-    ? Option.some(true)
-    : Option.none<boolean>();
-  const explicitIgnoreCase = Option.orElse(
-    directives.ignoreCase,
-    () => literalIgnoreCase,
-  );
+  const literalIgnoreCase =
+    Option.isSome(literal) && literal.value.flags.includes("i")
+      ? Option.some(true)
+      : Option.none<boolean>();
+  const explicitIgnoreCase = Option.orElse(directives.ignoreCase, () => literalIgnoreCase);
   const smartcase = Option.isNone(explicitIgnoreCase);
-  const ignoreCase = Option.getOrElse(
-    explicitIgnoreCase,
-    () => !hasUpperCase(pattern),
-  );
+  const ignoreCase = Option.getOrElse(explicitIgnoreCase, () => !hasUpperCase(pattern));
 
-  const extraFlags = Option.isNone(literal)
-    ? ""
-    : literal.value.flags.replace("i", "");
+  const extraFlags = Option.isNone(literal) ? "" : literal.value.flags.replace("i", "");
   const flags = `${BASE_FLAGS}${ignoreCase ? "i" : ""}${extraFlags}`;
 
   if (pattern.length === 0) {
@@ -284,22 +266,15 @@ export const parseFindQuery = (
 const MAX_PATTERN_LENGTH = 512;
 
 /** A `None` when `source` and `flags` compile *and* are safe to run. */
-const compileError = (
-  source: string,
-  flags: string,
-): Option.Option<string> => {
+const compileError = (source: string, flags: string): Option.Option<string> => {
   if (source.length > MAX_PATTERN_LENGTH) {
-    return Option.some(
-      `pattern is longer than ${MAX_PATTERN_LENGTH} characters`,
-    );
+    return Option.some(`pattern is longer than ${MAX_PATTERN_LENGTH} characters`);
   }
 
   try {
     new RegExp(source, flags);
   } catch (cause) {
-    return Option.some(
-      cause instanceof Error ? cause.message : String(cause),
-    );
+    return Option.some(cause instanceof Error ? cause.message : String(cause));
   }
 
   // The safety check reads the text of the pattern, and never runs it. A
@@ -313,10 +288,7 @@ const compileError = (
   // promise a linear match, so `~/features/find/Engine.ts` reads the page text
   // in measured windows and stops at a deadline. That budget is the second
   // limit on the same pattern.
-  return Option.map(
-    regexSafetyError(source, flags),
-    (reason) => `${reason}; try a simpler one`,
-  );
+  return Option.map(regexSafetyError(source, flags), (reason) => `${reason}; try a simpler one`);
 };
 
 /**

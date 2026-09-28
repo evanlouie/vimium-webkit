@@ -25,24 +25,9 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import {
-  Cause,
-  Context,
-  Effect,
-  Exit,
-  Layer,
-  Option,
-  Queue,
-  Result,
-  Scope,
-  Stream,
-} from "effect";
+import { Cause, Context, Effect, Exit, Layer, Option, Queue, Result, Scope, Stream } from "effect";
 import { ENVELOPE } from "~/domain/FrameMessage.ts";
-import {
-  FrameAuth,
-  type FrameCipher,
-  type FrameHandshake,
-} from "~/frames/Auth.ts";
+import { FrameAuth, type FrameCipher, type FrameHandshake } from "~/frames/Auth.ts";
 import {
   FrameBus,
   makeSealedLink,
@@ -50,12 +35,7 @@ import {
   type PortHost,
   toFrame,
 } from "~/frames/Bus.ts";
-import {
-  Dom,
-  type Listener,
-  type ListenOptions,
-  type TargetEventMap,
-} from "~/platform/Dom.ts";
+import { Dom, type Listener, type ListenOptions, type TargetEventMap } from "~/platform/Dom.ts";
 import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 import { type FrameId, Realm } from "~/platform/Realm.ts";
 
@@ -120,7 +100,7 @@ const makeWorld = (): World => {
 const domLayer = (world: World): Layer.Layer<Dom> =>
   Layer.effect(
     Dom,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const services = yield* Effect.context<never>();
 
       const attach = <A extends Event, R>(
@@ -128,11 +108,9 @@ const domLayer = (world: World): Layer.Layer<Dom> =>
         type: string,
         handler: Listener<A, R>,
       ): Effect.Effect<void, never, R | Scope.Scope> =>
-        Effect.gen(function*() {
+        Effect.gen(function* () {
           const handlerServices = yield* Effect.context<R>();
-          const run = Effect.runSyncExitWith(
-            Context.merge(services, handlerServices),
-          );
+          const run = Effect.runSyncExitWith(Context.merge(services, handlerServices));
           const listen = (event: Event): void => {
             const exit = run(handler(event as A));
             if (Exit.isFailure(exit)) {
@@ -164,30 +142,16 @@ const domLayer = (world: World): Layer.Layer<Dom> =>
             }
           }),
         attempt: <A>(_api: string, run: () => A) => Effect.sync(run),
-        listen: <
-          K extends keyof TargetEventMap,
-          T extends keyof TargetEventMap[K],
-          R,
-        >(
+        listen: <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K], R>(
           _target: K,
           type: T,
           handler: Listener<TargetEventMap[K][T], R>,
           _options?: ListenOptions,
-        ) =>
-          attach(
-            world.top,
-            String(type),
-            handler as unknown as Listener<Event, R>,
-          ),
-        listenOn: <R>(
-          target: EventTarget,
-          type: string,
-          handler: Listener<Event, R>,
-        ) => attach(target, type, handler),
-        events: <
-          K extends keyof TargetEventMap,
-          T extends keyof TargetEventMap[K],
-        >() => Stream.empty as Stream.Stream<TargetEventMap[K][T]>,
+        ) => attach(world.top, String(type), handler as unknown as Listener<Event, R>),
+        listenOn: <R>(target: EventTarget, type: string, handler: Listener<Event, R>) =>
+          attach(target, type, handler),
+        events: <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K]>() =>
+          Stream.empty as Stream.Stream<TargetEventMap[K][T]>,
         nextFrame: Effect.succeed(0),
         yieldToBrowser: Effect.void,
         now: Effect.sync(() => Date.now()),
@@ -246,25 +210,16 @@ const authLayer = (
   frameId: string,
 ): Layer.Layer<FrameAuth> =>
   Layer.fresh(FrameAuth.layer).pipe(
-    Layer.provide(Layer.mergeAll(
-      Layer.succeed(KeyValueStore, kv),
-      realmLayer(isTop, frameId),
-    )),
+    Layer.provide(Layer.mergeAll(Layer.succeed(KeyValueStore, kv), realmLayer(isTop, frameId))),
   );
 
 /** The same service, with a delay on the proof of one attempt. */
-const slowFor = (
-  auth: FrameAuth["Service"],
-  helloId: string,
-): FrameAuth["Service"] =>
+const slowFor = (auth: FrameAuth["Service"], helloId: string): FrameAuth["Service"] =>
   FrameAuth.of({
     ...auth,
     verifyJoin: (handshake, proof) =>
       handshake.helloId === helloId
-        ? Effect.andThen(
-          Effect.sleep(SLOW_PROOF),
-          auth.verifyJoin(handshake, proof),
-        )
+        ? Effect.andThen(Effect.sleep(SLOW_PROOF), auth.verifyJoin(handshake, proof))
         : auth.verifyJoin(handshake, proof),
   });
 
@@ -273,11 +228,7 @@ const slowFor = (
 // ---------------------------------------------------------------------------
 
 /** Send one message to the top window, as a child frame of the page does. */
-const deliver = (
-  world: World,
-  data: unknown,
-  ports: readonly MessagePort[],
-): void => {
+const deliver = (world: World, data: unknown, ports: readonly MessagePort[]): void => {
   const event = new MessageEvent("message", {
     data,
     origin: CHILD_ORIGIN,
@@ -305,20 +256,19 @@ const tokenOf = (world: World): string => {
   return String(data.token);
 };
 
-const join = (
-  world: World,
-  handshake: FrameHandshake,
-  proof: string,
-  port: MessagePort,
-): void =>
-  deliver(world, {
-    ...ENVELOPE,
-    kind: "JOIN",
-    token: handshake.token,
-    helloId: handshake.helloId,
-    frameId: handshake.frameId,
-    proof,
-  }, [port]);
+const join = (world: World, handshake: FrameHandshake, proof: string, port: MessagePort): void =>
+  deliver(
+    world,
+    {
+      ...ENVELOPE,
+      kind: "JOIN",
+      token: handshake.token,
+      helloId: handshake.helloId,
+      frameId: handshake.frameId,
+      proof,
+    },
+    [port],
+  );
 
 /** The link of the child, over the port that the child still holds. */
 const makeSealedLinkOf = (
@@ -331,7 +281,8 @@ const makeSealedLinkOf = (
     makeSealedLink(host, port, cipher, "up", (data) =>
       Effect.sync(() => {
         Queue.offerUnsafe(delivered, data);
-      })),
+      }),
+    ),
   );
 
 /** Read one value, or give `None` after a wait on the real clock. */
@@ -342,11 +293,8 @@ const nextOf = <A>(queue: Queue.Queue<A>): Effect.Effect<Option.Option<A>> =>
   });
 
 /** Did a message of this kind reach the child on its own port? */
-const sawKind = (
-  delivered: Queue.Queue<unknown>,
-  kind: string,
-): Effect.Effect<boolean> =>
-  Effect.gen(function*() {
+const sawKind = (delivered: Queue.Queue<unknown>, kind: string): Effect.Effect<boolean> =>
+  Effect.gen(function* () {
     while (true) {
       const next = yield* nextOf(delivered);
       if (Option.isNone(next)) return false;
@@ -357,17 +305,17 @@ const sawKind = (
 
 describe("the admission of a JOIN", () => {
   it.live("admits the joins of one child in the order they arrive", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const kv = makeStore();
       const world = makeWorld();
       const delivered = yield* Queue.unbounded<unknown>();
 
       // The top frame. Its `FrameAuth` creates the credential of the session.
-      yield* Effect.gen(function*() {
+      yield* Effect.gen(function* () {
         const real = yield* FrameAuth;
         const auth = slowFor(real, HELLO_FIRST);
 
-        yield* Effect.gen(function*() {
+        yield* Effect.gen(function* () {
           const bus = yield* FrameBus;
           const dom = yield* Dom;
 
@@ -387,7 +335,7 @@ describe("the admission of a JOIN", () => {
           };
 
           // The child signs both attempts and keeps the cipher of the second.
-          const signed = yield* Effect.gen(function*() {
+          const signed = yield* Effect.gen(function* () {
             const child = yield* FrameAuth;
             return {
               one: yield* child.joinProof(handshakeOne),
@@ -437,27 +385,30 @@ describe("the admission of a JOIN", () => {
         }).pipe(
           Effect.provide(
             FrameBus.layer.pipe(
-              Layer.provideMerge(Layer.mergeAll(
-                domLayer(world),
-                realmLayer(true, TOP_FRAME),
-                Layer.succeed(FrameAuth, auth),
-              )),
+              Layer.provideMerge(
+                Layer.mergeAll(
+                  domLayer(world),
+                  realmLayer(true, TOP_FRAME),
+                  Layer.succeed(FrameAuth, auth),
+                ),
+              ),
             ),
           ),
         );
       }).pipe(Effect.provide(authLayer(kv, true, TOP_FRAME)));
-    }));
+    }),
+  );
 
   it.live("keeps the newest join when page code fills the queue", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const kv = makeStore();
       const world = makeWorld();
       const delivered = yield* Queue.unbounded<unknown>();
 
-      yield* Effect.gen(function*() {
+      yield* Effect.gen(function* () {
         const auth = yield* FrameAuth;
 
-        yield* Effect.gen(function*() {
+        yield* Effect.gen(function* () {
           const dom = yield* Dom;
 
           // The join of a true frame is signed first, because the signature
@@ -467,7 +418,7 @@ describe("the admission of a JOIN", () => {
             helloId: HELLO_SECOND,
             frameId: CHILD_FRAME,
           };
-          const signed = yield* Effect.gen(function*() {
+          const signed = yield* Effect.gen(function* () {
             const child = yield* FrameAuth;
             return {
               proof: yield* child.joinProof(handshake),
@@ -509,14 +460,17 @@ describe("the admission of a JOIN", () => {
         }).pipe(
           Effect.provide(
             FrameBus.layer.pipe(
-              Layer.provideMerge(Layer.mergeAll(
-                domLayer(world),
-                realmLayer(true, TOP_FRAME),
-                Layer.succeed(FrameAuth, auth),
-              )),
+              Layer.provideMerge(
+                Layer.mergeAll(
+                  domLayer(world),
+                  realmLayer(true, TOP_FRAME),
+                  Layer.succeed(FrameAuth, auth),
+                ),
+              ),
             ),
           ),
         );
       }).pipe(Effect.provide(authLayer(kv, true, TOP_FRAME)));
-    }));
+    }),
+  );
 });

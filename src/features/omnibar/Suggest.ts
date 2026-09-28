@@ -23,15 +23,7 @@
  * service. The local history index is never read here, and never sent.
  */
 
-import {
-  Clock,
-  Duration,
-  Effect,
-  FiberHandle,
-  Option,
-  Ref,
-  type Scope,
-} from "effect";
+import { Clock, Duration, Effect, FiberHandle, Option, Ref, type Scope } from "effect";
 import { Settings } from "~/core/Settings.ts";
 import {
   parseSuggestResponse,
@@ -45,10 +37,7 @@ import type { GmXhrResponse } from "~/platform/Gm.ts";
 import { Gm } from "~/platform/Gm.ts";
 
 /** What a completed request gives back to the caller. */
-export type SuggestionSink = (
-  query: string,
-  suggestions: readonly string[],
-) => Effect.Effect<void>;
+export type SuggestionSink = (query: string, suggestions: readonly string[]) => Effect.Effect<void>;
 
 export interface Suggester {
   /**
@@ -84,16 +73,11 @@ const NO_SUGGESTIONS = Option.none<readonly string[]>();
  * `None` for anything that is not a complete, successful answer. A failure
  * here is a non-event: the omnibar shows the rows that it already has.
  */
-const readResponse = (
-  response: Option.Option<GmXhrResponse>,
-): Option.Option<readonly string[]> => {
+const readResponse = (response: Option.Option<GmXhrResponse>): Option.Option<readonly string[]> => {
   if (Option.isNone(response)) return NO_SUGGESTIONS;
   if (response.value.status !== 200) return NO_SUGGESTIONS;
   return Option.some(
-    parseSuggestResponse(response.value.responseText ?? "").slice(
-      0,
-      SUGGEST_LIMIT,
-    ),
+    parseSuggestResponse(response.value.responseText ?? "").slice(0, SUGGEST_LIMIT),
   );
 };
 
@@ -104,26 +88,19 @@ const readResponse = (
  * enclosing scope. It holds the text that the user typed, so it must not
  * outlive the page.
  */
-export const makeSuggester: Effect.Effect<
-  Suggester,
-  never,
-  Gm | Settings | Scope.Scope
-> = Effect.gen(function*() {
-  const gm = yield* Gm;
-  const settings = yield* Settings;
+export const makeSuggester: Effect.Effect<Suggester, never, Gm | Settings | Scope.Scope> =
+  Effect.gen(function* () {
+    const gm = yield* Gm;
+    const settings = yield* Settings;
 
-  const cache = yield* Ref.make<ReadonlyMap<string, CacheEntry>>(new Map());
-  const available = yield* Ref.make(gm.canRequest);
-  const inFlight = yield* FiberHandle.make<void, never>();
+    const cache = yield* Ref.make<ReadonlyMap<string, CacheEntry>>(new Map());
+    const available = yield* Ref.make(gm.canRequest);
+    const inFlight = yield* FiberHandle.make<void, never>();
 
-  const fetch = Effect.fn("Suggester.fetch")(
-    function*(endpoint: string, query: string) {
+    const fetch = Effect.fn("Suggester.fetch")(function* (endpoint: string, query: string) {
       // A function, so that a query which holds `$&` cannot become a
       // replacement pattern.
-      const url = endpoint.replaceAll(
-        "%s",
-        () => encodeURIComponent(query),
-      );
+      const url = endpoint.replaceAll("%s", () => encodeURIComponent(query));
 
       return yield* Effect.matchEffect(
         // Two deadlines, and both are needed. The manager gets `timeoutMs`,
@@ -150,11 +127,13 @@ export const makeSuggester: Effect.Effect<
           onSuccess: (response) => Effect.succeed(readResponse(response)),
         },
       );
-    },
-  );
+    });
 
-  const request = Effect.fn("Suggester.request")(
-    function*(searchUrl: string, query: string, onResults: SuggestionSink) {
+    const request = Effect.fn("Suggester.request")(function* (
+      searchUrl: string,
+      query: string,
+      onResults: SuggestionSink,
+    ) {
       // A new question replaces the old one, in flight or not.
       yield* FiberHandle.clear(inFlight);
 
@@ -188,27 +167,28 @@ export const makeSuggester: Effect.Effect<
         });
       }
 
-      yield* Effect.asVoid(FiberHandle.run(
-        inFlight,
-        Effect.gen(function*() {
-          yield* Effect.sleep(Duration.millis(SUGGEST_DEBOUNCE_MS));
-          const suggestions = yield* fetch(endpoint, trimmed);
-          if (Option.isNone(suggestions)) return;
-          const at = yield* Clock.currentTimeMillis;
-          yield* Ref.update(cache, (entries) => {
-            const next = new Map(entries);
-            next.set(key, { at, suggestions: suggestions.value });
-            return next;
-          });
-          yield* onResults(trimmed, suggestions.value);
-        }),
-      ));
-    },
-  );
+      yield* Effect.asVoid(
+        FiberHandle.run(
+          inFlight,
+          Effect.gen(function* () {
+            yield* Effect.sleep(Duration.millis(SUGGEST_DEBOUNCE_MS));
+            const suggestions = yield* fetch(endpoint, trimmed);
+            if (Option.isNone(suggestions)) return;
+            const at = yield* Clock.currentTimeMillis;
+            yield* Ref.update(cache, (entries) => {
+              const next = new Map(entries);
+              next.set(key, { at, suggestions: suggestions.value });
+              return next;
+            });
+            yield* onResults(trimmed, suggestions.value);
+          }),
+        ),
+      );
+    });
 
-  return {
-    request,
-    cancel: FiberHandle.clear(inFlight),
-    isAvailable: Ref.get(available),
-  };
-});
+    return {
+      request,
+      cancel: FiberHandle.clear(inFlight),
+      isAvailable: Ref.get(available),
+    };
+  });

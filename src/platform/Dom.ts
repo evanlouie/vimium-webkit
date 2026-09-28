@@ -12,16 +12,7 @@
  * every listener goes with it. No module keeps a list of things to remove.
  */
 
-import {
-  Cause,
-  Context,
-  Effect,
-  Exit,
-  Layer,
-  Schema,
-  type Scope,
-  Stream,
-} from "effect";
+import { Cause, Context, Effect, Exit, Layer, Schema, type Scope, Stream } from "effect";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -73,13 +64,9 @@ export interface ListenOptions {
  * the browser's own dispatch, so `preventDefault` still works. Read
  * `ARCHITECTURE.md` section 3 before you put anything that suspends in here.
  */
-export type Listener<Event, R> = (
-  event: Event,
-) => Effect.Effect<void, never, R>;
+export type Listener<Event, R> = (event: Event) => Effect.Effect<void, never, R>;
 
-const toAddOptions = (
-  options: ListenOptions | undefined,
-): AddEventListenerOptions => ({
+const toAddOptions = (options: ListenOptions | undefined): AddEventListenerOptions => ({
   capture: options?.capture ?? false,
   ...(options?.passive === undefined ? {} : { passive: options.passive }),
   ...(options?.once === undefined ? {} : { once: options.once }),
@@ -89,85 +76,75 @@ const toAddOptions = (
 // The service
 // ---------------------------------------------------------------------------
 
-export class Dom extends Context.Service<Dom, {
-  /** This frame's global object. Use it instead of a bare `globalThis`. */
-  readonly window: Window & typeof globalThis;
-  readonly document: Document;
+export class Dom extends Context.Service<
+  Dom,
+  {
+    /** This frame's global object. Use it instead of a bare `globalThis`. */
+    readonly window: Window & typeof globalThis;
+    readonly document: Document;
 
-  /** The URL of this frame. A read, because a soft navigation changes it. */
-  readonly href: Effect.Effect<string>;
+    /** The URL of this frame. A read, because a soft navigation changes it. */
+    readonly href: Effect.Effect<string>;
 
-  /**
-   * Read a global that this realm may have poisoned.
-   *
-   * The failure says which API, so a caller can name it to the user.
-   */
-  readonly probe: <A>(
-    api: string,
-    read: () => A,
-  ) => Effect.Effect<A, DomError>;
+    /**
+     * Read a global that this realm may have poisoned.
+     *
+     * The failure says which API, so a caller can name it to the user.
+     */
+    readonly probe: <A>(api: string, read: () => A) => Effect.Effect<A, DomError>;
 
-  /** The same read, with a value for "absent" and for "we could not tell". */
-  readonly probeOr: <A>(read: () => A, fallback: A) => Effect.Effect<A>;
+    /** The same read, with a value for "absent" and for "we could not tell". */
+    readonly probeOr: <A>(read: () => A, fallback: A) => Effect.Effect<A>;
 
-  /** Run a synchronous DOM call, and name the failure if it throws. */
-  readonly attempt: <A>(
-    api: string,
-    run: () => A,
-  ) => Effect.Effect<A, DomError>;
+    /** Run a synchronous DOM call, and name the failure if it throws. */
+    readonly attempt: <A>(api: string, run: () => A) => Effect.Effect<A, DomError>;
 
-  /**
-   * Listen on `window`, `document` or an element, for the enclosing scope.
-   *
-   * The handler runs synchronously, inside the browser's dispatch. That is what
-   * lets a key handler call `preventDefault`.
-   */
-  readonly listen: <
-    K extends keyof TargetEventMap,
-    T extends keyof TargetEventMap[K],
-    R,
-  >(
-    target: K,
-    type: T,
-    handler: Listener<TargetEventMap[K][T], R>,
-    options?: ListenOptions,
-  ) => Effect.Effect<void, never, R | Scope.Scope>;
+    /**
+     * Listen on `window`, `document` or an element, for the enclosing scope.
+     *
+     * The handler runs synchronously, inside the browser's dispatch. That is what
+     * lets a key handler call `preventDefault`.
+     */
+    readonly listen: <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K], R>(
+      target: K,
+      type: T,
+      handler: Listener<TargetEventMap[K][T], R>,
+      options?: ListenOptions,
+    ) => Effect.Effect<void, never, R | Scope.Scope>;
 
-  /** Listen on any other target. The event is not narrowed. */
-  readonly listenOn: <R>(
-    target: EventTarget,
-    type: string,
-    handler: Listener<Event, R>,
-    options?: ListenOptions,
-  ) => Effect.Effect<void, never, R | Scope.Scope>;
+    /** Listen on any other target. The event is not narrowed. */
+    readonly listenOn: <R>(
+      target: EventTarget,
+      type: string,
+      handler: Listener<Event, R>,
+      options?: ListenOptions,
+    ) => Effect.Effect<void, never, R | Scope.Scope>;
 
-  /** The same events as a stream, for work that may suspend. */
-  readonly events: <
-    K extends keyof TargetEventMap,
-    T extends keyof TargetEventMap[K],
-  >(
-    target: K,
-    type: T,
-    options?: ListenOptions,
-  ) => Stream.Stream<TargetEventMap[K][T]>;
+    /** The same events as a stream, for work that may suspend. */
+    readonly events: <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K]>(
+      target: K,
+      type: T,
+      options?: ListenOptions,
+    ) => Stream.Stream<TargetEventMap[K][T]>;
 
-  /** Resolves on the next animation frame, with its timestamp. */
-  readonly nextFrame: Effect.Effect<number>;
+    /** Resolves on the next animation frame, with its timestamp. */
+    readonly nextFrame: Effect.Effect<number>;
 
-  /**
-   * Give control back to the browser.
-   *
-   * A `MessageChannel`, not a timer. Every engine clamps a nested timeout to
-   * 4 ms, which triples the cost of work that takes many slices.
-   */
-  readonly yieldToBrowser: Effect.Effect<void>;
+    /**
+     * Give control back to the browser.
+     *
+     * A `MessageChannel`, not a timer. Every engine clamps a nested timeout to
+     * 4 ms, which triples the cost of work that takes many slices.
+     */
+    readonly yieldToBrowser: Effect.Effect<void>;
 
-  /** A monotonic clock reading in milliseconds. */
-  readonly now: Effect.Effect<number>;
-}>()("vimium/platform/Dom") {
+    /** A monotonic clock reading in milliseconds. */
+    readonly now: Effect.Effect<number>;
+  }
+>()("vimium/platform/Dom") {
   static readonly layer: Layer.Layer<Dom> = Layer.effect(
     Dom,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const services = yield* Effect.context<never>();
       const win = globalThis as unknown as Window & typeof globalThis;
       const doc = win.document;
@@ -181,10 +158,7 @@ export class Dom extends Context.Service<Dom, {
           }
         });
 
-      const probe = <A>(
-        api: string,
-        read: () => A,
-      ): Effect.Effect<A, DomError> =>
+      const probe = <A>(api: string, read: () => A): Effect.Effect<A, DomError> =>
         Effect.try({
           try: read,
           catch: (cause) =>
@@ -213,11 +187,9 @@ export class Dom extends Context.Service<Dom, {
         handler: Listener<A, R>,
         options: ListenOptions | undefined,
       ): Effect.Effect<void, never, R | Scope.Scope> =>
-        Effect.gen(function*() {
+        Effect.gen(function* () {
           const handlerServices = yield* Effect.context<R>();
-          const run = Effect.runSyncExitWith(
-            Context.merge(services, handlerServices),
-          );
+          const run = Effect.runSyncExitWith(Context.merge(services, handlerServices));
           const listen = (event: Event): void => {
             const exit = run(handler(event as A));
             if (Exit.isFailure(exit)) reportListenerFailure(type, exit.cause);
@@ -243,15 +215,9 @@ export class Dom extends Context.Service<Dom, {
         attempt: probe,
 
         listen: (target, type, handler, options) =>
-          attach(
-            resolveTarget(target),
-            String(type),
-            handler as Listener<Event, never>,
-            options,
-          ),
+          attach(resolveTarget(target), String(type), handler as Listener<Event, never>, options),
 
-        listenOn: (target, type, handler, options) =>
-          attach(target, type, handler, options),
+        listenOn: (target, type, handler, options) => attach(target, type, handler, options),
 
         events: (target, type, options) =>
           Stream.fromEventListener(
@@ -283,7 +249,7 @@ export class Dom extends Context.Service<Dom, {
         }),
 
         now: Effect.sync(() =>
-          typeof performance === "undefined" ? Date.now() : performance.now()
+          typeof performance === "undefined" ? Date.now() : performance.now(),
         ),
       });
     }),
@@ -296,14 +262,8 @@ export class Dom extends Context.Service<Dom, {
  * `console.error` and not a logger, because this can run before the logger
  * exists, and because a userscript shares its console with the page.
  */
-const reportListenerFailure = (
-  type: string,
-  cause: Cause.Cause<never>,
-): void => {
-  console.error(
-    `[vimium-webkit] the ${type} listener failed`,
-    Cause.pretty(cause),
-  );
+const reportListenerFailure = (type: string, cause: Cause.Cause<never>): void => {
+  console.error(`[vimium-webkit] the ${type} listener failed`, Cause.pretty(cause));
 };
 
 const describe = (cause: unknown): string => {

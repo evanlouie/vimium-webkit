@@ -74,10 +74,7 @@ export const buildMetadata = (input: MetadataInput): string => {
     // userscript's grants are the only thing standing between it and the user's
     // cookies on arbitrary origins. quoid does not implement `@connect` at all,
     // which degrades to "no suggestions" rather than an error.
-    ...SUGGEST_HOSTS.map((host): readonly [string, string] => [
-      "connect",
-      host,
-    ]),
+    ...SUGGEST_HOSTS.map((host): readonly [string, string] => ["connect", host]),
     ["downloadURL", input.downloadUrl],
     ["updateURL", input.updateUrl],
   ];
@@ -87,9 +84,7 @@ export const buildMetadata = (input: MetadataInput): string => {
   // and running in every frame is required for cross-frame link hints (§6.5).
 
   const width = Math.max(...lines.map(([key]) => key.length));
-  const body = lines
-    .map(([key, value]) => `// @${key.padEnd(width)}  ${value}`)
-    .join("\n");
+  const body = lines.map(([key, value]) => `// @${key.padEnd(width)}  ${value}`).join("\n");
 
   // Exactly one space after `//`, and the block must be the very first thing in
   // the file: ScriptCat rejects the script otherwise.

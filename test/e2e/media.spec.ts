@@ -39,13 +39,7 @@ test.describe("a focused media player", () => {
 
     await vw.press("ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Space");
 
-    expect(await pageKeys(vw)).toEqual([
-      "ArrowDown",
-      "ArrowUp",
-      "ArrowLeft",
-      "ArrowRight",
-      " ",
-    ]);
+    expect(await pageKeys(vw)).toEqual(["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", " "]);
     // The player called `preventDefault`, as players do, so nothing scrolled.
     expect((await vw.scrollOffsets()).y).toBe(0);
   });

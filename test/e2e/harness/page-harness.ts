@@ -141,16 +141,10 @@ export const installPageHarness = (init: HarnessInit): void => {
 
   interface GmNamespaceStub {
     readonly info: unknown;
-    readonly getValue: (
-      key: string,
-      fallback?: GmValue,
-    ) => Promise<GmValue | undefined>;
+    readonly getValue: (key: string, fallback?: GmValue) => Promise<GmValue | undefined>;
     readonly setValue: (key: string, value: GmValue) => Promise<void>;
     readonly deleteValue: (key: string) => Promise<void>;
-    readonly openInTab: (
-      url: string,
-      options?: OpenInTabOptions | boolean,
-    ) => Promise<TabHandle>;
+    readonly openInTab: (url: string, options?: OpenInTabOptions | boolean) => Promise<TabHandle>;
     readonly setClipboard: (data: string, type?: string) => Promise<void>;
   }
 
@@ -160,10 +154,7 @@ export const installPageHarness = (init: HarnessInit): void => {
     GM_getValue?: (key: string, fallback?: GmValue) => GmValue | undefined;
     GM_setValue?: (key: string, value: GmValue) => void;
     GM_deleteValue?: (key: string) => void;
-    GM_openInTab?: (
-      url: string,
-      options?: OpenInTabOptions | boolean,
-    ) => TabHandle;
+    GM_openInTab?: (url: string, options?: OpenInTabOptions | boolean) => TabHandle;
     GM_setClipboard?: (data: string, type?: string) => void;
   }
 
@@ -204,10 +195,7 @@ export const installPageHarness = (init: HarnessInit): void => {
       const name = durable.key(index);
       if (name === null || !name.startsWith(DURABLE_PREFIX)) continue;
       // The stored value wins over the seed. It is the newer of the two.
-      state.store.set(
-        name.slice(DURABLE_PREFIX.length),
-        durable.getItem(name) ?? "",
-      );
+      state.store.set(name.slice(DURABLE_PREFIX.length), durable.getItem(name) ?? "");
     }
   };
 
@@ -227,10 +215,7 @@ export const installPageHarness = (init: HarnessInit): void => {
   // -- Closed shadow root capture -------------------------------------------
 
   const nativeAttachShadow = Element.prototype.attachShadow;
-  Element.prototype.attachShadow = function(
-    this: Element,
-    options: ShadowRootInit,
-  ): ShadowRoot {
+  Element.prototype.attachShadow = function (this: Element, options: ShadowRootInit): ShadowRoot {
     const root = nativeAttachShadow.call(this, options);
     // Only the extension's single host. `capabilities.ts` probes constructable
     // stylesheets by attaching a throwaway root to a `<div>`; capturing that
@@ -256,11 +241,7 @@ export const installPageHarness = (init: HarnessInit): void => {
 
   // -- Timer instrumentation -------------------------------------------------
 
-  type TimerFn = (
-    handler: TimerHandler,
-    timeout?: number,
-    ...args: readonly unknown[]
-  ) => number;
+  type TimerFn = (handler: TimerHandler, timeout?: number, ...args: readonly unknown[]) => number;
 
   const timers = globalThis as unknown as {
     setTimeout: TimerFn;
@@ -287,10 +268,7 @@ export const installPageHarness = (init: HarnessInit): void => {
 
   // -- Value store -----------------------------------------------------------
 
-  const readValue = (
-    key: string,
-    fallback?: GmValue,
-  ): GmValue | undefined => {
+  const readValue = (key: string, fallback?: GmValue): GmValue | undefined => {
     const value = state.store.get(key);
     return value === undefined ? fallback : value;
   };
@@ -302,17 +280,14 @@ export const installPageHarness = (init: HarnessInit): void => {
     state.store.delete(key);
     keepDurable(key, null);
   };
-  const recordTab = (
-    url: string,
-    options?: OpenInTabOptions | boolean,
-  ): TabHandle => {
-    const active = typeof options === "boolean"
-      ? !options
-      : options === undefined
-      ? null
-      : options.active ?? (options.loadInBackground === undefined
-        ? null
-        : !options.loadInBackground);
+  const recordTab = (url: string, options?: OpenInTabOptions | boolean): TabHandle => {
+    const active =
+      typeof options === "boolean"
+        ? !options
+        : options === undefined
+          ? null
+          : (options.active ??
+            (options.loadInBackground === undefined ? null : !options.loadInBackground));
     state.openedTabs.push({ url, active });
     // A real handle would open a tab; the point of the recording is that no
     // test should ever depend on a second tab actually existing.

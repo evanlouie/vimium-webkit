@@ -14,17 +14,7 @@
  * suspend. Read `ARCHITECTURE.md` section 3.
  */
 
-import {
-  Context,
-  Effect,
-  Exit,
-  Layer,
-  Option,
-  Ref,
-  Scope,
-  Stream,
-  SubscriptionRef,
-} from "effect";
+import { Context, Effect, Exit, Layer, Option, Ref, Scope, Stream, SubscriptionRef } from "effect";
 import { isPassKey } from "~/domain/Exclusion.ts";
 import { appendCountDigit, isCountDigit } from "~/domain/Key.ts";
 import { isComposing, isModifierKey, keyNotation } from "~/domain/Key.ts";
@@ -41,11 +31,7 @@ import { mediaPlayerHasFocus } from "~/platform/Elements.ts";
 import { Realm } from "~/platform/Realm.ts";
 import { Commands } from "./Commands.ts";
 import { Exclusions } from "./Exclusions.ts";
-import {
-  CONTINUE_BUBBLING,
-  type HandlerResult,
-  SUPPRESS_EVENT,
-} from "./HandlerStack.ts";
+import { CONTINUE_BUBBLING, type HandlerResult, SUPPRESS_EVENT } from "./HandlerStack.ts";
 import { Mappings } from "./Mappings.ts";
 import { isEscape, Modes } from "./Modes.ts";
 import { Report } from "./Report.ts";
@@ -79,8 +65,7 @@ export const MEDIA_KEYS: ReadonlySet<string> = new Set([
  * an `Event`, but other paths do not. A page can hand such an object to a
  * handler of ours directly, so every value except `true` is refused.
  */
-export const isUserEvent = (event: Pick<Event, "isTrusted">): boolean =>
-  event.isTrusted === true;
+export const isUserEvent = (event: Pick<Event, "isTrusted">): boolean => event.isTrusted === true;
 
 /**
  * The key state, in the per-branch model.
@@ -114,47 +99,42 @@ interface KeyState {
   readonly pending: ReadonlyArray<string>;
 }
 
-export class Keyboard extends Context.Service<Keyboard, {
-  /** The half-typed sequence, for the HUD. `null` when there is none. */
-  readonly pending: SubscriptionRef.SubscriptionRef<string | null>;
+export class Keyboard extends Context.Service<
+  Keyboard,
+  {
+    /** The half-typed sequence, for the HUD. `null` when there is none. */
+    readonly pending: SubscriptionRef.SubscriptionRef<string | null>;
 
-  /**
-   * Enter or leave normal mode, to match the exclusion verdict now.
-   *
-   * A fiber already follows the verdict, and a fiber runs later. The start path
-   * replays the keys that the user pressed while the application was building,
-   * so it must know that normal mode is live *before* it replays them.
-   */
-  readonly syncExclusion: Effect.Effect<void>;
+    /**
+     * Enter or leave normal mode, to match the exclusion verdict now.
+     *
+     * A fiber already follows the verdict, and a fiber runs later. The start path
+     * replays the keys that the user pressed while the application was building,
+     * so it must know that normal mode is live *before* it replays them.
+     */
+    readonly syncExclusion: Effect.Effect<void>;
 
-  /** Give the next `count` keystrokes to the page, without reading them. */
-  readonly passNextKey: (count: number) => Effect.Effect<void>;
+    /** Give the next `count` keystrokes to the page, without reading them. */
+    readonly passNextKey: (count: number) => Effect.Effect<void>;
 
-  /**
-   * Forget which presses we took.
-   *
-   * A press whose release we will never see leaves normal mode waiting for a
-   * `keyup` that never comes. The everyday case is a window switch in the
-   * middle of a keystroke. The next release of that physical key would then be
-   * taken from a page that was entitled to it.
-   */
-  readonly forgetSuppressed: Effect.Effect<void>;
-}>()("vimium/core/Keyboard") {
+    /**
+     * Forget which presses we took.
+     *
+     * A press whose release we will never see leaves normal mode waiting for a
+     * `keyup` that never comes. The everyday case is a window switch in the
+     * middle of a keystroke. The next release of that physical key would then be
+     * taken from a page that was entitled to it.
+     */
+    readonly forgetSuppressed: Effect.Effect<void>;
+  }
+>()("vimium/core/Keyboard") {
   static readonly layer: Layer.Layer<
     Keyboard,
     never,
-    | Commands
-    | Capabilities
-    | Dom
-    | Exclusions
-    | Mappings
-    | Modes
-    | Realm
-    | Report
-    | Settings
+    Commands | Capabilities | Dom | Exclusions | Mappings | Modes | Realm | Report | Settings
   > = Layer.effect(
     Keyboard,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const commands = yield* Commands;
       const capabilities = yield* Capabilities;
       const dom = yield* Dom;
@@ -178,7 +158,7 @@ export class Keyboard extends Context.Service<Keyboard, {
       // between the press and the release.
       const suppressedCodes = yield* Ref.make<ReadonlySet<string>>(new Set());
 
-      const reset = Effect.gen(function*() {
+      const reset = Effect.gen(function* () {
         const current = yield* Ref.get(state);
         yield* Ref.set(state, { branches: [], count: 0, pending: [] });
         if (current.pending.length > 0) {
@@ -187,28 +167,18 @@ export class Keyboard extends Context.Service<Keyboard, {
       });
 
       // A new trie must not leave a half-walked sequence behind it.
-      yield* Effect.forkScoped(
-        Stream.runForEach(Stream.drop(mappings.changes, 1), () => reset),
-      );
+      yield* Effect.forkScoped(Stream.runForEach(Stream.drop(mappings.changes, 1), () => reset));
 
       const suppress = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-        Effect.gen(function*() {
+        Effect.gen(function* () {
           if (event.code) {
-            yield* Ref.update(
-              suppressedCodes,
-              (current) => new Set(current).add(event.code),
-            );
+            yield* Ref.update(suppressedCodes, (current) => new Set(current).add(event.code));
           }
           return SUPPRESS_EVENT;
         });
 
-      const showPending = (
-        keys: ReadonlyArray<string>,
-      ): Effect.Effect<void> =>
-        SubscriptionRef.set(
-          pending,
-          keys.length === 0 ? null : keys.join(""),
-        );
+      const showPending = (keys: ReadonlyArray<string>): Effect.Effect<void> =>
+        SubscriptionRef.set(pending, keys.length === 0 ? null : keys.join(""));
 
       /**
        * `0` is a count digit only once a count is under way. Otherwise it is a
@@ -246,14 +216,13 @@ export class Keyboard extends Context.Service<Keyboard, {
         count: number,
         event: KeyboardEvent,
       ): Effect.Effect<void> =>
-        Effect.gen(function*() {
+        Effect.gen(function* () {
           // Woken here, and not eagerly. A child frame must not be forced
           // through a full start unless a cross-frame function needs it.
           if (name.startsWith("LinkHints.")) yield* realm.wakeDescendants;
           yield* Effect.forkDetach(
-            Effect.catch(
-              commands.run(name, { count, options, event }),
-              (error) => report.error(error.detail),
+            Effect.catch(commands.run(name, { count, options, event }), (error) =>
+              report.error(error.detail),
             ),
             { startImmediately: true },
           );
@@ -274,11 +243,8 @@ export class Keyboard extends Context.Service<Keyboard, {
        * The recursion is bounded at one call. `reset` clears every branch
        * before the key goes back, so no accepted binding can run twice.
        */
-      const advance = (
-        notation: string,
-        event: KeyboardEvent,
-      ): Effect.Effect<HandlerResult> =>
-        Effect.gen(function*() {
+      const advance = (notation: string, event: KeyboardEvent): Effect.Effect<HandlerResult> =>
+        Effect.gen(function* () {
           const current = yield* Ref.get(state);
 
           if (isCountKey(current, notation)) {
@@ -304,7 +270,8 @@ export class Keyboard extends Context.Service<Keyboard, {
           // even when it accepted nothing, and a shallower dead branch with a
           // binding is then dropped in silence.
           if (
-            extended.length === 0 && Option.isSome(deepestDead) &&
+            extended.length === 0 &&
+            Option.isSome(deepestDead) &&
             Option.isSome(deepestDead.value.accepted)
           ) {
             const { command, options } = deepestDead.value.accepted.value;
@@ -321,9 +288,7 @@ export class Keyboard extends Context.Service<Keyboard, {
           // The cursor stays shallowest first, and the deepest branch stays
           // last.
           const opened = openBranch(mappings.compiledUnsafe().trie, notation);
-          const branches = Option.isSome(opened)
-            ? [opened.value, ...extended]
-            : extended;
+          const branches = Option.isSome(opened) ? [opened.value, ...extended] : extended;
 
           if (branches.length === 0) {
             const wasPartial = current.branches.length > 0 || current.count > 0;
@@ -341,7 +306,8 @@ export class Keyboard extends Context.Service<Keyboard, {
           const deepest = deepestBranch(branches);
 
           if (
-            Option.isSome(deepest) && !canExtend(deepest.value) &&
+            Option.isSome(deepest) &&
+            !canExtend(deepest.value) &&
             Option.isSome(deepest.value.accepted)
           ) {
             const { command, options } = deepest.value.accepted.value;
@@ -363,10 +329,8 @@ export class Keyboard extends Context.Service<Keyboard, {
           return yield* suppress(event);
         });
 
-      const onKeydown = (
-        event: KeyboardEvent,
-      ): Effect.Effect<HandlerResult> =>
-        Effect.gen(function*() {
+      const onKeydown = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
+        Effect.gen(function* () {
           // A key that the page made. It gives no command, and it does not
           // touch the pending sequence.
           if (!isUserEvent(event)) return CONTINUE_BUBBLING;
@@ -426,7 +390,8 @@ export class Keyboard extends Context.Service<Keyboard, {
           // cheap set lookup goes first, because the check behind it walks the
           // document.
           if (
-            atRoot && MEDIA_KEYS.has(raw) &&
+            atRoot &&
+            MEDIA_KEYS.has(raw) &&
             settingsNow.passMediaKeys &&
             mediaPlayerHasFocus(dom.document)
           ) {
@@ -444,18 +409,15 @@ export class Keyboard extends Context.Service<Keyboard, {
         });
 
       const onKeyup = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-        Effect.gen(function*() {
+        Effect.gen(function* () {
           if (!isUserEvent(event)) return CONTINUE_BUBBLING;
           if (!event.code) return CONTINUE_BUBBLING;
-          const taken = yield* Ref.modify(
-            suppressedCodes,
-            (current) => {
-              if (!current.has(event.code)) return [false, current];
-              const next = new Set(current);
-              next.delete(event.code);
-              return [true, next as ReadonlySet<string>];
-            },
-          );
+          const taken = yield* Ref.modify(suppressedCodes, (current) => {
+            if (!current.has(event.code)) return [false, current];
+            const next = new Set(current);
+            next.delete(event.code);
+            return [true, next as ReadonlySet<string>];
+          });
           return taken ? SUPPRESS_EVENT : CONTINUE_BUBBLING;
         });
 
@@ -475,8 +437,7 @@ export class Keyboard extends Context.Service<Keyboard, {
        * sequence that survives a focus change is a surprise in each case. The
        * cost is small, because the user types the sequence again.
        */
-      const onFocus = (): Effect.Effect<HandlerResult> =>
-        Effect.as(reset, CONTINUE_BUBBLING);
+      const onFocus = (): Effect.Effect<HandlerResult> => Effect.as(reset, CONTINUE_BUBBLING);
 
       /**
        * Normal mode follows the exclusion verdict.
@@ -485,25 +446,26 @@ export class Keyboard extends Context.Service<Keyboard, {
        * handler and every finalizer that the mode registered. Nothing has to
        * remember what to undo.
        */
-      const modeScope = yield* Ref.make<Option.Option<Scope.Closeable>>(
-        Option.none(),
-      );
+      const modeScope = yield* Ref.make<Option.Option<Scope.Closeable>>(Option.none());
 
-      const exitNormal = Effect.gen(function*() {
+      const exitNormal = Effect.gen(function* () {
         const open = yield* Ref.getAndSet(modeScope, Option.none());
         if (Option.isSome(open)) yield* Scope.close(open.value, Exit.void);
       });
 
-      const enterNormal = Effect.gen(function*() {
+      const enterNormal = Effect.gen(function* () {
         if (Option.isSome(yield* Ref.get(modeScope))) return;
         const scope = yield* Scope.make();
         yield* reset;
         const handle = yield* Effect.provideService(
-          modes.enter({ name: "normal" }, {
-            keydown: onKeydown,
-            keyup: onKeyup,
-            focus: onFocus,
-          }),
+          modes.enter(
+            { name: "normal" },
+            {
+              keydown: onKeydown,
+              keyup: onKeyup,
+              focus: onFocus,
+            },
+          ),
           Scope.Scope,
           scope,
         );
@@ -516,16 +478,14 @@ export class Keyboard extends Context.Service<Keyboard, {
         yield* handle.onExit(() => exitNormal);
       });
 
-      const syncExclusion = Effect.flatMap(
-        SubscriptionRef.get(exclusions.effective),
-        (rule) => rule.enabled ? enterNormal : exitNormal,
+      const syncExclusion = Effect.flatMap(SubscriptionRef.get(exclusions.effective), (rule) =>
+        rule.enabled ? enterNormal : exitNormal,
       );
 
       yield* syncExclusion;
       yield* Effect.forkScoped(
-        Stream.runForEach(
-          Stream.drop(SubscriptionRef.changes(exclusions.effective), 1),
-          (rule) => rule.enabled ? enterNormal : exitNormal,
+        Stream.runForEach(Stream.drop(SubscriptionRef.changes(exclusions.effective), 1), (rule) =>
+          rule.enabled ? enterNormal : exitNormal,
         ),
       );
 

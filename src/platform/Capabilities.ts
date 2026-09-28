@@ -125,10 +125,8 @@ const detectWorld = (
  * iPadOS reports a Macintosh user agent, which is correct for this question:
  * a hardware keyboard on an iPad has the Option key of macOS.
  */
-export const isApplePlatform = (
-  userAgent: string,
-  platform: string,
-): boolean => /Mac|iPhone|iPad|iPod/.test(`${userAgent} ${platform}`);
+export const isApplePlatform = (userAgent: string, platform: string): boolean =>
+  /Mac|iPhone|iPad|iPod/.test(`${userAgent} ${platform}`);
 
 // ---------------------------------------------------------------------------
 // The probes
@@ -145,134 +143,115 @@ const isCallable = (owner: object, member: string): boolean => {
  * Every browser read is inside `dom.probeOr`, so a poisoned global gives
  * `false` and not a defect.
  */
-export const probeCapabilities: Effect.Effect<
-  CapabilityReport,
-  never,
-  Gm | KeyValueStore | Dom
-> = Effect.gen(function*() {
-  const gm = yield* Gm;
-  const kv = yield* KeyValueStore;
-  const dom = yield* Dom;
-  const win = dom.window;
-  const doc = dom.document;
+export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyValueStore | Dom> =
+  Effect.gen(function* () {
+    const gm = yield* Gm;
+    const kv = yield* KeyValueStore;
+    const dom = yield* Dom;
+    const win = dom.window;
+    const doc = dom.document;
 
-  const flag = (read: () => boolean): Effect.Effect<boolean> =>
-    dom.probeOr(read, false);
+    const flag = (read: () => boolean): Effect.Effect<boolean> => dom.probeOr(read, false);
 
-  /**
-   * Constructable stylesheets, and a shadow root that accepts them.
-   *
-   * The writable `adoptedStyleSheets` is the part that changes between
-   * engines. Safari 16.4, Chrome 111 and Firefox 101 are the floors.
-   */
-  const adoptedStyleSheets = yield* flag(() => {
-    if (typeof CSSStyleSheet !== "function") return false;
-    const sheet = new CSSStyleSheet();
-    sheet.replaceSync(":host{color:inherit}");
-    const root = doc.createElement("div").attachShadow({ mode: "closed" });
-    root.adoptedStyleSheets = [sheet];
-    return root.adoptedStyleSheets.length === 1;
+    /**
+     * Constructable stylesheets, and a shadow root that accepts them.
+     *
+     * The writable `adoptedStyleSheets` is the part that changes between
+     * engines. Safari 16.4, Chrome 111 and Firefox 101 are the floors.
+     */
+    const adoptedStyleSheets = yield* flag(() => {
+      if (typeof CSSStyleSheet !== "function") return false;
+      const sheet = new CSSStyleSheet();
+      sheet.replaceSync(":host{color:inherit}");
+      const root = doc.createElement("div").attachShadow({ mode: "closed" });
+      root.adoptedStyleSheets = [sheet];
+      return root.adoptedStyleSheets.length === 1;
+    });
+
+    const selectionModify = yield* flag(() => {
+      const selection = win.getSelection();
+      return selection !== null && isCallable(selection, "modify");
+    });
+
+    /**
+     * Are we on WebKit?
+     *
+     * This decides only whether to warn about a WebKit limit, so a wrong `false`
+     * costs one message. No feature test can answer "this engine keeps ⌘T for
+     * itself", and that is why the user agent is read here.
+     */
+    const webkitLike = yield* flag(() => {
+      const ua: unknown = win.navigator.userAgent;
+      if (!Predicate.isString(ua)) return false;
+      const isAppleWebKit = ua.includes("AppleWebKit");
+      const isBlink = ua.includes("Chrome/") || ua.includes("Chromium/") || ua.includes("Edg/");
+      return isAppleWebKit && !isBlink;
+    });
+
+    const constructableStyleSheets = yield* flag(() => typeof CSSStyleSheet === "function");
+
+    /**
+     * Is this macOS, iOS or iPadOS?
+     *
+     * The answer decides how an Option chord is read. See `isApplePlatform`.
+     */
+    const applePlatform = yield* flag(() =>
+      isApplePlatform(win.navigator.userAgent, win.navigator.platform),
+    );
+
+    const checkVisibility = yield* flag(() => isCallable(Element.prototype, "checkVisibility"));
+    const composedRanges = yield* flag(() => isCallable(Selection.prototype, "getComposedRanges"));
+    const caretPositionFromPoint = yield* flag(() => isCallable(doc, "caretPositionFromPoint"));
+    const caretRangeFromPoint = yield* flag(() => isCallable(doc, "caretRangeFromPoint"));
+    // The same accessors that `Clipboard` calls, so the report and the feature
+    // cannot disagree about what exists.
+    const clipboardWrite = yield* flag(() => clipboardWriter(win) !== null);
+    const clipboardRead = yield* flag(() => clipboardReader(win) !== null);
+    const idleCallback = yield* flag(() => hasNativeIdleCallback(win));
+    const visualViewport = yield* flag(() => {
+      const viewport: unknown = win.visualViewport;
+      return Predicate.isObjectKeyword(viewport);
+    });
+    const secureContext = yield* flag(() => win.isSecureContext === true);
+
+    const identity = gm.identity;
+
+    return {
+      manager: identifyManager(identity.handler),
+      managerVersion: identity.handlerVersion,
+      scriptVersion: identity.scriptVersion,
+      world: detectWorld(identity.injectInto, gm.hasUnsafeWindow, Option.isSome(gm.values)),
+
+      // Asked of the selected store, and not derived again. Separate predicates
+      // can make the warning disagree with the selected backend. One source of
+      // truth prevents that defect.
+      value: kv.kind,
+      valueChangeListener: kv.watchable,
+      openInTab: gm.canOpenInTab,
+      // No manager in the matrix refuses `{ active: false }`, but quoid ignores
+      // it. Reported as available, and checked by hand.
+      openInTabBackground: gm.canOpenInTab,
+      setClipboard: gm.canSetClipboard,
+      xhr: gm.canRequest,
+      menuCommand: gm.canRegisterMenuCommand,
+      windowClose: gm.canCloseWindow,
+
+      adoptedStyleSheets,
+      constructableStyleSheets,
+      checkVisibility,
+      composedRanges,
+      caretPositionFromPoint,
+      caretRangeFromPoint,
+      selectionModify,
+      clipboardWrite,
+      clipboardRead,
+      idleCallback,
+      visualViewport,
+      secureContext,
+      webkitLike,
+      applePlatform,
+    };
   });
-
-  const selectionModify = yield* flag(() => {
-    const selection = win.getSelection();
-    return selection !== null && isCallable(selection, "modify");
-  });
-
-  /**
-   * Are we on WebKit?
-   *
-   * This decides only whether to warn about a WebKit limit, so a wrong `false`
-   * costs one message. No feature test can answer "this engine keeps ⌘T for
-   * itself", and that is why the user agent is read here.
-   */
-  const webkitLike = yield* flag(() => {
-    const ua: unknown = win.navigator.userAgent;
-    if (!Predicate.isString(ua)) return false;
-    const isAppleWebKit = ua.includes("AppleWebKit");
-    const isBlink = ua.includes("Chrome/") || ua.includes("Chromium/") ||
-      ua.includes("Edg/");
-    return isAppleWebKit && !isBlink;
-  });
-
-  const constructableStyleSheets = yield* flag(
-    () => typeof CSSStyleSheet === "function",
-  );
-
-  /**
-   * Is this macOS, iOS or iPadOS?
-   *
-   * The answer decides how an Option chord is read. See `isApplePlatform`.
-   */
-  const applePlatform = yield* flag(() =>
-    isApplePlatform(win.navigator.userAgent, win.navigator.platform)
-  );
-
-  const checkVisibility = yield* flag(
-    () => isCallable(Element.prototype, "checkVisibility"),
-  );
-  const composedRanges = yield* flag(
-    () => isCallable(Selection.prototype, "getComposedRanges"),
-  );
-  const caretPositionFromPoint = yield* flag(
-    () => isCallable(doc, "caretPositionFromPoint"),
-  );
-  const caretRangeFromPoint = yield* flag(
-    () => isCallable(doc, "caretRangeFromPoint"),
-  );
-  // The same accessors that `Clipboard` calls, so the report and the feature
-  // cannot disagree about what exists.
-  const clipboardWrite = yield* flag(() => clipboardWriter(win) !== null);
-  const clipboardRead = yield* flag(() => clipboardReader(win) !== null);
-  const idleCallback = yield* flag(() => hasNativeIdleCallback(win));
-  const visualViewport = yield* flag(() => {
-    const viewport: unknown = win.visualViewport;
-    return Predicate.isObjectKeyword(viewport);
-  });
-  const secureContext = yield* flag(() => win.isSecureContext === true);
-
-  const identity = gm.identity;
-
-  return {
-    manager: identifyManager(identity.handler),
-    managerVersion: identity.handlerVersion,
-    scriptVersion: identity.scriptVersion,
-    world: detectWorld(
-      identity.injectInto,
-      gm.hasUnsafeWindow,
-      Option.isSome(gm.values),
-    ),
-
-    // Asked of the selected store, and not derived again. Separate predicates
-    // can make the warning disagree with the selected backend. One source of
-    // truth prevents that defect.
-    value: kv.kind,
-    valueChangeListener: kv.watchable,
-    openInTab: gm.canOpenInTab,
-    // No manager in the matrix refuses `{ active: false }`, but quoid ignores
-    // it. Reported as available, and checked by hand.
-    openInTabBackground: gm.canOpenInTab,
-    setClipboard: gm.canSetClipboard,
-    xhr: gm.canRequest,
-    menuCommand: gm.canRegisterMenuCommand,
-    windowClose: gm.canCloseWindow,
-
-    adoptedStyleSheets,
-    constructableStyleSheets,
-    checkVisibility,
-    composedRanges,
-    caretPositionFromPoint,
-    caretRangeFromPoint,
-    selectionModify,
-    clipboardWrite,
-    clipboardRead,
-    idleCallback,
-    visualViewport,
-    secureContext,
-    webkitLike,
-    applePlatform,
-  };
-});
 
 // ---------------------------------------------------------------------------
 // Warnings
@@ -286,9 +265,7 @@ export const probeCapabilities: Effect.Effect<
  * sign. A capability that only turns off an optional function belongs in the
  * help dialog, and not here.
  */
-export const degradationWarnings = (
-  report: CapabilityReport,
-): readonly string[] => {
+export const degradationWarnings = (report: CapabilityReport): readonly string[] => {
   const warnings: string[] = [];
 
   if (report.value === "memory") {
@@ -333,14 +310,11 @@ export const formatCapabilities = (report: CapabilityReport): string =>
 // The service
 // ---------------------------------------------------------------------------
 
-export class Capabilities
-  extends Context.Service<Capabilities, CapabilityReport>()(
-    "vimium/platform/Capabilities",
-  )
-{
-  static readonly layer: Layer.Layer<
+export class Capabilities extends Context.Service<Capabilities, CapabilityReport>()(
+  "vimium/platform/Capabilities",
+) {
+  static readonly layer: Layer.Layer<Capabilities, never, Gm | KeyValueStore | Dom> = Layer.effect(
     Capabilities,
-    never,
-    Gm | KeyValueStore | Dom
-  > = Layer.effect(Capabilities, probeCapabilities);
+    probeCapabilities,
+  );
 }

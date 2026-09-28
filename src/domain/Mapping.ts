@@ -184,20 +184,13 @@ const parseOption = (token: string): readonly [string, string | boolean] => {
 // Compilation
 // ---------------------------------------------------------------------------
 
-export const compileMappings = (
-  source: string,
-  options: ParseOptions,
-): CompiledMappings => {
+export const compileMappings = (source: string, options: ParseOptions): CompiledMappings => {
   const diagnostics: MappingDiagnostic[] = [];
   const bindings = new Map<string, KeyBinding>();
   const keyRemap = new Map<string, string>();
   const offset = options.lineOffset ?? 0;
 
-  const report = (
-    line: LogicalLine,
-    severity: DiagnosticSeverity,
-    message: string,
-  ): void => {
+  const report = (line: LogicalLine, severity: DiagnosticSeverity, message: string): void => {
     const relative = line.number - offset;
     // The line belongs to the shipped defaults, which the user cannot edit.
     if (relative < 1) return;
@@ -317,11 +310,7 @@ const reportShadowedPrefixes = (
   }
 };
 
-type Reporter = (
-  line: LogicalLine,
-  severity: DiagnosticSeverity,
-  message: string,
-) => void;
+type Reporter = (line: LogicalLine, severity: DiagnosticSeverity, message: string) => void;
 
 /**
  * Normalise a key sequence, or report the failure on this line.
@@ -388,8 +377,7 @@ const parseMapLine = (
     report(
       line,
       "warning",
-      `${key} is reserved on Safari (${reason.value}); this binding will not ` +
-        `work there`,
+      `${key} is reserved on Safari (${reason.value}); this binding will not ` + `work there`,
     );
   }
 
@@ -468,10 +456,7 @@ export type BranchCursor = readonly KeyBranch[];
  * The new branch accepts the binding of the child, and nothing else. `g` and
  * then `j` scrolls down, as upstream Vimium does, because `j` starts here.
  */
-export const openBranch = (
-  root: TrieNode,
-  key: string,
-): Option.Option<KeyBranch> => {
+export const openBranch = (root: TrieNode, key: string): Option.Option<KeyBranch> => {
   const child = root.children.get(key);
   if (child === undefined) return Option.none();
   return Option.some({ node: child, accepted: child.binding });
@@ -487,10 +472,7 @@ export const openBranch = (
  *
  * An empty answer means that this key ends every live attempt.
  */
-export const extendBranches = (
-  cursor: BranchCursor,
-  key: string,
-): readonly KeyBranch[] => {
+export const extendBranches = (cursor: BranchCursor, key: string): readonly KeyBranch[] => {
   const out: KeyBranch[] = [];
   for (const branch of cursor) {
     const child = branch.node.children.get(key);
@@ -509,9 +491,7 @@ export const extendBranches = (
  * The cursor is shallowest first, so the last branch is the deepest one. That
  * branch decides, and the longest attempt therefore wins.
  */
-export const deepestBranch = (
-  cursor: BranchCursor,
-): Option.Option<KeyBranch> => {
+export const deepestBranch = (cursor: BranchCursor): Option.Option<KeyBranch> => {
   const last = cursor[cursor.length - 1];
   return last === undefined ? Option.none() : Option.some(last);
 };
@@ -522,8 +502,7 @@ export const deepestBranch = (
  * While it can, the attempt is not finished, and a binding on the node waits.
  * Firing it at once is what made `map gg` unreachable behind `map g`.
  */
-export const canExtend = (branch: KeyBranch): boolean =>
-  branch.node.children.size > 0;
+export const canExtend = (branch: KeyBranch): boolean => branch.node.children.size > 0;
 
 // ---------------------------------------------------------------------------
 // Inspection (the help dialog and the tests)
@@ -545,9 +524,5 @@ export const keysByCommand = (
 export const hasErrors = (mappings: CompiledMappings): boolean =>
   mappings.diagnostics.some((entry) => entry.severity === "error");
 
-export const formatDiagnostics = (
-  mappings: CompiledMappings,
-): readonly string[] =>
-  mappings.diagnostics.map(
-    (entry) => `line ${entry.line}: ${entry.severity}: ${entry.message}`,
-  );
+export const formatDiagnostics = (mappings: CompiledMappings): readonly string[] =>
+  mappings.diagnostics.map((entry) => `line ${entry.line}: ${entry.severity}: ${entry.message}`);

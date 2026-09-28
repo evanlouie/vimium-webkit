@@ -87,27 +87,20 @@ import { Option } from "effect";
 // The reasons
 // ---------------------------------------------------------------------------
 
-const UNSUPPORTED_SYNTAX =
-  "this pattern uses syntax that the safety check does not know";
+const UNSUPPORTED_SYNTAX = "this pattern uses syntax that the safety check does not know";
 const TOO_LONG = "this pattern is too long for the safety check";
 const BACKREFERENCE = "a backreference can hang the page";
-const EMPTY_LOOP =
-  "a quantifier over an expression that matches nothing can hang the page";
-const AMBIGUOUS_LOOP =
-  "a quantifier whose body can grow past its own end can hang the page";
-const AMBIGUOUS_BRANCHES =
-  "two alternatives that match the same text can hang the page";
-const COMPETING_LOOPS =
-  "two quantifiers that match the same characters can hang the page";
+const EMPTY_LOOP = "a quantifier over an expression that matches nothing can hang the page";
+const AMBIGUOUS_LOOP = "a quantifier whose body can grow past its own end can hang the page";
+const AMBIGUOUS_BRANCHES = "two alternatives that match the same text can hang the page";
+const COMPETING_LOOPS = "two quantifiers that match the same characters can hang the page";
 const MANY_LOOPS =
-  "this pattern can try too many ways to match one piece of text, " +
-  "and that can hang the page";
+  "this pattern can try too many ways to match one piece of text, " + "and that can hang the page";
 const MANY_ASSERTIONS =
   "a pattern may hold at most eight lookaheads or lookbehinds; " +
   "divide the query into two searches";
 const NESTED_ASSERTIONS =
-  "an assertion may hold at most three nested assertions; simplify the " +
-  "assertion";
+  "an assertion may hold at most three nested assertions; simplify the " + "assertion";
 const PROPERTY_ESCAPE =
   "a property escape such as `\\p{L}` needs the `u` flag, which this field " +
   "does not allow; write a character class such as `[a-zA-Z]` instead";
@@ -164,31 +157,8 @@ const oneClass = (name: ClassName): CharSet => ({
 
 /** The characters of `\s`, as the specification lists them. */
 const WHITESPACE: ReadonlySet<number> = new Set([
-  0x09,
-  0x0a,
-  0x0b,
-  0x0c,
-  0x0d,
-  0x20,
-  0xa0,
-  0x1680,
-  0x2000,
-  0x2001,
-  0x2002,
-  0x2003,
-  0x2004,
-  0x2005,
-  0x2006,
-  0x2007,
-  0x2008,
-  0x2009,
-  0x200a,
-  0x2028,
-  0x2029,
-  0x202f,
-  0x205f,
-  0x3000,
-  0xfeff,
+  0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005,
+  0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
 ]);
 
 const isDigit = (code: number): boolean => code >= 0x30 && code <= 0x39;
@@ -218,8 +188,7 @@ const inClass = (name: ClassName, code: number): boolean => {
 
 /** Does `set` hold this character? The answer is exact. */
 const holdsExactly = (set: CharSet, code: number): boolean => {
-  let inside = set.chars.has(code) ||
-    set.ranges.some(([low, high]) => code >= low && code <= high);
+  let inside = set.chars.has(code) || set.ranges.some(([low, high]) => code >= low && code <= high);
   if (!inside) {
     for (const name of set.classes) {
       if (inClass(name, code)) {
@@ -238,18 +207,17 @@ const holds = (set: CharSet, code: number, ignoreCase: boolean): boolean => {
   const char = String.fromCharCode(code);
   const upper = char.toUpperCase();
   const lower = char.toLowerCase();
-  return (upper.length === 1 && holdsExactly(set, upper.charCodeAt(0))) ||
-    (lower.length === 1 && holdsExactly(set, lower.charCodeAt(0)));
+  return (
+    (upper.length === 1 && holdsExactly(set, upper.charCodeAt(0))) ||
+    (lower.length === 1 && holdsExactly(set, lower.charCodeAt(0)))
+  );
 };
 
 /** The most members that this module lists for one set. */
 const MEMBER_LIMIT = 256;
 
 /** The lists that `members` already made. One set never changes. */
-const memberCache = new WeakMap<
-  CharSet,
-  Option.Option<ReadonlyArray<number>>
->();
+const memberCache = new WeakMap<CharSet, Option.Option<ReadonlyArray<number>>>();
 
 /**
  * List the members of `set`, when there are few enough of them.
@@ -290,9 +258,7 @@ const listMembers = (set: CharSet): Option.Option<ReadonlyArray<number>> => {
         return Option.none();
     }
   }
-  return found.size > MEMBER_LIMIT
-    ? Option.none()
-    : Option.some([...found]);
+  return found.size > MEMBER_LIMIT ? Option.none() : Option.some([...found]);
 };
 
 /**
@@ -301,11 +267,7 @@ const listMembers = (set: CharSet): Option.Option<ReadonlyArray<number>> => {
  * The answer is exact when one of the two sets is small enough to list. Two
  * unlimited sets give `true`, which refuses the pattern.
  */
-const setsIntersect = (
-  left: CharSet,
-  right: CharSet,
-  ignoreCase: boolean,
-): boolean => {
+const setsIntersect = (left: CharSet, right: CharSet, ignoreCase: boolean): boolean => {
   const listed = members(left);
   if (Option.isSome(listed)) {
     return listed.value.some((code) => holds(right, code, ignoreCase));
@@ -318,12 +280,14 @@ const setsIntersect = (
 };
 
 const unionSets = (left: CharSet, right: CharSet): CharSet =>
-  left.negated || right.negated ? ANY_SET : {
-    negated: false,
-    chars: new Set([...left.chars, ...right.chars]),
-    ranges: [...left.ranges, ...right.ranges],
-    classes: new Set([...left.classes, ...right.classes]),
-  };
+  left.negated || right.negated
+    ? ANY_SET
+    : {
+        negated: false,
+        chars: new Set([...left.chars, ...right.chars]),
+        ranges: [...left.ranges, ...right.ranges],
+        classes: new Set([...left.classes, ...right.classes]),
+      };
 
 // ---------------------------------------------------------------------------
 // The syntax tree
@@ -340,11 +304,11 @@ type Node =
   | { readonly kind: "concat"; readonly parts: ReadonlyArray<Node> }
   | { readonly kind: "alt"; readonly branches: ReadonlyArray<Node> }
   | {
-    readonly kind: "repeat";
-    readonly body: Node;
-    readonly min: number;
-    readonly max: number;
-  };
+      readonly kind: "repeat";
+      readonly body: Node;
+      readonly min: number;
+      readonly max: number;
+    };
 
 const EMPTY_NODE: Node = { kind: "empty" };
 const ANCHOR_NODE: Node = { kind: "anchor" };
@@ -380,11 +344,7 @@ const readHex = (text: string): Option.Option<number> =>
  * valid. Syntax that this parser does not know is therefore not a fault of the
  * user: it is a limit of the check, and the pattern is refused.
  */
-const parse = (
-  source: string,
-  dotAll: boolean,
-  unicode: boolean,
-): ParseOutcome => {
+const parse = (source: string, dotAll: boolean, unicode: boolean): ParseOutcome => {
   let index = 0;
   let failure: string | null = null;
   let assertions = 0;
@@ -403,9 +363,7 @@ const parse = (
    * second one. The model must say what the engine does.
    */
   const readCodePoint = (): number => {
-    const point = unicode
-      ? source.codePointAt(index) ?? 0
-      : source.charCodeAt(index);
+    const point = unicode ? (source.codePointAt(index) ?? 0) : source.charCodeAt(index);
     index += point > 0xffff ? 2 : 1;
     return point;
   };
@@ -460,9 +418,7 @@ const parse = (
           }
           const code = readHex(source.slice(index + 1, close));
           index = close + 1;
-          return Option.isNone(code)
-            ? OPEN_ITEM
-            : { kind: "char", code: code.value };
+          return Option.isNone(code) ? OPEN_ITEM : { kind: "char", code: code.value };
         }
         const code = readHex(source.slice(index, index + 4));
         if (Option.isNone(code)) {
@@ -531,8 +487,8 @@ const parse = (
         continue;
       }
 
-      const dash = source[index] === "-" && source[index + 1] !== undefined &&
-        source[index + 1] !== "]";
+      const dash =
+        source[index] === "-" && source[index + 1] !== undefined && source[index + 1] !== "]";
       if (!dash) {
         chars.add(item.code);
         continue;
@@ -555,9 +511,7 @@ const parse = (
 
     if (source[index] !== "]") return fail(UNSUPPORTED_SYNTAX);
     index++;
-    const set: CharSet = open
-      ? ANY_SET
-      : { negated, chars, ranges, classes };
+    const set: CharSet = open ? ANY_SET : { negated, chars, ranges, classes };
     return { kind: "char", set };
   };
 
@@ -675,11 +629,12 @@ const parse = (
       if (counted === null) return atom;
       min = Number.parseInt(counted[1] ?? "0", 10);
       const high = counted[2];
-      max = high === undefined
-        ? min
-        : high.length === 0
-        ? Number.POSITIVE_INFINITY
-        : Number.parseInt(high, 10);
+      max =
+        high === undefined
+          ? min
+          : high.length === 0
+            ? Number.POSITIVE_INFINITY
+            : Number.parseInt(high, 10);
       index += counted[0].length;
     } else {
       return atom;
@@ -699,10 +654,12 @@ const parse = (
       if (failure !== null) return EMPTY_NODE;
     }
     if (parts.length === 0) return EMPTY_NODE;
-    return parts.length === 1 ? parts[0] ?? EMPTY_NODE : {
-      kind: "concat",
-      parts,
-    };
+    return parts.length === 1
+      ? (parts[0] ?? EMPTY_NODE)
+      : {
+          kind: "concat",
+          parts,
+        };
   };
 
   function parseAlternation(): Node {
@@ -712,10 +669,12 @@ const parse = (
       branches.push(parseConcat());
     }
     if (failure !== null) return EMPTY_NODE;
-    return branches.length === 1 ? branches[0] ?? EMPTY_NODE : {
-      kind: "alt",
-      branches,
-    };
+    return branches.length === 1
+      ? (branches[0] ?? EMPTY_NODE)
+      : {
+          kind: "alt",
+          branches,
+        };
   }
 
   const node = parseAlternation();
@@ -810,11 +769,7 @@ interface Analysis {
   /** The fixed shape of this expression, when it has one. */
   readonly sequence: (node: Node) => Option.Option<ReadonlyArray<CharSet>>;
   /** Can the boundary between `left` and the parts from `from` move? */
-  readonly slidesInto: (
-    left: Node,
-    parts: ReadonlyArray<Node>,
-    from: number,
-  ) => boolean;
+  readonly slidesInto: (left: Node, parts: ReadonlyArray<Node>, from: number) => boolean;
   /** Can one character belong to both sets? */
   readonly intersect: (left: CharSet, right: CharSet) => boolean;
 }
@@ -827,16 +782,9 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
   const anywhereCache = new Map<Node, CharSet>();
   const extendCache = new Map<Node, CharSet>();
   const costCache = new Map<Node, number>();
-  const sequenceCache = new Map<
-    Node,
-    Option.Option<ReadonlyArray<CharSet>>
-  >();
+  const sequenceCache = new Map<Node, Option.Option<ReadonlyArray<CharSet>>>();
 
-  const memo = <T>(
-    cache: Map<Node, T>,
-    node: Node,
-    make: (node: Node) => T,
-  ): T => {
+  const memo = <T>(cache: Map<Node, T>, node: Node, make: (node: Node) => T): T => {
     const found = cache.get(node);
     if (found !== undefined) return found;
     const value = make(node);
@@ -889,20 +837,18 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
         }
         case "repeat": {
           const reach = span(target.body);
-          const max = reach.max === 0
-            ? 0
-            : target.max === Number.POSITIVE_INFINITY
-            ? Number.POSITIVE_INFINITY
-            : reach.max * target.max;
+          const max =
+            reach.max === 0
+              ? 0
+              : target.max === Number.POSITIVE_INFINITY
+                ? Number.POSITIVE_INFINITY
+                : reach.max * target.max;
           return { min: reach.min * target.min, max };
         }
       }
     });
 
-  const spanOfParts = (
-    parts: ReadonlyArray<Node>,
-    from: number,
-  ): Span => {
+  const spanOfParts = (parts: ReadonlyArray<Node>, from: number): Span => {
     let min = 0;
     let max = 0;
     for (let index = from; index < parts.length; index++) {
@@ -936,19 +882,13 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
         case "concat":
           return firstOfParts(target.parts, 0);
         case "alt":
-          return target.branches.reduce(
-            (set, branch) => unionSets(set, first(branch)),
-            EMPTY_SET,
-          );
+          return target.branches.reduce((set, branch) => unionSets(set, first(branch)), EMPTY_SET);
         case "repeat":
           return target.max === 0 ? EMPTY_SET : first(target.body);
       }
     });
 
-  const firstOfParts = (
-    parts: ReadonlyArray<Node>,
-    from: number,
-  ): CharSet => {
+  const firstOfParts = (parts: ReadonlyArray<Node>, from: number): CharSet => {
     let set = EMPTY_SET;
     for (let index = from; index < parts.length; index++) {
       const part = parts[index];
@@ -980,10 +920,7 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
           return set;
         }
         case "alt":
-          return target.branches.reduce(
-            (set, branch) => unionSets(set, last(branch)),
-            EMPTY_SET,
-          );
+          return target.branches.reduce((set, branch) => unionSets(set, last(branch)), EMPTY_SET);
         case "repeat":
           return target.max === 0 ? EMPTY_SET : last(target.body);
       }
@@ -1011,10 +948,7 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
       }
     });
 
-  const anywhereOfParts = (
-    parts: ReadonlyArray<Node>,
-    from: number,
-  ): CharSet => {
+  const anywhereOfParts = (parts: ReadonlyArray<Node>, from: number): CharSet => {
     let set = EMPTY_SET;
     for (let index = from; index < parts.length; index++) {
       const part = parts[index];
@@ -1024,9 +958,7 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
     return set;
   };
 
-  const sequence = (
-    node: Node,
-  ): Option.Option<ReadonlyArray<CharSet>> =>
+  const sequence = (node: Node): Option.Option<ReadonlyArray<CharSet>> =>
     memo(sequenceCache, node, (target) => {
       switch (target.kind) {
         case "empty":
@@ -1069,7 +1001,7 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
               shapes.reduce(
                 (set, shape) => unionSets(set, shape[position] ?? EMPTY_SET),
                 EMPTY_SET,
-              )
+              ),
             ),
           );
         }
@@ -1168,9 +1100,7 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
           const set = extend(target.body);
           // One more iteration can follow a complete match, unless the count
           // is fixed.
-          return target.max > target.min
-            ? unionSets(set, first(target.body))
-            : set;
+          return target.max > target.min ? unionSets(set, first(target.body)) : set;
         }
       }
     });
@@ -1186,11 +1116,7 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
    * `\w+\.` and `\w+` do not slide: the first ends at a dot, and the second
    * holds no dot. `[a-z]*` and `x` do slide.
    */
-  const slidesInto = (
-    left: Node,
-    parts: ReadonlyArray<Node>,
-    from: number,
-  ): boolean =>
+  const slidesInto = (left: Node, parts: ReadonlyArray<Node>, from: number): boolean =>
     intersect(extend(left), firstOfParts(parts, from)) &&
     intersect(last(left), anywhereOfParts(parts, from));
 
@@ -1210,9 +1136,7 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
   const width = (node: Node): number => {
     const reach = span(node);
     const range = reach.max - reach.min;
-    return range >= WINDOW_WIDTH
-      ? WINDOW_WIDTH
-      : Math.max(1, range + 1);
+    return range >= WINDOW_WIDTH ? WINDOW_WIDTH : Math.max(1, range + 1);
   };
 
   const cost = (node: Node): number =>
@@ -1228,10 +1152,7 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
         case "look":
           return cost(target.body);
         case "alt":
-          return target.branches.reduce(
-            (most, branch) => Math.max(most, cost(branch)),
-            1,
-          );
+          return target.branches.reduce((most, branch) => Math.max(most, cost(branch)), 1);
         case "concat":
           return costOfParts(target.parts);
         case "repeat": {
@@ -1244,10 +1165,7 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
           const iterations = Number.isFinite(target.max)
             ? Math.min(target.max, WINDOW_WIDTH)
             : WINDOW_WIDTH;
-          return multiplyCosts(
-            inner,
-            Math.max(width(target), iterations),
-          );
+          return multiplyCosts(inner, Math.max(width(target), iterations));
         }
       }
     });
@@ -1302,10 +1220,7 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
  * neighbour that must match a character, because that neighbour separates the
  * pair.
  */
-const hasCompetingNeighbours = (
-  parts: ReadonlyArray<Node>,
-  analysis: Analysis,
-): boolean => {
+const hasCompetingNeighbours = (parts: ReadonlyArray<Node>, analysis: Analysis): boolean => {
   for (let left = 0; left < parts.length; left++) {
     const one = parts[left];
     if (one === undefined || !analysis.flexible(one)) continue;
@@ -1351,8 +1266,7 @@ const hasAmbiguousBranches = (
         return other !== undefined && analysis.intersect(set, other);
       });
     }
-    return inLoop &&
-      analysis.intersect(analysis.first(left), analysis.first(right));
+    return inLoop && analysis.intersect(analysis.first(left), analysis.first(right));
   };
 
   for (let left = 0; left < branches.length; left++) {
@@ -1367,11 +1281,7 @@ const hasAmbiguousBranches = (
   return false;
 };
 
-const check = (
-  node: Node,
-  inLoop: boolean,
-  analysis: Analysis,
-): Option.Option<string> => {
+const check = (node: Node, inLoop: boolean, analysis: Analysis): Option.Option<string> => {
   switch (node.kind) {
     case "empty":
     case "anchor":
@@ -1412,12 +1322,7 @@ const check = (
       if (analysis.nullable(node.body)) return Option.some(EMPTY_LOOP);
       // A body that can grow past its own end divides one text into
       // iterations in more than one way. `(a+)+` is the known shape.
-      if (
-        analysis.intersect(
-          analysis.extend(node.body),
-          analysis.first(node.body),
-        )
-      ) {
+      if (analysis.intersect(analysis.extend(node.body), analysis.first(node.body))) {
         return Option.some(AMBIGUOUS_LOOP);
       }
       return check(node.body, true, analysis);
@@ -1449,10 +1354,7 @@ export const MAX_PATTERN_LENGTH = 2048;
  * expression first: a source that does not compile gives a reason here that
  * says nothing about the true fault.
  */
-export const regexSafetyError = (
-  source: string,
-  flags: string,
-): Option.Option<string> => {
+export const regexSafetyError = (source: string, flags: string): Option.Option<string> => {
   if (source.length > MAX_PATTERN_LENGTH) return Option.some(TOO_LONG);
   const outcome = parse(source, flags.includes("s"), flags.includes("u"));
   if (!outcome.ok) return Option.some(outcome.reason);
@@ -1463,9 +1365,7 @@ export const regexSafetyError = (
   // The last rule counts the ways that one piece of text can be divided
   // between the parts of the pattern. It reads inside an assertion as well,
   // so `.*(?=.*x)` costs as much as `a.*b.*c` and is refused with it.
-  return analysis.cost(outcome.node) > PATH_BUDGET
-    ? Option.some(MANY_LOOPS)
-    : Option.none();
+  return analysis.cost(outcome.node) > PATH_BUDGET ? Option.some(MANY_LOOPS) : Option.none();
 };
 
 /** Is this expression free of the ambiguity that this module can prove? */

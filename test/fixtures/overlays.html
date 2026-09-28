@@ -1,66 +1,66 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <title>Sticky and fixed overlays</title>
     <link rel="stylesheet" href="assets/base.css" />
     <style>
-    body {
-      padding: 0;
-    }
-    /*
+      body {
+        padding: 0;
+      }
+      /*
      * An opaque fixed bar covering the top 220px of the viewport. Anything
      * underneath it is unreachable by a real click and must not take a hint.
      */
-    #bar {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 220px;
-      background: #223;
-      color: #fff;
-      padding: 16px 24px;
-      box-sizing: border-box;
-      z-index: 10;
-    }
-    #bar a {
-      color: #9cf;
-    }
-    #beneath {
-      position: absolute;
-      top: 80px;
-      left: 24px;
-    }
-    #below-the-bar {
-      padding: 260px 24px 0;
-    }
-    /* Sticky, and opaque, so it occludes whatever scrolls under it. */
-    #footer {
-      position: sticky;
-      bottom: 0;
-      background: #332;
-      color: #fff;
-      padding: 12px 24px;
-    }
-    #footer a {
-      color: #fc9;
-    }
-    /*
+      #bar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 220px;
+        background: #223;
+        color: #fff;
+        padding: 16px 24px;
+        box-sizing: border-box;
+        z-index: 10;
+      }
+      #bar a {
+        color: #9cf;
+      }
+      #beneath {
+        position: absolute;
+        top: 80px;
+        left: 24px;
+      }
+      #below-the-bar {
+        padding: 260px 24px 0;
+      }
+      /* Sticky, and opaque, so it occludes whatever scrolls under it. */
+      #footer {
+        position: sticky;
+        bottom: 0;
+        background: #332;
+        color: #fff;
+        padding: 12px 24px;
+      }
+      #footer a {
+        color: #fc9;
+      }
+      /*
      * Three ways a link can be inside a box that the hit test returns while
      * the link itself paints nothing. Accepting *any* ancestor hit gave all
      * three a hint, and a hint that activates dispatches a real click.
      */
-    #clipped {
-      clip-path: inset(100%);
-    }
-    #collapsed {
-      height: 0;
-      overflow: hidden;
-    }
-    #untouchable {
-      pointer-events: none;
-    }
+      #clipped {
+        clip-path: inset(100%);
+      }
+      #collapsed {
+        height: 0;
+        overflow: hidden;
+      }
+      #untouchable {
+        pointer-events: none;
+      }
     </style>
   </head>
   <body>
@@ -69,8 +69,7 @@
     </header>
 
     <!-- Sits at y=80, squarely under the fixed bar. -->
-    <p
-      id="beneath"><a id="occluded" href="#occluded-target">Occluded link</a></p>
+    <p id="beneath"><a id="occluded" href="#occluded-target">Occluded link</a></p>
 
     <div id="below-the-bar">
       <p><a id="clear" href="#clear-target">Clear link</a></p>
@@ -82,8 +81,8 @@
         <span class="note">clicks: <span id="click-count">0</span></span>
       </p>
       <p class="note">
-        Also present: a <code>position: sticky</code> footer that occludes the
-        bottom of the viewport once the page is scrolled.
+        Also present: a <code>position: sticky</code> footer that occludes the bottom of the
+        viewport once the page is scrolled.
       </p>
 
       <!--

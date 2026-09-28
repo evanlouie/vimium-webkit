@@ -85,12 +85,8 @@ export type ExclusionRule = typeof exclusionRuleSchema.Type;
  * the fallback is never re-validated against its own checks.
  */
 const field = <S extends Schema.Top>(schema: S, fallback: S["Type"]) => {
-  const recovered = Schema.catchDecoding<S>(() => Effect.succeedSome(fallback))(
-    schema,
-  );
-  return Schema.withDecodingDefaultTypeKey<typeof recovered>(
-    Effect.succeed(fallback),
-  )(recovered);
+  const recovered = Schema.catchDecoding<S>(() => Effect.succeedSome(fallback))(schema);
+  return Schema.withDecodingDefaultTypeKey<typeof recovered>(Effect.succeed(fallback))(recovered);
 };
 
 /**
@@ -118,10 +114,7 @@ const hasQueryPlaceholder = (value: string): boolean => value.includes("%s");
 export const settingsSchema = Schema.Struct({
   // --- Scrolling ---
   scrollStepSize: field(
-    Schema.Finite.check(
-      Schema.isGreaterThanOrEqualTo(1),
-      Schema.isLessThanOrEqualTo(10_000),
-    ),
+    Schema.Finite.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(10_000)),
     60,
   ),
   smoothScroll: field(Schema.Boolean, true),
@@ -146,10 +139,7 @@ export const settingsSchema = Schema.Struct({
   shadowNativeFind: field(Schema.Boolean, false),
 
   // --- Navigation heuristics ---
-  previousPatterns: field(
-    Schema.String,
-    "prev,previous,back,older,<,‹,←,«,≪,<<",
-  ),
+  previousPatterns: field(Schema.String, "prev,previous,back,older,<,‹,←,«,≪,<<"),
   nextPatterns: field(Schema.String, "next,more,newer,>,›,→,»,≫,>>"),
 
   // --- Search ---
@@ -210,10 +200,7 @@ export const settingsSchema = Schema.Struct({
   enableHistoryIndex: field(Schema.Boolean, false),
   historyIndexDenylist: field(Schema.mutable(Schema.Array(Schema.String)), []),
   historyIndexLimit: field(
-    Schema.Finite.check(
-      Schema.isGreaterThanOrEqualTo(0),
-      Schema.isLessThanOrEqualTo(50_000),
-    ),
+    Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(50_000)),
     5000,
   ),
 
@@ -239,8 +226,7 @@ export type Settings = typeof settingsSchema.Type;
  * That is a build-time mistake, and this line is where the test suite catches
  * it — rather than a user's `document-start`.
  */
-export const defaultSettings = (): Settings =>
-  Schema.decodeSync(settingsSchema)({});
+export const defaultSettings = (): Settings => Schema.decodeSync(settingsSchema)({});
 
 export const SETTINGS_SCHEMA_VERSION = 1;
 
@@ -279,10 +265,7 @@ export const globalMarkSchema = Schema.Struct({
 
 export const marksSchema = Schema.Struct({
   /** `url -> mark letter -> position`. */
-  local: Schema.Record(
-    Schema.String,
-    Schema.Record(Schema.String, localMarkSchema),
-  ),
+  local: Schema.Record(Schema.String, Schema.Record(Schema.String, localMarkSchema)),
   /** `mark letter -> {url, position}`. */
   global: Schema.Record(Schema.String, globalMarkSchema),
 });
@@ -407,13 +390,15 @@ export const historyGroup: GroupSpec<HistoryIndex> = {
 
 export const sessionSchema = Schema.Struct({
   /** Tabs we opened via `GM_openInTab`, heartbeated so Omnibar-lite can list them. */
-  knownTabs: Schema.mutable(Schema.Array(
-    Schema.Struct({
-      url: Schema.String,
-      title: Schema.String,
-      heartbeat: Schema.Finite,
-    }),
-  )),
+  knownTabs: Schema.mutable(
+    Schema.Array(
+      Schema.Struct({
+        url: Schema.String,
+        title: Schema.String,
+        heartbeat: Schema.Finite,
+      }),
+    ),
+  ),
   /** One-time warnings already shown, keyed by id. */
   acknowledged: Schema.mutable(Schema.Array(Schema.String)),
   /**
@@ -423,10 +408,7 @@ export const sessionSchema = Schema.Struct({
    * written far more often and a corrupt entry should not cost the user their
    * key mappings.
    */
-  zoomByOrigin: Schema.Record(
-    Schema.String,
-    Schema.Finite,
-  ),
+  zoomByOrigin: Schema.Record(Schema.String, Schema.Finite),
 });
 
 export type SessionState = typeof sessionSchema.Type;

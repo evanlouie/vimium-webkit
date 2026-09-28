@@ -47,10 +47,7 @@ const resolveWithin = (root: string, pathname: string): string => {
   return segments.length === 0 ? root : `${root}/${segments.join("/")}`;
 };
 
-const headersFor = (
-  pathname: string,
-  type: string,
-): Record<string, string> => {
+const headersFor = (pathname: string, type: string): Record<string, string> => {
   const headers: Record<string, string> = {
     "content-type": type,
     // Fixtures change while tests are being written; a cached one produces a
@@ -120,15 +117,17 @@ export const startFixtureServer = (): readonly Server[] => {
   const { primary, secondary } = fixturePorts();
   return [primary, secondary].map((port) => {
     const server = createServer((request, response) => {
-      void handle(request.url ?? "/").then((reply) => {
-        response.writeHead(reply.status, reply.headers);
-        response.end(reply.body);
-      }).catch(() => {
-        response.writeHead(500, {
-          "content-type": "text/plain; charset=utf-8",
+      void handle(request.url ?? "/")
+        .then((reply) => {
+          response.writeHead(reply.status, reply.headers);
+          response.end(reply.body);
+        })
+        .catch(() => {
+          response.writeHead(500, {
+            "content-type": "text/plain; charset=utf-8",
+          });
+          response.end("fixture server error\n");
         });
-        response.end("fixture server error\n");
-      });
     });
     server.listen(port, FIXTURE_HOST, () => {
       console.log(`[fixtures] http://${FIXTURE_HOST}:${port}/`);

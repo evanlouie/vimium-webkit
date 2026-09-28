@@ -127,8 +127,7 @@ test.describe("the page lifecycle", () => {
     await vw.boot();
 
     await vw.press("j");
-    await expect.poll(async () => (await vw.scrollOffsets()).y)
-      .toBeGreaterThan(0);
+    await expect.poll(async () => (await vw.scrollOffsets()).y).toBeGreaterThan(0);
   });
 
   test("a child frame that goes away leaves the top frame alone", async ({ vw, page }) => {
@@ -138,8 +137,7 @@ test.describe("the page lifecycle", () => {
     await page.goto("/lifecycle.html");
     await vw.bootAllFrames();
     await page.locator("#drop-child").click();
-    await expect(page.frameLocator("#child").locator("#remote-link"))
-      .toBeAttached();
+    await expect(page.frameLocator("#child").locator("#remote-link")).toBeAttached();
 
     // The top frame never saw a `pagehide` of its own.
     await expect(page.locator("vimium-webkit-overlay")).toHaveCount(1);
@@ -192,7 +190,9 @@ test.describe("what a dying page saves", () => {
    * the backend call starts before the handler returns. A macrotask that starts
    * inside `pagehide` never runs, so nothing later counts.
    */
-  const dispatchAndRead = (page: Page): Promise<{
+  const dispatchAndRead = (
+    page: Page,
+  ): Promise<{
     before: string | null;
     during: string | null;
   }> =>

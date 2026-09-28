@@ -23,13 +23,10 @@ import { bundleConfig, type BundleOptions, ROOT } from "./vite-config.ts";
 const DIST = `${ROOT}/dist`;
 const REPOSITORY = "https://github.com/evanlouie/vimium-webkit";
 
-const byteLength = (text: string): number =>
-  new TextEncoder().encode(text).length;
+const byteLength = (text: string): number => new TextEncoder().encode(text).length;
 
 const readVersion = async (): Promise<string> => {
-  const raw: unknown = JSON.parse(
-    await readFile(`${ROOT}/package.json`, "utf8"),
-  );
+  const raw: unknown = JSON.parse(await readFile(`${ROOT}/package.json`, "utf8"));
   const version = (raw as { readonly version?: unknown }).version;
   if (typeof version !== "string") {
     throw new Error("package.json has no string `version`");
@@ -39,12 +36,11 @@ const readVersion = async (): Promise<string> => {
 
 /** The single entry chunk Vite produced for a library build. */
 const entryChunk = (result: unknown): OutputChunk => {
-  const outputs = (Array.isArray(result)
-    ? (result[0] as RollupOutput).output
-    : (result as RollupOutput).output) ?? [];
-  const chunk = outputs.find(
-    (item): item is OutputChunk => item.type === "chunk" && item.isEntry,
-  );
+  const outputs =
+    (Array.isArray(result)
+      ? (result[0] as RollupOutput).output
+      : (result as RollupOutput).output) ?? [];
+  const chunk = outputs.find((item): item is OutputChunk => item.type === "chunk" && item.isEntry);
   if (!chunk) throw new Error("Vite produced no entry chunk");
   return chunk;
 };
@@ -70,9 +66,9 @@ const sizeReport = (chunk: OutputChunk): readonly ModuleSize[] =>
     .map(([module, meta]) => ({
       module: module.startsWith(ROOT)
         ? module.slice(ROOT.length + 1)
-        // Rollup prefixes virtual module identifiers with NUL.
-        // oxlint-disable-next-line no-control-regex
-        : module.replace(/^\u0000/, ""),
+        : // Rollup prefixes virtual module identifiers with NUL.
+          // oxlint-disable-next-line no-control-regex
+          module.replace(/^\u0000/, ""),
       bytes: meta.renderedLength,
     }))
     .filter((entry) => entry.bytes > 0)
@@ -118,26 +114,26 @@ const main = async (): Promise<void> => {
 
     await writeFile(
       `${DIST}/report.json`,
-      `${
-        JSON.stringify(
-          {
-            version,
-            totalBytes: byteLength(output),
-            modules: sizeReport(chunk),
-          },
-          null,
-          2,
-        )
-      }\n`,
+      `${JSON.stringify(
+        {
+          version,
+          totalBytes: byteLength(output),
+          modules: sizeReport(chunk),
+        },
+        null,
+        2,
+      )}\n`,
     );
 
-    const violations = (await checkInvariants({
-      root: ROOT,
-      bundle: output,
-      code: chunk.code,
-      declaredVersion: version,
-      metadataBlock: metadata,
-    }))
+    const violations = (
+      await checkInvariants({
+        root: ROOT,
+        bundle: output,
+        code: chunk.code,
+        declaredVersion: version,
+        metadataBlock: metadata,
+      })
+    )
       // A dev bundle carries an inline sourcemap, which is several times the
       // size of the code. Measuring it against the shipping ceiling made
       // `build:dev` fail every time it was run — a documented entry point that

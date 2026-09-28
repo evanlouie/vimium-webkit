@@ -24,16 +24,7 @@
  * reach the bindings of the page.
  */
 
-import {
-  Clock,
-  Context,
-  Effect,
-  Exit,
-  Layer,
-  Option,
-  Ref,
-  Scope,
-} from "effect";
+import { Clock, Context, Effect, Exit, Layer, Option, Ref, Scope } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import {
   CONTINUE_BUBBLING,
@@ -61,12 +52,7 @@ import { Storage } from "~/platform/Storage.ts";
 import { Tabs } from "~/platform/Tabs.ts";
 import { Hud } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
-import {
-  type Completion,
-  completionsFor,
-  liveTabs,
-  type OmnibarSource,
-} from "./Completers.ts";
+import { type Completion, completionsFor, liveTabs, type OmnibarSource } from "./Completers.ts";
 import { makeHistoryIndex } from "./History.ts";
 import { makeOmnibarView, OMNIBAR_CSS, type OmnibarView } from "./OmnibarUi.ts";
 import { makeSuggester } from "./Suggest.ts";
@@ -90,19 +76,15 @@ const KEY_LEGEND = "↑↓ move · ⏎ open · ⇧⏎ new tab · esc close";
 const DEFAULT_SUGGESTION_BADGE = "Suggested";
 
 const footerText = (badLines: number): string =>
-  badLines === 0 ? KEY_LEGEND : `${KEY_LEGEND} · ${badLines} malformed ` +
-    `searchEngines line${badLines === 1 ? "" : "s"}`;
+  badLines === 0
+    ? KEY_LEGEND
+    : `${KEY_LEGEND} · ${badLines} malformed ` + `searchEngines line${badLines === 1 ? "" : "s"}`;
 
 // ---------------------------------------------------------------------------
 // Keys
 // ---------------------------------------------------------------------------
 
-export type OmnibarKeyAction =
-  | "previous"
-  | "next"
-  | "accept"
-  | "accept-new-tab"
-  | "cancel";
+export type OmnibarKeyAction = "previous" | "next" | "accept" | "accept-new-tab" | "cancel";
 
 /**
  * Read a key press as an omnibar action.
@@ -112,9 +94,7 @@ export type OmnibarKeyAction =
  * accepted beside the arrows, for the reason that readline has them, and to
  * agree with the history keys of find mode.
  */
-export const omnibarAction = (
-  event: KeyboardEvent,
-): Option.Option<OmnibarKeyAction> => {
+export const omnibarAction = (event: KeyboardEvent): Option.Option<OmnibarKeyAction> => {
   if (isEscape(event)) return Option.some("cancel");
 
   switch (event.key) {
@@ -178,22 +158,22 @@ const NO_ENGINE_SOURCE = "\u0000 never parsed";
 // The service
 // ---------------------------------------------------------------------------
 
-export class Omnibar extends Context.Service<Omnibar, {
-  readonly open: (
-    source: OmnibarSource,
-    initialQuery?: string,
-  ) => Effect.Effect<void>;
-  readonly close: Effect.Effect<void>;
-  /** Record this page in the local index, when the user turned the index on. */
-  readonly noteVisit: Effect.Effect<void>;
-  /**
-   * Erase the local index.
-   *
-   * This is a privacy control, and not plumbing. The README documents it as the
-   * only way to erase the index, so it must report a failure to erase.
-   */
-  readonly clearHistory: Effect.Effect<void>;
-}>()("vimium/features/omnibar/Omnibar") {
+export class Omnibar extends Context.Service<
+  Omnibar,
+  {
+    readonly open: (source: OmnibarSource, initialQuery?: string) => Effect.Effect<void>;
+    readonly close: Effect.Effect<void>;
+    /** Record this page in the local index, when the user turned the index on. */
+    readonly noteVisit: Effect.Effect<void>;
+    /**
+     * Erase the local index.
+     *
+     * This is a privacy control, and not plumbing. The README documents it as the
+     * only way to erase the index, so it must report a failure to erase.
+     */
+    readonly clearHistory: Effect.Effect<void>;
+  }
+>()("vimium/features/omnibar/Omnibar") {
   static readonly layer: Layer.Layer<
     Omnibar,
     never,
@@ -211,7 +191,7 @@ export class Omnibar extends Context.Service<Omnibar, {
     | Gm
   > = Layer.effect(
     Omnibar,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const commands = yield* Commands;
       const dom = yield* Dom;
       const hud = yield* Hud;
@@ -242,7 +222,7 @@ export class Omnibar extends Context.Service<Omnibar, {
       });
 
       /** The engines of the current configuration, parsed at most once. */
-      const engines = Effect.fn("Omnibar.engines")(function*() {
+      const engines = Effect.fn("Omnibar.engines")(function* () {
         const current = yield* settings.current;
         const cached = yield* Ref.get(engineCache);
         if (cached.source === current.searchEngines) return cached;
@@ -260,7 +240,7 @@ export class Omnibar extends Context.Service<Omnibar, {
       // Lifecycle
       // ---------------------------------------------------------------
 
-      const close: Effect.Effect<void> = Effect.gen(function*() {
+      const close: Effect.Effect<void> = Effect.gen(function* () {
         const current = yield* Ref.getAndSet(session, Option.none());
         if (Option.isNone(current)) return;
         yield* suggester.cancel;
@@ -282,60 +262,53 @@ export class Omnibar extends Context.Service<Omnibar, {
        * a test machine, a single-use link from a message — went to the search
        * engine on its way to being opened.
        */
-      const requestSuggestions = Effect.fn("Omnibar.requestSuggestions")(
-        function*(current: Session, query: string) {
-          const config = yield* settings.current;
-          const parsed = (yield* engines()).engines;
+      const requestSuggestions = Effect.fn("Omnibar.requestSuggestions")(function* (
+        current: Session,
+        query: string,
+      ) {
+        const config = yield* settings.current;
+        const parsed = (yield* engines()).engines;
 
-          // A keyword in front sends the suggestions to that engine, which is
-          // what the user asked for by typing it.
-          const split = splitKeyword(query, parsed);
-          const template = Option.isSome(split)
-            ? split.value.engine.url
-            : config.searchUrl;
-          const text = Option.isSome(split) ? split.value.rest : query;
+        // A keyword in front sends the suggestions to that engine, which is
+        // what the user asked for by typing it.
+        const split = splitKeyword(query, parsed);
+        const template = Option.isSome(split) ? split.value.engine.url : config.searchUrl;
+        const text = Option.isSome(split) ? split.value.rest : query;
 
-          // A keyword is an explicit "search this engine for the rest", so it
-          // settles the question by itself. Without one, the classification
-          // decides, and only a search may go out.
-          if (Option.isNone(split) && classifyQuery(text) !== "search") return;
+        // A keyword is an explicit "search this engine for the rest", so it
+        // settles the question by itself. Without one, the classification
+        // decides, and only a search may go out.
+        if (Option.isNone(split) && classifyQuery(text) !== "search") return;
 
-          const badge = Option.isSome(split)
-            ? split.value.engine.description
-            : DEFAULT_SUGGESTION_BADGE;
+        const badge = Option.isSome(split)
+          ? split.value.engine.description
+          : DEFAULT_SUGGESTION_BADGE;
 
-          // Keyed on the *whole* input, and not on the text that goes to the
-          // engine, so that the answer can be compared with what is on screen.
-          const forQuery = query.trim();
+        // Keyed on the *whole* input, and not on the text that goes to the
+        // engine, so that the answer can be compared with what is on screen.
+        const forQuery = query.trim();
 
-          yield* suggester.request(
-            template,
-            text,
-            (_answered, items) =>
-              Effect.gen(function*() {
-                const live = yield* Ref.get(session);
-                if (Option.isNone(live) || live.value !== current) return;
-                yield* Ref.set(current.suggestions, {
-                  query: forQuery,
-                  badge,
-                  items,
-                });
-                // Draw again only. To ask again here would loop.
-                yield* render(current, false);
-              }),
-          );
-        },
-      );
+        yield* suggester.request(template, text, (_answered, items) =>
+          Effect.gen(function* () {
+            const live = yield* Ref.get(session);
+            if (Option.isNone(live) || live.value !== current) return;
+            yield* Ref.set(current.suggestions, {
+              query: forQuery,
+              badge,
+              items,
+            });
+            // Draw again only. To ask again here would loop.
+            yield* render(current, false);
+          }),
+        );
+      });
 
       // ---------------------------------------------------------------
       // Drawing
       // ---------------------------------------------------------------
 
-      const render: (
-        current: Session,
-        askForSuggestions: boolean,
-      ) => Effect.Effect<void> = Effect.fn("Omnibar.render")(
-        function*(current: Session, askForSuggestions: boolean) {
+      const render: (current: Session, askForSuggestions: boolean) => Effect.Effect<void> =
+        Effect.fn("Omnibar.render")(function* (current: Session, askForSuggestions: boolean) {
           const config = yield* settings.current;
           const parsed = yield* engines();
           const query = yield* current.view.value;
@@ -355,18 +328,14 @@ export class Omnibar extends Context.Service<Omnibar, {
             // Only the suggestions that belong to the query on screen. A late
             // answer for a query that the user has left behind is worse than
             // no answer.
-            suggestions: suggestion.query === query.trim()
-              ? suggestion.items
-              : [],
+            suggestions: suggestion.query === query.trim() ? suggestion.items : [],
             suggestionEngine: suggestion.badge,
             now,
           });
 
           yield* Ref.set(current.rows, state.rows);
-          const selected = yield* Ref.updateAndGet(
-            current.selected,
-            (value) =>
-              Math.min(Math.max(value, 0), Math.max(0, state.rows.length - 1)),
+          const selected = yield* Ref.updateAndGet(current.selected, (value) =>
+            Math.min(Math.max(value, 0), Math.max(0, state.rows.length - 1)),
           );
 
           yield* current.view.setPrefix(state.commandMode ? ":" : "›");
@@ -376,8 +345,7 @@ export class Omnibar extends Context.Service<Omnibar, {
           if (askForSuggestions && !state.commandMode) {
             yield* requestSuggestions(current, state.effectiveQuery);
           }
-        },
-      );
+        });
 
       // ---------------------------------------------------------------
       // Acting on a row
@@ -390,86 +358,78 @@ export class Omnibar extends Context.Service<Omnibar, {
        * both misleading in the completion list and growth without a limit in
        * storage.
        */
-      const registerOpenedTab = Effect.fn("Omnibar.registerOpenedTab")(
-        function*(url: string, title: string) {
-          const now = yield* Clock.currentTimeMillis;
-          yield* Effect.ignore(
-            storage.session.update((current): SessionState => ({
-              ...current,
-              knownTabs: [
-                { url, title, heartbeat: now },
-                ...liveTabs(current.knownTabs, now).filter(
-                  (tab) => tab.url !== url,
-                ),
-              ],
-            })),
-          );
-        },
-      );
+      const registerOpenedTab = Effect.fn("Omnibar.registerOpenedTab")(function* (
+        url: string,
+        title: string,
+      ) {
+        const now = yield* Clock.currentTimeMillis;
+        yield* Effect.ignore(
+          storage.session.update((current): SessionState => ({
+            ...current,
+            knownTabs: [
+              { url, title, heartbeat: now },
+              ...liveTabs(current.knownTabs, now).filter((tab) => tab.url !== url),
+            ],
+          })),
+        );
+      });
 
-      const openInNewTab = Effect.fn("Omnibar.openInNewTab")(
-        function*(url: string) {
-          yield* Effect.matchEffect(tabs.open(url, { active: true }), {
-            onSuccess: (outcome) => registerOpenedTab(outcome.url, ""),
-            onFailure: (error) =>
-              report.error(
-                error.nativeAlternative === undefined
-                  ? error.detail
-                  : `${error.detail} (${error.nativeAlternative})`,
-              ),
-          });
-        },
-      );
+      const openInNewTab = Effect.fn("Omnibar.openInNewTab")(function* (url: string) {
+        yield* Effect.matchEffect(tabs.open(url, { active: true }), {
+          onSuccess: (outcome) => registerOpenedTab(outcome.url, ""),
+          onFailure: (error) =>
+            report.error(
+              error.nativeAlternative === undefined
+                ? error.detail
+                : `${error.detail} (${error.nativeAlternative})`,
+            ),
+        });
+      });
 
-      const activate = Effect.fn("Omnibar.activate")(
-        function*(index: number, newTab: boolean) {
-          const live = yield* Ref.get(session);
-          if (Option.isNone(live)) return;
-          const current = live.value;
-          const row = (yield* Ref.get(current.rows))[index];
-          if (row === undefined) return;
+      const activate = Effect.fn("Omnibar.activate")(function* (index: number, newTab: boolean) {
+        const live = yield* Ref.get(session);
+        if (Option.isNone(live)) return;
+        const current = live.value;
+        const row = (yield* Ref.get(current.rows))[index];
+        if (row === undefined) return;
 
-          switch (row.action.type) {
-            case "fill": {
-              // To adopt a keyword is a refinement, and not a destination. The
-              // omnibar stays open with the cursor after the keyword.
-              yield* current.view.setValue(row.action.text);
-              yield* Ref.set(current.selected, 0);
-              yield* render(current, true);
-              return;
-            }
-            case "none": {
-              yield* close;
-              return;
-            }
-            case "command": {
-              const name = row.action.name;
-              yield* close;
-              // A tier C command is run, and not blocked here. The catalogue
-              // owns the refusal, and a second copy of it would move away from
-              // the first.
-              yield* Effect.catch(
-                commands.run(name, { count: 1, options: {}, event: null }),
-                (error) => report.error(error.detail),
-              );
-              return;
-            }
-            case "navigate": {
-              const url = row.action.url;
-              yield* close;
-              if (newTab) {
-                yield* openInNewTab(url);
-                return;
-              }
-              yield* Effect.catch(
-                tabs.navigate(url),
-                (error) => report.error(error.detail),
-              );
-              return;
-            }
+        switch (row.action.type) {
+          case "fill": {
+            // To adopt a keyword is a refinement, and not a destination. The
+            // omnibar stays open with the cursor after the keyword.
+            yield* current.view.setValue(row.action.text);
+            yield* Ref.set(current.selected, 0);
+            yield* render(current, true);
+            return;
           }
-        },
-      );
+          case "none": {
+            yield* close;
+            return;
+          }
+          case "command": {
+            const name = row.action.name;
+            yield* close;
+            // A tier C command is run, and not blocked here. The catalogue
+            // owns the refusal, and a second copy of it would move away from
+            // the first.
+            yield* Effect.catch(
+              commands.run(name, { count: 1, options: {}, event: null }),
+              (error) => report.error(error.detail),
+            );
+            return;
+          }
+          case "navigate": {
+            const url = row.action.url;
+            yield* close;
+            if (newTab) {
+              yield* openInNewTab(url);
+              return;
+            }
+            yield* Effect.catch(tabs.navigate(url), (error) => report.error(error.detail));
+            return;
+          }
+        }
+      });
 
       /**
        * Start the work of a row, and give the key task back at once.
@@ -479,13 +439,12 @@ export class Omnibar extends Context.Service<Omnibar, {
        * `startImmediately` keeps the call to the manager inside the activation
        * window of the key press.
        */
-      const startActivation = (
-        index: number,
-        newTab: boolean,
-      ): Effect.Effect<void> =>
-        Effect.asVoid(Effect.forkDetach(activate(index, newTab), {
-          startImmediately: true,
-        }));
+      const startActivation = (index: number, newTab: boolean): Effect.Effect<void> =>
+        Effect.asVoid(
+          Effect.forkDetach(activate(index, newTab), {
+            startImmediately: true,
+          }),
+        );
 
       const startClose: Effect.Effect<void> = Effect.asVoid(
         Effect.forkDetach(close, { startImmediately: true }),
@@ -495,40 +454,31 @@ export class Omnibar extends Context.Service<Omnibar, {
       // Keys
       // ---------------------------------------------------------------
 
-      const move = Effect.fn("Omnibar.move")(
-        function*(current: Session, delta: number) {
-          const rows = yield* Ref.get(current.rows);
-          if (rows.length === 0) return;
-          // It wraps, because a list this short is faster to cycle than to
-          // turn around.
-          const selected = yield* Ref.updateAndGet(
-            current.selected,
-            (value) =>
-              (((value + delta) % rows.length) + rows.length) %
-              rows.length,
-          );
-          yield* current.view.render(rows, selected);
-        },
-      );
+      const move = Effect.fn("Omnibar.move")(function* (current: Session, delta: number) {
+        const rows = yield* Ref.get(current.rows);
+        if (rows.length === 0) return;
+        // It wraps, because a list this short is faster to cycle than to
+        // turn around.
+        const selected = yield* Ref.updateAndGet(
+          current.selected,
+          (value) => (((value + delta) % rows.length) + rows.length) % rows.length,
+        );
+        yield* current.view.render(rows, selected);
+      });
 
-      const onAction = (
-        current: Session,
-        action: OmnibarKeyAction,
-      ): Effect.Effect<void> => {
+      const onAction = (current: Session, action: OmnibarKeyAction): Effect.Effect<void> => {
         switch (action) {
           case "previous":
             return move(current, -1);
           case "next":
             return move(current, 1);
           case "accept":
-            return Effect.flatMap(
-              Ref.get(current.selected),
-              (index) => startActivation(index, false),
+            return Effect.flatMap(Ref.get(current.selected), (index) =>
+              startActivation(index, false),
             );
           case "accept-new-tab":
-            return Effect.flatMap(
-              Ref.get(current.selected),
-              (index) => startActivation(index, true),
+            return Effect.flatMap(Ref.get(current.selected), (index) =>
+              startActivation(index, true),
             );
           case "cancel":
             return startClose;
@@ -544,64 +494,62 @@ export class Omnibar extends Context.Service<Omnibar, {
        * retargeted to our shadow host. That cannot be prevented without the
        * extension-origin iframe that upstream Vimium has and we do not.
        */
-      const passIfOurs = (
-        view: OmnibarView,
-        event: KeyboardEvent,
-      ): HandlerResult =>
+      const passIfOurs = (view: OmnibarView, event: KeyboardEvent): HandlerResult =>
         view.ownsFocus(event.target) ? PASS_EVENT_TO_PAGE : SUPPRESS_EVENT;
 
-      const onKeydown = (
-        current: () => Option.Option<Session>,
-        view: OmnibarView,
-      ) =>
-      (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-        Effect.gen(function*() {
-          // An input method is in the middle of a composition. Every key
-          // belongs to that composition.
-          if (isComposing(event)) return passIfOurs(view, event);
+      const onKeydown =
+        (current: () => Option.Option<Session>, view: OmnibarView) =>
+        (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
+          Effect.gen(function* () {
+            // An input method is in the middle of a composition. Every key
+            // belongs to that composition.
+            if (isComposing(event)) return passIfOurs(view, event);
 
-          const action = omnibarAction(event);
-          if (Option.isNone(action)) return passIfOurs(view, event);
+            const action = omnibarAction(event);
+            if (Option.isNone(action)) return passIfOurs(view, event);
 
-          const live = current();
-          if (Option.isNone(live)) return passIfOurs(view, event);
-          yield* onAction(live.value, action.value);
-          // `preventDefault` is more than tidiness here. Without it Tab moves
-          // the focus out of the overlay, and the arrows move the caret in the
-          // field.
-          return SUPPRESS_EVENT;
-        });
+            const live = current();
+            if (Option.isNone(live)) return passIfOurs(view, event);
+            yield* onAction(live.value, action.value);
+            // `preventDefault` is more than tidiness here. Without it Tab moves
+            // the focus out of the overlay, and the arrows move the caret in the
+            // field.
+            return SUPPRESS_EVENT;
+          });
 
       // ---------------------------------------------------------------
       // Opening
       // ---------------------------------------------------------------
 
-      const open = Effect.fn("Omnibar.open")(
-        function*(source: OmnibarSource, initialQuery?: string) {
-          yield* close;
-          // The omnibar takes the keyboard, so a message that is still on
-          // screen is no longer the thing that the user looks at.
-          yield* hud.hide;
+      const open = Effect.fn("Omnibar.open")(function* (
+        source: OmnibarSource,
+        initialQuery?: string,
+      ) {
+        yield* close;
+        // The omnibar takes the keyboard, so a message that is still on
+        // screen is no longer the thing that the user looks at.
+        yield* hud.hide;
 
-          const scope = yield* Scope.make();
-          const inScope = <A, R>(
-            effect: Effect.Effect<A, never, R>,
-          ): Effect.Effect<A, never, Exclude<R, Scope.Scope>> =>
-            Effect.provideService(effect, Scope.Scope, scope);
+        const scope = yield* Scope.make();
+        const inScope = <A, R>(
+          effect: Effect.Effect<A, never, R>,
+        ): Effect.Effect<A, never, Exclude<R, Scope.Scope>> =>
+          Effect.provideService(effect, Scope.Scope, scope);
 
-          const rows = yield* Ref.make<readonly Completion[]>([]);
-          const selected = yield* Ref.make(0);
-          const suggestions = yield* Ref.make<SuggestionState>({
-            query: "",
-            badge: DEFAULT_SUGGESTION_BADGE,
-            items: [],
-          });
+        const rows = yield* Ref.make<readonly Completion[]>([]);
+        const selected = yield* Ref.make(0);
+        const suggestions = yield* Ref.make<SuggestionState>({
+          query: "",
+          badge: DEFAULT_SUGGESTION_BADGE,
+          items: [],
+        });
 
-          const view = yield* inScope(Effect.provideContext(
+        const view = yield* inScope(
+          Effect.provideContext(
             makeOmnibarView({
               placeholder: PLACEHOLDERS[source],
               onInput: () =>
-                Effect.gen(function*() {
+                Effect.gen(function* () {
                   const live = yield* Ref.get(session);
                   if (Option.isNone(live)) return;
                   // Any edit makes the choice stale: the row under the cursor
@@ -613,58 +561,61 @@ export class Omnibar extends Context.Service<Omnibar, {
               onDismiss: close,
             }),
             services,
-          ));
+          ),
+        );
 
-          const mode = yield* inScope(modes.enter({
-            name: "omnibar",
-            indicator: null,
-            // Escape is handled above, and not by the mode, so that the
-            // overlay goes and the focus comes back before the frame does.
-            exitOnEscape: false,
-            // The backstop, and not the mechanism. Read the file comment.
-            suppressAllKeyboardEvents: true,
-            singleton: "omnibar",
-          }, {
-            keydown: onKeydown(() => Ref.getUnsafe(session), view),
-            keypress: (event) => Effect.succeed(passIfOurs(view, event)),
-            keyup: (event) => Effect.succeed(passIfOurs(view, event)),
-            focus: (event) =>
-              // Keep insert mode, which sits below us, from reading a focus on
-              // our own field as the page asking for insert mode.
-              Effect.succeed(
-                view.ownsFocus(event.target)
-                  ? SUPPRESS_PROPAGATION
-                  : CONTINUE_BUBBLING,
-              ),
-          }));
+        const mode = yield* inScope(
+          modes.enter(
+            {
+              name: "omnibar",
+              indicator: null,
+              // Escape is handled above, and not by the mode, so that the
+              // overlay goes and the focus comes back before the frame does.
+              exitOnEscape: false,
+              // The backstop, and not the mechanism. Read the file comment.
+              suppressAllKeyboardEvents: true,
+              singleton: "omnibar",
+            },
+            {
+              keydown: onKeydown(() => Ref.getUnsafe(session), view),
+              keypress: (event) => Effect.succeed(passIfOurs(view, event)),
+              keyup: (event) => Effect.succeed(passIfOurs(view, event)),
+              focus: (event) =>
+                // Keep insert mode, which sits below us, from reading a focus on
+                // our own field as the page asking for insert mode.
+                Effect.succeed(
+                  view.ownsFocus(event.target) ? SUPPRESS_PROPAGATION : CONTINUE_BUBBLING,
+                ),
+            },
+          ),
+        );
 
-          const current: Session = {
-            source,
-            scope,
-            view,
-            rows,
-            selected,
-            suggestions,
-          };
-          yield* Ref.set(session, Option.some(current));
+        const current: Session = {
+          source,
+          scope,
+          view,
+          rows,
+          selected,
+          suggestions,
+        };
+        yield* Ref.set(session, Option.some(current));
 
-          // Anything that removes us — another singleton mode, a navigation —
-          // must take the overlay with it, or the user is left with a field
-          // that cannot be reached.
-          yield* mode.onExit(() =>
-            Effect.gen(function*() {
-              const live = yield* Ref.get(session);
-              if (Option.isSome(live) && live.value === current) yield* close;
-            })
-          );
+        // Anything that removes us — another singleton mode, a navigation —
+        // must take the overlay with it, or the user is left with a field
+        // that cannot be reached.
+        yield* mode.onExit(() =>
+          Effect.gen(function* () {
+            const live = yield* Ref.get(session);
+            if (Option.isSome(live) && live.value === current) yield* close;
+          }),
+        );
 
-          // The optional first query is what "open a link with the omnibar"
-          // gives us.
-          yield* view.setValue(initialQuery ?? "");
-          yield* view.focus;
-          yield* render(current, true);
-        },
-      );
+        // The optional first query is what "open a link with the omnibar"
+        // gives us.
+        yield* view.setValue(initialQuery ?? "");
+        yield* view.focus;
+        yield* render(current, true);
+      });
 
       // ---------------------------------------------------------------
       // Page bookkeeping
@@ -677,7 +628,7 @@ export class Omnibar extends Context.Service<Omnibar, {
        * To add an entry here would quietly turn a liveness list into a second
        * history index, and that is the very thing that must stay opt-in.
        */
-      const heartbeat = Effect.fn("Omnibar.heartbeat")(function*() {
+      const heartbeat = Effect.fn("Omnibar.heartbeat")(function* () {
         const href = yield* dom.href;
         const stored = yield* storage.session.current;
         if (!stored.knownTabs.some((tab) => tab.url === href)) return;
@@ -688,18 +639,15 @@ export class Omnibar extends Context.Service<Omnibar, {
           storage.session.update((current): SessionState => ({
             ...current,
             knownTabs: liveTabs(current.knownTabs, now).map((tab) =>
-              tab.url === href ? { url: href, title, heartbeat: now } : tab
+              tab.url === href ? { url: href, title, heartbeat: now } : tab,
             ),
           })),
         );
       });
 
-      const clearHistory = Effect.fn("Omnibar.clearHistory")(function*() {
+      const clearHistory = Effect.fn("Omnibar.clearHistory")(function* () {
         yield* Effect.matchEffect(history.clear, {
-          onFailure: (error) =>
-            report.error(
-              `Could not erase the history index: ${error.detail}`,
-            ),
+          onFailure: (error) => report.error(`Could not erase the history index: ${error.detail}`),
           onSuccess: () => report.info("Local history index erased"),
         });
       });

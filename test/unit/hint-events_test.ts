@@ -17,43 +17,27 @@ describe("buttonStateFor", () => {
       assert.strictEqual(buttonStateFor("pointerdown").buttons, 1);
       assert.strictEqual(buttonStateFor("mousedown").buttons, 1);
 
-      for (
-        const type of [
-          "pointerover",
-          "mouseover",
-          "pointerup",
-          "mouseup",
-          "click",
-          "pointerout",
-          "mouseout",
-        ]
-      ) {
-        assert.strictEqual(
-          buttonStateFor(type).buttons,
-          0,
-          `${type} must report no button down`,
-        );
+      for (const type of [
+        "pointerover",
+        "mouseover",
+        "pointerup",
+        "mouseup",
+        "click",
+        "pointerout",
+        "mouseout",
+      ]) {
+        assert.strictEqual(buttonStateFor(type).buttons, 0, `${type} must report no button down`);
       }
-    }));
+    }),
+  );
 
   it.effect("names the primary button on every event that changes it", () =>
     Effect.sync(() => {
-      for (
-        const type of [
-          "pointerdown",
-          "mousedown",
-          "pointerup",
-          "mouseup",
-          "click",
-        ]
-      ) {
-        assert.strictEqual(
-          buttonStateFor(type).button,
-          0,
-          `${type} must name the primary button`,
-        );
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        assert.strictEqual(buttonStateFor(type).button, 0, `${type} must name the primary button`);
       }
-    }));
+    }),
+  );
 
   it.effect("gives a pointer event that changes no button `button: -1`", () =>
     Effect.sync(() => {
@@ -64,5 +48,6 @@ describe("buttonStateFor", () => {
       // specification says. The two families differ here.
       assert.strictEqual(buttonStateFor("mouseover").button, 0);
       assert.strictEqual(buttonStateFor("mouseout").button, 0);
-    }));
+    }),
+  );
 });

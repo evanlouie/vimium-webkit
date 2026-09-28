@@ -34,6 +34,7 @@ worked around, is in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
    writes `dist/vimium-webkit.user.js`. `dist/` is not committed, deliberately —
    a build output in version control is a second source of truth that goes stale
    the first time someone forgets to rebuild.
+
 3. Press `?` on any page for the full key reference.
 
 > [!NOTE]
@@ -284,19 +285,19 @@ is composed with NFC first, so `é` is one character however it was pasted.
 
 A character is refused when it is one of these:
 
-| Refused                            | Example             | Why                                         |
-| ---------------------------------- | ------------------- | ------------------------------------------- |
-| a variation selector               | the U+FE0F in `❤️`  | it draws nothing, so the label is invisible |
-| a zero width joiner                | the joiner in `👨‍👩`  | the same                                    |
-| a combining mark                   | a combining acute   | it draws on the character before it         |
-| a Hangul jamo                      | `ᄀ` or `ᅡ`          | it can compose with an adjacent jamo        |
-| a regional indicator               | the letters in `🇩🇪` | two indicators draw as one flag             |
-| an emoji modifier                  | the tone in `👍🏽`    | it joins the emoji before it                |
-| a control or format character      | a soft hyphen       | it has no shape                             |
-| white space                        | a no-break space    | the label looks empty                       |
-| half of a surrogate pair           | a cut emoji         | it is half of a character                   |
-| a character that a case fold grows | `ß`, `İ`, `ﬁ`       | the label would need two keystrokes         |
-| a repeat of an earlier character   | `a` and `A`         | two links would show one label              |
+| Refused                            | Example               | Why                                         |
+| ---------------------------------- | --------------------- | ------------------------------------------- |
+| a variation selector               | the U+FE0F in `❤️`    | it draws nothing, so the label is invisible |
+| a zero width joiner                | the joiner in `👨‍👩` | the same                                    |
+| a combining mark                   | a combining acute     | it draws on the character before it         |
+| a Hangul jamo                      | `ᄀ` or `ᅡ`           | it can compose with an adjacent jamo        |
+| a regional indicator               | the letters in `🇩🇪`   | two indicators draw as one flag             |
+| an emoji modifier                  | the tone in `👍🏽`      | it joins the emoji before it                |
+| a control or format character      | a soft hyphen         | it has no shape                             |
+| white space                        | a no-break space      | the label looks empty                       |
+| half of a surrogate pair           | a cut emoji           | it is half of a character                   |
+| a character that a case fold grows | `ß`, `İ`, `ﬁ`         | the label would need two keystrokes         |
+| a repeat of an earlier character   | `a` and `A`           | two links would show one label              |
 
 A refused character is dropped, and the rest of your set stays in use. A joined
 symbol that uses a join control refuses the complete set. Thus, a family emoji

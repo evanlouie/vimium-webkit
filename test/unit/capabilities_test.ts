@@ -77,13 +77,15 @@ describe("degradationWarnings", () => {
       for (const loss of ["frames", "frame focus", "excluded"]) {
         assert.include(warning, loss, `the warning does not name ${loss}`);
       }
-    }));
+    }),
+  );
 
   it.effect("says nothing about storage when the manager has a store", () =>
     Effect.sync(() => {
       const warnings = degradationWarnings(healthy);
       assert.deepEqual(warnings, []);
-    }));
+    }),
+  );
 });
 
 const AGENTS: readonly {
@@ -102,7 +104,8 @@ const AGENTS: readonly {
   },
   {
     name: "Safari on iPhone",
-    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) " +
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) " +
       "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 " +
       "Safari/604.1",
     platform: "iPhone",
@@ -126,8 +129,7 @@ const AGENTS: readonly {
   },
   {
     name: "Firefox on Linux",
-    userAgent:
-      "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    userAgent: "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
     platform: "Linux x86_64",
     apple: false,
   },
@@ -163,10 +165,7 @@ const AGENTS: readonly {
 ];
 
 /** Supply a navigator without a change to the global test window. */
-const domWithNavigator = (
-  userAgent: string,
-  platform: string,
-): Layer.Layer<Dom> =>
+const domWithNavigator = (userAgent: string, platform: string): Layer.Layer<Dom> =>
   Layer.effect(
     Dom,
     Effect.map(Dom, (dom) => {
@@ -182,21 +181,15 @@ describe("Capabilities", () => {
   for (const row of AGENTS) {
     it.effect(`names the platform: ${row.name}`, () =>
       Effect.sync(() => {
-        assert.strictEqual(
-          isApplePlatform(row.userAgent, row.platform),
-          row.apple,
-        );
-      }));
+        assert.strictEqual(isApplePlatform(row.userAgent, row.platform), row.apple);
+      }),
+    );
   }
 
   it.effect("reads the Apple platform flag from the navigator probe", () => {
     const dom = domWithNavigator("", "MacIntel");
-    const support = Layer.mergeAll(
-      dom,
-      Layer.provide(Gm.layer, dom),
-      KeyValueStore.layerMemory,
-    );
-    return Effect.gen(function*() {
+    const support = Layer.mergeAll(dom, Layer.provide(Gm.layer, dom), KeyValueStore.layerMemory);
+    return Effect.gen(function* () {
       const report = yield* probeCapabilities;
       assert.isTrue(report.applePlatform);
     }).pipe(Effect.provide(support));

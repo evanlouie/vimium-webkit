@@ -71,8 +71,10 @@ const describe = (cause: unknown): string => {
   return String(cause);
 };
 
-const gmFailed = (api: string) => (cause: unknown): GmError =>
-  new GmError({ reason: "failed", api, detail: describe(cause), cause });
+const gmFailed =
+  (api: string) =>
+  (cause: unknown): GmError =>
+    new GmError({ reason: "failed", api, detail: describe(cause), cause });
 
 /**
  * Run a synchronous manager call.
@@ -81,16 +83,11 @@ const gmFailed = (api: string) => (cause: unknown): GmError =>
  * key handler still runs inside the browser's activation window. That is the
  * only reason `setClipboard` works.
  */
-export const gmAttempt = <A>(
-  api: string,
-  run: () => A,
-): Effect.Effect<A, GmError> => Effect.try({ try: run, catch: gmFailed(api) });
+export const gmAttempt = <A>(api: string, run: () => A): Effect.Effect<A, GmError> =>
+  Effect.try({ try: run, catch: gmFailed(api) });
 
 /** Run an asynchronous manager call. This suspends. Keep it off the key path. */
-export const gmAttemptAsync = <A>(
-  api: string,
-  run: () => Promise<A>,
-): Effect.Effect<A, GmError> =>
+export const gmAttemptAsync = <A>(api: string, run: () => Promise<A>): Effect.Effect<A, GmError> =>
   Effect.tryPromise({ try: run, catch: gmFailed(api) });
 
 // ---------------------------------------------------------------------------
@@ -137,55 +134,38 @@ interface GmSurface {
   readonly windowClose: (() => void) | null;
 }
 
-const detectSurface = (
-  probeOr: <A>(read: () => A, fallback: A) => A,
-): GmSurface => {
-  const binding = <A>(read: () => A | undefined): A | null =>
-    probeOr(() => read() ?? null, null);
+const detectSurface = (probeOr: <A>(read: () => A, fallback: A) => A): GmSurface => {
+  const binding = <A>(read: () => A | undefined): A | null => probeOr(() => read() ?? null, null);
 
   const namespace = binding<GmNamespace>(() =>
-    typeof GM !== "undefined" && GM !== null && typeof GM === "object"
-      ? GM
-      : undefined
+    typeof GM !== "undefined" && GM !== null && typeof GM === "object" ? GM : undefined,
   );
 
   return {
     namespace,
     info: probeOr(
-      () => typeof GM_info !== "undefined" ? GM_info : namespace?.info ?? null,
+      () => (typeof GM_info !== "undefined" ? GM_info : (namespace?.info ?? null)),
       null,
     ),
-    getValueSync: binding(() =>
-      typeof GM_getValue === "function" ? GM_getValue : undefined
-    ),
-    setValueSync: binding(() =>
-      typeof GM_setValue === "function" ? GM_setValue : undefined
-    ),
+    getValueSync: binding(() => (typeof GM_getValue === "function" ? GM_getValue : undefined)),
+    setValueSync: binding(() => (typeof GM_setValue === "function" ? GM_setValue : undefined)),
     deleteValueSync: binding(() =>
-      typeof GM_deleteValue === "function" ? GM_deleteValue : undefined
+      typeof GM_deleteValue === "function" ? GM_deleteValue : undefined,
     ),
-    openInTabSync: binding(() =>
-      typeof GM_openInTab === "function" ? GM_openInTab : undefined
-    ),
+    openInTabSync: binding(() => (typeof GM_openInTab === "function" ? GM_openInTab : undefined)),
     setClipboardSync: binding(() =>
-      typeof GM_setClipboard === "function" ? GM_setClipboard : undefined
+      typeof GM_setClipboard === "function" ? GM_setClipboard : undefined,
     ),
     xhrSync: binding(() =>
-      typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : undefined
+      typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : undefined,
     ),
     addValueChangeListener: binding(() =>
-      typeof GM_addValueChangeListener === "function"
-        ? GM_addValueChangeListener
-        : undefined
+      typeof GM_addValueChangeListener === "function" ? GM_addValueChangeListener : undefined,
     ),
     registerMenuCommand: binding(() =>
-      typeof GM_registerMenuCommand === "function"
-        ? GM_registerMenuCommand
-        : undefined
+      typeof GM_registerMenuCommand === "function" ? GM_registerMenuCommand : undefined,
     ),
-    addStyle: binding(() =>
-      typeof GM_addStyle === "function" ? GM_addStyle : undefined
-    ),
+    addStyle: binding(() => (typeof GM_addStyle === "function" ? GM_addStyle : undefined)),
     hasUnsafeWindow: probeOr(
       () => typeof unsafeWindow !== "undefined" && unsafeWindow !== undefined,
       false,
@@ -230,8 +210,7 @@ const readIdentity = (info: unknown): ManagerIdentity => {
     handler: readString(info, "scriptHandler"),
     handlerVersion: readString(info, "version"),
     scriptVersion: readString(script, "version"),
-    injectInto: readString(info, "injectInto") ??
-      readString(script, "injectInto"),
+    injectInto: readString(info, "injectInto") ?? readString(script, "injectInto"),
     sandboxMode: readString(info, "sandboxMode"),
   };
 };
@@ -261,17 +240,15 @@ export interface GmValueApi {
   /** A synchronous API binding, when the manager gives one. */
   readonly setUnsafe: ((key: string, value: string) => void) | null;
   /** Changes made in another tab. `None` when the manager has no such API. */
-  readonly changes: Option.Option<
-    (key: string) => Stream.Stream<Option.Option<string>>
-  >;
+  readonly changes: Option.Option<(key: string) => Stream.Stream<Option.Option<string>>>;
 }
 
 const asString = (value: GmValue | undefined): string | undefined =>
   typeof value === "string"
     ? value
     : value === undefined || value === null
-    ? undefined
-    : String(value);
+      ? undefined
+      : String(value);
 
 const asOption = (value: GmValue | undefined): Option.Option<string> =>
   Option.fromNullishOr(asString(value) ?? null);
@@ -285,16 +262,15 @@ const asyncValueApi = (surface: GmSurface): Option.Option<GmValueApi> => {
   const sync = surface.setValueSync;
   return Option.some({
     kind: "gm-async",
-    get: (key) =>
-      gmAttemptAsync("GM.getValue", () => getValue(key).then(asOption)),
-    set: (key, value) =>
-      gmAttemptAsync("GM.setValue", () => setValue(key, value)),
+    get: (key) => gmAttemptAsync("GM.getValue", () => getValue(key).then(asOption)),
+    set: (key, value) => gmAttemptAsync("GM.setValue", () => setValue(key, value)),
     remove: (key) => gmAttemptAsync("GM.deleteValue", () => deleteValue(key)),
-    setUnsafe: sync === null
-      ? null
-      : (key, value) => {
-        sync(key, value);
-      },
+    setUnsafe:
+      sync === null
+        ? null
+        : (key, value) => {
+            sync(key, value);
+          },
     changes: Option.none(),
   });
 };
@@ -318,31 +294,32 @@ const syncValueApi = (surface: GmSurface): Option.Option<GmValueApi> => {
     setUnsafe: (key, value) => {
       setValueSync(key, value);
     },
-    changes: watcher === null
-      ? Option.none()
-      : Option.some((key: string) =>
-        Stream.callback<Option.Option<string>>((queue) =>
-          Effect.acquireRelease(
-            Effect.sync(() =>
-              watcher(key, (_name, _old, next) => {
-                Queue.offerUnsafe(queue, asOption(next));
-              })
+    changes:
+      watcher === null
+        ? Option.none()
+        : Option.some((key: string) =>
+            Stream.callback<Option.Option<string>>((queue) =>
+              Effect.acquireRelease(
+                Effect.sync(() =>
+                  watcher(key, (_name, _old, next) => {
+                    Queue.offerUnsafe(queue, asOption(next));
+                  }),
+                ),
+                (id) =>
+                  Effect.sync(() => {
+                    // Not in the compatibility floor, so this is best effort. A
+                    // listener that stays is better than a throw during teardown.
+                    try {
+                      if (typeof GM_removeValueChangeListener === "function") {
+                        GM_removeValueChangeListener(id);
+                      }
+                    } catch {
+                      // Nothing else can be done.
+                    }
+                  }),
+              ),
             ),
-            (id) =>
-              Effect.sync(() => {
-                // Not in the compatibility floor, so this is best effort. A
-                // listener that stays is better than a throw during teardown.
-                try {
-                  if (typeof GM_removeValueChangeListener === "function") {
-                    GM_removeValueChangeListener(id);
-                  }
-                } catch {
-                  // Nothing else can be done.
-                }
-              }),
-          )
-        )
-      ),
+          ),
   });
 };
 
@@ -368,89 +345,86 @@ export interface XhrRequest {
 // The service
 // ---------------------------------------------------------------------------
 
-export class Gm extends Context.Service<Gm, {
-  /** Diagnostics only. */
-  readonly identity: ManagerIdentity;
-  /** The raw `GM_info`, for a bug report. */
-  readonly info: unknown;
+export class Gm extends Context.Service<
+  Gm,
+  {
+    /** Diagnostics only. */
+    readonly identity: ManagerIdentity;
+    /** The raw `GM_info`, for a bug report. */
+    readonly info: unknown;
 
-  /** The best value API that this manager has, if it has one. */
-  readonly values: Option.Option<GmValueApi>;
+    /** The best value API that this manager has, if it has one. */
+    readonly values: Option.Option<GmValueApi>;
 
-  /** True when the manager gives the page-world `unsafeWindow`. */
-  readonly hasUnsafeWindow: boolean;
+    /** True when the manager gives the page-world `unsafeWindow`. */
+    readonly hasUnsafeWindow: boolean;
 
-  readonly canOpenInTab: boolean;
-  readonly canSetClipboard: boolean;
-  readonly canRequest: boolean;
-  readonly canRegisterMenuCommand: boolean;
-  readonly canCloseWindow: boolean;
-  readonly canAddStyle: boolean;
+    readonly canOpenInTab: boolean;
+    readonly canSetClipboard: boolean;
+    readonly canRequest: boolean;
+    readonly canRegisterMenuCommand: boolean;
+    readonly canCloseWindow: boolean;
+    readonly canAddStyle: boolean;
 
-  /**
-   * Open a URL in a new tab.
-   *
-   * `window.open` is the fallback, and a poor one on WebKit. It needs fresh
-   * synchronous activation, and it cannot make a background tab from page
-   * script. Always prefer the manager.
-   */
-  readonly openInTab: (
-    url: string,
-    options: GmOpenInTabOptions,
-  ) => Effect.Effect<OpenInTabResult, GmError>;
+    /**
+     * Open a URL in a new tab.
+     *
+     * `window.open` is the fallback, and a poor one on WebKit. It needs fresh
+     * synchronous activation, and it cannot make a background tab from page
+     * script. Always prefer the manager.
+     */
+    readonly openInTab: (
+      url: string,
+      options: GmOpenInTabOptions,
+    ) => Effect.Effect<OpenInTabResult, GmError>;
 
-  /**
-   * Write to the clipboard through the manager.
-   *
-   * This must run synchronously inside the key task. Anything that suspends
-   * first spends the transient activation that the write needs. Every effect
-   * on this path is `Effect.try` or `Effect.fail`, and neither suspends.
-   */
-  readonly setClipboard: (text: string) => Effect.Effect<void, GmError>;
+    /**
+     * Write to the clipboard through the manager.
+     *
+     * This must run synchronously inside the key task. Anything that suspends
+     * first spends the transient activation that the write needs. Every effect
+     * on this path is `Effect.try` or `Effect.fail`, and neither suspends.
+     */
+    readonly setClipboard: (text: string) => Effect.Effect<void, GmError>;
 
-  /**
-   * A cross-origin request through the manager.
-   *
-   * This needs `@connect`, which quoid does not have. Treat `unavailable` as
-   * "this function is off", and do not report it more than once.
-   */
-  readonly request: (
-    request: XhrRequest,
-  ) => Effect.Effect<GmXhrResponse, GmError>;
+    /**
+     * A cross-origin request through the manager.
+     *
+     * This needs `@connect`, which quoid does not have. Treat `unavailable` as
+     * "this function is off", and do not report it more than once.
+     */
+    readonly request: (request: XhrRequest) => Effect.Effect<GmXhrResponse, GmError>;
 
-  /** Add a menu entry for the life of the enclosing scope. */
-  readonly registerMenuCommand: (
-    caption: string,
-    onClick: Effect.Effect<void>,
-  ) => Effect.Effect<void, GmError>;
+    /** Add a menu entry for the life of the enclosing scope. */
+    readonly registerMenuCommand: (
+      caption: string,
+      onClick: Effect.Effect<void>,
+    ) => Effect.Effect<void, GmError>;
 
-  /** Close this tab. Only Violentmonkey and Tampermonkey grant this. */
-  readonly closeWindow: Effect.Effect<void, GmError>;
-}>()("vimium/platform/Gm") {
+    /** Close this tab. Only Violentmonkey and Tampermonkey grant this. */
+    readonly closeWindow: Effect.Effect<void, GmError>;
+  }
+>()("vimium/platform/Gm") {
   static readonly layer: Layer.Layer<Gm, never, Dom> = Layer.effect(
     Gm,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const dom = yield* Dom;
-      const surface = detectSurface(
-        <A>(read: () => A, fallback: A): A => {
-          try {
-            return read();
-          } catch {
-            return fallback;
-          }
-        },
-      );
+      const surface = detectSurface(<A>(read: () => A, fallback: A): A => {
+        try {
+          return read();
+        } catch {
+          return fallback;
+        }
+      });
       return makeGm(surface, dom);
     }),
   );
 
   /** A layer over a surface that a test supplies. */
-  static readonly layerFrom = (
-    surface: GmSurface,
-  ): Layer.Layer<Gm, never, Dom> =>
+  static readonly layerFrom = (surface: GmSurface): Layer.Layer<Gm, never, Dom> =>
     Layer.effect(
       Gm,
-      Effect.gen(function*() {
+      Effect.gen(function* () {
         const dom = yield* Dom;
         return makeGm(surface, dom);
       }),
@@ -460,31 +434,29 @@ export class Gm extends Context.Service<Gm, {
 const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
   const ns = surface.namespace;
 
-  const openInTab = Effect.fn("Gm.openInTab")(
-    function*(url: string, options: GmOpenInTabOptions) {
-      if (ns?.openInTab) {
-        const open = ns.openInTab;
-        return yield* gmAttemptAsync("GM.openInTab", async () => {
-          const handle = await open(url, options);
-          return { handle: handle ?? null, viaManager: true };
-        });
-      }
-      if (surface.openInTabSync) {
-        const open = surface.openInTabSync;
-        return yield* gmAttempt("GM_openInTab", () => ({
-          handle: open(url, options) ?? null,
-          viaManager: true,
-        }));
-      }
-      return yield* gmAttempt("window.open", () => {
-        const opened = dom.window.open(url, "_blank", "noopener,noreferrer");
-        if (opened === null) {
-          throw new Error("window.open was blocked (no transient activation?)");
-        }
-        return { handle: null, viaManager: false };
+  const openInTab = Effect.fn("Gm.openInTab")(function* (url: string, options: GmOpenInTabOptions) {
+    if (ns?.openInTab) {
+      const open = ns.openInTab;
+      return yield* gmAttemptAsync("GM.openInTab", async () => {
+        const handle = await open(url, options);
+        return { handle: handle ?? null, viaManager: true };
       });
-    },
-  );
+    }
+    if (surface.openInTabSync) {
+      const open = surface.openInTabSync;
+      return yield* gmAttempt("GM_openInTab", () => ({
+        handle: open(url, options) ?? null,
+        viaManager: true,
+      }));
+    }
+    return yield* gmAttempt("window.open", () => {
+      const opened = dom.window.open(url, "_blank", "noopener,noreferrer");
+      if (opened === null) {
+        throw new Error("window.open was blocked (no transient activation?)");
+      }
+      return { handle: null, viaManager: false };
+    });
+  });
 
   const setClipboard = (text: string): Effect.Effect<void, GmError> => {
     if (ns?.setClipboard) {
@@ -504,7 +476,7 @@ const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
     return Effect.fail(gmUnavailable("GM_setClipboard"));
   };
 
-  const request = Effect.fn("Gm.request")(function*(input: XhrRequest) {
+  const request = Effect.fn("Gm.request")(function* (input: XhrRequest) {
     const impl: ((details: GmXhrDetails) => unknown) | null = ns?.xmlHttpRequest
       ? (details) => ns.xmlHttpRequest?.(details)
       : surface.xhrSync;
@@ -567,12 +539,13 @@ const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
     caption: string,
     onClick: Effect.Effect<void>,
   ): Effect.Effect<void, GmError> => {
-    const register = surface.registerMenuCommand ??
+    const register =
+      surface.registerMenuCommand ??
       (ns?.registerMenuCommand
         ? (text: string, callback: () => void) => {
-          ns.registerMenuCommand?.(text, callback);
-          return 0;
-        }
+            ns.registerMenuCommand?.(text, callback);
+            return 0;
+          }
         : null);
     if (register === null) {
       return Effect.fail(gmUnavailable("GM_registerMenuCommand"));
@@ -601,11 +574,10 @@ const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
     ),
     hasUnsafeWindow: surface.hasUnsafeWindow,
     canOpenInTab: ns?.openInTab !== undefined || surface.openInTabSync !== null,
-    canSetClipboard: ns?.setClipboard !== undefined ||
-      surface.setClipboardSync !== null,
+    canSetClipboard: ns?.setClipboard !== undefined || surface.setClipboardSync !== null,
     canRequest: ns?.xmlHttpRequest !== undefined || surface.xhrSync !== null,
-    canRegisterMenuCommand: ns?.registerMenuCommand !== undefined ||
-      surface.registerMenuCommand !== null,
+    canRegisterMenuCommand:
+      ns?.registerMenuCommand !== undefined || surface.registerMenuCommand !== null,
     canCloseWindow: surface.windowClose !== null,
     canAddStyle: surface.addStyle !== null,
     openInTab,

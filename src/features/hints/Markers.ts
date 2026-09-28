@@ -228,16 +228,10 @@ export interface MarkerLayer {
   readonly clear: Effect.Effect<void>;
 }
 
-const paintText = (
-  document: Document,
-  marker: HTMLElement,
-  spec: MarkerSpec,
-): void => {
+const paintText = (document: Document, marker: HTMLElement, spec: MarkerSpec): void => {
   const matched = spec.hintString.slice(0, spec.matchedLength);
   const rest = spec.hintString.slice(spec.matchedLength);
-  const label = spec.showLinkText
-    ? spec.linkText.slice(0, MAX_LABEL_LENGTH)
-    : "";
+  const label = spec.showLinkText ? spec.linkText.slice(0, MAX_LABEL_LENGTH) : "";
 
   // `textContent` on each part, and never `innerHTML`: the page supplies the
   // link text, and it would otherwise be a route for injection into our own
@@ -258,11 +252,7 @@ const paintText = (
   }
 };
 
-const paint = (
-  document: Document,
-  marker: HTMLElement,
-  spec: MarkerSpec,
-): void => {
+const paint = (document: Document, marker: HTMLElement, spec: MarkerSpec): void => {
   const classes = ["vw-hint"];
   if (spec.hidden) classes.push("vw-hint--hidden");
   if (spec.secondary) classes.push("vw-hint--secondary");
@@ -274,9 +264,7 @@ const paint = (
   const top = Math.max(MARKER_INSET, spec.rect.top);
   // Whole pixels: a marker on a fractional boundary is drawn blurred, and hint
   // text at 11px has no legibility to spare.
-  marker.style.transform = `translate(${Math.round(left)}px, ${
-    Math.round(top)
-  }px)`;
+  marker.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
 
   paintText(document, marker, spec);
 };
@@ -287,137 +275,128 @@ const paint = (
  * The container, the listeners and the reposition fiber go when the scope
  * closes.
  */
-export const makeMarkerLayer: Effect.Effect<
-  MarkerLayer,
-  never,
-  Dom | Ui | Scope.Scope
-> = Effect.gen(function*() {
-  const dom = yield* Dom;
-  const ui = yield* Ui;
-  const document = dom.document;
+export const makeMarkerLayer: Effect.Effect<MarkerLayer, never, Dom | Ui | Scope.Scope> =
+  Effect.gen(function* () {
+    const dom = yield* Dom;
+    const ui = yield* Ui;
+    const document = dom.document;
 
-  const hintsLayer = yield* ui.layer("hints");
+    const hintsLayer = yield* ui.layer("hints");
 
-  const container = yield* Effect.acquireRelease(
-    Effect.sync(() => {
-      const element = document.createElement("div");
-      element.className = "vw-hints";
-      hintsLayer.appendChild(element);
-      return element;
-    }),
-    (element) =>
+    const container = yield* Effect.acquireRelease(
       Effect.sync(() => {
-        element.remove();
+        const element = document.createElement("div");
+        element.className = "vw-hints";
+        hintsLayer.appendChild(element);
+        return element;
       }),
-  );
+      (element) =>
+        Effect.sync(() => {
+          element.remove();
+        }),
+    );
 
-  const markers = yield* Ref.make<ReadonlyArray<HTMLElement>>([]);
+    const markers = yield* Ref.make<ReadonlyArray<HTMLElement>>([]);
 
-  /** Where the page stood when the rects of the current specs were measured. */
-  const first = yield* dom.probeOr(
-    () => ({ x: dom.window.scrollX, y: dom.window.scrollY }),
-    { x: 0, y: 0 },
-  );
-  const originRef = yield* Ref.make(first);
-
-  const scrollNow = Effect.flatMap(
-    Ref.get(originRef),
-    (origin) =>
-      dom.probeOr(
-        () => ({ x: dom.window.scrollX, y: dom.window.scrollY }),
-        origin,
-      ),
-  );
-
-  const applyOffset = Effect.gen(function*() {
-    const viewport = yield* ui.viewport;
-    const origin = yield* Ref.get(originRef);
-    const scroll = yield* scrollNow;
-    const dx = scroll.x - origin.x + viewport.offsetLeft;
-    const dy = scroll.y - origin.y + viewport.offsetTop;
-    yield* Effect.sync(() => {
-      container.style.transform = `translate(${-dx}px, ${-dy}px)`;
+    /** Where the page stood when the rects of the current specs were measured. */
+    const first = yield* dom.probeOr(() => ({ x: dom.window.scrollX, y: dom.window.scrollY }), {
+      x: 0,
+      y: 0,
     });
-  });
+    const originRef = yield* Ref.make(first);
 
-  const reanchor = Effect.gen(function*() {
-    const scroll = yield* scrollNow;
-    yield* Ref.set(originRef, scroll);
+    const scrollNow = Effect.flatMap(Ref.get(originRef), (origin) =>
+      dom.probeOr(() => ({ x: dom.window.scrollX, y: dom.window.scrollY }), origin),
+    );
+
+    const applyOffset = Effect.gen(function* () {
+      const viewport = yield* ui.viewport;
+      const origin = yield* Ref.get(originRef);
+      const scroll = yield* scrollNow;
+      const dx = scroll.x - origin.x + viewport.offsetLeft;
+      const dy = scroll.y - origin.y + viewport.offsetTop;
+      yield* Effect.sync(() => {
+        container.style.transform = `translate(${-dx}px, ${-dy}px)`;
+      });
+    });
+
+    const reanchor = Effect.gen(function* () {
+      const scroll = yield* scrollNow;
+      yield* Ref.set(originRef, scroll);
+      yield* applyOffset;
+    });
+
+    // One write for each animation frame. A scroll arrives far more often than
+    // we can usefully draw again, and WebKit throttles the animation frames of a
+    // cross-origin frame and of Low Power Mode to 30 each second, which is
+    // exactly the back pressure that we want here.
+    const frame = yield* FiberHandle.make<void, never>();
+    const reposition = Effect.asVoid(
+      FiberHandle.run(frame, Effect.andThen(dom.nextFrame, applyOffset)),
+    );
+
+    // The capture phase: a scroll does not bubble from an element that scrolls,
+    // and a hint on an inner scroller must follow it as well.
+    yield* dom.listen("document", "scroll", () => reposition, {
+      capture: true,
+      passive: true,
+    });
+    yield* dom.listen("window", "resize", () => reposition, { passive: true });
+
+    const visualViewport = yield* dom.probeOr(
+      () => Option.fromNullishOr(dom.window.visualViewport),
+      Option.none<VisualViewport>(),
+    );
+    if (Option.isSome(visualViewport)) {
+      const visual = visualViewport.value;
+      yield* dom.listenOn(visual, "resize", () => reposition, { passive: true });
+      yield* dom.listenOn(visual, "scroll", () => reposition, { passive: true });
+    }
+
     yield* applyOffset;
-  });
 
-  // One write for each animation frame. A scroll arrives far more often than
-  // we can usefully draw again, and WebKit throttles the animation frames of a
-  // cross-origin frame and of Low Power Mode to 30 each second, which is
-  // exactly the back pressure that we want here.
-  const frame = yield* FiberHandle.make<void, never>();
-  const reposition = Effect.asVoid(
-    FiberHandle.run(frame, Effect.andThen(dom.nextFrame, applyOffset)),
-  );
-
-  // The capture phase: a scroll does not bubble from an element that scrolls,
-  // and a hint on an inner scroller must follow it as well.
-  yield* dom.listen("document", "scroll", () => reposition, {
-    capture: true,
-    passive: true,
-  });
-  yield* dom.listen("window", "resize", () => reposition, { passive: true });
-
-  const visualViewport = yield* dom.probeOr(
-    () => Option.fromNullishOr(dom.window.visualViewport),
-    Option.none<VisualViewport>(),
-  );
-  if (Option.isSome(visualViewport)) {
-    const visual = visualViewport.value;
-    yield* dom.listenOn(visual, "resize", () => reposition, { passive: true });
-    yield* dom.listenOn(visual, "scroll", () => reposition, { passive: true });
-  }
-
-  yield* applyOffset;
-
-  /**
-   * Make sure that there are at least `count` marker elements.
-   *
-   * A marker is a child of the container, and the container is released with
-   * the scope, so the markers go with it. There is nothing else to remove.
-   */
-  const grow = (count: number): Effect.Effect<ReadonlyArray<HTMLElement>> =>
-    Ref.modify(markers, (current) => {
-      if (current.length >= count) return [current, current];
-      const next = [...current];
-      while (next.length < count) {
-        const marker = document.createElement("div");
-        marker.className = "vw-hint";
-        container.appendChild(marker);
-        next.push(marker);
-      }
-      return [next, next];
-    });
-
-  const render = (specs: readonly MarkerSpec[]): Effect.Effect<void> =>
-    Effect.flatMap(grow(specs.length), (elements) =>
-      Effect.sync(() => {
-        for (let index = 0; index < elements.length; index++) {
-          const marker = elements[index];
-          if (marker === undefined) continue;
-          const spec = specs[index];
-          if (spec === undefined) {
-            marker.className = "vw-hint vw-hint--hidden";
-            continue;
-          }
-          paint(document, marker, spec);
+    /**
+     * Make sure that there are at least `count` marker elements.
+     *
+     * A marker is a child of the container, and the container is released with
+     * the scope, so the markers go with it. There is nothing else to remove.
+     */
+    const grow = (count: number): Effect.Effect<ReadonlyArray<HTMLElement>> =>
+      Ref.modify(markers, (current) => {
+        if (current.length >= count) return [current, current];
+        const next = [...current];
+        while (next.length < count) {
+          const marker = document.createElement("div");
+          marker.className = "vw-hint";
+          container.appendChild(marker);
+          next.push(marker);
         }
-      }));
+        return [next, next];
+      });
 
-  const clear = Effect.flatMap(
-    Ref.get(markers),
-    (elements) =>
+    const render = (specs: readonly MarkerSpec[]): Effect.Effect<void> =>
+      Effect.flatMap(grow(specs.length), (elements) =>
+        Effect.sync(() => {
+          for (let index = 0; index < elements.length; index++) {
+            const marker = elements[index];
+            if (marker === undefined) continue;
+            const spec = specs[index];
+            if (spec === undefined) {
+              marker.className = "vw-hint vw-hint--hidden";
+              continue;
+            }
+            paint(document, marker, spec);
+          }
+        }),
+      );
+
+    const clear = Effect.flatMap(Ref.get(markers), (elements) =>
       Effect.sync(() => {
         for (const marker of elements) {
           marker.className = "vw-hint vw-hint--hidden";
         }
       }),
-  );
+    );
 
-  return { render, reanchor, clear };
-});
+    return { render, reanchor, clear };
+  });

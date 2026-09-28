@@ -27,14 +27,16 @@ describe("HintString", () => {
       assert.strictEqual(reverseString(""), "");
       // A plain `split("")` breaks the surrogate pair.
       assert.strictEqual(reverseString("a😀b"), "b😀a");
-    }));
+    }),
+  );
 
   it.effect("gives exactly the number of hints that was asked for", () =>
     Effect.sync(() => {
       for (const count of [1, 2, 5, 13, 14, 15, 100, 197, 1000]) {
         assert.lengthOf(hintStrings(count, DEFAULT_ALPHABET), count);
       }
-    }));
+    }),
+  );
 
   it.effect("gives nothing for degenerate input", () =>
     Effect.sync(() => {
@@ -42,13 +44,15 @@ describe("HintString", () => {
       assert.deepEqual(hintStrings(-3, DEFAULT_ALPHABET), []);
       // An alphabet of one character has no prefix-free code.
       assert.deepEqual(hintStrings(5, "a"), []);
-    }));
+    }),
+  );
 
   it.effect("gives unique hints", () =>
     Effect.sync(() => {
       const hints = hintStrings(500, DEFAULT_ALPHABET);
       assert.strictEqual(new Set(hints).size, hints.length);
-    }));
+    }),
+  );
 
   it.effect("gives prefix-free hints", () =>
     Effect.sync(() => {
@@ -64,7 +68,8 @@ describe("HintString", () => {
           }
         }
       }
-    }));
+    }),
+  );
 
   it.effect("uses only characters of the alphabet", () =>
     Effect.sync(() => {
@@ -74,7 +79,8 @@ describe("HintString", () => {
           assert.include(alphabet, char, `unexpected character "${char}"`);
         }
       }
-    }));
+    }),
+  );
 
   it.effect("agrees with the reference algorithm", () =>
     Effect.sync(() => {
@@ -84,7 +90,8 @@ describe("HintString", () => {
       assert.deepEqual(hintStrings(3, "ab"), ["aa", "b", "ab"]);
       assert.deepEqual(hintStrings(1, "ab"), ["a"]);
       assert.deepEqual(hintStrings(2, "ab"), ["a", "b"]);
-    }));
+    }),
+  );
 
   it.effect("spreads the short hints over the page", () =>
     Effect.sync(() => {
@@ -101,26 +108,27 @@ describe("HintString", () => {
         shortPositions.length,
         `the short hints cluster at the front: ${shortPositions.join(",")}`,
       );
-    }));
+    }),
+  );
 
   it.effect("grows the length only as far as it must", () =>
     Effect.sync(() => {
       const alphabet = "abcd";
-      assert.isTrue(
-        hintStrings(4, alphabet).every((hint) => hint.length === 1),
-      );
+      assert.isTrue(hintStrings(4, alphabet).every((hint) => hint.length === 1));
       // The fifth link forces two characters, but not for every link.
       const five = hintStrings(5, alphabet);
       assert.isTrue(five.some((hint) => hint.length === 1));
       assert.isTrue(five.some((hint) => hint.length === 2));
-    }));
+    }),
+  );
 
   it.effect("removes duplicates and whitespace from the alphabet", () =>
     Effect.sync(() => {
       assert.strictEqual(normaliseHintCharacters("aabbc", "xy"), "abc");
       assert.strictEqual(normaliseHintCharacters("a b\tc", "xy"), "abc");
       assert.strictEqual(normaliseHintCharacters("AaB", "xy"), "ab");
-    }));
+    }),
+  );
 
   /**
    * Characters that a case fold expands or joins.
@@ -189,11 +197,9 @@ describe("HintString", () => {
   for (const row of FOLD_CASES) {
     it.effect(`folds the alphabet: ${row.name}`, () =>
       Effect.sync(() => {
-        assert.strictEqual(
-          normaliseHintCharacters(row.input, "xy"),
-          row.expected,
-        );
-      }));
+        assert.strictEqual(normaliseHintCharacters(row.input, "xy"), row.expected);
+      }),
+    );
   }
 
   it.effect("gives distinct labels for an alphabet that folds", () =>
@@ -219,7 +225,8 @@ describe("HintString", () => {
           for (const char of hint) assert.include(alphabet, char);
         }
       }
-    }));
+    }),
+  );
 
   it.effect("falls back when the alphabet cannot be used", () =>
     Effect.sync(() => {
@@ -229,7 +236,8 @@ describe("HintString", () => {
       // Two characters that fold together leave one character behind.
       assert.strictEqual(normaliseHintCharacters("i\u0131", "xy"), "xy");
       assert.strictEqual(normaliseHintCharacters("\u00df\u1e9e", "xy"), "xy");
-    }));
+    }),
+  );
 
   it.effect("gives one matching key to characters that fold together", () =>
     Effect.sync(() => {
@@ -237,12 +245,10 @@ describe("HintString", () => {
       assert.strictEqual(normaliseHintCharacters("ab\u00df", "xy"), "ab");
       assert.strictEqual(normaliseHintCharacters("a b", "xy"), "ab");
       // The fold joins the pair, so the identity is one value.
-      assert.strictEqual(
-        hintCharacterKey("\u03c2"),
-        hintCharacterKey("\u03c3"),
-      );
+      assert.strictEqual(hintCharacterKey("\u03c2"), hintCharacterKey("\u03c3"));
       assert.strictEqual(hintCharacterKey("\u0131"), hintCharacterKey("I"));
-    }));
+    }),
+  );
 
   it.effect("refuses half of an astral character", () =>
     Effect.sync(() => {
@@ -251,11 +257,9 @@ describe("HintString", () => {
       assert.strictEqual(normaliseHintCharacters("ab\udfff", "xy"), "ab");
       assert.strictEqual(normaliseHintCharacters("ab\ud83d", "xy"), "ab");
       // A whole astral character is one hint character.
-      assert.strictEqual(
-        normaliseHintCharacters("ab\u{1f600}", "xy"),
-        "ab\u{1f600}",
-      );
-    }));
+      assert.strictEqual(normaliseHintCharacters("ab\u{1f600}", "xy"), "ab\u{1f600}");
+    }),
+  );
 
   /**
    * Characters that have no shape of their own.
@@ -341,11 +345,9 @@ describe("HintString", () => {
   for (const row of INVISIBLE_CASES) {
     it.effect(`drops a character with no shape: ${row.name}`, () =>
       Effect.sync(() => {
-        assert.strictEqual(
-          normaliseHintCharacters(row.input, "xy"),
-          row.expected,
-        );
-      }));
+        assert.strictEqual(normaliseHintCharacters(row.input, "xy"), row.expected);
+      }),
+    );
   }
 
   /** The four grapheme cases from the review. */
@@ -371,12 +373,7 @@ describe("HintString", () => {
       name: "a thumb loses its skin tone modifier",
       input: "\u{1f44d}\u{1f3fd}ab",
       alphabet: "\u{1f44d}ab",
-      labels: [
-        "a",
-        "\u{1f44d}a",
-        "b",
-        "\u{1f44d}\u{1f44d}",
-      ],
+      labels: ["a", "\u{1f44d}a", "b", "\u{1f44d}\u{1f44d}"],
     },
     {
       name: "a combining acute composes with its letter",
@@ -392,7 +389,8 @@ describe("HintString", () => {
         const alphabet = normaliseHintCharacters(row.input, "xy");
         assert.strictEqual(alphabet, row.alphabet);
         assert.deepEqual(hintStrings(4, alphabet), row.labels);
-      }));
+      }),
+    );
   }
 
   it.effect("gives visible and distinct labels for a heart and a face", () =>
@@ -408,27 +406,17 @@ describe("HintString", () => {
       for (const label of labels) {
         assert.strictEqual(label.normalize("NFC"), label);
       }
-    }));
+    }),
+  );
 
   it.effect("refuses both endpoints of each emoji joiner property", () =>
     Effect.sync(() => {
-      assert.strictEqual(
-        normaliseHintCharacters("ab\u{1f1e6}", "xy"),
-        "ab",
-      );
-      assert.strictEqual(
-        normaliseHintCharacters("ab\u{1f1ff}", "xy"),
-        "ab",
-      );
-      assert.strictEqual(
-        normaliseHintCharacters("ab\u{1f3fb}", "xy"),
-        "ab",
-      );
-      assert.strictEqual(
-        normaliseHintCharacters("ab\u{1f3ff}", "xy"),
-        "ab",
-      );
-    }));
+      assert.strictEqual(normaliseHintCharacters("ab\u{1f1e6}", "xy"), "ab");
+      assert.strictEqual(normaliseHintCharacters("ab\u{1f1ff}", "xy"), "ab");
+      assert.strictEqual(normaliseHintCharacters("ab\u{1f3fb}", "xy"), "ab");
+      assert.strictEqual(normaliseHintCharacters("ab\u{1f3ff}", "xy"), "ab");
+    }),
+  );
 
   it.effect("refuses Hangul jamo and pair composition", () =>
     Effect.sync(() => {
@@ -442,33 +430,24 @@ describe("HintString", () => {
         labels.length,
       );
 
-      const pairs = [...alphabet].flatMap((first) =>
-        [...alphabet].map((second) => first + second)
-      );
-      assert.strictEqual(
-        new Set(pairs.map((pair) => pair.normalize("NFC"))).size,
-        pairs.length,
-      );
-      assert.strictEqual(
-        new Set(pairs.map(hintCharacterKey)).size,
-        pairs.length,
-      );
+      const pairs = [...alphabet].flatMap((first) => [...alphabet].map((second) => first + second));
+      assert.strictEqual(new Set(pairs.map((pair) => pair.normalize("NFC"))).size, pairs.length);
+      assert.strictEqual(new Set(pairs.map(hintCharacterKey)).size, pairs.length);
       const segmenter = new Intl.Segmenter(undefined, {
         granularity: "grapheme",
       });
       for (const pair of pairs) {
         assert.lengthOf([...segmenter.segment(pair)], 2);
       }
-    }));
+    }),
+  );
 
   it.effect("cannot detect font coverage for a Tangsa letter", () =>
     Effect.sync(() => {
       // Font coverage depends on the device and is unavailable in this module.
-      assert.strictEqual(
-        normaliseHintCharacters("\u{16a70}x", "xy"),
-        "\u{16a70}x",
-      );
-    }));
+      assert.strictEqual(normaliseHintCharacters("\u{16a70}x", "xy"), "\u{16a70}x");
+    }),
+  );
 
   it.effect("composes the set with NFC before it reads a character", () =>
     Effect.sync(() => {
@@ -480,7 +459,8 @@ describe("HintString", () => {
       );
       assert.strictEqual(hintCharacterCount("e\u0301x"), 2);
       assert.strictEqual(hintCharacterCount("\u{1f600}"), 1);
-    }));
+    }),
+  );
 
   it.effect("is decimal for the default digit set", () =>
     Effect.sync(() => {
@@ -489,7 +469,8 @@ describe("HintString", () => {
       assert.strictEqual(numberToHintString(9, digits), "9");
       assert.strictEqual(numberToHintString(10, digits), "10");
       assert.strictEqual(numberToHintString(147, digits), "147");
-    }));
+    }),
+  );
 
   it.effect("honours a custom digit set", () =>
     Effect.sync(() => {
@@ -497,7 +478,8 @@ describe("HintString", () => {
       assert.strictEqual(numberToHintString(1, "xyz"), "y");
       assert.strictEqual(numberToHintString(3, "xyz"), "yx");
       assert.strictEqual(numberToHintString(4, "xyz"), "yy");
-    }));
+    }),
+  );
 
   it.effect("refuses degenerate input for a hint number", () =>
     Effect.sync(() => {
@@ -505,12 +487,14 @@ describe("HintString", () => {
       assert.strictEqual(numberToHintString(-1, "0123456789"), "");
       assert.strictEqual(numberToHintString(Number.NaN, "0123456789"), "");
       assert.strictEqual(numberToHintString(5, "a"), "");
-    }));
+    }),
+  );
 
   it.effect("gives every index for an empty prefix", () =>
     Effect.sync(() => {
       assert.deepEqual(matchByPrefix(["aa", "ab", "b"], ""), [0, 1, 2]);
-    }));
+    }),
+  );
 
   it.effect("narrows as the user types", () =>
     Effect.sync(() => {
@@ -518,5 +502,6 @@ describe("HintString", () => {
       assert.deepEqual(matchByPrefix(hints, "a"), [0, 1]);
       assert.deepEqual(matchByPrefix(hints, "ab"), [1]);
       assert.deepEqual(matchByPrefix(hints, "c"), []);
-    }));
+    }),
+  );
 });

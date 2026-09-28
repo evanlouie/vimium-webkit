@@ -31,9 +31,7 @@ const SETTLE_MS = 400;
 const dispatchFocusEvent = (vw: Vimium, type: string): Promise<void> =>
   vw.page.evaluate((name: string) => {
     const field = document.getElementById("light-field");
-    field?.dispatchEvent(
-      new FocusEvent(name, { bubbles: false, composed: true }),
-    );
+    field?.dispatchEvent(new FocusEvent(name, { bubbles: false, composed: true }));
   }, type);
 
 const fieldValue = (vw: Vimium): Promise<string> =>

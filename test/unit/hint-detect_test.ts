@@ -16,16 +16,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import {
-  Deferred,
-  Effect,
-  Exit,
-  Fiber,
-  Layer,
-  Option,
-  Ref,
-  Stream,
-} from "effect";
+import { Deferred, Effect, Exit, Fiber, Layer, Option, Ref, Stream } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 import {
   collectElements,
@@ -91,12 +82,10 @@ describe("the image-map lookup", () => {
 
         const found = findImageMap(context, `#${name}`);
 
-        assert.isTrue(
-          Option.isSome(found),
-          `no map for ${JSON.stringify(name)}`,
-        );
+        assert.isTrue(Option.isSome(found), `no map for ${JSON.stringify(name)}`);
         assert.strictEqual(Option.getOrNull(found), target);
-      }));
+      }),
+    );
   }
 
   it.effect("gives no map for an empty name", () =>
@@ -108,7 +97,8 @@ describe("the image-map lookup", () => {
       assert.isTrue(Option.isNone(findImageMap(context, "")));
       assert.isTrue(Option.isNone(mapNameOf("#")));
       assert.isTrue(Option.isNone(mapNameOf("")));
-    }));
+    }),
+  );
 
   it.effect("takes the first map when the name is on the page two times", () =>
     Effect.sync(() => {
@@ -116,17 +106,16 @@ describe("the image-map lookup", () => {
       const second = mapElement("nav");
       const context = contextIn(rootWith([first, second]));
 
-      assert.strictEqual(
-        Option.getOrNull(findImageMap(context, "#nav")),
-        first,
-      );
-    }));
+      assert.strictEqual(Option.getOrNull(findImageMap(context, "#nav")), first);
+    }),
+  );
 
   it.effect("gives no map for a name that is not on the page", () =>
     Effect.sync(() => {
       const context = contextIn(rootWith([mapElement("nav")]));
       assert.isTrue(Option.isNone(findImageMap(context, "#missing")));
-    }));
+    }),
+  );
 
   it.effect("compares the name exactly", () =>
     Effect.sync(() => {
@@ -135,38 +124,33 @@ describe("the image-map lookup", () => {
       assert.isTrue(Option.isNone(findImageMap(context, "#nav ")));
       assert.isTrue(Option.isNone(findImageMap(context, "nav")));
       assert.strictEqual(Option.getOrNull(mapNameOf("#nav")), "nav");
-    }));
+    }),
+  );
 
   it.effect("keeps a name that already holds a hash", () =>
     Effect.sync(() => {
       const target = mapElement("#nav");
       const context = contextIn(rootWith([mapElement("nav"), target]));
       // Only the first `#` is the separator, as `usemap` defines it.
-      assert.strictEqual(
-        Option.getOrNull(findImageMap(context, "##nav")),
-        target,
-      );
-    }));
+      assert.strictEqual(Option.getOrNull(findImageMap(context, "##nav")), target);
+    }),
+  );
 
   it.effect("uses the text after the first hash", () =>
     Effect.sync(() => {
       const target = mapElement("nav");
       const context = contextIn(rootWith([target]));
-      assert.strictEqual(
-        Option.getOrNull(findImageMap(context, "prefix#nav")),
-        target,
-      );
-    }));
+      assert.strictEqual(Option.getOrNull(findImageMap(context, "prefix#nav")), target);
+    }),
+  );
 
   it.effect("matches an id when a map has no name", () =>
     Effect.sync(() => {
       const target = mapElement(null, "nav");
       const context = contextIn(rootWith([target]));
-      assert.strictEqual(
-        Option.getOrNull(findImageMap(context, "#nav")),
-        target,
-      );
-    }));
+      assert.strictEqual(Option.getOrNull(findImageMap(context, "#nav")), target);
+    }),
+  );
 
   it.effect("searches only the image context tree", () =>
     Effect.sync(() => {
@@ -177,16 +161,11 @@ describe("the image-map lookup", () => {
       const shadowContext = contextIn(rootWith([shadowMap]), documentRoot);
       const emptyShadowContext = contextIn(rootWith([]), documentRoot);
 
-      assert.strictEqual(
-        Option.getOrNull(findImageMap(shadowContext, "#nav")),
-        shadowMap,
-      );
-      assert.strictEqual(
-        Option.getOrNull(findImageMap(documentContext, "#nav")),
-        documentMap,
-      );
+      assert.strictEqual(Option.getOrNull(findImageMap(shadowContext, "#nav")), shadowMap);
+      assert.strictEqual(Option.getOrNull(findImageMap(documentContext, "#nav")), documentMap);
       assert.isTrue(Option.isNone(findImageMap(emptyShadowContext, "#nav")));
-    }));
+    }),
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -323,7 +302,8 @@ const referenceWalk = (
 
 /** The heuristic of `looksLikeClosedShadowHost`, over the fake node. */
 const looksClosed = (element: FakeNode): boolean =>
-  element.shadowRoot === null && element.localName.includes("-") &&
+  element.shadowRoot === null &&
+  element.localName.includes("-") &&
   element.childNodes.length === 0 &&
   element.getBoundingClientRect().width >= 3 &&
   element.getBoundingClientRect().height >= 3;
@@ -390,12 +370,10 @@ describe("the walk of the tree", () => {
           `element ${index} is not the element of the walk before`,
         );
       }
-      assert.strictEqual(
-        chunked.unreachableHosts,
-        reference.unreachableHosts,
-      );
+      assert.strictEqual(chunked.unreachableHosts, reference.unreachableHosts);
       assert.isAbove(reference.unreachableHosts, 0);
-    }));
+    }),
+  );
 
   it.effect("gives the same order for every slice size", () =>
     Effect.sync(() => {
@@ -407,7 +385,8 @@ describe("the walk of the tree", () => {
       assert.deepStrictEqual([...one.elements], [...seven.elements]);
       assert.deepStrictEqual([...one.elements], [...whole.elements]);
       assert.strictEqual(one.unreachableHosts, whole.unreachableHosts);
-    }));
+    }),
+  );
 
   it.effect("visits the host, then its shadow tree, then its light tree", () =>
     Effect.sync(() => {
@@ -424,7 +403,8 @@ describe("the walk of the tree", () => {
       const walked = walkAll(tree, 1);
 
       assert.deepStrictEqual([...walked.elements], [host, shadowChild, light]);
-    }));
+    }),
+  );
 
   it.effect("gives false as soon as no element is left", () =>
     Effect.sync(() => {
@@ -436,14 +416,16 @@ describe("the walk of the tree", () => {
       assert.isFalse(stepWalk(walk, 1));
       assert.isFalse(stepWalk(walk, 1));
       assert.strictEqual(walk.collected.elements.length, 2);
-    }));
+    }),
+  );
 
   it.effect("walks an empty root", () =>
     Effect.sync(() => {
       const walk = startWalk(root() as unknown as ParentNode);
       assert.isFalse(stepWalk(walk, 32));
       assert.strictEqual(walk.collected.elements.length, 0);
-    }));
+    }),
+  );
 
   it.effect("bounds sibling reads in one step", () =>
     Effect.sync(() => {
@@ -456,7 +438,8 @@ describe("the walk of the tree", () => {
 
       assert.strictEqual(walk.collected.elements.length, 7);
       assert.isAtMost(siblingReads, 7);
-    }));
+    }),
+  );
 
   it.effect("excludes a child appended after its parent was visited", () =>
     Effect.sync(() => {
@@ -470,11 +453,9 @@ describe("the walk of the tree", () => {
       append(parent, added);
 
       assert.isFalse(stepWalk(walk, 10));
-      assert.deepStrictEqual(
-        walk.collected.elements as unknown as FakeNode[],
-        [parent],
-      );
-    }));
+      assert.deepStrictEqual(walk.collected.elements as unknown as FakeNode[], [parent]);
+    }),
+  );
 
   it.effect("includes a child added before its parent is visited", () =>
     Effect.sync(() => {
@@ -490,11 +471,13 @@ describe("the walk of the tree", () => {
       append(future, added);
       while (stepWalk(walk, 1));
 
-      assert.deepStrictEqual(
-        walk.collected.elements as unknown as FakeNode[],
-        [parent, future, added],
-      );
-    }));
+      assert.deepStrictEqual(walk.collected.elements as unknown as FakeNode[], [
+        parent,
+        future,
+        added,
+      ]);
+    }),
+  );
 
   it.effect("keeps a pending element that the page removes", () =>
     Effect.sync(() => {
@@ -509,11 +492,9 @@ describe("the walk of the tree", () => {
       remove(removed);
       while (stepWalk(walk, 1));
 
-      assert.deepStrictEqual(
-        walk.collected.elements as unknown as FakeNode[],
-        [first, removed],
-      );
-    }));
+      assert.deepStrictEqual(walk.collected.elements as unknown as FakeNode[], [first, removed]);
+    }),
+  );
 
   it.effect("does not produce a moved element two times", () =>
     Effect.sync(() => {
@@ -528,11 +509,9 @@ describe("the walk of the tree", () => {
       move(first, second);
       while (stepWalk(walk, 1));
 
-      assert.deepStrictEqual(
-        walk.collected.elements as unknown as FakeNode[],
-        [first, second],
-      );
-    }));
+      assert.deepStrictEqual(walk.collected.elements as unknown as FakeNode[], [first, second]);
+    }),
+  );
 
   it.effect("stops continuous growth at the element limit", () =>
     Effect.sync(() => {
@@ -554,7 +533,8 @@ describe("the walk of the tree", () => {
       assert.strictEqual(walk.collected.elements.length, 12);
       assert.strictEqual(walk.examined, 12);
       assert.isFalse(stepWalk(walk, 1));
-    }));
+    }),
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -577,34 +557,32 @@ interface Turns {
 const countingDom = (turns: Turns): Layer.Layer<Dom> =>
   Layer.effect(
     Dom,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const clock = yield* Ref.make(0);
-      return Dom.of(
-        {
-          window: undefined as unknown as Window & typeof globalThis,
-          document: undefined as unknown as Document,
-          href: Effect.succeed("https://example.test/"),
-          probe: <A>(_api: string, read: () => A) => Effect.sync(read),
-          probeOr: <A>(read: () => A, _fallback: A) => Effect.sync(read),
-          attempt: <A>(_api: string, run: () => A) => Effect.sync(run),
-          listen: () => Effect.void,
-          listenOn: () => Effect.void,
-          events: () => Stream.empty,
-          nextFrame: Effect.succeed(0),
-          yieldToBrowser: Effect.gen(function*() {
-            yield* Ref.update(turns.count, (value) => value + 1);
-            yield* Deferred.succeed(turns.first, undefined);
-            // A real turn: `Dom.yieldToBrowser` posts through a `MessageChannel`,
-            // so the fiber suspends, and an interruption takes effect here.
-            yield* Effect.yieldNow;
-          }),
-          now: Ref.getAndUpdate(clock, (value) => value + 1),
-        } as unknown as Dom["Service"],
-      );
+      return Dom.of({
+        window: undefined as unknown as Window & typeof globalThis,
+        document: undefined as unknown as Document,
+        href: Effect.succeed("https://example.test/"),
+        probe: <A>(_api: string, read: () => A) => Effect.sync(read),
+        probeOr: <A>(read: () => A, _fallback: A) => Effect.sync(read),
+        attempt: <A>(_api: string, run: () => A) => Effect.sync(run),
+        listen: () => Effect.void,
+        listenOn: () => Effect.void,
+        events: () => Stream.empty,
+        nextFrame: Effect.succeed(0),
+        yieldToBrowser: Effect.gen(function* () {
+          yield* Ref.update(turns.count, (value) => value + 1);
+          yield* Deferred.succeed(turns.first, undefined);
+          // A real turn: `Dom.yieldToBrowser` posts through a `MessageChannel`,
+          // so the fiber suspends, and an interruption takes effect here.
+          yield* Effect.yieldNow;
+        }),
+        now: Ref.getAndUpdate(clock, (value) => value + 1),
+      } as unknown as Dom["Service"]);
     }),
   );
 
-const makeTurns = Effect.gen(function*() {
+const makeTurns = Effect.gen(function* () {
   const count = yield* Ref.make(0);
   const first = yield* Deferred.make<void>();
   return { count, first } satisfies Turns;
@@ -612,7 +590,7 @@ const makeTurns = Effect.gen(function*() {
 
 describe("discovery in slices", () => {
   it.effect("gives the thread back before it has walked the whole tree", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const turns = yield* makeTurns;
       const tree = buildTree(6, 5) as unknown as ParentNode;
 
@@ -626,18 +604,16 @@ describe("discovery in slices", () => {
       // deterministic clock makes a larger budget use fewer browser turns.
       assert.strictEqual(count, 54);
       assert.isAbove(collected.elements.length, 4_000);
-    }));
+    }),
+  );
 
   it.effect("stops at the first turn when the fiber is interrupted", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const turns = yield* makeTurns;
       const tree = buildTree(6, 5) as unknown as ParentNode;
 
       const fiber = yield* Effect.forkChild(
-        Effect.provide(
-          collectElements(tree, { budgetMs: 8, checkEvery: 64 }),
-          countingDom(turns),
-        ),
+        Effect.provide(collectElements(tree, { budgetMs: 8, checkEvery: 64 }), countingDom(turns)),
       );
 
       // A signal, and not a sleep: the walk itself says when it gave the
@@ -650,10 +626,11 @@ describe("discovery in slices", () => {
       const count = yield* Ref.get(turns.count);
       // A walk that ran to the end took far more turns than this.
       assert.isBelow(count, 4);
-    }));
+    }),
+  );
 
   it.effect("walks an empty document without a turn", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const turns = yield* makeTurns;
 
       const collected = yield* Effect.provide(
@@ -663,5 +640,6 @@ describe("discovery in slices", () => {
 
       assert.strictEqual(collected.elements.length, 0);
       assert.strictEqual(yield* Ref.get(turns.count), 0);
-    }));
+    }),
+  );
 });

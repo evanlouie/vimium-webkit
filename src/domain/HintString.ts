@@ -28,8 +28,7 @@ const codePoints = (value: string): readonly string[] => [...value];
 const toNfc = (value: string): string => value.normalize("NFC");
 
 /** How many characters a string holds, counted by code point after NFC. */
-export const hintCharacterCount = (value: string): number =>
-  codePoints(toNfc(value)).length;
+export const hintCharacterCount = (value: string): number => codePoints(toNfc(value)).length;
 
 /** Reverse by code point, so an astral character in a custom alphabet survives. */
 export const reverseString = (value: string): string =>
@@ -162,10 +161,7 @@ export const readHintCharacters = (characters: string): readonly string[] => {
  * that collides with an earlier one is also dropped. Joined symbols and unsafe
  * pairs select the fallback. Each remaining code point is independent.
  */
-export const normaliseHintCharacters = (
-  characters: string,
-  fallback: string,
-): string => {
+export const normaliseHintCharacters = (characters: string, fallback: string): string => {
   const alphabet = readHintCharacters(characters);
   return alphabet.length >= 2 ? alphabet.join("") : fallback;
 };
@@ -181,10 +177,7 @@ export const normaliseHintCharacters = (
  * The result is prefix-free. A hint is therefore unambiguous as soon as the
  * user types its last character.
  */
-export const hintStrings = (
-  linkCount: number,
-  alphabet: string,
-): readonly string[] => {
+export const hintStrings = (linkCount: number, alphabet: string): readonly string[] => {
   if (linkCount <= 0) return [];
   // The split into code points is intentional. See `reverseString`.
   const chars = codePoints(alphabet);
@@ -200,7 +193,10 @@ export const hintStrings = (
     for (const char of chars) hints.push(char + hint);
   }
 
-  return hints.slice(offset, offset + linkCount).sort().map(reverseString);
+  return hints
+    .slice(offset, offset + linkCount)
+    .sort()
+    .map(reverseString);
 };
 
 /**
@@ -210,10 +206,7 @@ export const hintStrings = (
  * form. The indirection lets the setting give another set of digits. Upstream
  * supports a set that is not Latin.
  */
-export const numberToHintString = (
-  value: number,
-  characterSet: string,
-): string => {
+export const numberToHintString = (value: number, characterSet: string): string => {
   // The split into code points is intentional. See `reverseString`.
   const chars = codePoints(characterSet);
   const base = chars.length;
@@ -229,10 +222,7 @@ export const numberToHintString = (
 };
 
 /** The indices of the hints that an extension of `typed` can still reach. */
-export const matchByPrefix = (
-  hints: readonly string[],
-  typed: string,
-): readonly number[] => {
+export const matchByPrefix = (hints: readonly string[], typed: string): readonly number[] => {
   if (typed.length === 0) return hints.map((_, index) => index);
   const out: number[] = [];
   for (let index = 0; index < hints.length; index++) {

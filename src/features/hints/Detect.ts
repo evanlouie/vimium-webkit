@@ -31,11 +31,7 @@
 import { Effect, Option } from "effect";
 import type { CapabilityReport } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
-import {
-  CHUNK_BUDGET_MS,
-  type ChunkedOptions,
-  mapChunked,
-} from "~/platform/Scheduler.ts";
+import { CHUNK_BUDGET_MS, type ChunkedOptions, mapChunked } from "~/platform/Scheduler.ts";
 import type { ViewportRect } from "~/ui/Ui.ts";
 
 // ---------------------------------------------------------------------------
@@ -129,11 +125,7 @@ export interface DetectionResult {
 // ---------------------------------------------------------------------------
 
 /** The several spellings of Angular. Each one implies a click listener. */
-const FRAMEWORK_CLICK_ATTRIBUTES: readonly string[] = [
-  "ng-click",
-  "data-ng-click",
-  "x-ng-click",
-];
+const FRAMEWORK_CLICK_ATTRIBUTES: readonly string[] = ["ng-click", "data-ng-click", "x-ng-click"];
 
 const CLICKABLE_ROLES: ReadonlySet<string> = new Set([
   "button",
@@ -203,7 +195,7 @@ const hasJsAction = (element: Element): boolean => {
   for (const rule of attribute.split(";")) {
     const parts = rule.trim().split(":");
     if (parts.length === 0 || parts.length > 2) continue;
-    const eventType = parts.length === 1 ? "click" : parts[0]?.trim() ?? "";
+    const eventType = parts.length === 1 ? "click" : (parts[0]?.trim() ?? "");
     const body = (parts.length === 1 ? parts[0] : parts[1])?.trim() ?? "";
     const [namespace, action = "_"] = body.split(".");
     if (eventType === "click" && namespace !== "none" && action !== "_") {
@@ -218,14 +210,10 @@ const isDisabled = (element: Element): boolean =>
 
 const hrefOf = (element: Element): Option.Option<string> => {
   if (element instanceof HTMLAnchorElement) {
-    return element.getAttribute("href") === null
-      ? Option.none()
-      : Option.some(element.href);
+    return element.getAttribute("href") === null ? Option.none() : Option.some(element.href);
   }
   if (element instanceof HTMLAreaElement) {
-    return element.getAttribute("href") === null
-      ? Option.none()
-      : Option.some(element.href);
+    return element.getAttribute("href") === null ? Option.none() : Option.some(element.href);
   }
   return Option.none();
 };
@@ -234,10 +222,7 @@ const hrefOf = (element: Element): Option.Option<string> => {
 // Classification
 // ---------------------------------------------------------------------------
 
-const classifyNative = (
-  element: Element,
-  view: Window,
-): Option.Option<Classification> => {
+const classifyNative = (element: Element, view: Window): Option.Option<Classification> => {
   switch (element.localName) {
     case "a":
       return element.hasAttribute("href") ? clickable("native") : Option.none();
@@ -245,9 +230,7 @@ const classifyNative = (
     case "input": {
       if (!(element instanceof HTMLInputElement)) return clickable("native");
       const type = element.type.toLowerCase();
-      return type === "hidden" || element.disabled
-        ? Option.none()
-        : clickable("native");
+      return type === "hidden" || element.disabled ? Option.none() : clickable("native");
     }
 
     case "button":
@@ -255,8 +238,7 @@ const classifyNative = (
       return isDisabled(element) ? Option.none() : clickable("native");
 
     case "textarea":
-      return element instanceof HTMLTextAreaElement &&
-          (element.disabled || element.readOnly)
+      return element instanceof HTMLTextAreaElement && (element.disabled || element.readOnly)
         ? Option.none()
         : clickable("native");
 
@@ -270,9 +252,7 @@ const classifyNative = (
       if (control === null || isDisabled(control)) return Option.none();
       // A label earns a hint only when its own control did not. The same
       // checkbox would otherwise get two hints, one on top of the other.
-      return Option.isNone(classify(control, view))
-        ? clickable("native")
-        : Option.none();
+      return Option.isNone(classify(control, view)) ? clickable("native") : Option.none();
     }
 
     case "details":
@@ -282,8 +262,7 @@ const classifyNative = (
       // The inline style only, as upstream does. One `getComputedStyle` call
       // for each image is not worth a rare cursor value.
       return element instanceof HTMLImageElement &&
-          (element.style.cursor === "zoom-in" ||
-            element.style.cursor === "zoom-out")
+        (element.style.cursor === "zoom-in" || element.style.cursor === "zoom-out")
         ? clickable("native", Option.some("Zoom."))
         : Option.none();
 
@@ -312,10 +291,7 @@ const classifyNative = (
  * `onclick` beats a `<span>`), and a later, weaker signal is marked as a
  * possible false positive, so that the descendant filter can drop it.
  */
-export const classify = (
-  element: Element,
-  view: Window,
-): Option.Option<Classification> => {
+export const classify = (element: Element, view: Window): Option.Option<Classification> => {
   // `aria-disabled` is a hard refusal, before everything else. An element that
   // the page declares inert must never take a hint, however clickable it looks.
   const ariaDisabled = element.getAttribute("aria-disabled")?.toLowerCase();
@@ -382,11 +358,7 @@ interface VisibilityCheckable {
  * old, and `getBoundingClientRect()` reports a rect that looks correct for
  * something that is not rendered at all.
  */
-const isRendered = (
-  element: Element,
-  capabilities: CapabilityReport,
-  view: Window,
-): boolean => {
+const isRendered = (element: Element, capabilities: CapabilityReport, view: Window): boolean => {
   if (capabilities.checkVisibility) {
     const check = (element as unknown as VisibilityCheckable).checkVisibility;
     if (typeof check === "function") {
@@ -398,8 +370,7 @@ const isRendered = (
     }
   }
   const style = view.getComputedStyle(element);
-  return style.display !== "none" && style.visibility === "visible" &&
-    style.opacity !== "0";
+  return style.display !== "none" && style.visibility === "visible" && style.opacity !== "0";
 };
 
 /** The four edges that the crop needs. A `DOMRect` has them all. */
@@ -415,10 +386,7 @@ interface EdgeRect {
  * that the caller gives, and not against `window.innerWidth` and
  * `window.innerHeight`.
  */
-const cropRectToVisible = (
-  rect: EdgeRect,
-  viewport: ViewportRect,
-): Option.Option<HintRect> => {
+const cropRectToVisible = (rect: EdgeRect, viewport: ViewportRect): Option.Option<HintRect> => {
   const left = Math.max(rect.left, 0);
   const top = Math.max(rect.top, 0);
   if (top >= viewport.height - 4 || left >= viewport.width - 4) {
@@ -464,17 +432,14 @@ const visibleClientRect = (
         const position = childStyle.position;
         if (
           childStyle.float === "none" &&
-          position !== "absolute" && position !== "fixed" &&
+          position !== "absolute" &&
+          position !== "fixed" &&
           !(clientRect.width === 0 && childStyle.overflowX === "hidden") &&
           !(clientRect.height === 0 && childStyle.overflowY === "hidden")
-        ) continue;
+        )
+          continue;
 
-        const childRect = visibleClientRect(
-          child,
-          capabilities,
-          view,
-          viewport,
-        );
+        const childRect = visibleClientRect(child, capabilities, view, viewport);
         if (Option.isNone(childRect) || !isUsable(childRect.value)) continue;
         return childRect;
       }
@@ -530,10 +495,7 @@ export const mapNameOf = (usemap: string): Option.Option<string> => {
  * first map with an equal `id` or `name` wins. A missing map gives
  * `Option.none()`. The image gets no hint, and other elements keep their hints.
  */
-export const findImageMap = (
-  context: Element,
-  usemap: string,
-): Option.Option<Element> => {
+export const findImageMap = (context: Element, usemap: string): Option.Option<Element> => {
   const name = mapNameOf(usemap);
   if (Option.isNone(name)) return Option.none();
 
@@ -541,10 +503,8 @@ export const findImageMap = (
   // not contain page text, so malformed names cannot change or break it.
   const root = context.getRootNode() as Document | ShadowRoot;
   for (const map of root.querySelectorAll("map")) {
-    if (
-      map.getAttribute("id") === name.value ||
-      map.getAttribute("name") === name.value
-    ) return Option.some(map);
+    if (map.getAttribute("id") === name.value || map.getAttribute("name") === name.value)
+      return Option.some(map);
   }
   return Option.none();
 };
@@ -607,12 +567,15 @@ const imageMapHints = (
 
     const left = Math.min(x1, x2) + imageRect.left;
     const top = Math.min(y1, y2) + imageRect.top;
-    const rect = cropRectToVisible({
-      left,
-      top,
-      right: left + Math.abs(x2 - x1),
-      bottom: top + Math.abs(y2 - y1),
-    }, options.viewport);
+    const rect = cropRectToVisible(
+      {
+        left,
+        top,
+        right: left + Math.abs(x2 - x1),
+        bottom: top + Math.abs(y2 - y1),
+      },
+      options.viewport,
+    );
     if (Option.isNone(rect) || !isUsable(rect.value)) continue;
 
     const href = hrefOf(area);
@@ -651,8 +614,7 @@ export const linkTextFor = (
   reason: Option.Option<string>,
 ): { readonly text: string; readonly show: boolean } => {
   const fallback = (): { text: string; show: boolean } => {
-    const label = element.getAttribute("aria-label") ??
-      element.getAttribute("title") ?? "";
+    const label = element.getAttribute("aria-label") ?? element.getAttribute("title") ?? "";
     return { text: label.trim(), show: label.trim().length > 0 };
   };
 
@@ -798,17 +760,16 @@ export const WALK_ELEMENT_LIMIT = 250_000;
 const childFrame = (parent: ParentNode): WalkFrame | undefined => {
   const first = parent.firstElementChild;
   const boundary = parent.lastElementChild;
-  return first === null || boundary === null ? undefined : {
-    next: first,
-    boundary,
-  };
+  return first === null || boundary === null
+    ? undefined
+    : {
+        next: first,
+        boundary,
+      };
 };
 
 /** A walk of `root` that has visited nothing yet. */
-export const startWalk = (
-  root: ParentNode,
-  limit = WALK_ELEMENT_LIMIT,
-): ElementWalk => {
+export const startWalk = (root: ParentNode, limit = WALK_ELEMENT_LIMIT): ElementWalk => {
   const first = childFrame(root);
   return {
     pending: first === undefined ? [] : [first],
@@ -877,7 +838,7 @@ export const collectElements = (
   root: ParentNode,
   options: ChunkedOptions,
 ): Effect.Effect<Collected, never, Dom> =>
-  Effect.gen(function*() {
+  Effect.gen(function* () {
     const dom = yield* Dom;
     const budget = options.budgetMs ?? CHUNK_BUDGET_MS;
     const checkEvery = options.checkEvery ?? WALK_CHECK_EVERY;
@@ -897,9 +858,7 @@ export const collectElements = (
     }
 
     if (walk.collected.truncated) {
-      yield* Effect.logWarning(
-        `hint discovery stopped after ${walk.limit} examined elements`,
-      );
+      yield* Effect.logWarning(`hint discovery stopped after ${walk.limit} examined elements`);
     }
     return walk.collected;
   });
@@ -966,10 +925,7 @@ const hitsAtPoint = (
   options: DetectOptions,
 ): boolean => {
   for (const candidate of options.document.elementsFromPoint(x, y)) {
-    if (
-      Option.isSome(options.overlayHost) &&
-      candidate === options.overlayHost.value
-    ) continue;
+    if (Option.isSome(options.overlayHost) && candidate === options.overlayHost.value) continue;
     if (candidate === element) return true;
     if (containsDeep(element, candidate)) return true;
     if (hosts.includes(candidate)) return true;
@@ -990,14 +946,17 @@ const isHintVisible = (hint: LocalHint, options: DetectOptions): boolean => {
   const far = { x: left + width - EDGE_NUDGE, y: top + height - EDGE_NUDGE };
   const target = Option.getOrElse(hint.hitTarget, () => hint.element);
   const hosts = shadowHostChain(target);
-  const hits = (x: number, y: number): boolean =>
-    hitsAtPoint(target, hosts, x, y, options);
+  const hits = (x: number, y: number): boolean => hitsAtPoint(target, hosts, x, y, options);
 
   // The centre first: it is the point that succeeds most often, and every hit
   // test forces a layout flush.
-  return hits(left + width / 2, top + height / 2) ||
-    hits(near.x, near.y) || hits(far.x, near.y) ||
-    hits(near.x, far.y) || hits(far.x, far.y);
+  return (
+    hits(left + width / 2, top + height / 2) ||
+    hits(near.x, near.y) ||
+    hits(far.x, near.y) ||
+    hits(near.x, far.y) ||
+    hits(far.x, far.y)
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -1017,17 +976,11 @@ const FALSE_POSITIVE_DEPTH = 3;
  * DOM, which is why a window of six elements is enough, and why a full walk of
  * the ancestors is not necessary.
  */
-export const dropFalsePositives = (
-  hints: readonly LocalHint[],
-): readonly LocalHint[] =>
+export const dropFalsePositives = (hints: readonly LocalHint[]): readonly LocalHint[] =>
   hints.filter((hint, position) => {
     if (!hint.possibleFalsePositive) return true;
 
-    for (
-      let index = Math.max(0, position - FALSE_POSITIVE_WINDOW);
-      index < position;
-      index++
-    ) {
+    for (let index = Math.max(0, position - FALSE_POSITIVE_WINDOW); index < position; index++) {
       let candidate: Element | null = hints[index]?.element ?? null;
       for (let depth = 0; depth < FALSE_POSITIVE_DEPTH; depth++) {
         candidate = candidate?.parentElement ?? null;
@@ -1059,26 +1012,23 @@ const buildHints = (
   const href = hrefOf(element);
   if (options.requireHref && Option.isNone(href)) return Option.none();
 
-  const rect = visibleClientRect(
-    element,
-    options.capabilities,
-    options.window,
-    options.viewport,
-  );
+  const rect = visibleClientRect(element, options.capabilities, options.window, options.viewport);
   if (Option.isNone(rect)) return Option.none();
 
   const { text, show } = linkTextFor(element, classification.value.reason);
-  return Option.some([{
-    element,
-    hitTarget: Option.none(),
-    rect: rect.value,
-    kind: classification.value.kind,
-    secondary: classification.value.secondary,
-    possibleFalsePositive: classification.value.possibleFalsePositive,
-    linkText: text,
-    showLinkText: show,
-    href,
-  }]);
+  return Option.some([
+    {
+      element,
+      hitTarget: Option.none(),
+      rect: rect.value,
+      kind: classification.value.kind,
+      secondary: classification.value.secondary,
+      possibleFalsePositive: classification.value.possibleFalsePositive,
+      linkText: text,
+      showLinkText: show,
+      href,
+    },
+  ]);
 };
 
 /**
@@ -1090,10 +1040,8 @@ const buildHints = (
  * the middle of a loop that reads styles, which is the worst pattern for
  * layout thrash.
  */
-export const detectHints = (
-  options: DetectOptions,
-): Effect.Effect<DetectionResult, never, Dom> =>
-  Effect.gen(function*() {
+export const detectHints = (options: DetectOptions): Effect.Effect<DetectionResult, never, Dom> =>
+  Effect.gen(function* () {
     const chunk = { budgetMs: CHUNK_BUDGET_MS };
 
     const collected = yield* collectElements(options.document, chunk);
@@ -1111,8 +1059,7 @@ export const detectHints = (
 
     const visible = yield* mapChunked(
       filtered,
-      (hint) =>
-        isHintVisible(hint, options) ? Option.some(hint) : Option.none(),
+      (hint) => (isHintVisible(hint, options) ? Option.some(hint) : Option.none()),
       chunk,
     );
 

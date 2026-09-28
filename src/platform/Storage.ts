@@ -86,16 +86,13 @@ export const StorageDirection = Schema.Literals(["read", "write"]);
 
 export type StorageDirection = typeof StorageDirection.Type;
 
-export class StorageError extends Schema.TaggedError<StorageError>()(
-  "StorageError",
-  {
-    reason: StorageFailureReason,
-    direction: StorageDirection,
-    group: Schema.String,
-    detail: Schema.String,
-    cause: Schema.optional(Schema.Defect()),
-  },
-) {}
+export class StorageError extends Schema.TaggedError<StorageError>()("StorageError", {
+  reason: StorageFailureReason,
+  direction: StorageDirection,
+  group: Schema.String,
+  detail: Schema.String,
+  cause: Schema.optional(Schema.Defect()),
+}) {}
 
 // ---------------------------------------------------------------------------
 // A group
@@ -125,9 +122,7 @@ export interface ValueGroup<A> {
   readonly write: (value: A) => Effect.Effect<void, StorageError>;
 
   /** Read, change and write, as one indivisible step. */
-  readonly update: (
-    change: (current: A) => A,
-  ) => Effect.Effect<A, StorageError>;
+  readonly update: (change: (current: A) => A) => Effect.Effect<A, StorageError>;
 
   /** Erase the stored value and go back to the defaults. */
   readonly reset: Effect.Effect<A, StorageError>;
@@ -151,23 +146,23 @@ export interface ValueGroup<A> {
 type Command<A> =
   | { readonly _tag: "Hydrate"; readonly reply: Deferred.Deferred<A> }
   | {
-    readonly _tag: "Write";
-    readonly value: A;
-    readonly reply: Deferred.Deferred<void, StorageError>;
-  }
+      readonly _tag: "Write";
+      readonly value: A;
+      readonly reply: Deferred.Deferred<void, StorageError>;
+    }
   | {
-    readonly _tag: "Update";
-    readonly change: (current: A) => A;
-    readonly reply: Deferred.Deferred<A, StorageError>;
-  }
+      readonly _tag: "Update";
+      readonly change: (current: A) => A;
+      readonly reply: Deferred.Deferred<A, StorageError>;
+    }
   | {
-    readonly _tag: "Reset";
-    readonly reply: Deferred.Deferred<A, StorageError>;
-  }
+      readonly _tag: "Reset";
+      readonly reply: Deferred.Deferred<A, StorageError>;
+    }
   | {
-    readonly _tag: "Flush";
-    readonly reply: Option.Option<Deferred.Deferred<void, StorageError>>;
-  }
+      readonly _tag: "Flush";
+      readonly reply: Option.Option<Deferred.Deferred<void, StorageError>>;
+    }
   | { readonly _tag: "Remote"; readonly raw: Option.Option<string> };
 
 interface Envelope {
@@ -183,7 +178,8 @@ interface Envelope {
  * `unknown` in a schema that then says nothing.
  */
 const isEnvelope = (value: unknown): value is Envelope =>
-  typeof value === "object" && value !== null &&
+  typeof value === "object" &&
+  value !== null &&
   typeof (value as Record<string, unknown>)["schemaVersion"] === "number" &&
   "data" in value;
 
@@ -209,13 +205,12 @@ export const makeGroup = <A>(
   kv: KeyValueStore["Service"],
   issues: Queue.Queue<StorageError>,
 ): Effect.Effect<ValueGroup<A>, never, Scope.Scope> =>
-  Effect.gen(function*() {
+  Effect.gen(function* () {
     const key = `${STORAGE_PREFIX}${spec.name}`;
     const debounce = Duration.millis(spec.writeDebounceMs ?? 0);
     // A promise is not a completed write. Send each accepted change through
     // the actor while the page is alive. This keeps one serial write order.
-    const debounced = kv.kind !== "gm-async" &&
-      Duration.toMillis(debounce) > 0;
+    const debounced = kv.kind !== "gm-async" && Duration.toMillis(debounce) > 0;
 
     const value = yield* SubscriptionRef.make(spec.defaults());
     const mailbox = yield* Queue.unbounded<Command<A>>();
@@ -247,9 +242,7 @@ export const makeGroup = <A>(
         reason,
         direction,
         group: spec.name,
-        detail: cause === undefined
-          ? detail
-          : `${detail}: ${describeCause(cause)}`,
+        detail: cause === undefined ? detail : `${detail}: ${describeCause(cause)}`,
         ...(cause === undefined ? {} : { cause }),
       });
       if (report) Queue.offerUnsafe(issues, error);
@@ -258,10 +251,7 @@ export const makeGroup = <A>(
 
     // -- decoding ----------------------------------------------------------
 
-    const runMigrations = (
-      data: unknown,
-      from: number,
-    ): Option.Option<unknown> => {
+    const runMigrations = (data: unknown, from: number): Option.Option<unknown> => {
       let current = data;
       const steps = (spec.migrations ?? [])
         .filter((step) => step.to > from)
@@ -270,12 +260,7 @@ export const makeGroup = <A>(
         try {
           current = step.migrate(current);
         } catch (cause) {
-          raise(
-            "migration",
-            "read",
-            `migration to v${step.to} (${step.describe}) failed`,
-            cause,
-          );
+          raise("migration", "read", `migration to v${step.to} (${step.describe}) failed`, cause);
           return Option.none();
         }
       }
@@ -294,9 +279,7 @@ export const makeGroup = <A>(
       }
 
       // Data from a 0.1 development build has no envelope. Treat it as v0.
-      const envelope: Envelope = isEnvelope(parsed)
-        ? parsed
-        : { schemaVersion: 0, data: parsed };
+      const envelope: Envelope = isEnvelope(parsed) ? parsed : { schemaVersion: 0, data: parsed };
 
       let data = envelope.data;
       if (envelope.schemaVersion < spec.schemaVersion) {
@@ -343,19 +326,18 @@ export const makeGroup = <A>(
      * `report` is false on the exit path, so that one failure gives one
      * message: the actor writes the same value again and reports it there.
      */
-    const encode = (
-      next: A,
-      report: boolean,
-    ): Result.Result<string, StorageError> => {
+    const encode = (next: A, report: boolean): Result.Result<string, StorageError> => {
       const validated = decodeUnknown(spec.schema)(next);
       if (Result.isFailure(validated)) {
-        return Result.fail(raise(
-          "invalid",
-          "write",
-          "refusing to persist a value that fails its own schema",
-          describeSchemaError(validated.failure),
-          report,
-        ));
+        return Result.fail(
+          raise(
+            "invalid",
+            "write",
+            "refusing to persist a value that fails its own schema",
+            describeSchemaError(validated.failure),
+            report,
+          ),
+        );
       }
       try {
         const envelope: Envelope = {
@@ -364,19 +346,15 @@ export const makeGroup = <A>(
         };
         return Result.succeed(JSON.stringify(envelope));
       } catch (cause) {
-        return Result.fail(raise(
-          "malformed",
-          "write",
-          "the value cannot be serialised",
-          cause,
-          report,
-        ));
+        return Result.fail(
+          raise("malformed", "write", "the value cannot be serialised", cause, report),
+        );
       }
     };
 
     /** Write one value to the backend. */
     const commit = (next: A): Effect.Effect<void, StorageError> =>
-      Effect.gen(function*() {
+      Effect.gen(function* () {
         const encoded = encode(next, true);
         if (Result.isFailure(encoded)) {
           return yield* encoded.failure;
@@ -386,9 +364,8 @@ export const makeGroup = <A>(
         // its fiber is interrupted, so an interrupted `set` could still land
         // after a later `remove`.
         yield* Effect.uninterruptible(
-          Effect.mapError(
-            kv.set(key, encoded.success),
-            (cause) => raise("backend", "write", cause.detail, cause),
+          Effect.mapError(kv.set(key, encoded.success), (cause) =>
+            raise("backend", "write", cause.detail, cause),
           ),
         );
         readFailure = null;
@@ -439,26 +416,19 @@ export const makeGroup = <A>(
       }
     };
 
-    const publish = (next: A): Effect.Effect<void> =>
-      SubscriptionRef.set(value, next);
+    const publish = (next: A): Effect.Effect<void> => SubscriptionRef.set(value, next);
 
     const cancelTimer = FiberHandle.clear(timer);
 
-    const settleWaiters = (
-      outcome: Exit.Exit<void, StorageError>,
-    ): Effect.Effect<void> =>
+    const settleWaiters = (outcome: Exit.Exit<void, StorageError>): Effect.Effect<void> =>
       Effect.suspend(() => {
         const waiting = waiters;
         waiters = [];
-        return Effect.forEach(
-          waiting,
-          (reply) => Deferred.done(reply, outcome),
-          { discard: true },
-        );
+        return Effect.forEach(waiting, (reply) => Deferred.done(reply, outcome), { discard: true });
       });
 
     /** Write whatever is inside the debounce window, if anything is. */
-    const commitPending = Effect.gen(function*() {
+    const commitPending = Effect.gen(function* () {
       yield* cancelTimer;
       const held = pending;
       pending = Option.none();
@@ -487,7 +457,7 @@ export const makeGroup = <A>(
       next: A,
       reply: Deferred.Deferred<void, StorageError>,
     ): Effect.Effect<void> =>
-      Effect.gen(function*() {
+      Effect.gen(function* () {
         // Validated before it is published, and the *decoded* value is what
         // gets published. A schema repairs a field rather than rejecting it, so
         // the two differ. Publishing the raw value would leave memory holding a
@@ -519,7 +489,7 @@ export const makeGroup = <A>(
       });
 
     const handle = (command: Command<A>): Effect.Effect<void> =>
-      Effect.gen(function*() {
+      Effect.gen(function* () {
         switch (command._tag) {
           case "Hydrate": {
             // A value still inside its debounce window is newer than the disk.
@@ -531,16 +501,8 @@ export const makeGroup = <A>(
               // Do not publish the defaults after a transport failure. They are
               // an answer for this caller, not the state of the world. An
               // unrelated update must not write them over good data later.
-              readFailure = raise(
-                "backend",
-                "read",
-                "could not read the stored value",
-                raw.cause,
-              );
-              yield* Deferred.succeed(
-                command.reply,
-                yield* SubscriptionRef.get(value),
-              );
+              readFailure = raise("backend", "read", "could not read the stored value", raw.cause);
+              yield* Deferred.succeed(command.reply, yield* SubscriptionRef.get(value));
               return;
             }
             readFailure = null;
@@ -592,22 +554,15 @@ export const makeGroup = <A>(
             // it is not reported beside the message that caused it.
             yield* settleWaiters(
               Exit.fail(
-                raise(
-                  "cancelled",
-                  "write",
-                  "the write was replaced by a reset",
-                  undefined,
-                  false,
-                ),
+                raise("cancelled", "write", "the write was replaced by a reset", undefined, false),
               ),
             );
             const defaults = spec.defaults();
             yield* publish(defaults);
             const removed = yield* Effect.exit(
               Effect.uninterruptible(
-                Effect.mapError(
-                  kv.remove(key),
-                  (cause) => raise("backend", "write", cause.detail, cause),
+                Effect.mapError(kv.remove(key), (cause) =>
+                  raise("backend", "write", cause.detail, cause),
                 ),
               ),
             );
@@ -631,23 +586,18 @@ export const makeGroup = <A>(
         }
       });
 
-    yield* Effect.forkScoped(
-      Effect.forever(Effect.flatMap(Queue.take(mailbox), handle)),
-    );
+    yield* Effect.forkScoped(Effect.forever(Effect.flatMap(Queue.take(mailbox), handle)));
 
     // Another tab's writes enter through the same queue, so they take their
     // turn like everything else.
     yield* Effect.forkScoped(
-      Stream.runForEach(
-        kv.changes(key),
-        (raw) => Queue.offer(mailbox, { _tag: "Remote", raw }),
-      ),
+      Stream.runForEach(kv.changes(key), (raw) => Queue.offer(mailbox, { _tag: "Remote", raw })),
     );
 
     const ask = <Ok, Err>(
       make: (reply: Deferred.Deferred<Ok, Err>) => Command<A>,
     ): Effect.Effect<Ok, Err> =>
-      Effect.gen(function*() {
+      Effect.gen(function* () {
         const reply = yield* Deferred.make<Ok, Err>();
         yield* Queue.offer(mailbox, make(reply));
         return yield* Deferred.await(reply);
@@ -665,8 +615,7 @@ export const makeGroup = <A>(
           value: next,
           reply,
         })),
-      update: (change) =>
-        ask<A, StorageError>((reply) => ({ _tag: "Update", change, reply })),
+      update: (change) => ask<A, StorageError>((reply) => ({ _tag: "Update", change, reply })),
       reset: ask<A, StorageError>((reply) => ({ _tag: "Reset", reply })),
       flush: ask<void, StorageError>((reply) => ({
         _tag: "Flush",
@@ -680,82 +629,83 @@ export const makeGroup = <A>(
 // The service
 // ---------------------------------------------------------------------------
 
-export class Storage extends Context.Service<Storage, {
-  readonly settings: ValueGroup<Settings>;
-  readonly marks: ValueGroup<Marks>;
-  readonly findHistory: ValueGroup<FindHistory>;
-  readonly history: ValueGroup<HistoryIndex>;
-  readonly session: ValueGroup<SessionState>;
+export class Storage extends Context.Service<
+  Storage,
+  {
+    readonly settings: ValueGroup<Settings>;
+    readonly marks: ValueGroup<Marks>;
+    readonly findHistory: ValueGroup<FindHistory>;
+    readonly history: ValueGroup<HistoryIndex>;
+    readonly session: ValueGroup<SessionState>;
 
-  /**
-   * Every read failure and every write failure, in order.
-   *
-   * A queue and not a broadcast. The HUD does not exist when the application
-   * first reads storage, and a message that nobody heard is the failure that
-   * this stream exists to prevent.
-   */
-  readonly issues: Stream.Stream<StorageError>;
+    /**
+     * Every read failure and every write failure, in order.
+     *
+     * A queue and not a broadcast. The HUD does not exist when the application
+     * first reads storage, and a message that nobody heard is the failure that
+     * this stream exists to prevent.
+     */
+    readonly issues: Stream.Stream<StorageError>;
 
-  /** Read every group. This is the only correct way to start. */
-  readonly hydrateAll: Effect.Effect<void>;
+    /** Read every group. This is the only correct way to start. */
+    readonly hydrateAll: Effect.Effect<void>;
 
-  /** Write every value that is still inside a debounce window. */
-  readonly flushAll: Effect.Effect<void>;
+    /** Write every value that is still inside a debounce window. */
+    readonly flushAll: Effect.Effect<void>;
 
-  /**
-   * Write every held value to the backend now, with no suspension.
-   *
-   * For the page exit only. This writes held values for synchronous backends.
-   * Promise-backed managers do not hold values in a debounce window. This call
-   * never throws. A failed direct write becomes one issue.
-   */
-  readonly flushAllUnsafe: () => void;
-}>()("vimium/platform/Storage") {
-  static readonly layer: Layer.Layer<Storage, never, KeyValueStore> = Layer
-    .effect(
-      Storage,
-      Effect.gen(function*() {
-        const kv = yield* KeyValueStore;
-        const issues = yield* Queue.unbounded<StorageError>();
+    /**
+     * Write every held value to the backend now, with no suspension.
+     *
+     * For the page exit only. This writes held values for synchronous backends.
+     * Promise-backed managers do not hold values in a debounce window. This call
+     * never throws. A failed direct write becomes one issue.
+     */
+    readonly flushAllUnsafe: () => void;
+  }
+>()("vimium/platform/Storage") {
+  static readonly layer: Layer.Layer<Storage, never, KeyValueStore> = Layer.effect(
+    Storage,
+    Effect.gen(function* () {
+      const kv = yield* KeyValueStore;
+      const issues = yield* Queue.unbounded<StorageError>();
 
-        const settings = yield* makeGroup(settingsGroup, kv, issues);
-        const marks = yield* makeGroup(marksGroup, kv, issues);
-        const findHistory = yield* makeGroup(findHistoryGroup, kv, issues);
-        const history = yield* makeGroup(historyGroup, kv, issues);
-        const session = yield* makeGroup(sessionGroup, kv, issues);
+      const settings = yield* makeGroup(settingsGroup, kv, issues);
+      const marks = yield* makeGroup(marksGroup, kv, issues);
+      const findHistory = yield* makeGroup(findHistoryGroup, kv, issues);
+      const history = yield* makeGroup(historyGroup, kv, issues);
+      const session = yield* makeGroup(sessionGroup, kv, issues);
 
-        const groups: ReadonlyArray<ValueGroup<unknown>> = [
-          settings,
-          marks,
-          findHistory,
-          history,
-          session,
-          // Every group, and never a subset. `update` works against the value
-          // in memory, so a group that was never read has only the defaults —
-          // and the first write to it would replace the user's whole stored
-          // value with the defaults plus one change.
-        ] as ReadonlyArray<ValueGroup<unknown>>;
+      const groups: ReadonlyArray<ValueGroup<unknown>> = [
+        settings,
+        marks,
+        findHistory,
+        history,
+        session,
+        // Every group, and never a subset. `update` works against the value
+        // in memory, so a group that was never read has only the defaults —
+        // and the first write to it would replace the user's whole stored
+        // value with the defaults plus one change.
+      ] as ReadonlyArray<ValueGroup<unknown>>;
 
-        return Storage.of({
-          settings,
-          marks,
-          findHistory,
-          history,
-          session,
-          issues: Stream.fromQueue(issues),
-          hydrateAll: Effect.forEach(groups, (group) => group.hydrate, {
-            concurrency: "unbounded",
-            discard: true,
-          }),
-          flushAll: Effect.forEach(
-            groups,
-            (group) => Effect.ignore(group.flush),
-            { concurrency: "unbounded", discard: true },
-          ),
-          flushAllUnsafe: () => {
-            for (const group of groups) group.flushUnsafe();
-          },
-        });
-      }),
-    );
+      return Storage.of({
+        settings,
+        marks,
+        findHistory,
+        history,
+        session,
+        issues: Stream.fromQueue(issues),
+        hydrateAll: Effect.forEach(groups, (group) => group.hydrate, {
+          concurrency: "unbounded",
+          discard: true,
+        }),
+        flushAll: Effect.forEach(groups, (group) => Effect.ignore(group.flush), {
+          concurrency: "unbounded",
+          discard: true,
+        }),
+        flushAllUnsafe: () => {
+          for (const group of groups) group.flushUnsafe();
+        },
+      });
+    }),
+  );
 }

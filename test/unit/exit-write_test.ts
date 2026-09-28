@@ -34,9 +34,7 @@ interface Attached {
 }
 
 /** `Dom`, with `listen` recording and a visible document. */
-const recordingDom = (
-  attached: Ref.Ref<ReadonlyArray<Attached>>,
-): Layer.Layer<Dom> =>
+const recordingDom = (attached: Ref.Ref<ReadonlyArray<Attached>>): Layer.Layer<Dom> =>
   Layer.effect(
     Dom,
     Effect.map(Dom, (dom) =>
@@ -55,7 +53,8 @@ const recordingDom = (
             ...current,
             { type: String(type), run: handler },
           ])) as unknown as Dom["Service"]["listen"],
-      })),
+      }),
+    ),
   ).pipe(Layer.provide(Dom.layer));
 
 /** What the backend saw, and when. */
@@ -88,8 +87,7 @@ const makeBackend = (): Backend => {
         kind: "gm-sync",
         durable: true,
         watchable: false,
-        get: (key) =>
-          Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
+        get: (key) => Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
         set: (key, value) => Effect.sync(() => record(key, value)),
         remove: (key) =>
           Effect.sync(() => {
@@ -127,74 +125,66 @@ const yieldUntil = (ready: () => boolean, steps = 50): Effect.Effect<void> =>
 
 describe("a value that changed just before the page went away", () => {
   it.effect("is at the backend when the pagehide listener returns", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const attached = yield* Ref.make<ReadonlyArray<Attached>>([]);
       const backend = makeBackend();
 
       yield* Effect.provide(
-        Effect.scoped(Effect.gen(function*() {
-          const lifecycle = yield* Lifecycle;
-          const storage = yield* Storage;
+        Effect.scoped(
+          Effect.gen(function* () {
+            const lifecycle = yield* Lifecycle;
+            const storage = yield* Storage;
 
-          // The hook that ships, with the parts that ship.
-          yield* lifecycle.onExit(onPageExit({
-            flushAllUnsafe: storage.flushAllUnsafe,
-            forgetSuppressed: Effect.void,
-            flushAll: storage.flushAll,
-            release: Effect.void,
-          }));
+            // The hook that ships, with the parts that ship.
+            yield* lifecycle.onExit(
+              onPageExit({
+                flushAllUnsafe: storage.flushAllUnsafe,
+                forgetSuppressed: Effect.void,
+                flushAll: storage.flushAll,
+                release: Effect.void,
+              }),
+            );
 
-          // The user changes a setting. The settings group joins writes for
-          // 250 ms, so the value is in memory and not at the backend.
-          yield* Effect.forkChild(
-            storage.settings.write({
-              ...defaultSettings(),
-              scrollStepSize: 120,
-            }),
-            { startImmediately: true },
-          );
-          yield* yieldUntil(() =>
-            storage.settings.currentUnsafe().scrollStepSize === 120
-          );
-          assert.deepEqual(
-            backend.writesNow(),
-            [],
-            "the debounce window must still hold the value",
-          );
+            // The user changes a setting. The settings group joins writes for
+            // 250 ms, so the value is in memory and not at the backend.
+            yield* Effect.forkChild(
+              storage.settings.write({
+                ...defaultSettings(),
+                scrollStepSize: 120,
+              }),
+              { startImmediately: true },
+            );
+            yield* yieldUntil(() => storage.settings.currentUnsafe().scrollStepSize === 120);
+            assert.deepEqual(
+              backend.writesNow(),
+              [],
+              "the debounce window must still hold the value",
+            );
 
-          // The page goes away. One synchronous run, and no other.
-          const listener = (yield* Ref.get(attached))
-            .find((entry) => entry.type === "pagehide");
-          assert.isDefined(listener, "the layer must register `pagehide`");
-          const outcome = yield* Effect.sync(() =>
-            Effect.runSyncExit(listener.run(pageHide(false)))
-          );
+            // The page goes away. One synchronous run, and no other.
+            const listener = (yield* Ref.get(attached)).find((entry) => entry.type === "pagehide");
+            assert.isDefined(listener, "the layer must register `pagehide`");
+            const outcome = yield* Effect.sync(() =>
+              Effect.runSyncExit(listener.run(pageHide(false))),
+            );
 
-          const written = backend.writesNow();
-          assert.lengthOf(
-            written,
-            1,
-            "the backend call must start before the dispatch returns",
-          );
-          assert.include(written[0] ?? "", '"scrollStepSize":120');
-          assert.isTrue(
-            Exit.isSuccess(outcome),
-            "the pagehide listener must not fail",
-          );
+            const written = backend.writesNow();
+            assert.lengthOf(written, 1, "the backend call must start before the dispatch returns");
+            assert.include(written[0] ?? "", '"scrollStepSize":120');
+            assert.isTrue(Exit.isSuccess(outcome), "the pagehide listener must not fail");
 
-          // And the same bytes are under the key of the group, ready for the
-          // next page load.
-          assert.include(
-            backend.readNow(SETTINGS_KEY) ?? "",
-            '"scrollStepSize":120',
-          );
-          const reread = yield* storage.settings.hydrate;
-          assert.strictEqual(reread.scrollStepSize, 120);
-        })),
+            // And the same bytes are under the key of the group, ready for the
+            // next page load.
+            assert.include(backend.readNow(SETTINGS_KEY) ?? "", '"scrollStepSize":120');
+            const reread = yield* storage.settings.hydrate;
+            assert.strictEqual(reread.scrollStepSize, 120);
+          }),
+        ),
         Layer.mergeAll(
           Lifecycle.layer.pipe(Layer.provide(recordingDom(attached))),
           Storage.layer.pipe(Layer.provide(backend.layer)),
         ),
       );
-    }));
+    }),
+  );
 });

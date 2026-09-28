@@ -236,10 +236,7 @@ export interface OmnibarView {
   readonly setPrefix: (text: string) => Effect.Effect<void>;
   readonly setFooter: (text: string) => Effect.Effect<void>;
   readonly focus: Effect.Effect<void>;
-  readonly render: (
-    rows: readonly Completion[],
-    selected: number,
-  ) => Effect.Effect<void>;
+  readonly render: (rows: readonly Completion[], selected: number) => Effect.Effect<void>;
   /** True while the event belongs to our own overlay. */
   readonly ownsFocus: (target: EventTarget | null) => boolean;
 }
@@ -256,7 +253,7 @@ const OMNIBAR_NAME = "Vimium-WebKit omnibar";
 export const makeOmnibarView = (
   options: OmnibarViewOptions,
 ): Effect.Effect<OmnibarView, never, Dom | Ui | Scope.Scope> =>
-  Effect.gen(function*() {
+  Effect.gen(function* () {
     const dom = yield* Dom;
     const ui = yield* Ui;
     const doc = dom.document;
@@ -265,18 +262,17 @@ export const makeOmnibarView = (
     // Taken before the field takes the focus, and given back when the scope
     // closes. To close the omnibar must not steal the focus of the page.
     yield* Effect.acquireRelease(
-      dom.probeOr(
-        () => Option.fromNullishOr(deepActiveElement(doc)),
-        Option.none<Element>(),
-      ),
+      dom.probeOr(() => Option.fromNullishOr(deepActiveElement(doc)), Option.none<Element>()),
       (previous) =>
-        Effect.ignore(dom.attempt("HTMLElement.focus", () => {
-          if (Option.isNone(previous)) return;
-          const element = previous.value;
-          if (element instanceof HTMLElement && element.isConnected) {
-            element.focus({ preventScroll: true });
-          }
-        })),
+        Effect.ignore(
+          dom.attempt("HTMLElement.focus", () => {
+            if (Option.isNone(previous)) return;
+            const element = previous.value;
+            if (element instanceof HTMLElement && element.isConnected) {
+              element.focus({ preventScroll: true });
+            }
+          }),
+        ),
     );
 
     const parts = yield* Effect.acquireRelease(
@@ -343,10 +339,7 @@ export const makeOmnibarView = (
     // Drawing
     // ---------------------------------------------------------------
 
-    const buildRow = (
-      completion: Completion,
-      selected: boolean,
-    ): HTMLElement => {
+    const buildRow = (completion: Completion, selected: boolean): HTMLElement => {
       const row = doc.createElement("li");
       const classes = ["vw-omnibar__row"];
       if (selected) classes.push("vw-omnibar__row--selected");
@@ -388,44 +381,42 @@ export const makeOmnibarView = (
       return row;
     };
 
-    const render = Effect.fn("OmnibarView.render")(
-      function*(rows: readonly Completion[], selected: number) {
-        if (rows.length === 0) {
-          yield* Ref.set(rowElements, []);
-          yield* Effect.sync(() => {
-            const empty = doc.createElement("li");
-            empty.className = "vw-omnibar__empty";
-            empty.textContent = "No matches";
-            parts.list.replaceChildren(empty);
-          });
-          return;
-        }
-
-        const elements = rows.map((completion, index) =>
-          buildRow(completion, index === selected)
-        );
-        yield* Ref.set(rowElements, elements);
+    const render = Effect.fn("OmnibarView.render")(function* (
+      rows: readonly Completion[],
+      selected: number,
+    ) {
+      if (rows.length === 0) {
+        yield* Ref.set(rowElements, []);
         yield* Effect.sync(() => {
-          parts.list.replaceChildren(...elements);
-          const active = elements[selected];
-          if (active !== undefined) {
-            active.scrollIntoView({ block: "nearest", behavior: "instant" });
-          }
+          const empty = doc.createElement("li");
+          empty.className = "vw-omnibar__empty";
+          empty.textContent = "No matches";
+          parts.list.replaceChildren(empty);
         });
-      },
-    );
+        return;
+      }
+
+      const elements = rows.map((completion, index) => buildRow(completion, index === selected));
+      yield* Ref.set(rowElements, elements);
+      yield* Effect.sync(() => {
+        parts.list.replaceChildren(...elements);
+        const active = elements[selected];
+        if (active !== undefined) {
+          active.scrollIntoView({ block: "nearest", behavior: "instant" });
+        }
+      });
+    });
 
     // ---------------------------------------------------------------
     // The viewport
     // ---------------------------------------------------------------
 
-    const applyViewport = Effect.gen(function*() {
+    const applyViewport = Effect.gen(function* () {
       const rect = yield* ui.viewport;
       yield* Effect.ignore(
         dom.attempt("CSSStyleDeclaration.setProperty", () => {
           const style = parts.container.style;
-          style.transform =
-            `translate(${rect.offsetLeft}px, ${rect.offsetTop}px)`;
+          style.transform = `translate(${rect.offsetLeft}px, ${rect.offsetTop}px)`;
           style.width = `${rect.width}px`;
           style.height = `${rect.height}px`;
           style.paddingTop = `${Math.round(rect.height * TOP_FRACTION)}px`;
@@ -437,10 +428,9 @@ export const makeOmnibarView = (
     // times inside one frame, and a newer one interrupts the fiber that the
     // one before it started.
     const repositionFiber = yield* FiberHandle.make<void, never>();
-    const reposition = Effect.asVoid(FiberHandle.run(
-      repositionFiber,
-      Effect.andThen(dom.nextFrame, applyViewport),
-    ));
+    const reposition = Effect.asVoid(
+      FiberHandle.run(repositionFiber, Effect.andThen(dom.nextFrame, applyViewport)),
+    );
 
     yield* dom.listen("window", "resize", () => reposition, { passive: true });
 
@@ -473,13 +463,8 @@ export const makeOmnibarView = (
     // The body of `onInput` reads storage and may suspend, and a DOM listener
     // must not. A newer keystroke interrupts the render of the older one.
     const inputFiber = yield* FiberHandle.make<void, never>();
-    yield* dom.listenOn(
-      parts.input,
-      "input",
-      () =>
-        Effect.asVoid(
-          FiberHandle.run(inputFiber, options.onInput(parts.input.value)),
-        ),
+    yield* dom.listenOn(parts.input, "input", () =>
+      Effect.asVoid(FiberHandle.run(inputFiber, options.onInput(parts.input.value))),
     );
 
     /**
@@ -491,56 +476,47 @@ export const makeOmnibarView = (
     yield* dom.listenOn(parts.panel, "mousedown", (event) =>
       Effect.sync(() => {
         if (event.target !== parts.input) event.preventDefault();
-      }));
+      }),
+    );
 
-    yield* dom.listenOn(
-      parts.panel,
-      "click",
-      (event) =>
-        Effect.gen(function*() {
-          const elements = yield* Ref.get(rowElements);
-          const target = event.target;
-          const index = elements.findIndex((row) =>
-            target instanceof Node && row.contains(target)
-          );
-          if (index === -1) return;
-          const mouse = event instanceof MouseEvent ? event : null;
-          yield* options.onActivate(
-            index,
-            mouse !== null && (mouse.shiftKey || mouse.metaKey),
-          );
-        }),
+    yield* dom.listenOn(parts.panel, "click", (event) =>
+      Effect.gen(function* () {
+        const elements = yield* Ref.get(rowElements);
+        const target = event.target;
+        const index = elements.findIndex((row) => target instanceof Node && row.contains(target));
+        if (index === -1) return;
+        const mouse = event instanceof MouseEvent ? event : null;
+        yield* options.onActivate(index, mouse !== null && (mouse.shiftKey || mouse.metaKey));
+      }),
     );
 
     // A click on a row blurs the field for one task before the focus comes
     // back, so only a focus that has truly left our shadow root is a
     // dismissal. The check waits one task, in a fiber of this scope.
     const blurFiber = yield* FiberHandle.make<void, never>();
-    yield* dom.listenOn(
-      parts.input,
-      "blur",
-      () =>
-        Effect.asVoid(FiberHandle.run(
+    yield* dom.listenOn(parts.input, "blur", () =>
+      Effect.asVoid(
+        FiberHandle.run(
           blurFiber,
-          Effect.gen(function*() {
+          Effect.gen(function* () {
             yield* dom.yieldToBrowser;
-            const active = yield* dom.probeOr(
-              () => ui.shadow.activeElement,
-              null,
-            );
+            const active = yield* dom.probeOr(() => ui.shadow.activeElement, null);
             if (active === parts.input) return;
             yield* options.onDismiss;
           }),
-        )),
+        ),
+      ),
     );
 
     return {
       value: Effect.sync(() => parts.input.value),
       setValue: (value) =>
-        Effect.ignore(dom.attempt("HTMLInputElement.setSelectionRange", () => {
-          parts.input.value = value;
-          parts.input.setSelectionRange(value.length, value.length);
-        })),
+        Effect.ignore(
+          dom.attempt("HTMLInputElement.setSelectionRange", () => {
+            parts.input.value = value;
+            parts.input.setSelectionRange(value.length, value.length);
+          }),
+        ),
       setPrefix: (text) =>
         Effect.sync(() => {
           parts.prefix.textContent = text;
@@ -550,11 +526,13 @@ export const makeOmnibarView = (
           parts.footer.textContent = text;
           parts.footer.hidden = text.length === 0;
         }),
-      focus: Effect.ignore(dom.attempt("HTMLElement.focus", () => {
-        // `preventScroll`: without it WebKit scrolls the *page* to show an
-        // element inside a fixed overlay.
-        parts.input.focus({ preventScroll: true });
-      })),
+      focus: Effect.ignore(
+        dom.attempt("HTMLElement.focus", () => {
+          // `preventScroll`: without it WebKit scrolls the *page* to show an
+          // element inside a fixed overlay.
+          parts.input.focus({ preventScroll: true });
+        }),
+      ),
       render,
       ownsFocus,
     };

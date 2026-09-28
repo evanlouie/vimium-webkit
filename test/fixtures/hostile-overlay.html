@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -6,7 +6,7 @@
     <title>Hostile page: hide and remove the overlay</title>
     <link rel="stylesheet" href="assets/base.css" />
     <style>
-    /*
+      /*
      * The overlay host has a known name in the light DOM, so any page can
      * address it. Every property below is a way to make the interface
      * invisible while the keyboard modes keep taking keys from the user.
@@ -14,26 +14,26 @@
      * An important inline declaration beats an important rule of the page, so
      * none of these may have an effect.
      */
-    vimium-webkit-overlay {
-      display: none !important;
-      visibility: hidden !important;
-      opacity: 0 !important;
-      position: static !important;
-      z-index: -1 !important;
-      transform: scale(0) !important;
-      clip-path: inset(100%) !important;
-      width: 0 !important;
-      height: 0 !important;
-      filter: opacity(0) !important;
-    }
+      vimium-webkit-overlay {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        position: static !important;
+        z-index: -1 !important;
+        transform: scale(0) !important;
+        clip-path: inset(100%) !important;
+        width: 0 !important;
+        height: 0 !important;
+        filter: opacity(0) !important;
+      }
     </style>
   </head>
   <body>
     <h1>Hostile page</h1>
     <p class="note">
-      The stylesheet of this page tries to hide the overlay. The first button
-      removes the host from the document. The second button moves the host
-      into a container of this page, and that container is invisible.
+      The stylesheet of this page tries to hide the overlay. The first button removes the host from
+      the document. The second button moves the host into a container of this page, and that
+      container is invisible.
     </p>
 
     <p><a id="target" href="#hostile-target">Hostile page link</a></p>
@@ -44,8 +44,7 @@
     </p>
 
     <p>
-      <button id="cage-host" type="button">Move the overlay host into a
-        hidden container</button>
+      <button id="cage-host" type="button">Move the overlay host into a hidden container</button>
       <span class="note">moves: <span id="moves">0</span></span>
     </p>
 

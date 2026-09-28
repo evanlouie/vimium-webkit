@@ -32,9 +32,7 @@ const OPAQUE_ENOUGH = 0.5;
 
 const channelToLinear = (value: number): number => {
   const channel = value / 255;
-  return channel <= 0.04045
-    ? channel / 12.92
-    : ((channel + 0.055) / 1.055) ** 2.4;
+  return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
 };
 
 /**
@@ -53,9 +51,7 @@ export const backgroundLuminance = (color: string): Option.Option<number> => {
   const red = Number(parts[0]);
   const green = Number(parts[1]);
   const blue = Number(parts[2]);
-  if (
-    !Number.isFinite(red) || !Number.isFinite(green) || !Number.isFinite(blue)
-  ) {
+  if (!Number.isFinite(red) || !Number.isFinite(green) || !Number.isFinite(blue)) {
     return Option.none();
   }
 
@@ -87,9 +83,7 @@ export const backgroundLuminance = (color: string): Option.Option<number> => {
  * and a page can replace it with an accessor that throws. `Ui.ts` therefore
  * calls this inside `dom.probeOr`.
  */
-export const detectPageScheme = (
-  doc: Document,
-): Option.Option<ColorScheme> => {
+export const detectPageScheme = (doc: Document): Option.Option<ColorScheme> => {
   const view = doc.defaultView;
   if (view === null) return Option.none();
 
@@ -103,13 +97,9 @@ export const detectPageScheme = (
   const surfaces: ReadonlyArray<Element | null> = [doc.body, root];
   for (const element of surfaces) {
     if (element === null) continue;
-    const luminance = backgroundLuminance(
-      view.getComputedStyle(element).backgroundColor,
-    );
+    const luminance = backgroundLuminance(view.getComputedStyle(element).backgroundColor);
     if (Option.isNone(luminance)) continue;
-    return Option.some(
-      luminance.value < DARK_THRESHOLD ? "dark" : "light",
-    );
+    return Option.some(luminance.value < DARK_THRESHOLD ? "dark" : "light");
   }
 
   return Option.none();

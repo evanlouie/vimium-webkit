@@ -57,10 +57,7 @@ export const overlayAttribute = (
  * carries `aria-hidden="true"`. That is the rule that a screen reader follows,
  * and asserting it on the node alone would miss a hidden host.
  */
-export const overlayAriaHidden = (
-  page: Page,
-  selector: string,
-): Promise<boolean | null> =>
+export const overlayAriaHidden = (page: Page, selector: string): Promise<boolean | null> =>
   page.evaluate((query: string): boolean | null => {
     const host = globalThis as unknown as ShadowHost;
     const shadow = host.__vimiumHarness?.shadow ?? null;
@@ -68,15 +65,11 @@ export const overlayAriaHidden = (
     if (node === null) return null;
     let current: Node | null = node;
     while (current !== null) {
-      if (
-        current instanceof Element &&
-        current.getAttribute("aria-hidden") === "true"
-      ) {
+      if (current instanceof Element && current.getAttribute("aria-hidden") === "true") {
         return true;
       }
-      current = current.parentNode instanceof ShadowRoot
-        ? current.parentNode.host
-        : current.parentNode;
+      current =
+        current.parentNode instanceof ShadowRoot ? current.parentNode.host : current.parentNode;
     }
     return false;
   }, selector);
@@ -88,9 +81,7 @@ export const overlayAriaHidden = (
  * closed. `shadow.activeElement` gives the true node, as a class list and a
  * tag name, so a failure says which control has the focus.
  */
-export const overlayActiveElement = (
-  page: Page,
-): Promise<string | null> =>
+export const overlayActiveElement = (page: Page): Promise<string | null> =>
   page.evaluate((): string | null => {
     const host = globalThis as unknown as ShadowHost;
     const shadow = host.__vimiumHarness?.shadow ?? null;
@@ -122,10 +113,7 @@ export const overlayActiveBox = (page: Page): Promise<OverlayBox | null> =>
   });
 
 /** Does the focus sit inside this part of the overlay? */
-export const overlayFocusWithin = (
-  page: Page,
-  selector: string,
-): Promise<boolean> =>
+export const overlayFocusWithin = (page: Page, selector: string): Promise<boolean> =>
   page.evaluate((query: string): boolean => {
     const host = globalThis as unknown as ShadowHost;
     const shadow = host.__vimiumHarness?.shadow ?? null;
@@ -136,10 +124,7 @@ export const overlayFocusWithin = (
   }, selector);
 
 /** Trimmed `textContent` of the first match inside the overlay, or `null`. */
-export const overlayText = (
-  page: Page,
-  selector: string,
-): Promise<string | null> =>
+export const overlayText = (page: Page, selector: string): Promise<string | null> =>
   page.evaluate((query: string): string | null => {
     const host = globalThis as unknown as ShadowHost;
     const shadow = host.__vimiumHarness?.shadow ?? null;
@@ -155,10 +140,7 @@ export const overlayCount = (page: Page, selector: string): Promise<number> =>
   }, selector);
 
 /** Border box of the first match, in viewport coordinates. */
-export const overlayBox = (
-  page: Page,
-  selector: string,
-): Promise<OverlayBox | null> =>
+export const overlayBox = (page: Page, selector: string): Promise<OverlayBox | null> =>
   page.evaluate((query: string): OverlayBox | null => {
     const host = globalThis as unknown as ShadowHost;
     const shadow = host.__vimiumHarness?.shadow ?? null;
@@ -196,9 +178,7 @@ export const overlayComputedStyle = (
  * Used only to *discover* which label sits on which element; the assertions
  * that follow are always about what activating it did.
  */
-export const visibleHintMarkers = (
-  page: Page,
-): Promise<readonly OverlayNode[]> =>
+export const visibleHintMarkers = (page: Page): Promise<readonly OverlayNode[]> =>
   page.evaluate((): readonly OverlayNode[] => {
     const host = globalThis as unknown as ShadowHost;
     const shadow = host.__vimiumHarness?.shadow ?? null;

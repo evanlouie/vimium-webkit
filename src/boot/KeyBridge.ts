@@ -45,7 +45,7 @@ export const attachKeyBridge: Effect.Effect<
   void,
   never,
   Dom | HandlerStack | Keyboard | Scope.Scope
-> = Effect.gen(function*() {
+> = Effect.gen(function* () {
   const dom = yield* Dom;
   const stack = yield* HandlerStack;
   const keyboard = yield* Keyboard;
@@ -53,47 +53,32 @@ export const attachKeyBridge: Effect.Effect<
   yield* dom.listen(
     "window",
     "keydown",
-    (event) =>
-      isUserEvent(event)
-        ? Effect.asVoid(stack.bubble("keydown", event))
-        : Effect.void,
+    (event) => (isUserEvent(event) ? Effect.asVoid(stack.bubble("keydown", event)) : Effect.void),
     { capture: true },
   );
 
   yield* dom.listen(
     "window",
     "keyup",
-    (event) =>
-      isUserEvent(event)
-        ? Effect.asVoid(stack.bubble("keyup", event))
-        : Effect.void,
+    (event) => (isUserEvent(event) ? Effect.asVoid(stack.bubble("keyup", event)) : Effect.void),
     { capture: true },
   );
 
-  yield* dom.listen(
-    "window",
-    "click",
-    (event) => Effect.asVoid(stack.bubble("click", event)),
-    { capture: true },
-  );
+  yield* dom.listen("window", "click", (event) => Effect.asVoid(stack.bubble("click", event)), {
+    capture: true,
+  });
 
   yield* dom.listen(
     "window",
     "focus",
-    (event) =>
-      isUserEvent(event)
-        ? Effect.asVoid(stack.bubble("focus", event))
-        : Effect.void,
+    (event) => (isUserEvent(event) ? Effect.asVoid(stack.bubble("focus", event)) : Effect.void),
     { capture: true },
   );
 
   yield* dom.listen(
     "window",
     "blur",
-    (event) =>
-      isUserEvent(event)
-        ? Effect.asVoid(stack.bubble("blur", event))
-        : Effect.void,
+    (event) => (isUserEvent(event) ? Effect.asVoid(stack.bubble("blur", event)) : Effect.void),
     { capture: true },
   );
 
@@ -104,10 +89,8 @@ export const attachKeyBridge: Effect.Effect<
   //
   // The page must not reach this either. A page-made `blur` would give the page
   // the release of a press that we took.
-  yield* dom.listen(
-    "window",
-    "blur",
-    (event) => isUserEvent(event) ? keyboard.forgetSuppressed : Effect.void,
+  yield* dom.listen("window", "blur", (event) =>
+    isUserEvent(event) ? keyboard.forgetSuppressed : Effect.void,
   );
 });
 
@@ -115,7 +98,7 @@ export const attachKeyBridge: Effect.Effect<
 export const replayBufferedKeys = (
   events: ReadonlyArray<KeyboardEvent>,
 ): Effect.Effect<void, never, HandlerStack> =>
-  Effect.gen(function*() {
+  Effect.gen(function* () {
     const stack = yield* HandlerStack;
     for (const event of events) {
       yield* stack.bubble("keydown", event);

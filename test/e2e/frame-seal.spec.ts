@@ -54,9 +54,10 @@ const capturePorts = (waitMs: number): Promise<CaptureResult> =>
 
     const onPortMessage = (event: MessageEvent): void => {
       const data: unknown = event.data;
-      const kind = typeof data === "object" && data !== null
-        ? String((data as Record<string, unknown>)["kind"])
-        : typeof data;
+      const kind =
+        typeof data === "object" && data !== null
+          ? String((data as Record<string, unknown>)["kind"])
+          : typeof data;
       result.kinds.push(kind);
 
       const text = JSON.stringify(data ?? null);
@@ -133,11 +134,8 @@ test.describe("a captured frame port", () => {
       result.kinds.filter((kind) => kind !== "SEALED"),
       "a message on the port was not sealed",
     ).toEqual([]);
-    expect(result.leakedNonce, "the session nonce reached the page").toBe(
-      false,
-    );
-    expect(result.leakedLinkText, "link text of a frame reached the page")
-      .toBe(false);
+    expect(result.leakedNonce, "the session nonce reached the page").toBe(false);
+    expect(result.leakedLinkText, "link text of a frame reached the page").toBe(false);
   });
 
   test("does not stop the frame from joining the true session", async ({ vw, page }) => {
@@ -152,11 +150,11 @@ test.describe("a captured frame port", () => {
     await vw.startHints();
     await vw.activateHint("Level two link");
 
-    await expect.poll(() => {
-      const frame = page.frames().find((candidate) =>
-        candidate.url().includes("level2.html")
-      );
-      return frame?.url() ?? "";
-    }).toContain("#level2-target");
+    await expect
+      .poll(() => {
+        const frame = page.frames().find((candidate) => candidate.url().includes("level2.html"));
+        return frame?.url() ?? "";
+      })
+      .toContain("#level2-target");
   });
 });

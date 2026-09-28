@@ -32,14 +32,8 @@ export const SUGGEST_LIMIT = 5;
  * host, which is a fault with consequences.
  */
 const SUGGEST_ENDPOINTS: ReadonlyArray<readonly [string, string]> = [
-  [
-    "google.com",
-    "https://suggestqueries.google.com/complete/search?client=firefox&q=%s",
-  ],
-  [
-    "youtube.com",
-    "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=%s",
-  ],
+  ["google.com", "https://suggestqueries.google.com/complete/search?client=firefox&q=%s"],
+  ["youtube.com", "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=%s"],
   ["duckduckgo.com", "https://duckduckgo.com/ac/?type=list&q=%s"],
   ["bing.com", "https://api.bing.com/osjson.aspx?query=%s"],
   [
@@ -59,9 +53,7 @@ export const SUGGEST_HOSTS: readonly string[] = [
 ].sort();
 
 /** The endpoint for a search URL, if the table has one. */
-export const suggestEndpointFor = (
-  searchUrl: string,
-): string | undefined => {
+export const suggestEndpointFor = (searchUrl: string): string | undefined => {
   let host: string;
   try {
     host = new URL(searchUrl).hostname.toLowerCase();

@@ -24,12 +24,7 @@ import {
   type TrieNode,
 } from "~/domain/Mapping.ts";
 
-const known: ReadonlySet<string> = new Set([
-  "scrollDown",
-  "scrollUp",
-  "showHelp",
-  "reload",
-]);
+const known: ReadonlySet<string> = new Set(["scrollDown", "scrollUp", "showHelp", "reload"]);
 
 const compile = (source: string, rejectReserved = false) =>
   compileMappings(source, {
@@ -66,35 +61,26 @@ describe("Mapping", () => {
   it.effect("removes comments and joins continuations", () =>
     Effect.sync(() => {
       const lines = readLogicalLines(
-        [
-          "# a comment",
-          '" another comment',
-          "map j scrollDown",
-          "map k \\",
-          "  scrollUp",
-          "",
-        ].join("\n"),
+        ["# a comment", '" another comment', "map j scrollDown", "map k \\", "  scrollUp", ""].join(
+          "\n",
+        ),
       );
-      assert.deepEqual(lines.map((line) => line.text), [
-        "map j scrollDown",
-        "map k    scrollUp",
-      ]);
-    }));
+      assert.deepEqual(
+        lines.map((line) => line.text),
+        ["map j scrollDown", "map k    scrollUp"],
+      );
+    }),
+  );
 
   it.effect('treats `#` and `"` as bindable keys, not trailing comments', () =>
     Effect.sync(() => {
       // Upstream honours a comment marker as the first character of a line
       // only, and `map # searchWordBackwards` is in the shipped defaults.
-      assert.strictEqual(
-        readLogicalLines("map # showHelp")[0]?.text,
-        "map # showHelp",
-      );
-      assert.strictEqual(
-        readLogicalLines('map " showHelp')[0]?.text,
-        'map " showHelp',
-      );
+      assert.strictEqual(readLogicalLines("map # showHelp")[0]?.text, "map # showHelp");
+      assert.strictEqual(readLogicalLines('map " showHelp')[0]?.text, 'map " showHelp');
       assert.lengthOf(readLogicalLines("   # indented comment"), 0);
-    }));
+    }),
+  );
 
   it.effect("builds a trie with the canonical notation", () =>
     Effect.sync(() => {
@@ -102,50 +88,51 @@ describe("Mapping", () => {
       assert.strictEqual(command(result.trie, ["j"]), "scrollDown");
       assert.strictEqual(command(result.trie, ["<c-d>"]), "scrollDown");
       assert.lengthOf(result.diagnostics, 0);
-    }));
+    }),
+  );
 
   it.effect("lets a prefix and its extension live together", () =>
     Effect.sync(() => {
       const result = compile("map gg scrollUp\nmap j scrollDown");
       const g = lookup(result.trie, ["g"]);
       assert.isNotNull(g);
-      assert.isTrue(
-        g !== null && Option.isNone(g.binding),
-        "`g` alone must stay a pure prefix",
-      );
+      assert.isTrue(g !== null && Option.isNone(g.binding), "`g` alone must stay a pure prefix");
       assert.strictEqual(command(result.trie, ["g", "g"]), "scrollUp");
-    }));
+    }),
+  );
 
   it.effect("warns when one binding shadows another as a prefix", () =>
     Effect.sync(() => {
       const result = compile("map g scrollUp\nmap gg scrollDown");
-      const warning = result.diagnostics.find(
-        (entry) => entry.severity === "warning",
-      );
+      const warning = result.diagnostics.find((entry) => entry.severity === "warning");
       assert.isDefined(warning);
       assert.isFalse(hasErrors(result));
-    }));
+    }),
+  );
 
   it.effect("removes an earlier binding with unmap", () =>
     Effect.sync(() => {
       const result = compile("map j scrollDown\nunmap j");
       assert.isNull(lookup(result.trie, ["j"]));
       assert.lengthOf(result.diagnostics, 0);
-    }));
+    }),
+  );
 
   it.effect("warns rather than fails when unmap finds nothing", () =>
     Effect.sync(() => {
       const result = compile("unmap q");
       assert.strictEqual(result.diagnostics[0]?.severity, "warning");
       assert.isFalse(hasErrors(result));
-    }));
+    }),
+  );
 
   it.effect("clears everything before it with unmapAll", () =>
     Effect.sync(() => {
       const result = compile("map j scrollDown\nunmapAll\nmap k scrollUp");
       assert.isNull(lookup(result.trie, ["j"]));
       assert.strictEqual(command(result.trie, ["k"]), "scrollUp");
-    }));
+    }),
+  );
 
   it.effect("reads the options of a map line", () =>
     Effect.sync(() => {
@@ -158,23 +145,24 @@ describe("Mapping", () => {
         count: "3",
         flag: true,
       });
-    }));
+    }),
+  );
 
   it.effect("reports an unknown command and keeps the good line", () =>
     Effect.sync(() => {
       const result = compile("map j scrollDown\nmap k noSuchCommand");
       assert.isTrue(hasErrors(result));
       assert.strictEqual(command(result.trie, ["j"]), "scrollDown");
-    }));
+    }),
+  );
 
   it.effect("attributes a malformed key sequence to its line", () =>
     Effect.sync(() => {
       const result = compile("map j scrollDown\nmap <c-a scrollUp");
-      const error = result.diagnostics.find(
-        (entry) => entry.severity === "error",
-      );
+      const error = result.diagnostics.find((entry) => entry.severity === "error");
       assert.strictEqual(error?.line, 2);
-    }));
+    }),
+  );
 
   it.effect("drops a diagnostic that belongs to the shipped defaults", () =>
     Effect.sync(() => {
@@ -185,34 +173,39 @@ describe("Mapping", () => {
         lineOffset: 1,
       });
       assert.lengthOf(result.diagnostics, 0);
-    }));
+    }),
+  );
 
   it.effect("records a physical remap with mapkey", () =>
     Effect.sync(() => {
       const result = compile("mapkey a b");
       assert.strictEqual(result.keyRemap.get("a"), "b");
       assert.isFalse(hasErrors(result));
-    }));
+    }),
+  );
 
   it.effect("refuses a sequence in mapkey", () =>
     Effect.sync(() => {
       assert.isTrue(hasErrors(compile("mapkey ab cd")));
       assert.isTrue(hasErrors(compile("mapkey a")));
-    }));
+    }),
+  );
 
   it.effect("warns when mapkey targets a count digit", () =>
     Effect.sync(() => {
       const result = compile("mapkey a 3");
       assert.strictEqual(result.diagnostics[0]?.severity, "warning");
       assert.strictEqual(result.keyRemap.get("a"), "3");
-    }));
+    }),
+  );
 
   it.effect("reports an unknown directive", () =>
     Effect.sync(() => {
       const result = compile("nope j scrollDown");
       assert.isTrue(hasErrors(result));
       assert.include(formatDiagnostics(result)[0] ?? "", "unknown directive");
-    }));
+    }),
+  );
 
   it.effect("refuses a reserved shortcut on WebKit", () =>
     Effect.sync(() => {
@@ -220,7 +213,8 @@ describe("Mapping", () => {
       const rejected = compile("map <m-t> reload", true);
       assert.isTrue(hasErrors(rejected));
       assert.isNull(lookup(rejected.trie, ["<m-t>"]));
-    }));
+    }),
+  );
 
   it.effect("only warns about a reserved shortcut elsewhere", () =>
     Effect.sync(() => {
@@ -228,16 +222,15 @@ describe("Mapping", () => {
       assert.isFalse(hasErrors(warned));
       assert.strictEqual(warned.diagnostics[0]?.severity, "warning");
       assert.strictEqual(command(warned.trie, ["<m-t>"]), "reload");
-    }));
+    }),
+  );
 
   it.effect("groups every sequence that is bound to a command", () =>
     Effect.sync(() => {
       const result = compile("map j scrollDown\nmap <down> scrollDown");
-      assert.deepEqual(keysByCommand(result).get("scrollDown"), [
-        "j",
-        "<down>",
-      ]);
-    }));
+      assert.deepEqual(keysByCommand(result).get("scrollDown"), ["j", "<down>"]);
+    }),
+  );
 
   it.effect("keeps two bindings that join to the same text apart", () =>
     Effect.sync(() => {
@@ -245,11 +238,9 @@ describe("Mapping", () => {
       // binding table must not treat them as one entry.
       const result = compile("map <lt>c-a> scrollDown\nmap <c-a> scrollUp");
       assert.strictEqual(command(result.trie, ["<c-a>"]), "scrollUp");
-      assert.strictEqual(
-        command(result.trie, ["<", "c", "-", "a", ">"]),
-        "scrollDown",
-      );
-    }));
+      assert.strictEqual(command(result.trie, ["<", "c", "-", "a", ">"]), "scrollDown");
+    }),
+  );
 
   it.effect("compiles the shipped defaults with no error", () =>
     Effect.sync(() => {
@@ -258,7 +249,8 @@ describe("Mapping", () => {
         result.diagnostics.filter((entry) => entry.severity === "error"),
         [],
       );
-    }));
+    }),
+  );
 
   it.effect("binds the tier C commands as well", () =>
     Effect.sync(() => {
@@ -266,20 +258,19 @@ describe("Mapping", () => {
       const result = compileDefaults();
       assert.strictEqual(command(result.trie, ["J"]), "previousTab");
       assert.strictEqual(command(result.trie, ["X"]), "restoreTab");
-    }));
+    }),
+  );
 
   it.effect("puts the user mappings on top of the defaults", () =>
     Effect.sync(() => {
-      const result = compileMappings(
-        `${DEFAULT_MAPPINGS}\nunmap j\nmap J showHelp`,
-        {
-          knownCommands: allCommandNames,
-          rejectReservedShortcuts: true,
-        },
-      );
+      const result = compileMappings(`${DEFAULT_MAPPINGS}\nunmap j\nmap J showHelp`, {
+        knownCommands: allCommandNames,
+        rejectReservedShortcuts: true,
+      });
       assert.isNull(lookup(result.trie, ["j"]));
       assert.strictEqual(command(result.trie, ["J"]), "showHelp");
-    }));
+    }),
+  );
 });
 
 /**
@@ -290,8 +281,7 @@ describe("Mapping", () => {
  * root, and it dies when its node has no child for the next key.
  */
 describe("the trie walk", () => {
-  const walkTrie = compile("map g scrollUp\nmap gg showHelp\nmap j scrollDown")
-    .trie;
+  const walkTrie = compile("map g scrollUp\nmap gg showHelp\nmap j scrollDown").trie;
 
   const nameOf = (binding: Option.Option<{ command: string }>): string =>
     Option.isSome(binding) ? binding.value.command : "none";
@@ -315,14 +305,16 @@ describe("the trie walk", () => {
       assert.strictEqual(nameOf(start(walkTrie, "g").accepted), "scrollUp");
       // `x` is bound nowhere, so it opens no branch at all.
       assert.isTrue(Option.isNone(openBranch(walkTrie, "x")));
-    }));
+    }),
+  );
 
   it.effect("lets a deeper node replace the accepted binding", () =>
     Effect.sync(() => {
       const after = extendBranches([start(walkTrie, "g")], "g");
       assert.lengthOf(after, 1);
       assert.strictEqual(decision(after), "showHelp");
-    }));
+    }),
+  );
 
   it.effect("kills a branch that has no child for the key", () =>
     Effect.sync(() => {
@@ -330,19 +322,22 @@ describe("the trie walk", () => {
       // which is what tells the dispatcher to run the accepted binding.
       assert.lengthOf(extendBranches([start(walkTrie, "g")], "j"), 0);
       assert.lengthOf(extendBranches([], "g"), 0);
-    }));
+    }),
+  );
 
   it.effect("says whether a branch takes another key", () =>
     Effect.sync(() => {
       assert.isTrue(canExtend(start(walkTrie, "g")));
       const [deep] = extendBranches([start(walkTrie, "g")], "g");
       assert.isTrue(deep !== undefined && !canExtend(deep));
-    }));
+    }),
+  );
 
   it.effect("gives no deepest branch when nothing is live", () =>
     Effect.sync(() => {
       assert.isTrue(Option.isNone(deepestBranch([])));
-    }));
+    }),
+  );
 
   /**
    * Two branches that live at the same time.
@@ -352,8 +347,7 @@ describe("the trie walk", () => {
    * older branch.
    */
   describe("an accepted binding belongs to its branch", () => {
-    const overlapping =
-      compile("map a scrollUp\nmap abc showHelp\nmap b scrollDown").trie;
+    const overlapping = compile("map a scrollUp\nmap abc showHelp\nmap b scrollDown").trie;
 
     it.effect("keeps the older binding out of a new branch", () =>
       Effect.sync(() => {
@@ -364,27 +358,23 @@ describe("the trie walk", () => {
 
         assert.lengthOf(cursor, 2);
         // The new branch accepts its own binding, and nothing else.
-        assert.strictEqual(
-          nameOf(cursor[0]?.accepted ?? Option.none()),
-          "scrollDown",
-        );
+        assert.strictEqual(nameOf(cursor[0]?.accepted ?? Option.none()), "scrollDown");
         // The deepest branch decides, and it accepted `scrollUp` at `a`.
         assert.strictEqual(decision(cursor), "scrollUp");
-      }));
+      }),
+    );
 
     it.effect("gives the deepest branch even when it accepted nothing", () =>
       Effect.sync(() => {
         // `ab` accepted nothing, and it is deeper than the new branch `b`,
         // which accepted `scrollDown`. The deepest branch still decides.
         const uneven = compile("map abz showHelp\nmap b scrollDown").trie;
-        const cursor = [
-          start(uneven, "b"),
-          ...extendBranches([start(uneven, "a")], "b"),
-        ];
+        const cursor = [start(uneven, "b"), ...extendBranches([start(uneven, "a")], "b")];
 
         assert.lengthOf(cursor, 2);
         assert.strictEqual(decision(cursor), "none");
-      }));
+      }),
+    );
 
     it.effect("drops the accepted binding when the branch dies", () =>
       Effect.sync(() => {
@@ -392,12 +382,14 @@ describe("the trie walk", () => {
         // `abz` is bound nowhere, so the attempt at `abc` dies, and the
         // binding that `a` accepted dies with it.
         assert.lengthOf(extendBranches(live, "z"), 0);
-      }));
+      }),
+    );
 
     it.effect("takes the binding of a node that carries on the attempt", () =>
       Effect.sync(() => {
         const live = extendBranches([start(overlapping, "a")], "b");
         assert.strictEqual(decision(extendBranches(live, "c")), "showHelp");
-      }));
+      }),
+    );
   });
 });

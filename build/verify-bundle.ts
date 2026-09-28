@@ -36,9 +36,7 @@ const SKIP = "VIMIUM_SKIP_BOOT_CHECK";
  */
 const BUNDLE_FLOOR_BYTES = 200 * 1024;
 
-export const verifyBundleBoots = async (
-  artefactPath: string,
-): Promise<BootResult> => {
+export const verifyBundleBoots = async (artefactPath: string): Promise<BootResult> => {
   const source = await readFile(artefactPath, "utf8");
   const bytes = new TextEncoder().encode(source).length;
   // Before the skip switch: this is a `stat`, not a browser, and the switch
@@ -46,7 +44,8 @@ export const verifyBundleBoots = async (
   if (bytes < BUNDLE_FLOOR_BYTES) {
     return {
       ok: false,
-      error: `the artefact is ${bytes} bytes, under the ` +
+      error:
+        `the artefact is ${bytes} bytes, under the ` +
         `${BUNDLE_FLOOR_BYTES}-byte floor — it cannot contain the extension`,
     };
   }
@@ -64,9 +63,7 @@ export const verifyBundleBoots = async (
     return {
       ok: false,
       error:
-        `could not launch WebKit (${
-          cause instanceof Error ? cause.message : String(cause)
-        }).\n` +
+        `could not launch WebKit (${cause instanceof Error ? cause.message : String(cause)}).\n` +
         `  Run \`npm run test:e2e:install\`, or set ${SKIP}=1 to skip this check.`,
     };
   }
@@ -83,10 +80,11 @@ export const verifyBundleBoots = async (
     await page.evaluate(source);
 
     // Give any microtask-deferred boot work a turn to throw.
-    await page.evaluate(() =>
-      new Promise((done) => {
-        setTimeout(done, 50);
-      })
+    await page.evaluate(
+      () =>
+        new Promise((done) => {
+          setTimeout(done, 50);
+        }),
     );
 
     if (failures.length > 0) {

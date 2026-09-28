@@ -30,9 +30,7 @@ import {
 } from "~/ui/Ui.ts";
 
 /** A style that holds exactly what the overlay wrote. */
-const intact = (
-  property: string,
-): readonly [string, string] => [
+const intact = (property: string): readonly [string, string] => [
   HOST_STYLE.find(([name]) => name === property)?.[1] ?? "",
   "important",
 ];
@@ -56,59 +54,56 @@ const asBrowser = (property: string): readonly [string, string] => {
 };
 
 /** The properties that this engine can compare, read from the style itself. */
-const guardedIntact = (): ReadonlySet<string> =>
-  comparableHostProperties(asBrowser);
+const guardedIntact = (): ReadonlySet<string> => comparableHostProperties(asBrowser);
 
 describe("the guarded set", () => {
   it.effect("drops a shorthand that the engine gives back in another form", () =>
     Effect.sync(() => {
       const guarded = comparableHostProperties(asBrowser);
       for (const shorthand of ["all", "margin", "padding", "border"]) {
-        assert.isFalse(
-          guarded.has(shorthand),
-          `${shorthand} cannot be compared`,
-        );
+        assert.isFalse(guarded.has(shorthand), `${shorthand} cannot be compared`);
       }
-    }));
+    }),
+  );
 
   it.effect("drops a property that this engine does not know", () =>
     Effect.sync(() => {
       // An engine that refuses `clip-path` keeps nothing, so the property
       // reads back empty. Guarding it would make the guard write for ever.
       const guarded = comparableHostProperties((property) =>
-        property === "clip-path" ? ["", ""] : asBrowser(property)
+        property === "clip-path" ? ["", ""] : asBrowser(property),
       );
       assert.isFalse(guarded.has("clip-path"));
       assert.isTrue(guarded.has("filter"));
-    }));
+    }),
+  );
 
   it.effect("guards every property that hides the overlay on its own", () =>
     Effect.sync(() => {
       const guarded = comparableHostProperties(asBrowser);
-      for (
-        const property of [
-          "--vw-scale",
-          "position",
-          "top",
-          "right",
-          "bottom",
-          "left",
-          "width",
-          "height",
-          "pointer-events",
-          "z-index",
-          "display",
-          "contain",
-          "transform",
-          "visibility",
-          "opacity",
-          "clip-path",
-          "filter",
-        ]
-      ) {
+      for (const property of [
+        "--vw-scale",
+        "position",
+        "top",
+        "right",
+        "bottom",
+        "left",
+        "width",
+        "height",
+        "pointer-events",
+        "z-index",
+        "display",
+        "contain",
+        "transform",
+        "visibility",
+        "opacity",
+        "clip-path",
+        "filter",
+      ]) {
         assert.isTrue(guarded.has(property), `${property} is not guarded`);
       }
-    }));
+    }),
+  );
 
   it.effect("writes longhands, so that the guard can compare them", () =>
     Effect.sync(() => {
@@ -117,28 +112,27 @@ describe("the guarded set", () => {
       // makes them disagree, so the guard would rewrite the style for ever.
       const written = HOST_STYLE.map(([property]) => property);
       assert.notInclude(written, "inset");
-    }));
+    }),
+  );
 });
 
 describe("the overlay host style", () => {
   it.effect("finds nothing to do while the style is intact", () =>
     Effect.sync(() => {
-      assert.deepEqual(
-        outOfDateHostProperties(guardedIntact(), asBrowser, NO_OWNED),
-        [],
-      );
-    }));
+      assert.deepEqual(outOfDateHostProperties(guardedIntact(), asBrowser, NO_OWNED), []);
+    }),
+  );
 
   it.effect("finds a property that the page overwrote", () =>
     Effect.sync(() => {
       const stale = outOfDateHostProperties(
         guardedIntact(),
-        (property) =>
-          property === "display" ? ["none", "important"] : asBrowser(property),
+        (property) => (property === "display" ? ["none", "important"] : asBrowser(property)),
         NO_OWNED,
       );
       assert.deepEqual(stale, ["display"]);
-    }));
+    }),
+  );
 
   it.effect("finds a property that lost the important priority", () =>
     Effect.sync(() => {
@@ -146,45 +140,35 @@ describe("the overlay host style", () => {
       // position: static !important }` in the stylesheet of the page.
       const stale = outOfDateHostProperties(
         guardedIntact(),
-        (property) =>
-          property === "position" ? ["fixed", ""] : asBrowser(property),
+        (property) => (property === "position" ? ["fixed", ""] : asBrowser(property)),
         NO_OWNED,
       );
       assert.deepEqual(stale, ["position"]);
-    }));
+    }),
+  );
 
   it.effect("finds each property that page script removed", () =>
     Effect.sync(() => {
       // One line of page script is enough:
       // `host.style.removeProperty("clip-path")`. The page rule then wins for
       // ever, and a guard that watched ten properties only reported nothing.
-      for (
-        const property of [
-          "clip-path",
-          "filter",
-          "transform",
-          "width",
-          "height",
-        ]
-      ) {
+      for (const property of ["clip-path", "filter", "transform", "width", "height"]) {
         const stale = outOfDateHostProperties(
           guardedIntact(),
-          (name) => name === property ? ["", ""] : asBrowser(name),
+          (name) => (name === property ? ["", ""] : asBrowser(name)),
           NO_OWNED,
         );
         assert.deepEqual(stale, [property]);
       }
-    }));
+    }),
+  );
 
   it.effect("finds every property when the style attribute is gone", () =>
     Effect.sync(() => {
-      const stale = outOfDateHostProperties(
-        guardedIntact(),
-        () => ["", ""],
-        NO_OWNED,
-      );
+      const stale = outOfDateHostProperties(guardedIntact(), () => ["", ""], NO_OWNED);
       assert.isAbove(stale.length, 4);
-    }));
+    }),
+  );
 });
 
 describe("the properties that the viewport sync owns", () => {
@@ -203,11 +187,9 @@ describe("the properties that the viewport sync owns", () => {
 
   it.effect("accepts the value that the sync wrote", () =>
     Effect.sync(() => {
-      assert.deepEqual(
-        outOfDateHostProperties(guardedIntact(), synced, OWNED),
-        [],
-      );
-    }));
+      assert.deepEqual(outOfDateHostProperties(guardedIntact(), synced, OWNED), []);
+    }),
+  );
 
   it.effect("repairs with the viewport value, and not with the constant", () =>
     Effect.sync(() => {
@@ -220,17 +202,19 @@ describe("the properties that the viewport sync owns", () => {
       assert.strictEqual(written.get("width"), "390px");
       assert.strictEqual(written.get("height"), "580px");
       assert.strictEqual(written.get("display"), "block");
-    }));
+    }),
+  );
 
   it.effect("still finds the sync value when the page removed it", () =>
     Effect.sync(() => {
       const stale = outOfDateHostProperties(
         guardedIntact(),
-        (property) => property === "transform" ? ["", ""] : synced(property),
+        (property) => (property === "transform" ? ["", ""] : synced(property)),
         OWNED,
       );
       assert.deepEqual(stale, ["transform"]);
-    }));
+    }),
+  );
 });
 
 describe("the fallback of the guarded set", () => {
@@ -243,27 +227,23 @@ describe("the fallback of the guarded set", () => {
       for (const [property] of HOST_STYLE) {
         assert.isTrue(fallback.has(property), `${property} is not in the set`);
       }
-    }));
+    }),
+  );
 
   it.effect("still finds a property that the page removed", () =>
     Effect.sync(() => {
       const removed = (name: string): readonly [string, string] =>
         name === "display" ? ["", ""] : asBrowser(name);
-      assert.include(
-        outOfDateHostProperties(allHostProperties(), removed, NO_OWNED),
-        "display",
-      );
+      assert.include(outOfDateHostProperties(allHostProperties(), removed, NO_OWNED), "display");
       // The old fallback, for the comparison: it reports nothing at all.
-      assert.deepEqual(
-        outOfDateHostProperties(new Set<string>(), removed, NO_OWNED),
-        [],
-      );
-    }));
+      assert.deepEqual(outOfDateHostProperties(new Set<string>(), removed, NO_OWNED), []);
+    }),
+  );
 });
 
 describe("the host that the page moved", () => {
   /** A node that stands for an element in these pure tests. */
-  const node = (name: string): Node => ({ nodeName: name } as unknown as Node);
+  const node = (name: string): Node => ({ nodeName: name }) as unknown as Node;
 
   it.effect("puts the host back when the page holds it", () =>
     Effect.sync(() => {
@@ -273,18 +253,21 @@ describe("the host that the page moved", () => {
       const root = node("HTML");
       const cage = node("DIV");
       assert.isTrue(hostNeedsAttachment(root, cage));
-    }));
+    }),
+  );
 
   it.effect("puts the host back after a removal", () =>
     Effect.sync(() => {
       assert.isTrue(hostNeedsAttachment(node("HTML"), null));
-    }));
+    }),
+  );
 
   it.effect("does nothing while the host is in its place", () =>
     Effect.sync(() => {
       const root = node("HTML");
       assert.isFalse(hostNeedsAttachment(root, root));
-    }));
+    }),
+  );
 
   it.effect("does nothing while the document has no element", () =>
     Effect.sync(() => {
@@ -292,7 +275,8 @@ describe("the host that the page moved", () => {
       // call tries again.
       assert.isFalse(hostNeedsAttachment(null, null));
       assert.isFalse(hostNeedsAttachment(null, node("DIV")));
-    }));
+    }),
+  );
 });
 
 describe("the place of the host in the viewport", () => {
@@ -312,7 +296,8 @@ describe("the place of the host in the viewport", () => {
     Effect.sync(() => {
       assert.isTrue(Option.isNone(alignError(ON_VIEWPORT, VIEW)));
       assert.isFalse(hostIsDisplaced(ON_VIEWPORT, VIEW));
-    }));
+    }),
+  );
 
   it.effect("measures the error that a containing block makes", () =>
     Effect.sync(() => {
@@ -325,19 +310,19 @@ describe("the place of the host in the viewport", () => {
       assert.isTrue(Option.isSome(error));
       assert.deepEqual(Option.getOrThrow(error), { dx: 0, dy: 2759 });
       assert.isTrue(hostIsDisplaced(scrolled, VIEW));
-    }));
+    }),
+  );
 
   it.effect("keeps the offset of the visual viewport", () =>
     Effect.sync(() => {
       // Under the dynamic toolbar of iOS the host must sit at the offset of
       // the visual viewport, and not at the origin of the layout viewport.
       const shifted: ViewportRect = { ...VIEW, offsetTop: 84 };
-      assert.isTrue(
-        Option.isNone(alignError({ ...ON_VIEWPORT, top: 84 }, shifted)),
-      );
+      assert.isTrue(Option.isNone(alignError({ ...ON_VIEWPORT, top: 84 }, shifted)));
       assert.isFalse(hostIsDisplaced({ ...ON_VIEWPORT, top: 84 }, shifted));
       assert.isTrue(hostIsDisplaced(ON_VIEWPORT, shifted));
-    }));
+    }),
+  );
 
   it.effect("says nothing about an error of one pixel", () =>
     Effect.sync(() => {
@@ -347,7 +332,8 @@ describe("the place of the host in the viewport", () => {
       const rounded = { ...ON_VIEWPORT, left: 0.5, top: -0.5 };
       assert.isTrue(Option.isNone(alignError(rounded, VIEW)));
       assert.isFalse(hostIsDisplaced(rounded, VIEW));
-    }));
+    }),
+  );
 
   it.effect("finds a host that a page rule made small", () =>
     Effect.sync(() => {
@@ -356,18 +342,16 @@ describe("the place of the host in the viewport", () => {
       // a list of CSS properties written by hand cannot.
       assert.isTrue(hostIsDisplaced({ ...ON_VIEWPORT, width: 0 }, VIEW));
       assert.isTrue(hostIsDisplaced({ ...ON_VIEWPORT, height: 0 }, VIEW));
-      assert.isTrue(
-        hostIsDisplaced({ left: 0, top: 0, width: 1280, height: 399 }, VIEW),
-      );
-    }));
+      assert.isTrue(hostIsDisplaced({ left: 0, top: 0, width: 1280, height: 399 }, VIEW));
+    }),
+  );
 
   it.effect("accepts a size that a scrollbar made smaller", () =>
     Effect.sync(() => {
       // A classic scrollbar costs about 15 px, and it hides no interface.
-      assert.isFalse(
-        hostIsDisplaced({ left: 0, top: 0, width: 1265, height: 800 }, VIEW),
-      );
-    }));
+      assert.isFalse(hostIsDisplaced({ left: 0, top: 0, width: 1265, height: 800 }, VIEW));
+    }),
+  );
 });
 
 describe("the declarations that the viewport sync writes", () => {
@@ -384,23 +368,19 @@ describe("the declarations that the viewport sync writes", () => {
       // A removal would leave the page rule as the only declaration for
       // `transform`, and `transform: scale(0) !important` would then win.
       assert.strictEqual(hostTranslate(0, 0), "none");
-      assert.strictEqual(
-        ownedDeclarations(VIEW, NO_SHIFT).get("transform"),
-        "none",
-      );
-    }));
+      assert.strictEqual(ownedDeclarations(VIEW, NO_SHIFT).get("transform"), "none");
+    }),
+  );
 
   it.effect("adds the correction to the offset of the viewport", () =>
     Effect.sync(() => {
-      const owned = ownedDeclarations(
-        { ...VIEW, offsetTop: 84 },
-        { dx: 0, dy: 2759 },
-      );
+      const owned = ownedDeclarations({ ...VIEW, offsetTop: 84 }, { dx: 0, dy: 2759 });
       assert.strictEqual(owned.get("--vw-scale"), "1");
       assert.strictEqual(owned.get("transform"), "translate(0px, 2843px)");
       assert.strictEqual(owned.get("width"), "1280px");
       assert.strictEqual(owned.get("height"), "800px");
-    }));
+    }),
+  );
 });
 
 describe("the paint of the host ancestor chain", () => {
@@ -413,56 +393,63 @@ describe("the paint of the host ancestor chain", () => {
     clipPath: "none",
   };
 
-  for (
-    const [property, value] of [
-      ["opacity", "0"],
-      ["visibility", "hidden"],
-      ["filter", "opacity(0)"],
-      ["contentVisibility", "hidden"],
-      ["clipPath", "inset(100%)"],
-    ] as const
-  ) {
+  for (const [property, value] of [
+    ["opacity", "0"],
+    ["visibility", "hidden"],
+    ["filter", "opacity(0)"],
+    ["contentVisibility", "hidden"],
+    ["clipPath", "inset(100%)"],
+  ] as const) {
     it.effect(`finds ${property}: ${value}`, () =>
       Effect.sync(() => {
-        assert.isTrue(preventsOverlayPaint({
-          ...visible,
-          [property]: value,
-        }));
-      }));
+        assert.isTrue(
+          preventsOverlayPaint({
+            ...visible,
+            [property]: value,
+          }),
+        );
+      }),
+    );
   }
 
   it.effect("keeps a visible style", () =>
     Effect.sync(() => {
       assert.isFalse(preventsOverlayPaint(visible));
-      assert.isFalse(preventsOverlayPaint({
-        ...visible,
-        filter: "brightness(1)",
-        clipPath: "inset(0)",
-      }));
-    }));
+      assert.isFalse(
+        preventsOverlayPaint({
+          ...visible,
+          filter: "brightness(1)",
+          clipPath: "inset(0)",
+        }),
+      );
+    }),
+  );
 });
 
 describe("the focus after a repair", () => {
   /** A node that stands for an element in these pure tests. */
-  const node = (name: string): Node => ({ nodeName: name } as unknown as Node);
+  const node = (name: string): Node => ({ nodeName: name }) as unknown as Node;
   const body = node("BODY");
 
   it.effect("takes the focus back while nothing holds it", () =>
     Effect.sync(() => {
       assert.isTrue(focusIsFree(null, null, body));
       assert.isTrue(focusIsFree(null, body, body));
-    }));
+    }),
+  );
 
   it.effect("leaves the focus that the overlay already holds", () =>
     Effect.sync(() => {
       // A second repair must not move the focus that the first one gave back.
       assert.isFalse(focusIsFree(node("BUTTON"), null, body));
-    }));
+    }),
+  );
 
   it.effect("leaves the focus that the page took", () =>
     Effect.sync(() => {
       // Page script can focus one of its own controls at any moment. The user
       // is then typing into the page, and a repair must not take that away.
       assert.isFalse(focusIsFree(null, node("A"), body));
-    }));
+    }),
+  );
 });

@@ -22,25 +22,24 @@ const DEFAULT_MAPPING_LINES = `${DEFAULT_MAPPINGS}\n`.split("\n").length - 1;
 
 const KNOWN_COMMANDS: ReadonlySet<string> = new Set(Object.keys(COMMANDS));
 
-export class Mappings extends Context.Service<Mappings, {
-  readonly compiled: Effect.Effect<CompiledMappings>;
+export class Mappings extends Context.Service<
+  Mappings,
+  {
+    readonly compiled: Effect.Effect<CompiledMappings>;
 
-  /** The trie, read synchronously. For the key path only. */
-  readonly compiledUnsafe: () => CompiledMappings;
+    /** The trie, read synchronously. For the key path only. */
+    readonly compiledUnsafe: () => CompiledMappings;
 
-  /** The current trie, and then every later one. */
-  readonly changes: Stream.Stream<CompiledMappings>;
+    /** The current trie, and then every later one. */
+    readonly changes: Stream.Stream<CompiledMappings>;
 
-  /** Compile a source without adopting it. The settings dialog checks with it. */
-  readonly check: (source: string) => Effect.Effect<CompiledMappings>;
-}>()("vimium/core/Mappings") {
-  static readonly layer: Layer.Layer<
+    /** Compile a source without adopting it. The settings dialog checks with it. */
+    readonly check: (source: string) => Effect.Effect<CompiledMappings>;
+  }
+>()("vimium/core/Mappings") {
+  static readonly layer: Layer.Layer<Mappings, never, Settings | Capabilities> = Layer.effect(
     Mappings,
-    never,
-    Settings | Capabilities
-  > = Layer.effect(
-    Mappings,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const settings = yield* Settings;
       const capabilities = yield* Capabilities;
 
@@ -53,17 +52,13 @@ export class Mappings extends Context.Service<Mappings, {
           lineOffset: DEFAULT_MAPPING_LINES,
         });
 
-      const compile = (current: SettingsData): CompiledMappings =>
-        compileFor(current.keyMappings);
+      const compile = (current: SettingsData): CompiledMappings => compileFor(current.keyMappings);
 
-      const trie = yield* SubscriptionRef.make(
-        compile(yield* settings.current),
-      );
+      const trie = yield* SubscriptionRef.make(compile(yield* settings.current));
 
       yield* Effect.forkScoped(
-        Stream.runForEach(
-          settings.changes,
-          (current) => SubscriptionRef.set(trie, compile(current)),
+        Stream.runForEach(settings.changes, (current) =>
+          SubscriptionRef.set(trie, compile(current)),
         ),
       );
 

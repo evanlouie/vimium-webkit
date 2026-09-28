@@ -85,10 +85,7 @@ export interface ScoreTarget {
  * The result is `0` when a query word matches nothing at all. That zero is the
  * important behaviour. The omnibar is a filter first, and a ranking second.
  */
-export const scoreCandidate = (
-  queryTokens: readonly string[],
-  target: ScoreTarget,
-): number => {
+export const scoreCandidate = (queryTokens: readonly string[], target: ScoreTarget): number => {
   if (queryTokens.length === 0) return 0;
 
   const groups = [tokenize(target.title), tokenize(target.url)];
@@ -111,10 +108,8 @@ export const scoreCandidate = (
 };
 
 /** Score one string, for a candidate with no URL, such as a command or an engine. */
-export const scoreText = (
-  queryTokens: readonly string[],
-  text: string,
-): number => scoreCandidate(queryTokens, { title: text, url: "" });
+export const scoreText = (queryTokens: readonly string[], text: string): number =>
+  scoreCandidate(queryTokens, { title: text, url: "" });
 
 // ---------------------------------------------------------------------------
 // Frecency
@@ -157,14 +152,10 @@ export interface FrecencyInput {
  * the query describes better.
  */
 export const frecencyScore = (visit: FrecencyInput, now: number): number =>
-  0.5 * frequencyScore(visit.visitCount) +
-  0.5 * recencyScore(visit.lastVisit, now);
+  0.5 * frequencyScore(visit.visitCount) + 0.5 * recencyScore(visit.lastVisit, now);
 
 /** How much frecency may increase the text relevancy of a history candidate. */
 export const FRECENCY_WEIGHT = 1;
 
-export const historyScore = (
-  relevancy: number,
-  visit: FrecencyInput,
-  now: number,
-): number => relevancy * (1 + FRECENCY_WEIGHT * frecencyScore(visit, now));
+export const historyScore = (relevancy: number, visit: FrecencyInput, now: number): number =>
+  relevancy * (1 + FRECENCY_WEIGHT * frecencyScore(visit, now));

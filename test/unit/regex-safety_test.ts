@@ -168,49 +168,44 @@ describe("RegexSafety", () => {
           `${source} was refused: ${Option.getOrElse(problem, () => "")}`,
         );
       }
-    }));
+    }),
+  );
 
   it.effect("refuses every pattern that grows with a power", () =>
     Effect.sync(() => {
       for (const source of SUPER_LINEAR) {
-        assert.isFalse(
-          isLinearRegex(source, ""),
-          `${source} passed the check`,
-        );
+        assert.isFalse(isLinearRegex(source, ""), `${source} passed the check`);
       }
-    }));
+    }),
+  );
 
   it.effect("refuses eight nested fixed loops over assertions", () =>
     Effect.sync(() => {
       assert.strictEqual(NESTED_FIXED_ASSERTIONS.length, 103);
       assert.isFalse(isLinearRegex(NESTED_FIXED_ASSERTIONS, ""));
-    }));
+    }),
+  );
 
   it.effect("gives a reason that a user can read", () =>
     Effect.sync(() => {
       assert.deepEqual(
         regexSafetyError("(a+)+$", ""),
-        Option.some(
-          "a quantifier whose body can grow past its own end can hang the page",
-        ),
+        Option.some("a quantifier whose body can grow past its own end can hang the page"),
       );
       assert.deepEqual(
         regexSafetyError("\\s+\\s+\\s+$", ""),
-        Option.some(
-          "two quantifiers that match the same characters can hang the page",
-        ),
+        Option.some("two quantifiers that match the same characters can hang the page"),
       );
       assert.deepEqual(
         regexSafetyError("(a|a)+", ""),
-        Option.some(
-          "two alternatives that match the same text can hang the page",
-        ),
+        Option.some("two alternatives that match the same text can hang the page"),
       );
       assert.deepEqual(
         regexSafetyError("(a)\\1", ""),
         Option.some("a backreference can hang the page"),
       );
-    }));
+    }),
+  );
 
   it.effect("refuses syntax that it cannot read", () =>
     Effect.sync(() => {
@@ -219,7 +214,8 @@ describe("RegexSafety", () => {
       for (const source of ["[unclosed", "(unclosed", "a)b"]) {
         assert.isFalse(isLinearRegex(source, ""), `${source} passed`);
       }
-    }));
+    }),
+  );
 
   it.effect("refuses a property escape when the flags hold no `u`", () =>
     Effect.sync(() => {
@@ -234,13 +230,11 @@ describe("RegexSafety", () => {
 
       // The reason must tell the user what to write instead. "syntax that the
       // safety check does not know" is true and useless.
-      const reason = Option.getOrElse(
-        regexSafetyError("\\p{L}+", ""),
-        () => "",
-      );
+      const reason = Option.getOrElse(regexSafetyError("\\p{L}+", ""), () => "");
       assert.include(reason, "`u` flag");
       assert.include(reason, "[a-zA-Z]");
-    }));
+    }),
+  );
 
   it.effect("reads one character as the engine reads it", () =>
     Effect.sync(() => {
@@ -251,7 +245,8 @@ describe("RegexSafety", () => {
       assert.isFalse(isLinearRegex("\u{1F600}+\u{1F600}+x", "u"));
       assert.isTrue(isLinearRegex("\u{1F600}+x", "u"));
       assert.isTrue(isLinearRegex("[\\u{1F600}-\\u{1F64F}]+x", "u"));
-    }));
+    }),
+  );
 
   it.effect("refuses a long chain of lookarounds", () =>
     Effect.sync(() => {
@@ -262,28 +257,24 @@ describe("RegexSafety", () => {
       assert.isBelow(chain.length, 512);
       assert.isFalse(isLinearRegex(chain, ""));
       assert.include(
-        Option.getOrElse(
-          regexSafetyError(`${"(?=a)".repeat(9)}b`, ""),
-          () => "",
-        ),
+        Option.getOrElse(regexSafetyError(`${"(?=a)".repeat(9)}b`, ""), () => ""),
         "at most eight lookaheads",
       );
       assert.include(
-        Option.getOrElse(
-          regexSafetyError("(?=(?=(?=(?=a))))", ""),
-          () => "",
-        ),
+        Option.getOrElse(regexSafetyError("(?=(?=(?=(?=a))))", ""), () => ""),
         "at most three nested assertions",
       );
       // A pattern that a user writes holds a few assertions, and passes.
       assert.isTrue(isLinearRegex("^(?=.*foo)(?=.*bar)(?=.*baz)", ""));
-    }));
+    }),
+  );
 
   it.effect("refuses a pattern that is too long to read", () =>
     Effect.sync(() => {
       assert.isFalse(isLinearRegex("a".repeat(4096), ""));
       assert.isTrue(isLinearRegex("a".repeat(64), ""));
-    }));
+    }),
+  );
 
   it.effect("uses the flags", () =>
     Effect.sync(() => {
@@ -296,7 +287,8 @@ describe("RegexSafety", () => {
       assert.isTrue(isLinearRegex(".*\\n*", ""));
       // With `s` the dot holds the line terminators too.
       assert.isFalse(isLinearRegex(".*\\n*", "s"));
-    }));
+    }),
+  );
 
   it.effect("decides in a time that a keystroke can pay", () =>
     Effect.sync(() => {
@@ -305,7 +297,8 @@ describe("RegexSafety", () => {
       for (let round = 0; round < 20; round++) regexSafetyError(pattern, "i");
       const elapsed = performance.now() - started;
       assert.isBelow(elapsed, SLOW_CHECK_MS, `the check took ${elapsed}ms`);
-    }));
+    }),
+  );
 
   it.effect("decides a hostile pattern in the same time", () =>
     Effect.sync(() => {
@@ -313,9 +306,7 @@ describe("RegexSafety", () => {
       // walks a tree, so the cost follows the pattern and never the input.
       const hostile = [
         `${"(".repeat(250)}a${")".repeat(250)}${"b".repeat(500)}`,
-        `(?:${
-          Array.from({ length: 200 }, (_, index) => `a${index}`).join("|")
-        })+`,
+        `(?:${Array.from({ length: 200 }, (_, index) => `a${index}`).join("|")})+`,
         "a".repeat(1024),
         "(a|b)*".repeat(120),
       ];
@@ -323,5 +314,6 @@ describe("RegexSafety", () => {
       for (const source of hostile) regexSafetyError(source, "i");
       const elapsed = performance.now() - started;
       assert.isBelow(elapsed, SLOW_CHECK_MS, `the check took ${elapsed}ms`);
-    }));
+    }),
+  );
 });

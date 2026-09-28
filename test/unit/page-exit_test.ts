@@ -34,197 +34,175 @@ import { makeOwnedRuntime, onPageExit } from "~/boot/Bootstrap.ts";
  * the layer takes them, and the scope gives them back.
  */
 const countedLayer = (log: string[]): Layer.Layer<never> =>
-  Layer.effectDiscard(Effect.acquireRelease(
-    Effect.sync(() => {
-      log.push("acquire");
-    }),
-    () =>
+  Layer.effectDiscard(
+    Effect.acquireRelease(
       Effect.sync(() => {
-        log.push("release");
+        log.push("acquire");
       }),
-  ));
+      () =>
+        Effect.sync(() => {
+          log.push("release");
+        }),
+    ),
+  );
 
 /** Build a runtime for one frame, and give back what the exit hook needs. */
 const startFrame = (log: string[]) =>
-  makeOwnedRuntime((owner) =>
-    ManagedRuntime.make(Layer.merge(countedLayer(log), owner))
-  );
+  makeOwnedRuntime((owner) => ManagedRuntime.make(Layer.merge(countedLayer(log), owner)));
 
 // ---------------------------------------------------------------------------
 // The tests
 // ---------------------------------------------------------------------------
 
 describe("the runtime of a frame", () => {
-  it.effect(
-    "acquires and releases in step over repeated starts and exits",
-    () =>
-      Effect.gen(function*() {
-        const log: string[] = [];
+  it.effect("acquires and releases in step over repeated starts and exits", () =>
+    Effect.gen(function* () {
+      const log: string[] = [];
 
-        for (let round = 0; round < 3; round++) {
-          const frame = startFrame(log);
-          // The layer is lazy. Running one effect builds it, exactly as the
-          // first run of the application does.
-          yield* Effect.promise(() => frame.runtime.runPromise(Effect.void));
-          yield* onPageExit({
-            flushAllUnsafe: () => {},
-            forgetSuppressed: Effect.void,
-            flushAll: Effect.void,
-            release: frame.release,
-          })({ final: true });
-        }
-
-        assert.deepStrictEqual(log, [
-          "acquire",
-          "release",
-          "acquire",
-          "release",
-          "acquire",
-          "release",
-        ]);
-      }),
-  );
-
-  it.effect(
-    "keeps everything when the browser keeps the page",
-    () =>
-      Effect.gen(function*() {
-        const log: string[] = [];
+      for (let round = 0; round < 3; round++) {
         const frame = startFrame(log);
+        // The layer is lazy. Running one effect builds it, exactly as the
+        // first run of the application does.
         yield* Effect.promise(() => frame.runtime.runPromise(Effect.void));
-
-        yield* onPageExit({
-          flushAllUnsafe: () => {},
-          forgetSuppressed: Effect.void,
-          flushAll: Effect.void,
-          release: frame.release,
-        })({ final: false });
-
-        assert.deepStrictEqual(log, ["acquire"]);
-
-        // The proof that matters for the back/forward cache: the frame still
-        // works. A restored page never runs its scripts again, so this runtime
-        // is the only one that it will ever have.
-        const answer = yield* Effect.promise(() =>
-          frame.runtime.runPromise(Effect.succeed("alive"))
-        );
-        assert.strictEqual(answer, "alive");
-      }),
-  );
-
-  it.effect(
-    "cannot be used again after a final exit",
-    () =>
-      Effect.gen(function*() {
-        const log: string[] = [];
-        const frame = startFrame(log);
-        yield* Effect.promise(() => frame.runtime.runPromise(Effect.void));
-
         yield* onPageExit({
           flushAllUnsafe: () => {},
           forgetSuppressed: Effect.void,
           flushAll: Effect.void,
           release: frame.release,
         })({ final: true });
+      }
 
-        assert.deepStrictEqual(log, ["acquire", "release"]);
-
-        // This is why a persisted exit must not release. `dispose` puts a
-        // defect in the place of the context.
-        const outcome = yield* Effect.promise(() =>
-          frame.runtime.runPromiseExit(Effect.succeed("alive"))
-        );
-        assert.isTrue(
-          Exit.isFailure(outcome),
-          "a released runtime must refuse work",
-        );
-      }),
+      assert.deepStrictEqual(log, [
+        "acquire",
+        "release",
+        "acquire",
+        "release",
+        "acquire",
+        "release",
+      ]);
+    }),
   );
 
-  it.effect(
-    "releases only what this frame built",
-    () =>
-      Effect.gen(function*() {
-        const top: string[] = [];
-        const child: string[] = [];
-        const topFrame = startFrame(top);
-        const childFrame = startFrame(child);
-        yield* Effect.promise(() => topFrame.runtime.runPromise(Effect.void));
-        yield* Effect.promise(() => childFrame.runtime.runPromise(Effect.void));
+  it.effect("keeps everything when the browser keeps the page", () =>
+    Effect.gen(function* () {
+      const log: string[] = [];
+      const frame = startFrame(log);
+      yield* Effect.promise(() => frame.runtime.runPromise(Effect.void));
 
-        // The child document goes away. Each frame has its own realm, its own
-        // window and its own runtime, so `pagehide` reaches the child only.
-        yield* onPageExit({
-          flushAllUnsafe: () => {},
-          forgetSuppressed: Effect.void,
-          flushAll: Effect.void,
-          release: childFrame.release,
-        })({ final: true });
+      yield* onPageExit({
+        flushAllUnsafe: () => {},
+        forgetSuppressed: Effect.void,
+        flushAll: Effect.void,
+        release: frame.release,
+      })({ final: false });
 
-        assert.deepStrictEqual(child, ["acquire", "release"]);
-        assert.deepStrictEqual(top, ["acquire"]);
+      assert.deepStrictEqual(log, ["acquire"]);
 
-        const answer = yield* Effect.promise(() =>
-          topFrame.runtime.runPromise(Effect.succeed("alive"))
-        );
-        assert.strictEqual(answer, "alive");
-      }),
+      // The proof that matters for the back/forward cache: the frame still
+      // works. A restored page never runs its scripts again, so this runtime
+      // is the only one that it will ever have.
+      const answer = yield* Effect.promise(() => frame.runtime.runPromise(Effect.succeed("alive")));
+      assert.strictEqual(answer, "alive");
+    }),
+  );
+
+  it.effect("cannot be used again after a final exit", () =>
+    Effect.gen(function* () {
+      const log: string[] = [];
+      const frame = startFrame(log);
+      yield* Effect.promise(() => frame.runtime.runPromise(Effect.void));
+
+      yield* onPageExit({
+        flushAllUnsafe: () => {},
+        forgetSuppressed: Effect.void,
+        flushAll: Effect.void,
+        release: frame.release,
+      })({ final: true });
+
+      assert.deepStrictEqual(log, ["acquire", "release"]);
+
+      // This is why a persisted exit must not release. `dispose` puts a
+      // defect in the place of the context.
+      const outcome = yield* Effect.promise(() =>
+        frame.runtime.runPromiseExit(Effect.succeed("alive")),
+      );
+      assert.isTrue(Exit.isFailure(outcome), "a released runtime must refuse work");
+    }),
+  );
+
+  it.effect("releases only what this frame built", () =>
+    Effect.gen(function* () {
+      const top: string[] = [];
+      const child: string[] = [];
+      const topFrame = startFrame(top);
+      const childFrame = startFrame(child);
+      yield* Effect.promise(() => topFrame.runtime.runPromise(Effect.void));
+      yield* Effect.promise(() => childFrame.runtime.runPromise(Effect.void));
+
+      // The child document goes away. Each frame has its own realm, its own
+      // window and its own runtime, so `pagehide` reaches the child only.
+      yield* onPageExit({
+        flushAllUnsafe: () => {},
+        forgetSuppressed: Effect.void,
+        flushAll: Effect.void,
+        release: childFrame.release,
+      })({ final: true });
+
+      assert.deepStrictEqual(child, ["acquire", "release"]);
+      assert.deepStrictEqual(top, ["acquire"]);
+
+      const answer = yield* Effect.promise(() =>
+        topFrame.runtime.runPromise(Effect.succeed("alive")),
+      );
+      assert.strictEqual(answer, "alive");
+    }),
   );
 });
 
 describe("the order of the exit", () => {
-  it.effect(
-    "releases the runtime only after the last write",
-    () =>
-      Effect.gen(function*() {
-        // A plain array, because one of the steps is not an effect at all.
-        const order: string[] = [];
-        const note = (step: string): Effect.Effect<void> =>
-          Effect.sync(() => {
-            order.push(step);
-          });
+  it.effect("releases the runtime only after the last write", () =>
+    Effect.gen(function* () {
+      // A plain array, because one of the steps is not an effect at all.
+      const order: string[] = [];
+      const note = (step: string): Effect.Effect<void> =>
+        Effect.sync(() => {
+          order.push(step);
+        });
 
-        yield* onPageExit({
-          flushAllUnsafe: () => {
-            order.push("direct write");
-          },
-          forgetSuppressed: note("forget"),
-          // The true flush suspends: it hands the value to the storage actor,
-          // and the answer comes back on another fiber.
-          flushAll: Effect.andThen(Effect.yieldNow, note("write")),
-          release: note("release"),
-        })({ final: true });
+      yield* onPageExit({
+        flushAllUnsafe: () => {
+          order.push("direct write");
+        },
+        forgetSuppressed: note("forget"),
+        // The true flush suspends: it hands the value to the storage actor,
+        // and the answer comes back on another fiber.
+        flushAll: Effect.andThen(Effect.yieldNow, note("write")),
+        release: note("release"),
+      })({ final: true });
 
-        assert.deepStrictEqual(order, [
-          "direct write",
-          "forget",
-          "write",
-          "release",
-        ]);
-      }),
+      assert.deepStrictEqual(order, ["direct write", "forget", "write", "release"]);
+    }),
   );
 
-  it.effect(
-    "starts the work that cannot suspend first",
-    () =>
-      Effect.gen(function*() {
-        const order: string[] = [];
-        const note = (step: string): Effect.Effect<void> =>
-          Effect.sync(() => {
-            order.push(step);
-          });
+  it.effect("starts the work that cannot suspend first", () =>
+    Effect.gen(function* () {
+      const order: string[] = [];
+      const note = (step: string): Effect.Effect<void> =>
+        Effect.sync(() => {
+          order.push(step);
+        });
 
-        // A hidden tab, and not an exit. Nothing may be released.
-        yield* onPageExit({
-          flushAllUnsafe: () => {
-            order.push("direct write");
-          },
-          forgetSuppressed: note("forget"),
-          flushAll: note("write"),
-          release: note("release"),
-        })({ final: false });
+      // A hidden tab, and not an exit. Nothing may be released.
+      yield* onPageExit({
+        flushAllUnsafe: () => {
+          order.push("direct write");
+        },
+        forgetSuppressed: note("forget"),
+        flushAll: note("write"),
+        release: note("release"),
+      })({ final: false });
 
-        assert.deepStrictEqual(order, ["direct write", "forget", "write"]);
-      }),
+      assert.deepStrictEqual(order, ["direct write", "forget", "write"]);
+    }),
   );
 });

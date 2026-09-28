@@ -18,17 +18,20 @@ export interface UserMessage {
   readonly text: string;
 }
 
-export class Report extends Context.Service<Report, {
-  /** Tell the user that something did not work. */
-  readonly error: (text: string) => Effect.Effect<void>;
-  /** Tell the user what happened. */
-  readonly info: (text: string) => Effect.Effect<void>;
-  /** Every message, in order, from the start of the application. */
-  readonly messages: Stream.Stream<UserMessage>;
-}>()("vimium/core/Report") {
+export class Report extends Context.Service<
+  Report,
+  {
+    /** Tell the user that something did not work. */
+    readonly error: (text: string) => Effect.Effect<void>;
+    /** Tell the user what happened. */
+    readonly info: (text: string) => Effect.Effect<void>;
+    /** Every message, in order, from the start of the application. */
+    readonly messages: Stream.Stream<UserMessage>;
+  }
+>()("vimium/core/Report") {
   static readonly layer: Layer.Layer<Report> = Layer.effect(
     Report,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const queue = yield* Queue.unbounded<UserMessage>();
       const put = (level: MessageLevel) => (text: string) =>
         Effect.asVoid(Queue.offer(queue, { level, text }));

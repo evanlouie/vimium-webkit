@@ -32,12 +32,7 @@ import {
   splitKeyword,
   toNavigableUrl,
 } from "~/domain/SearchEngine.ts";
-import {
-  historyScore,
-  scoreCandidate,
-  scoreText,
-  tokenize,
-} from "~/domain/Score.ts";
+import { historyScore, scoreCandidate, scoreText, tokenize } from "~/domain/Score.ts";
 
 /** Which command opened the omnibar. It decides which sources are offered. */
 export type OmnibarSource = "url" | "command" | "search" | "bookmark";
@@ -104,8 +99,7 @@ export const COMMAND_PREFIX = ":";
 /** The longest URL that a row shows. */
 const DETAIL_LIMIT = 120;
 
-const byScore = (left: Completion, right: Completion): number =>
-  right.score - left.score;
+const byScore = (left: Completion, right: Completion): number => right.score - left.score;
 
 const truncate = (text: string, max: number): string =>
   text.length <= max ? text : `${text.slice(0, max - 1)}…`;
@@ -131,9 +125,7 @@ const toCommandCompletion = (
   kind: "command",
   badge: muted ? "Unavailable" : "Command",
   title: command.name,
-  detail: muted
-    ? command.unavailableReason ?? command.description
-    : command.description,
+  detail: muted ? (command.unavailableReason ?? command.description) : command.description,
   action: { type: "command", name: command.name },
   score: relevancy * (muted ? TIER_C_PENALTY : 1),
   muted,
@@ -149,15 +141,12 @@ export const completeCommands = (
 
   const rows = commands.map((command) => {
     const muted = command.tier === "C";
-    const relevancy = tokens.length === 0
-      ? 1
-      : scoreText(tokens, `${command.name} ${command.description}`);
+    const relevancy =
+      tokens.length === 0 ? 1 : scoreText(tokens, `${command.name} ${command.description}`);
     return toCommandCompletion(command, muted, relevancy);
   });
 
-  const matched = tokens.length === 0
-    ? rows
-    : rows.filter((row) => row.score > 0);
+  const matched = tokens.length === 0 ? rows : rows.filter((row) => row.score > 0);
 
   // With no query at all, alphabetical order beats the order of the catalogue.
   if (tokens.length === 0) {
@@ -203,13 +192,14 @@ export const completeEngines = (
       title: `${engine.keyword}: ${engine.description}`,
       detail: engine.url,
       action: { type: "fill", text: `${engine.keyword} ` },
-      score: trimmed.length === 0
-        ? 1
-        : engine.keyword === trimmed
-        ? KEYWORD_EXACT
-        : engine.keyword.startsWith(trimmed)
-        ? KEYWORD_PREFIX
-        : scoreText(tokens, `${engine.keyword} ${engine.description}`),
+      score:
+        trimmed.length === 0
+          ? 1
+          : engine.keyword === trimmed
+            ? KEYWORD_EXACT
+            : engine.keyword.startsWith(trimmed)
+              ? KEYWORD_PREFIX
+              : scoreText(tokens, `${engine.keyword} ${engine.description}`),
       muted: false,
       nativeAlternative: Option.none(),
     }))
@@ -247,16 +237,9 @@ export const completeHistory = (
     // No query. The pages with the best frecency, which is the only order that
     // means anything before the user has said what they want.
     return [...visits]
-      .sort((left, right) =>
-        historyScore(1, right, now) - historyScore(1, left, now)
-      )
+      .sort((left, right) => historyScore(1, right, now) - historyScore(1, left, now))
       .slice(0, limit)
-      .map((visit) =>
-        toHistoryCompletion(
-          visit,
-          historyScore(EMPTY_QUERY_RELEVANCY, visit, now),
-        )
-      );
+      .map((visit) => toHistoryCompletion(visit, historyScore(EMPTY_QUERY_RELEVANCY, visit, now)));
   }
 
   return visits
@@ -280,10 +263,7 @@ export const completeHistory = (
 // The tabs that we opened
 // ---------------------------------------------------------------------------
 
-export const liveTabs = (
-  tabs: readonly KnownTab[],
-  now: number,
-): readonly KnownTab[] =>
+export const liveTabs = (tabs: readonly KnownTab[], now: number): readonly KnownTab[] =>
   tabs.filter((tab) => now - tab.heartbeat < TAB_LIVENESS_MS);
 
 export const completeRecent = (
@@ -293,18 +273,14 @@ export const completeRecent = (
   limit: number = RECENT_LIMIT,
 ): readonly Completion[] => {
   const tokens = tokenize(query);
-  const live = [...liveTabs(tabs, now)].sort((left, right) =>
-    right.heartbeat - left.heartbeat
-  );
+  const live = [...liveTabs(tabs, now)].sort((left, right) => right.heartbeat - left.heartbeat);
 
   return live
     .map((tab) => ({
       tab,
       // The age of the signal breaks a tie. Nothing else about a tab that we
       // cannot inspect is a useful signal.
-      score: tokens.length === 0
-        ? 1
-        : scoreCandidate(tokens, { title: tab.title, url: tab.url }),
+      score: tokens.length === 0 ? 1 : scoreCandidate(tokens, { title: tab.title, url: tab.url }),
     }))
     .filter((entry) => entry.score > 0)
     .sort((left, right) => right.score - left.score)
@@ -376,43 +352,49 @@ export const completeNavigate = (
   const split = splitKeyword(trimmed, engines);
   if (Option.isSome(split) && split.value.rest.length > 0) {
     const url = buildSearchUrl(split.value.engine.url, split.value.rest);
-    return [{
+    return [
+      {
+        kind: "navigate",
+        badge: split.value.engine.description,
+        title: split.value.rest,
+        detail: url,
+        action: { type: "navigate", url },
+        score: Number.POSITIVE_INFINITY,
+        muted: false,
+        nativeAlternative: Option.none(),
+      },
+    ];
+  }
+
+  if (classifyQuery(trimmed) === "url") {
+    const url = toNavigableUrl(trimmed);
+    return [
+      {
+        kind: "navigate",
+        badge: "Open",
+        title: url,
+        detail: "",
+        action: { type: "navigate", url },
+        score: Number.POSITIVE_INFINITY,
+        muted: false,
+        nativeAlternative: Option.none(),
+      },
+    ];
+  }
+
+  const url = buildSearchUrl(defaultSearchUrl, trimmed);
+  return [
+    {
       kind: "navigate",
-      badge: split.value.engine.description,
-      title: split.value.rest,
+      badge: "Search",
+      title: trimmed,
       detail: url,
       action: { type: "navigate", url },
       score: Number.POSITIVE_INFINITY,
       muted: false,
       nativeAlternative: Option.none(),
-    }];
-  }
-
-  if (classifyQuery(trimmed) === "url") {
-    const url = toNavigableUrl(trimmed);
-    return [{
-      kind: "navigate",
-      badge: "Open",
-      title: url,
-      detail: "",
-      action: { type: "navigate", url },
-      score: Number.POSITIVE_INFINITY,
-      muted: false,
-      nativeAlternative: Option.none(),
-    }];
-  }
-
-  const url = buildSearchUrl(defaultSearchUrl, trimmed);
-  return [{
-    kind: "navigate",
-    badge: "Search",
-    title: trimmed,
-    detail: url,
-    action: { type: "navigate", url },
-    score: Number.POSITIVE_INFINITY,
-    muted: false,
-    nativeAlternative: Option.none(),
-  }];
+    },
+  ];
 };
 
 /**
@@ -504,9 +486,7 @@ const dedupe = (rows: readonly Completion[]): readonly Completion[] => {
 
 export const completionsFor = (input: CompletionInput): CompletionState => {
   const commandMode = isCommandMode(input.source, input.query);
-  const effectiveQuery = commandMode
-    ? stripCommandPrefix(input.query)
-    : input.query;
+  const effectiveQuery = commandMode ? stripCommandPrefix(input.query) : input.query;
 
   if (commandMode) {
     return {
@@ -518,9 +498,7 @@ export const completionsFor = (input: CompletionInput): CompletionState => {
 
   const rows: Completion[] = [];
   if (input.source === "bookmark") rows.push(bookmarkNotice());
-  rows.push(
-    ...completeNavigate(effectiveQuery, input.engines, input.searchUrl),
-  );
+  rows.push(...completeNavigate(effectiveQuery, input.engines, input.searchUrl));
 
   if (input.source !== "search") {
     rows.push(...completeHistory(input.visits, effectiveQuery, input.now));
@@ -532,18 +510,10 @@ export const completionsFor = (input: CompletionInput): CompletionState => {
     ...completeEngines(
       input.engines,
       effectiveQuery,
-      effectiveQuery.trim().length === 0
-        ? ENGINE_LIMIT
-        : ENGINE_LIMIT_WHILE_TYPING,
+      effectiveQuery.trim().length === 0 ? ENGINE_LIMIT : ENGINE_LIMIT_WHILE_TYPING,
     ),
   );
-  rows.push(
-    ...completeSuggestions(
-      input.suggestions,
-      input.searchUrl,
-      input.suggestionEngine,
-    ),
-  );
+  rows.push(...completeSuggestions(input.suggestions, input.searchUrl, input.suggestionEngine));
 
   // The list is deliberately *not* sorted again as a whole. Each source scores
   // on its own scale — the ladder score of a command and the frecency score of

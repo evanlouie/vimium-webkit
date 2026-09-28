@@ -15,10 +15,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { composedTarget } from "~/features/Insert.ts";
 
 /** A focus event with the path that the browser would build. */
-const focusEvent = (
-  path: readonly EventTarget[],
-  target: EventTarget | null,
-): Event =>
+const focusEvent = (path: readonly EventTarget[], target: EventTarget | null): Event =>
   ({
     composedPath: () => [...path],
     target,

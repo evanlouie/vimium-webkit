@@ -28,33 +28,17 @@
  * test can read against the schema keeps that promise true.
  */
 
-import {
-  Context,
-  Effect,
-  Exit,
-  FiberHandle,
-  Layer,
-  Option,
-  Ref,
-  Scope,
-} from "effect";
+import { Context, Effect, Exit, FiberHandle, Layer, Option, Ref, Scope } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { SUPPRESS_EVENT, SUPPRESS_PROPAGATION } from "~/core/HandlerStack.ts";
 import { Mappings } from "~/core/Mappings.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
-import {
-  type CommandDef,
-  type CommandGroup,
-  DEFAULT_MAPPINGS,
-} from "~/domain/Command.ts";
+import { type CommandDef, type CommandGroup, DEFAULT_MAPPINGS } from "~/domain/Command.ts";
 import { exclusionProblems, type ExclusionRule } from "~/domain/Exclusion.ts";
 import { formatDiagnostics, keysByCommand } from "~/domain/Mapping.ts";
-import {
-  defaultSettings,
-  type Settings as SettingsData,
-} from "~/domain/Persisted.ts";
+import { defaultSettings, type Settings as SettingsData } from "~/domain/Persisted.ts";
 import { Capabilities, formatCapabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { deepActiveElement } from "~/platform/Elements.ts";
@@ -81,16 +65,19 @@ const OVERLAY_CHECK_MS = 500;
  * persistence. It must agree with `Capabilities`.
  */
 const storageExplanation = (backend: KeyValueKind): string => {
-  const preamble = "There is no options page for a userscript, so settings " +
-    "live here. ";
+  const preamble = "There is no options page for a userscript, so settings " + "live here. ";
   switch (backend) {
     case "gm-sync":
     case "gm-async":
-      return `${preamble}They are stored with your userscript manager, which ` +
-        "is durable and survives Safari's seven-day storage purge.";
+      return (
+        `${preamble}They are stored with your userscript manager, which ` +
+        "is durable and survives Safari's seven-day storage purge."
+      );
     case "memory":
-      return `${preamble}No storage is available at all, so they last only ` +
-        "until this page is closed.";
+      return (
+        `${preamble}No storage is available at all, so they last only ` +
+        "until this page is closed."
+      );
   }
 };
 
@@ -200,25 +187,21 @@ export interface SettingsSection {
   readonly fields: readonly SettingsField[];
 }
 
-const clampNumber = (
-  value: number,
-  min: number,
-  max: number,
-  fallback: number,
-): number => {
+const clampNumber = (value: number, min: number, max: number, fallback: number): number => {
   if (!Number.isFinite(value)) return fallback;
   return Math.min(max, Math.max(min, Math.trunc(value)));
 };
 
 /** Text that holds no number at all. `write` then keeps the stored value. */
-const notANumber = (text: string): boolean =>
-  !Number.isFinite(Number.parseInt(text, 10));
+const notANumber = (text: string): boolean => !Number.isFinite(Number.parseInt(text, 10));
 
 /** A number that `clampNumber` brings into the range of this control. */
-const outsideRange = (min: number, max: number) => (text: string): boolean => {
-  const value = Number.parseInt(text, 10);
-  return Number.isFinite(value) && (value < min || value > max);
-};
+const outsideRange =
+  (min: number, max: number) =>
+  (text: string): boolean => {
+    const value = Number.parseInt(text, 10);
+    return Number.isFinite(value) && (value < min || value > max);
+  };
 
 /** A hint alphabet needs two characters, or it can label one hint only. */
 const shorterThanTwo = (text: string): boolean => text.length < 2;
@@ -243,27 +226,25 @@ export const parseLines = (text: string): ReadonlyArray<string> =>
     .filter((line) => line.length > 0);
 
 /** One rule for each line: `pattern [passKeys]`. `#` starts a comment. */
-export const parseExclusionText = (
-  text: string,
-): ReadonlyArray<ExclusionRule> => {
+export const parseExclusionText = (text: string): ReadonlyArray<ExclusionRule> => {
   const out: ExclusionRule[] = [];
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
     const space = trimmed.search(/\s/);
     out.push(
-      space === -1 ? { pattern: trimmed, passKeys: "" } : {
-        pattern: trimmed.slice(0, space),
-        passKeys: trimmed.slice(space + 1).trim(),
-      },
+      space === -1
+        ? { pattern: trimmed, passKeys: "" }
+        : {
+            pattern: trimmed.slice(0, space),
+            passKeys: trimmed.slice(space + 1).trim(),
+          },
     );
   }
   return out;
 };
 
-export const formatExclusionRules = (
-  rules: ReadonlyArray<ExclusionRule>,
-): string =>
+export const formatExclusionRules = (rules: ReadonlyArray<ExclusionRule>): string =>
   rules.map((rule) => `${rule.pattern} ${rule.passKeys}`.trimEnd()).join("\n");
 
 /**
@@ -285,9 +266,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         // The defaults are written out when there is nothing stored, so that
         // the user can see what to change instead of an empty box.
         read: (settings) =>
-          settings.keyMappings.length > 0
-            ? settings.keyMappings
-            : DEFAULT_MAPPINGS.trim(),
+          settings.keyMappings.length > 0 ? settings.keyMappings : DEFAULT_MAPPINGS.trim(),
         write: (settings, value) => ({ ...settings, keyMappings: value }),
       },
     ],
@@ -334,9 +313,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         read: (settings) => settings.linkHintCharacters,
         write: (settings, value) => ({
           ...settings,
-          linkHintCharacters: value.length >= 2
-            ? value
-            : settings.linkHintCharacters,
+          linkHintCharacters: value.length >= 2 ? value : settings.linkHintCharacters,
         }),
       },
       {
@@ -348,9 +325,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         read: (settings) => settings.linkHintNumbers,
         write: (settings, value) => ({
           ...settings,
-          linkHintNumbers: value.length >= 2
-            ? value
-            : settings.linkHintNumbers,
+          linkHintNumbers: value.length >= 2 ? value : settings.linkHintNumbers,
         }),
       },
       {
@@ -448,8 +423,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   },
   {
     title: "Navigating the page",
-    description: "The link text that [ and ] look for. Separate the words " +
-      "with a comma.",
+    description: "The link text that [ and ] look for. Separate the words " + "with a comma.",
     fields: [
       {
         kind: "line",
@@ -513,11 +487,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       {
         kind: "toggle",
         key: "passMediaKeys",
-        label:
-          "Leave the arrow keys and space to a focused video or audio player",
-        note:
-          "Turn off to scroll with them everywhere, even while a player has " +
-          "focus.",
+        label: "Leave the arrow keys and space to a focused video or audio player",
+        note: "Turn off to scroll with them everywhere, even while a player has " + "focus.",
         read: (settings) => settings.passMediaKeys,
         write: (settings, value) => ({ ...settings, passMediaKeys: value }),
       },
@@ -525,7 +496,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         kind: "toggle",
         key: "enableCssZoom",
         label: "Enable CSS zoom",
-        note: "Not true browser zoom: it does not change the URL bar, and it " +
+        note:
+          "Not true browser zoom: it does not change the URL bar, and it " +
           "breaks position:fixed on some sites.",
         read: (settings) => settings.enableCssZoom,
         write: (settings, value) => ({ ...settings, enableCssZoom: value }),
@@ -539,7 +511,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         kind: "toggle",
         key: "enableHistoryIndex",
         label: "Build a local history index for the omnibar",
-        note: "Recorded on this device only, and readable in the storage " +
+        note:
+          "Recorded on this device only, and readable in the storage " +
           "viewer of your userscript manager.",
         read: (settings) => settings.enableHistoryIndex,
         write: (settings, value) => ({
@@ -551,8 +524,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         kind: "block",
         key: "historyIndexDenylist",
         label: "URLs that the index never records",
-        note: "One URL pattern for each line, for example " +
-          "https://mail.example.com/*",
+        note: "One URL pattern for each line, for example " + "https://mail.example.com/*",
         minHeight: "80px",
         read: (settings) => settings.historyIndexDenylist.join("\n"),
         write: (settings, value) => ({
@@ -583,7 +555,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   },
   {
     title: "Excluded sites",
-    description: "One rule for each line: a URL pattern, and then the keys " +
+    description:
+      "One rule for each line: a URL pattern, and then the keys " +
       "to pass to the page. An empty key list turns Vimium-WebKit off for " +
       "that site.",
     fields: [
@@ -604,17 +577,13 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
 ];
 
 /** Every field of the dialog, in the order that the dialog draws it. */
-export const SETTINGS_FIELDS: readonly SettingsField[] = SETTINGS_SECTIONS
-  .flatMap((section) => section.fields);
+export const SETTINGS_FIELDS: readonly SettingsField[] = SETTINGS_SECTIONS.flatMap(
+  (section) => section.fields,
+);
 
 /** The text of one field, whatever its kind. */
-const fieldText = (
-  field: SettingsField,
-  settings: SettingsData,
-): string =>
-  field.kind === "toggle"
-    ? String(field.read(settings))
-    : field.read(settings);
+const fieldText = (field: SettingsField, settings: SettingsData): string =>
+  field.kind === "toggle" ? String(field.read(settings)) : field.read(settings);
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -643,9 +612,9 @@ export const adjustedFields = (
   offered: SettingsData,
   stored: SettingsData,
 ): ReadonlyArray<string> =>
-  SETTINGS_FIELDS
-    .filter((field) => fieldText(field, offered) !== fieldText(field, stored))
-    .map((field) => field.label);
+  SETTINGS_FIELDS.filter((field) => fieldText(field, offered) !== fieldText(field, stored)).map(
+    (field) => field.label,
+  );
 
 /** One control, as the refusal check reads it. */
 export interface OfferedText {
@@ -655,18 +624,15 @@ export interface OfferedText {
 
 /** Does this field refuse this text? A toggle never refuses. */
 const refusesText = (field: SettingsField, text: string): boolean =>
-  field.kind !== "toggle" && field.refuses !== undefined &&
-  field.refuses(text);
+  field.kind !== "toggle" && field.refuses !== undefined && field.refuses(text);
 
 /** Does this field bring this text into its range? A toggle never does. */
 const clampsText = (field: SettingsField, text: string): boolean =>
-  field.kind !== "toggle" && field.clamps !== undefined &&
-  field.clamps(text);
+  field.kind !== "toggle" && field.clamps !== undefined && field.clamps(text);
 
 /** Does this field drop the decimals of this text? A toggle never does. */
 const truncatesText = (field: SettingsField, text: string): boolean =>
-  field.kind !== "toggle" && field.truncates !== undefined &&
-  field.truncates(text);
+  field.kind !== "toggle" && field.truncates !== undefined && field.truncates(text);
 
 /** What the controls did with the text of the user, before the save. */
 export interface FormNotes {
@@ -698,9 +664,7 @@ export const NO_FORM_NOTES: FormNotes = {
  * and got no reason. This names each field, and it separates the results.
  * Each result does something else to the value.
  */
-export const formNotes = (
-  offered: ReadonlyArray<OfferedText>,
-): FormNotes => ({
+export const formNotes = (offered: ReadonlyArray<OfferedText>): FormNotes => ({
   refused: offered
     .filter((entry) => refusesText(entry.field, entry.text))
     .map((entry) => entry.field.label),
@@ -726,11 +690,7 @@ export const formNotes = (
  * -1 means that the dialog holds no control, so the box itself keeps the
  * focus.
  */
-export const nextFocusIndex = (
-  count: number,
-  current: number,
-  backwards: boolean,
-): number => {
+export const nextFocusIndex = (count: number, current: number, backwards: boolean): number => {
   if (count <= 0) return -1;
   if (current < 0) return backwards ? count - 1 : 0;
   return (current + (backwards ? -1 : 1) + count) % count;
@@ -744,14 +704,12 @@ export const nextFocusIndex = (
  * and a control with `tabindex="-1"` drop out, because neither takes a Tab
  * press.
  */
-const FOCUSABLE_SELECTOR =
-  "a[href], button, input, select, textarea, [tabindex]";
+const FOCUSABLE_SELECTOR = "a[href], button, input, select, textarea, [tabindex]";
 
 const focusableIn = (dialog: HTMLElement): readonly HTMLElement[] =>
-  [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)]
-    .filter((element) =>
-      !element.hasAttribute("disabled") && element.tabIndex >= 0
-    );
+  [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)].filter(
+    (element) => !element.hasAttribute("disabled") && element.tabIndex >= 0,
+  );
 
 // ---------------------------------------------------------------------------
 // The service
@@ -760,15 +718,15 @@ const focusableIn = (dialog: HTMLElement): readonly HTMLElement[] =>
 /** One control of the settings dialog, with the field that it edits. */
 type SettingsControl =
   | {
-    readonly kind: "toggle";
-    readonly field: ToggleField;
-    readonly input: HTMLInputElement;
-  }
+      readonly kind: "toggle";
+      readonly field: ToggleField;
+      readonly input: HTMLInputElement;
+    }
   | {
-    readonly kind: "value";
-    readonly field: ValueField;
-    readonly input: HTMLInputElement | HTMLTextAreaElement;
-  };
+      readonly kind: "value";
+      readonly field: ValueField;
+      readonly input: HTMLInputElement | HTMLTextAreaElement;
+    };
 
 /** The parts of the settings dialog that the save step writes back to. */
 interface SettingsForm {
@@ -780,18 +738,21 @@ interface SettingsForm {
   readonly save: HTMLButtonElement;
 }
 
-export class Dialog extends Context.Service<Dialog, {
-  readonly showHelp: Effect.Effect<void>;
-  readonly showSettings: Effect.Effect<void>;
-  readonly close: Effect.Effect<void>;
-}>()("vimium/ui/Dialog") {
+export class Dialog extends Context.Service<
+  Dialog,
+  {
+    readonly showHelp: Effect.Effect<void>;
+    readonly showSettings: Effect.Effect<void>;
+    readonly close: Effect.Effect<void>;
+  }
+>()("vimium/ui/Dialog") {
   static readonly layer: Layer.Layer<
     Dialog,
     never,
     Ui | Dom | Settings | Mappings | Commands | Modes | Report | Capabilities
   > = Layer.effect(
     Dialog,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const ui = yield* Ui;
       const dom = yield* Dom;
       const settings = yield* Settings;
@@ -805,9 +766,7 @@ export class Dialog extends Context.Service<Dialog, {
       const dialogLayer = yield* ui.layer("dialog");
 
       /** The scope of the open dialog. Closing it removes every part of it. */
-      const openScope = yield* Ref.make<Option.Option<Scope.Closeable>>(
-        Option.none(),
-      );
+      const openScope = yield* Ref.make<Option.Option<Scope.Closeable>>(Option.none());
 
       // One save at a time. A save reaches storage, so it cannot run on the
       // key path; it runs in this fiber instead.
@@ -817,7 +776,7 @@ export class Dialog extends Context.Service<Dialog, {
       // overlay while a dialog holds the keyboard.
       const watches = yield* FiberHandle.make<void, never>();
 
-      const close: Effect.Effect<void> = Effect.gen(function*() {
+      const close: Effect.Effect<void> = Effect.gen(function* () {
         const open = yield* Ref.getAndSet(openScope, Option.none());
         if (Option.isSome(open)) yield* Scope.close(open.value, Exit.void);
       });
@@ -846,7 +805,7 @@ export class Dialog extends Context.Service<Dialog, {
        * The fiber ends by itself when the dialog closes, so it never has to
        * interrupt the scope that started it.
        */
-      const watchOverlay: Effect.Effect<void> = Effect.gen(function*() {
+      const watchOverlay: Effect.Effect<void> = Effect.gen(function* () {
         while (true) {
           yield* Effect.sleep(OVERLAY_CHECK_MS);
           if (Option.isNone(yield* Ref.get(openScope))) return;
@@ -888,36 +847,34 @@ export class Dialog extends Context.Service<Dialog, {
        * then, so the keyboard stays with the page, and the console carries the
        * reason.
        */
-      const present = Effect.fn("Dialog.present")(
-        function*<A extends { readonly dialog: HTMLElement }>(
-          build: Effect.Effect<A, never, Scope.Scope>,
-        ) {
-          yield* close;
-          const fault = yield* ui.visibilityFault;
-          if (Option.isSome(fault)) {
-            yield* reportHidden(fault.value);
-            return Option.none<A>();
-          }
-          const scope = yield* Scope.make();
-          const inScope = <B>(
-            effect: Effect.Effect<B, never, Scope.Scope>,
-          ): Effect.Effect<B> =>
-            Effect.provideService(effect, Scope.Scope, scope);
+      const present = Effect.fn("Dialog.present")(function* <
+        A extends { readonly dialog: HTMLElement },
+      >(build: Effect.Effect<A, never, Scope.Scope>) {
+        yield* close;
+        const fault = yield* ui.visibilityFault;
+        if (Option.isSome(fault)) {
+          yield* reportHidden(fault.value);
+          return Option.none<A>();
+        }
+        const scope = yield* Scope.make();
+        const inScope = <B>(effect: Effect.Effect<B, never, Scope.Scope>): Effect.Effect<B> =>
+          Effect.provideService(effect, Scope.Scope, scope);
 
-          // The layer is opened before the dialog is built, so that the
-          // release steps run in the other order: the dialog leaves the tree
-          // first, and `aria-hidden` arrives on an empty layer. A layer that
-          // became hidden while it still held the focused element is the state
-          // that browsers warn about, because a screen reader loses the
-          // focused node.
-          yield* inScope(acceptPointerEvents(dialogLayer));
-          // The dialog is a true control, so assistive technology must reach
-          // it. The release step hides the layer again.
-          yield* inScope(ui.expose(dialogLayer));
+        // The layer is opened before the dialog is built, so that the
+        // release steps run in the other order: the dialog leaves the tree
+        // first, and `aria-hidden` arrives on an empty layer. A layer that
+        // became hidden while it still held the focused element is the state
+        // that browsers warn about, because a screen reader loses the
+        // focused node.
+        yield* inScope(acceptPointerEvents(dialogLayer));
+        // The dialog is a true control, so assistive technology must reach
+        // it. The release step hides the layer again.
+        yield* inScope(ui.expose(dialogLayer));
 
-          const parts = yield* inScope(build);
+        const parts = yield* inScope(build);
 
-          const backdrop = yield* inScope(Effect.acquireRelease(
+        const backdrop = yield* inScope(
+          Effect.acquireRelease(
             Effect.sync(() => {
               const element = el(doc, "div", "vw-dialog-backdrop");
               element.appendChild(parts.dialog);
@@ -928,71 +885,75 @@ export class Dialog extends Context.Service<Dialog, {
               Effect.sync(() => {
                 element.remove();
               }),
-          ));
+          ),
+        );
 
-          yield* inScope(
-            dom.listenOn(
-              backdrop,
-              "click",
-              (event) => event.target === backdrop ? close : Effect.void,
-            ),
-          );
+        yield* inScope(
+          dom.listenOn(backdrop, "click", (event) =>
+            event.target === backdrop ? close : Effect.void,
+          ),
+        );
 
-          // The dialog owns the keyboard. `SUPPRESS_PROPAGATION` keeps the
-          // event from normal mode and from the page, and keeps the default
-          // action, so the user can still type into a text area.
-          //
-          // Tab is the exception. `SUPPRESS_PROPAGATION` calls
-          // `stopImmediatePropagation` only, so the default action of Tab took
-          // the focus out of the dialog and on to the page behind it. That
-          // breaks the promise of `aria-modal="true"`, which tells a screen
-          // reader that the rest of the page is unavailable. `SUPPRESS_EVENT`
-          // takes the key, and the trap moves the focus by hand.
-          const mode = yield* inScope(modes.enter({
-            name: "dialog",
-            singleton: "dialog",
-            exitOnEscape: true,
-          }, {
-            keydown: (event) =>
-              Effect.sync(() => {
-                if (event.key !== "Tab") return SUPPRESS_PROPAGATION;
-                moveFocus(parts.dialog, event.shiftKey);
-                return SUPPRESS_EVENT;
-              }),
-          }));
-          yield* mode.onExit(() => close);
+        // The dialog owns the keyboard. `SUPPRESS_PROPAGATION` keeps the
+        // event from normal mode and from the page, and keeps the default
+        // action, so the user can still type into a text area.
+        //
+        // Tab is the exception. `SUPPRESS_PROPAGATION` calls
+        // `stopImmediatePropagation` only, so the default action of Tab took
+        // the focus out of the dialog and on to the page behind it. That
+        // breaks the promise of `aria-modal="true"`, which tells a screen
+        // reader that the rest of the page is unavailable. `SUPPRESS_EVENT`
+        // takes the key, and the trap moves the focus by hand.
+        const mode = yield* inScope(
+          modes.enter(
+            {
+              name: "dialog",
+              singleton: "dialog",
+              exitOnEscape: true,
+            },
+            {
+              keydown: (event) =>
+                Effect.sync(() => {
+                  if (event.key !== "Tab") return SUPPRESS_PROPAGATION;
+                  moveFocus(parts.dialog, event.shiftKey);
+                  return SUPPRESS_EVENT;
+                }),
+            },
+          ),
+        );
+        yield* mode.onExit(() => close);
 
-          yield* Ref.set(openScope, Option.some(scope));
+        yield* Ref.set(openScope, Option.some(scope));
 
-          // Acquired last, so that its release step runs first: the focus
-          // leaves the dialog before the dialog leaves the tree. A modal that
-          // drops the focus leaves the user at the top of the document.
-          yield* inScope(Effect.acquireRelease(
-            dom.probeOr(
-              () => Option.fromNullishOr(deepActiveElement(doc)),
-              Option.none<Element>(),
-            ),
+        // Acquired last, so that its release step runs first: the focus
+        // leaves the dialog before the dialog leaves the tree. A modal that
+        // drops the focus leaves the user at the top of the document.
+        yield* inScope(
+          Effect.acquireRelease(
+            dom.probeOr(() => Option.fromNullishOr(deepActiveElement(doc)), Option.none<Element>()),
             (previous) =>
-              Effect.ignore(dom.attempt("HTMLElement.focus", () => {
-                if (Option.isNone(previous)) return;
-                const element = previous.value;
-                if (element instanceof HTMLElement && element.isConnected) {
-                  element.focus({ preventScroll: true });
-                }
-              })),
-          ));
+              Effect.ignore(
+                dom.attempt("HTMLElement.focus", () => {
+                  if (Option.isNone(previous)) return;
+                  const element = previous.value;
+                  if (element instanceof HTMLElement && element.isConnected) {
+                    element.focus({ preventScroll: true });
+                  }
+                }),
+              ),
+          ),
+        );
 
-          yield* Effect.sync(() => {
-            parts.dialog.tabIndex = -1;
-            parts.dialog.focus({ preventScroll: true });
-          });
+        yield* Effect.sync(() => {
+          parts.dialog.tabIndex = -1;
+          parts.dialog.focus({ preventScroll: true });
+        });
 
-          // Started after the dialog holds the keyboard, and not before.
-          yield* FiberHandle.run(watches, watchOverlay);
+        // Started after the dialog holds the keyboard, and not before.
+        yield* FiberHandle.run(watches, watchOverlay);
 
-          return Option.some(parts);
-        },
-      );
+        return Option.some(parts);
+      });
 
       // ---------------------------------------------------------------
       // Help
@@ -1013,17 +974,12 @@ export class Dialog extends Context.Service<Dialog, {
             "vw-cmd-keys",
             keys.length === 0 ? "—" : keys.join("  "),
           );
-          const descriptionCell = el(
-            doc,
-            "span",
-            "vw-cmd-desc",
-            command.description,
-          );
+          const descriptionCell = el(doc, "span", "vw-cmd-desc", command.description);
           const nativeCell = el(
             doc,
             "span",
             "vw-cmd-native",
-            command.tier === "C" ? command.nativeAlternative ?? "" : "",
+            command.tier === "C" ? (command.nativeAlternative ?? "") : "",
           );
 
           for (const cell of [keysCell, descriptionCell, nativeCell]) {
@@ -1039,7 +995,7 @@ export class Dialog extends Context.Service<Dialog, {
         return table;
       };
 
-      const buildHelp = Effect.fn("Dialog.buildHelp")(function*() {
+      const buildHelp = Effect.fn("Dialog.buildHelp")(function* () {
         // `compiledUnsafe`, because a command body reaches this from the key
         // path, which must not suspend.
         const compiled = mappings.compiledUnsafe();
@@ -1053,20 +1009,20 @@ export class Dialog extends Context.Service<Dialog, {
             dialog.setAttribute("aria-label", "Vimium-WebKit help");
 
             dialog.appendChild(el(doc, "h1", undefined, "Vimium-WebKit"));
-            dialog.appendChild(el(
-              doc,
-              "p",
-              undefined,
-              "A grey command cannot be done by a userscript. The shortcut of " +
-                "the browser is beside it. Press Escape to close.",
-            ));
+            dialog.appendChild(
+              el(
+                doc,
+                "p",
+                undefined,
+                "A grey command cannot be done by a userscript. The shortcut of " +
+                  "the browser is beside it. Press Escape to close.",
+              ),
+            );
 
             for (const group of GROUP_ORDER) {
               const list = commands.byGroup.get(group);
               if (list === undefined || list.length === 0) continue;
-              dialog.appendChild(
-                el(doc, "h2", undefined, GROUP_TITLES[group]),
-              );
+              dialog.appendChild(el(doc, "h2", undefined, GROUP_TITLES[group]));
               dialog.appendChild(commandTable(list, bound));
             }
 
@@ -1088,12 +1044,7 @@ export class Dialog extends Context.Service<Dialog, {
             }
 
             const row = el(doc, "div", "vw-button-row");
-            const settingsButton = el(
-              doc,
-              "button",
-              "vw-button",
-              "Settings…",
-            );
+            const settingsButton = el(doc, "button", "vw-button", "Settings…");
             const closeButton = el(doc, "button", "vw-button", "Close");
             closeButton.dataset["variant"] = "primary";
             row.append(settingsButton, closeButton);
@@ -1107,11 +1058,7 @@ export class Dialog extends Context.Service<Dialog, {
             }),
         );
 
-        yield* dom.listenOn(
-          parts.settingsButton,
-          "click",
-          () => showSettings,
-        );
+        yield* dom.listenOn(parts.settingsButton, "click", () => showSettings);
         yield* dom.listenOn(parts.closeButton, "click", () => close);
         return parts;
       });
@@ -1133,15 +1080,13 @@ export class Dialog extends Context.Service<Dialog, {
         }
       };
 
-      const readForm = (
-        form: SettingsForm,
-        base: SettingsData,
-      ): SettingsData => {
+      const readForm = (form: SettingsForm, base: SettingsData): SettingsData => {
         let next: SettingsData = base;
         for (const control of form.controls) {
-          next = control.kind === "toggle"
-            ? control.field.write(next, control.input.checked)
-            : control.field.write(next, control.input.value);
+          next =
+            control.kind === "toggle"
+              ? control.field.write(next, control.input.checked)
+              : control.field.write(next, control.input.value);
         }
         return next;
       };
@@ -1150,9 +1095,7 @@ export class Dialog extends Context.Service<Dialog, {
       const offeredText = (form: SettingsForm): ReadonlyArray<OfferedText> =>
         form.controls.map((control) => ({
           field: control.field,
-          text: control.kind === "toggle"
-            ? String(control.input.checked)
-            : control.input.value,
+          text: control.kind === "toggle" ? String(control.input.checked) : control.input.value,
         }));
 
       /**
@@ -1164,93 +1107,81 @@ export class Dialog extends Context.Service<Dialog, {
        * storage repaired a field. In each case the dialog is the only place
        * where the user can see what happened.
        */
-      const store = Effect.fn("Dialog.store")(
-        function*(
-          form: SettingsForm,
-          next: SettingsData,
-          notes: FormNotes,
-        ) {
-          const outcome = yield* Effect.catch(
-            Effect.asSome(settings.save(next)),
-            (error) =>
-              Effect.as(
-                report.error(`Settings were not saved: ${error.detail}`),
-                Option.none<SettingsData>(),
-              ),
-          );
-          // The failure already went to the user. Success must not be claimed
-          // over it, and the dialog stays open.
-          if (Option.isNone(outcome)) return;
-          const stored = outcome.value;
+      const store = Effect.fn("Dialog.store")(function* (
+        form: SettingsForm,
+        next: SettingsData,
+        notes: FormNotes,
+      ) {
+        const outcome = yield* Effect.catch(Effect.asSome(settings.save(next)), (error) =>
+          Effect.as(
+            report.error(`Settings were not saved: ${error.detail}`),
+            Option.none<SettingsData>(),
+          ),
+        );
+        // The failure already went to the user. Success must not be claimed
+        // over it, and the dialog stays open.
+        if (Option.isNone(outcome)) return;
+        const stored = outcome.value;
 
-          yield* Effect.sync(() => fill(form, stored));
+        yield* Effect.sync(() => fill(form, stored));
 
-          const compiled = yield* mappings.check(stored.keyMappings);
-          const errors = compiled.diagnostics.filter(
-            (entry) => entry.severity === "error",
-          );
-          if (errors.length > 0) {
-            // Keep the dialog open. Closing it would hide the only place where
-            // the user can correct the line that we refused.
-            yield* Effect.sync(() => {
-              form.problems.textContent = errors
-                .map((entry) => `line ${entry.line}: ${entry.message}`)
-                .join("\n");
-            });
-            return;
-          }
-
-          const changed = adjustedFields(next, stored);
-          const lines: string[] = [];
-          if (notes.refused.length > 0) {
-            lines.push(
-              `These fields keep their stored value, because the text was ` +
-                `refused: ${notes.refused.join(", ")}.`,
-            );
-          }
-          if (notes.clamped.length > 0) {
-            // A clamped field did change. Saying that it kept its stored value
-            // would be false, and the user would look for a value that is not
-            // there.
-            lines.push(
-              `These fields were brought into range: ` +
-                `${notes.clamped.join(", ")}.`,
-            );
-          }
-          if (notes.truncated.length > 0) {
-            // A control of type `number` accepts `50.7`, and the setting holds
-            // a whole number. Neither of the two lines above covers that.
-            lines.push(
-              `These fields keep a whole number only: ` +
-                `${notes.truncated.join(", ")}.`,
-            );
-          }
-          if (notes.dropped.length > 0) {
-            lines.push(
-              `These exclusion rules were dropped, and they do not exclude a page: ` +
-                `${notes.dropped.join("; ")}.`,
-            );
-          }
-          if (changed.length > 0) {
-            lines.push(`Stored with changes to: ${changed.join(", ")}.`);
-          }
-          if (lines.length > 0) {
-            lines.push("The values above are the stored ones.");
-            yield* Effect.sync(() => {
-              form.problems.textContent = lines.join(" ");
-            });
-            return;
-          }
-
+        const compiled = yield* mappings.check(stored.keyMappings);
+        const errors = compiled.diagnostics.filter((entry) => entry.severity === "error");
+        if (errors.length > 0) {
+          // Keep the dialog open. Closing it would hide the only place where
+          // the user can correct the line that we refused.
           yield* Effect.sync(() => {
-            form.problems.textContent = "";
+            form.problems.textContent = errors
+              .map((entry) => `line ${entry.line}: ${entry.message}`)
+              .join("\n");
           });
-          yield* close;
-          yield* report.info("Settings saved");
-        },
-      );
+          return;
+        }
 
-      const buildSettings = Effect.fn("Dialog.buildSettings")(function*() {
+        const changed = adjustedFields(next, stored);
+        const lines: string[] = [];
+        if (notes.refused.length > 0) {
+          lines.push(
+            `These fields keep their stored value, because the text was ` +
+              `refused: ${notes.refused.join(", ")}.`,
+          );
+        }
+        if (notes.clamped.length > 0) {
+          // A clamped field did change. Saying that it kept its stored value
+          // would be false, and the user would look for a value that is not
+          // there.
+          lines.push(`These fields were brought into range: ` + `${notes.clamped.join(", ")}.`);
+        }
+        if (notes.truncated.length > 0) {
+          // A control of type `number` accepts `50.7`, and the setting holds
+          // a whole number. Neither of the two lines above covers that.
+          lines.push(`These fields keep a whole number only: ` + `${notes.truncated.join(", ")}.`);
+        }
+        if (notes.dropped.length > 0) {
+          lines.push(
+            `These exclusion rules were dropped, and they do not exclude a page: ` +
+              `${notes.dropped.join("; ")}.`,
+          );
+        }
+        if (changed.length > 0) {
+          lines.push(`Stored with changes to: ${changed.join(", ")}.`);
+        }
+        if (lines.length > 0) {
+          lines.push("The values above are the stored ones.");
+          yield* Effect.sync(() => {
+            form.problems.textContent = lines.join(" ");
+          });
+          return;
+        }
+
+        yield* Effect.sync(() => {
+          form.problems.textContent = "";
+        });
+        yield* close;
+        yield* report.info("Settings saved");
+      });
+
+      const buildSettings = Effect.fn("Dialog.buildSettings")(function* () {
         // `currentUnsafe`, because a command body reaches this from the key
         // path, which must not suspend.
         const current = settings.currentUnsafe();
@@ -1262,27 +1193,17 @@ export class Dialog extends Context.Service<Dialog, {
             dialog.setAttribute("aria-modal", "true");
             dialog.setAttribute("aria-label", "Vimium-WebKit settings");
             dialog.appendChild(el(doc, "h1", undefined, "Settings"));
-            dialog.appendChild(el(
-              doc,
-              "p",
-              undefined,
-              storageExplanation(capabilities.value),
-            ));
+            dialog.appendChild(el(doc, "p", undefined, storageExplanation(capabilities.value)));
 
             const controls: SettingsControl[] = [];
 
             /** The label of one control, with its note inside it. */
-            const labelFor = (
-              field: SettingsField,
-              id: string,
-            ): HTMLLabelElement => {
+            const labelFor = (field: SettingsField, id: string): HTMLLabelElement => {
               const label = doc.createElement("label");
               label.htmlFor = id;
               label.textContent = field.label;
               if (field.note !== undefined) {
-                label.appendChild(
-                  el(doc, "span", "vw-cmd-native", ` ${field.note}`),
-                );
+                label.appendChild(el(doc, "span", "vw-cmd-native", ` ${field.note}`));
               }
               return label;
             };
@@ -1290,9 +1211,7 @@ export class Dialog extends Context.Service<Dialog, {
             for (const section of SETTINGS_SECTIONS) {
               dialog.appendChild(el(doc, "h2", undefined, section.title));
               if (section.description !== undefined) {
-                dialog.appendChild(
-                  el(doc, "p", undefined, section.description),
-                );
+                dialog.appendChild(el(doc, "p", undefined, section.description));
               }
 
               for (const field of section.fields) {
@@ -1373,10 +1292,7 @@ export class Dialog extends Context.Service<Dialog, {
 
         // The store call reaches the backend, so it cannot run inside the
         // click dispatch. One fiber holds it, and a second click replaces it.
-        const submit = (
-          next: SettingsData,
-          notes: FormNotes,
-        ): Effect.Effect<void> =>
+        const submit = (next: SettingsData, notes: FormNotes): Effect.Effect<void> =>
           Effect.asVoid(FiberHandle.run(saves, store(form, next, notes)));
 
         yield* dom.listenOn(
@@ -1385,11 +1301,7 @@ export class Dialog extends Context.Service<Dialog, {
           // The base is read again here, and not at build time. Another frame
           // can store a change while this dialog is open, and a field that
           // this dialog does not edit must keep that change.
-          () =>
-            submit(
-              readForm(form, settings.currentUnsafe()),
-              formNotes(offeredText(form)),
-            ),
+          () => submit(readForm(form, settings.currentUnsafe()), formNotes(offeredText(form))),
         );
         yield* dom.listenOn(
           form.reset,
@@ -1402,9 +1314,7 @@ export class Dialog extends Context.Service<Dialog, {
         return form;
       });
 
-      const showSettings: Effect.Effect<void> = Effect.asVoid(
-        present(buildSettings()),
-      );
+      const showSettings: Effect.Effect<void> = Effect.asVoid(present(buildSettings()));
 
       // The commands that this layer owns. A feature registers its own bodies
       // in the same way, so no feature imports another feature.

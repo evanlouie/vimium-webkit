@@ -32,9 +32,7 @@ const newestSourceMtime = (root: string): number => {
 export const bundlePath = (): string => joinPath(repoRoot(), BUNDLE_RELATIVE);
 
 const runBuild = (root: string): void => {
-  console.log(
-    "[e2e] dist/vimium-webkit.user.js is missing or stale; building…",
-  );
+  console.log("[e2e] dist/vimium-webkit.user.js is missing or stale; building…");
   try {
     execFileSync("npm", ["run", "build"], { cwd: root, stdio: "inherit" });
   } catch (cause) {
@@ -67,15 +65,12 @@ export const readBundle = (): string => {
   try {
     text = readFileSync(path, "utf8");
   } catch (cause) {
-    throw new Error(
-      `Missing ${path}. Run \`npm run build\` (globalSetup normally does this).`,
-      { cause },
-    );
+    throw new Error(`Missing ${path}. Run \`npm run build\` (globalSetup normally does this).`, {
+      cause,
+    });
   }
   if (!text.startsWith("// ==UserScript==")) {
-    throw new Error(
-      `${path} does not start with a userscript metadata block; the build is wrong.`,
-    );
+    throw new Error(`${path} does not start with a userscript metadata block; the build is wrong.`);
   }
   cached = text;
   return text;

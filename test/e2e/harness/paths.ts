@@ -11,12 +11,8 @@ import { type Dirent, readdirSync, statSync } from "node:fs";
 /** Join an absolute base with a relative path. POSIX only; so is the CI. */
 export const joinPath = (base: string, relative: string): string => {
   const trimmedBase = base.endsWith("/") ? base.slice(0, -1) : base;
-  const trimmedRelative = relative.startsWith("/")
-    ? relative.slice(1)
-    : relative;
-  return trimmedRelative.length === 0
-    ? trimmedBase
-    : `${trimmedBase}/${trimmedRelative}`;
+  const trimmedRelative = relative.startsWith("/") ? relative.slice(1) : relative;
+  return trimmedRelative.length === 0 ? trimmedBase : `${trimmedBase}/${trimmedRelative}`;
 };
 
 export const parentPath = (path: string): string => {
@@ -69,10 +65,7 @@ export const isFile = (path: string): boolean => {
 };
 
 /** Newest mtime among files under `dir` whose name ends with any of `suffixes`. */
-export const newestMtime = (
-  dir: string,
-  suffixes: readonly string[],
-): number => {
+export const newestMtime = (dir: string, suffixes: readonly string[]): number => {
   let newest = 0;
   let entries: readonly Dirent[];
   try {

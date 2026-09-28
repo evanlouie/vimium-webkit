@@ -65,24 +65,27 @@ const isSafeMarkUrl = (href: string): boolean => {
   }
 };
 
-export class Marks extends Context.Service<Marks, {
-  /** `m` — set a mark on this page. An upper-case letter sets a global one. */
-  readonly setLocal: (letter: string) => Effect.Effect<void>;
+export class Marks extends Context.Service<
+  Marks,
+  {
+    /** `m` — set a mark on this page. An upper-case letter sets a global one. */
+    readonly setLocal: (letter: string) => Effect.Effect<void>;
 
-  /** `` ` `` — go to a mark on this page. */
-  readonly jumpLocal: (letter: string) => Effect.Effect<void>;
+    /** `` ` `` — go to a mark on this page. */
+    readonly jumpLocal: (letter: string) => Effect.Effect<void>;
 
-  readonly setGlobal: (letter: string) => Effect.Effect<void>;
+    readonly setGlobal: (letter: string) => Effect.Effect<void>;
 
-  readonly jumpGlobal: (letter: string) => Effect.Effect<void>;
-}>()("vimium/features/Marks") {
+    readonly jumpGlobal: (letter: string) => Effect.Effect<void>;
+  }
+>()("vimium/features/Marks") {
   static readonly layer: Layer.Layer<
     Marks,
     never,
     Commands | Dom | Hud | Modes | Report | Scroller | Storage | Tabs
   > = Layer.effect(
     Marks,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const commands = yield* Commands;
       const dom = yield* Dom;
       const hud = yield* Hud;
@@ -100,22 +103,20 @@ export class Marks extends Context.Service<Marks, {
        * written and the prune that goes with it share one reading. Two
        * `Date.now()` calls did not share one.
        */
-      const update = Effect.fn("Marks.update")(
-        function*(mutate: (marks: MarksData, now: number) => MarksData) {
-          const now = yield* Clock.currentTimeMillis;
-          // Pruned on every write, and not on a timer: a local mark is keyed by
-          // URL, nothing else ever removes one, so the table only grew — and
-          // the whole of it is rewritten on every mark.
-          yield* Effect.catch(
-            storage.marks.update((marks) =>
-              pruneMarks(mutate(marks, now), now)
-            ),
-            (error) => report.error(`Could not save mark: ${error.detail}`),
-          );
-        },
-      );
+      const update = Effect.fn("Marks.update")(function* (
+        mutate: (marks: MarksData, now: number) => MarksData,
+      ) {
+        const now = yield* Clock.currentTimeMillis;
+        // Pruned on every write, and not on a timer: a local mark is keyed by
+        // URL, nothing else ever removes one, so the table only grew — and
+        // the whole of it is rewritten on every mark.
+        yield* Effect.catch(
+          storage.marks.update((marks) => pruneMarks(mutate(marks, now), now)),
+          (error) => report.error(`Could not save mark: ${error.detail}`),
+        );
+      });
 
-      const setGlobal = Effect.fn("Marks.setGlobal")(function*(letter: string) {
+      const setGlobal = Effect.fn("Marks.setGlobal")(function* (letter: string) {
         const { x, y } = yield* scroller.position;
         const href = yield* dom.href;
         yield* update((marks, now) => ({
@@ -128,7 +129,7 @@ export class Marks extends Context.Service<Marks, {
         yield* hud.show(`Global mark "${letter}" set`);
       });
 
-      const setLocal = Effect.fn("Marks.setLocal")(function*(letter: string) {
+      const setLocal = Effect.fn("Marks.setLocal")(function* (letter: string) {
         if (isGlobalLetter(letter)) {
           yield* setGlobal(letter);
           return;
@@ -148,48 +149,42 @@ export class Marks extends Context.Service<Marks, {
         yield* hud.show(`Mark "${letter}" set`);
       });
 
-      const jumpGlobal = Effect.fn("Marks.jumpGlobal")(
-        function*(letter: string) {
-          const marks = yield* storage.marks.current;
-          const mark = Option.fromNullishOr(marks.global[letter]);
-          if (Option.isNone(mark)) {
-            yield* report.error(`Global mark "${letter}" is not set`);
-            return;
-          }
+      const jumpGlobal = Effect.fn("Marks.jumpGlobal")(function* (letter: string) {
+        const marks = yield* storage.marks.current;
+        const mark = Option.fromNullishOr(marks.global[letter]);
+        if (Option.isNone(mark)) {
+          yield* report.error(`Global mark "${letter}" is not set`);
+          return;
+        }
 
-          const href = yield* dom.href;
-          if (markKeyForUrl(mark.value.url) === markKeyForUrl(href)) {
-            yield* scroller.restore(mark.value.scrollX, mark.value.scrollY);
-            return;
-          }
+        const href = yield* dom.href;
+        if (markKeyForUrl(mark.value.url) === markKeyForUrl(href)) {
+          yield* scroller.restore(mark.value.scrollX, mark.value.scrollY);
+          return;
+        }
 
-          if (!isSafeMarkUrl(mark.value.url)) {
-            yield* report.error(
-              `Global mark "${letter}" points somewhere unsafe; ` +
-                "it will not be opened",
-            );
-            return;
-          }
-
-          const target = mark.value.url;
-          yield* hud.show(
-            `Going to global mark "${letter}" ` +
-              "(a userscript cannot focus another tab)",
+        if (!isSafeMarkUrl(mark.value.url)) {
+          yield* report.error(
+            `Global mark "${letter}" points somewhere unsafe; ` + "it will not be opened",
           );
-          // The scroll position of the mark is lost across the navigation.
-          // There is no channel that survives a document change, and the next
-          // document cannot know which letter brought it there.
-          // Through the tab service, which is the one place that decides
-          // what a safe URL is. A refusal is final; there is no fallback.
-          yield* Effect.catch(
-            tabs.navigate(target),
-            (error) =>
-              report.error(`Could not go to the mark: ${error.detail}`),
-          );
-        },
-      );
+          return;
+        }
 
-      const jumpLocal = Effect.fn("Marks.jumpLocal")(function*(letter: string) {
+        const target = mark.value.url;
+        yield* hud.show(
+          `Going to global mark "${letter}" ` + "(a userscript cannot focus another tab)",
+        );
+        // The scroll position of the mark is lost across the navigation.
+        // There is no channel that survives a document change, and the next
+        // document cannot know which letter brought it there.
+        // Through the tab service, which is the one place that decides
+        // what a safe URL is. A refusal is final; there is no fallback.
+        yield* Effect.catch(tabs.navigate(target), (error) =>
+          report.error(`Could not go to the mark: ${error.detail}`),
+        );
+      });
+
+      const jumpLocal = Effect.fn("Marks.jumpLocal")(function* (letter: string) {
         if (isGlobalLetter(letter)) {
           yield* jumpGlobal(letter);
           return;
@@ -214,12 +209,12 @@ export class Marks extends Context.Service<Marks, {
 
       yield* commands.registerAll({
         "Marks.activateCreateMode": () =>
-          Effect.gen(function*() {
+          Effect.gen(function* () {
             const letter = yield* captureNextKey({ prompt: "Set mark:" });
             if (Option.isSome(letter)) yield* service.setLocal(letter.value);
           }),
         "Marks.activateGotoMode": () =>
-          Effect.gen(function*() {
+          Effect.gen(function* () {
             const letter = yield* captureNextKey({ prompt: "Go to mark:" });
             if (Option.isSome(letter)) yield* service.jumpLocal(letter.value);
           }),

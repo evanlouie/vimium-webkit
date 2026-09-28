@@ -18,9 +18,7 @@ import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 /** A manager that gives the value API that the test names, and nothing else. */
 const gmLayer = (values: Option.Option<GmValueApi>): Layer.Layer<Gm> => {
   const refuse = <A>(api: string): Effect.Effect<A, GmError> =>
-    Effect.fail(
-      new GmError({ reason: "unavailable", api, detail: "not in this test" }),
-    );
+    Effect.fail(new GmError({ reason: "unavailable", api, detail: "not in this test" }));
   return Layer.succeed(
     Gm,
     Gm.of({
@@ -72,7 +70,7 @@ const valueApi = (): GmValueApi => {
 
 describe("KeyValueStore", () => {
   it.effect("falls back to memory when the manager has no value API", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const kv = yield* Effect.provide(
         KeyValueStore,
         KeyValueStore.layer.pipe(Layer.provide(gmLayer(Option.none()))),
@@ -89,19 +87,19 @@ describe("KeyValueStore", () => {
       yield* kv.set("k", "v");
       assert.deepEqual(yield* kv.get("k"), Option.some("v"));
       assert.deepEqual(yield* Stream.runCollect(kv.changes("k")), []);
-    }));
+    }),
+  );
 
   it.effect("uses the manager value store when there is one", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const kv = yield* Effect.provide(
         KeyValueStore,
-        KeyValueStore.layer.pipe(
-          Layer.provide(gmLayer(Option.some(valueApi()))),
-        ),
+        KeyValueStore.layer.pipe(Layer.provide(gmLayer(Option.some(valueApi())))),
       );
 
       assert.strictEqual(kv.kind, "gm-sync");
       assert.isTrue(kv.durable);
       assert.isTrue(kv.managerPrivate);
-    }));
+    }),
+  );
 });

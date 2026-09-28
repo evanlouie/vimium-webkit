@@ -196,9 +196,7 @@ const idSchema = Schema.String.check(Schema.isMaxLength(MAX_ID_LENGTH));
  * its choice could then derive the key of the link. A hexadecimal value can
  * spell neither payload.
  */
-const handshakeIdSchema = Schema.String.check(
-  Schema.isPattern(/^[0-9a-f]{8,64}$/),
-);
+const handshakeIdSchema = Schema.String.check(Schema.isPattern(/^[0-9a-f]{8,64}$/));
 
 /** `localIndex` on the wire: an integer with a bound, and never negative. */
 const localIndexSchema = Schema.Int.check(
@@ -258,13 +256,12 @@ const sessionDescriptorsSchema = Schema.Array(hintDescriptorSchema).check(
  * means that two frames do not agree about what `sa` selects. The hints service
  * must use this function, and no other.
  */
-export const compareDescriptors = (
-  left: HintDescriptor,
-  right: HintDescriptor,
-): number =>
+export const compareDescriptors = (left: HintDescriptor, right: HintDescriptor): number =>
   left.frameId === right.frameId
     ? left.localIndex - right.localIndex
-    : (left.frameId < right.frameId ? -1 : 1);
+    : left.frameId < right.frameId
+      ? -1
+      : 1;
 
 /** Sort into the canonical cross-frame order. The input is not changed. */
 export const sortDescriptors = (
@@ -480,9 +477,7 @@ export const welcomeSchema = Schema.Struct({
   frameId: handshakeIdSchema,
   /** It gives back the `JOIN` that earned it. Anything else is a race or a spoof. */
   helloId: handshakeIdSchema,
-  frames: Schema.Array(handshakeIdSchema).check(
-    Schema.isMaxLength(MAX_FRAMES),
-  ),
+  frames: Schema.Array(handshakeIdSchema).check(Schema.isMaxLength(MAX_FRAMES)),
 });
 
 export type HelloMessage = typeof helloSchema.Type;
@@ -501,11 +496,8 @@ export type WindowToTopMessage = typeof windowToTopSchema.Type;
  * The token stops a replay, the hello id binds the proof to one attempt, and
  * the frame id binds the claimed identity to the holder of the credential.
  */
-export const joinProofPayload = (
-  token: string,
-  helloId: string,
-  frameId: string,
-): string => `${token}:${helloId}:${frameId}`;
+export const joinProofPayload = (token: string, helloId: string, frameId: string): string =>
+  `${token}:${helloId}:${frameId}`;
 
 // ---------------------------------------------------------------------------
 // The sealed envelope
@@ -537,9 +529,7 @@ export type SealDirection = typeof SealDirection.Type;
 export const sealedSchema = Schema.Struct({
   ...envelopeShape(),
   kind: Schema.Literal("SEALED"),
-  seq: Schema.Int.check(
-    Schema.isBetween({ minimum: 0, maximum: MAX_SEAL_SEQUENCE }),
-  ),
+  seq: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: MAX_SEAL_SEQUENCE })),
   /** The ciphertext and its tag, in base64 for a URL, with no padding. */
   data: Schema.String.check(Schema.isMaxLength(MAX_SEALED_LENGTH)),
 });
@@ -556,11 +546,7 @@ export type SealedMessage = typeof sealedSchema.Type;
  * the same. The version is the version of the protocol, which is the number
  * that `sealedAad` uses as well.
  */
-export const linkKeyPayload = (
-  token: string,
-  helloId: string,
-  frameId: string,
-): string =>
+export const linkKeyPayload = (token: string, helloId: string, frameId: string): string =>
   `${PROTOCOL_MAGIC}/link/v${PROTOCOL_VERSION}:${token}:${helloId}:${frameId}`;
 
 /**
@@ -570,11 +556,7 @@ export const linkKeyPayload = (
  * to the ciphertext. The receiver builds it from what it expects, so a message
  * of another link, another direction or another position fails to open.
  */
-export const sealedAad = (
-  link: string,
-  direction: SealDirection,
-  seq: number,
-): string =>
+export const sealedAad = (link: string, direction: SealDirection, seq: number): string =>
   `${PROTOCOL_MAGIC}/${PROTOCOL_VERSION}/${link}/${direction}/${seq}`;
 
 // ---------------------------------------------------------------------------
@@ -664,9 +646,7 @@ const hints = define({
 const hintsResult = define({
   kind: Schema.Literal("HINTS_RESULT"),
   roundId: idSchema,
-  droppedDescriptors: Schema.Int.check(
-    Schema.isBetween({ minimum: 0, maximum: 1_000_000 }),
-  ),
+  droppedDescriptors: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1_000_000 })),
   descriptors: sessionDescriptorsSchema,
 });
 
@@ -821,10 +801,7 @@ export type FrameWire = typeof frameWireSchema.Type;
 export type MessageKind = FrameMessage["kind"];
 
 /** `MessageOf<"ROSTER">` reads better than `Extract<...>` at each call site. */
-export type MessageOf<K extends MessageKind> = Extract<
-  FrameMessage,
-  { kind: K }
->;
+export type MessageOf<K extends MessageKind> = Extract<FrameMessage, { kind: K }>;
 
 /** The fields that the bus fills in for the sender. */
 export interface WireEnvelope {
@@ -835,10 +812,11 @@ export interface WireEnvelope {
 }
 
 /** Put one message in its envelope. Pure, and it never fails. */
-export const encodeMessage = (
-  envelope: WireEnvelope,
-  message: FrameMessage,
-): FrameWire => ({ ...ENVELOPE, ...envelope, ...message });
+export const encodeMessage = (envelope: WireEnvelope, message: FrameMessage): FrameWire => ({
+  ...ENVELOPE,
+  ...envelope,
+  ...message,
+});
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -859,9 +837,7 @@ const decodeChallenge = Schema.decodeUnknownOption(challengeSchema);
 const decodeWelcome = Schema.decodeUnknownOption(welcomeSchema);
 const decodeSealed = Schema.decodeUnknownOption(sealedSchema);
 
-const readEnvelope = (
-  data: unknown,
-): Option.Option<Record<string, unknown>> => {
+const readEnvelope = (data: unknown): Option.Option<Record<string, unknown>> => {
   if (typeof data !== "object" || data === null) return Option.none();
   const raw = data as Record<string, unknown>;
   // The magic test is not a security control. It is a cost control, because a
@@ -895,10 +871,7 @@ export const peekKind = (data: unknown): Option.Option<string> => {
  * The comparison is not constant time. It does not need to be. The attacker is
  * in the same page, and can already observe our timing more directly.
  */
-export const preauthorize = (
-  data: unknown,
-  expectedNonce: Option.Option<string>,
-): boolean => {
+export const preauthorize = (data: unknown, expectedNonce: Option.Option<string>): boolean => {
   const raw = readEnvelope(data);
   if (Option.isNone(raw)) return false;
   if (Option.isNone(expectedNonce)) return false;
@@ -921,15 +894,11 @@ export const parseWire = (
 };
 
 /** Parse a `HELLO` or a `JOIN`. Both come before any nonce exists. */
-export const parseWindowToTop = (
-  data: unknown,
-): Option.Option<WindowToTopMessage> =>
+export const parseWindowToTop = (data: unknown): Option.Option<WindowToTopMessage> =>
   Option.isNone(readEnvelope(data)) ? Option.none() : decodeWindowToTop(data);
 
 /** Parse a `CHALLENGE`. The caller must first check that the sender is the top frame. */
-export const parseChallenge = (
-  data: unknown,
-): Option.Option<ChallengeMessage> =>
+export const parseChallenge = (data: unknown): Option.Option<ChallengeMessage> =>
   Option.isNone(readEnvelope(data)) ? Option.none() : decodeChallenge(data);
 
 /** Parse a `WELCOME`. The caller must check the `helloId` of the attempt. */

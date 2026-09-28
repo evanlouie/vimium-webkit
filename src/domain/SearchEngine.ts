@@ -242,14 +242,12 @@ const NON_TLD_EXTENSIONS: ReadonlySet<string> = new Set([
 ]);
 
 /** One or more labels, a possible top-level domain, then a port and a path. */
-const HOST_LIKE =
-  /^([^\s/?#@]+)\.([a-z]{2,63})\.?(?::\d+)?(?:[/?#][\s\S]*)?$/iu;
+const HOST_LIKE = /^([^\s/?#@]+)\.([a-z]{2,63})\.?(?::\d+)?(?:[/?#][\s\S]*)?$/iu;
 
 /** `[::1]`, `[::1]:8080` and `[fe80::1%25en0]/path`. */
 const IPV6_LIKE = /^\[[0-9a-f:.]+(?:%25[^\]]+)?\](?::\d+)?(?:[/?#][\s\S]*)?$/iu;
 
-const IPV4_LIKE =
-  /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?::\d+)?(?:[/?#][\s\S]*)?$/u;
+const IPV4_LIKE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?::\d+)?(?:[/?#][\s\S]*)?$/u;
 
 const isIpv4 = (trimmed: string): boolean => {
   const match = IPV4_LIKE.exec(trimmed);
@@ -294,9 +292,7 @@ export const classifyQuery = (query: string): QueryKind => {
 
   const match = HOST_LIKE.exec(trimmed);
   if (match === null) return "search";
-  return NON_TLD_EXTENSIONS.has((match[2] ?? "").toLowerCase())
-    ? "search"
-    : "url";
+  return NON_TLD_EXTENSIONS.has((match[2] ?? "").toLowerCase()) ? "search" : "url";
 };
 
 /** Add the scheme that a plain host does not have. It never guesses `http:`. */

@@ -67,27 +67,17 @@ const probeSelfAdmission = (waitMs: number): Promise<ProbeResult> =>
     globalThis.addEventListener("message", onWindowMessage);
 
     const withPort = new MessageChannel();
-    withPort.port1.addEventListener(
-      "message",
-      (event: MessageEvent) => readPort(event.data),
-    );
+    withPort.port1.addEventListener("message", (event: MessageEvent) => readPort(event.data));
     withPort.port1.start();
 
     // Shape 1: the original attack — one `HELLO`, port attached, addressed at
     // our own window.
-    globalThis.postMessage(
-      { magic: MAGIC, v: 3, kind: "HELLO" },
-      "*",
-      [withPort.port2],
-    );
+    globalThis.postMessage({ magic: MAGIC, v: 3, kind: "HELLO" }, "*", [withPort.port2]);
 
     // Shape 2: announce, then try to redeem a token we were never issued.
     globalThis.postMessage({ magic: MAGIC, v: 3, kind: "HELLO" }, "*");
     const forged = new MessageChannel();
-    forged.port1.addEventListener(
-      "message",
-      (event: MessageEvent) => readPort(event.data),
-    );
+    forged.port1.addEventListener("message", (event: MessageEvent) => readPort(event.data));
     forged.port1.start();
     globalThis.postMessage(
       {
@@ -117,11 +107,8 @@ test.describe("frame admission", () => {
     const result = await page.evaluate(probeSelfAdmission, REPLY_WINDOW_MS);
 
     expect(result.welcomed, "the page was admitted as a frame").toBe(false);
-    expect(result.challenged, "the coordinator challenged its own window")
-      .toBe(false);
-    expect(result.nonceLeaked, "the session nonce reached the page").toBe(
-      false,
-    );
+    expect(result.challenged, "the coordinator challenged its own window").toBe(false);
+    expect(result.nonceLeaked, "the session nonce reached the page").toBe(false);
     expect(result.settingsLeaked, "settings reached the page").toBe(false);
   });
 
@@ -148,9 +135,11 @@ test.describe("frame admission", () => {
           const onResult = (event: MessageEvent): void => {
             const data: unknown = event.data;
             if (
-              typeof data !== "object" || data === null ||
+              typeof data !== "object" ||
+              data === null ||
               (data as Record<string, unknown>)["marker"] !== marker
-            ) return;
+            )
+              return;
             globalThis.removeEventListener("message", onResult);
             resolve((data as Record<string, unknown>)["welcomed"] === true);
           };
@@ -189,9 +178,7 @@ test.describe("frame admission", () => {
       REPLY_WINDOW_MS,
     );
 
-    expect(admitted, "a page-owned child received a privileged port").toBe(
-      false,
-    );
+    expect(admitted, "a page-owned child received a privileged port").toBe(false);
   });
 
   test("settings never cross the frame boundary at all", async ({ vw, page }) => {

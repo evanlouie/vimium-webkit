@@ -18,9 +18,7 @@ import {
 import { type KeyEventLike, keyNotation } from "~/domain/Key.ts";
 import { compileMappings } from "~/domain/Mapping.ts";
 
-const entries: readonly (readonly [string, CommandDef])[] = Object.entries(
-  COMMANDS,
-);
+const entries: readonly (readonly [string, CommandDef])[] = Object.entries(COMMANDS);
 
 const names: ReadonlySet<string> = new Set(Object.keys(COMMANDS));
 
@@ -40,18 +38,16 @@ describe("Command", () => {
   it.effect("holds a catalogue that is not empty", () =>
     Effect.sync(() => {
       assert.isAbove(entries.length, 40);
-    }));
+    }),
+  );
 
   it.effect("gives every command a valid tier", () =>
     Effect.sync(() => {
       for (const [key, definition] of entries) {
-        assert.include(
-          ["A", "B", "C"],
-          definition.tier,
-          `${key} has no valid tier`,
-        );
+        assert.include(["A", "B", "C"], definition.tier, `${key} has no valid tier`);
       }
-    }));
+    }),
+  );
 
   it.effect("gives every tier C command a reason", () =>
     Effect.sync(() => {
@@ -69,7 +65,8 @@ describe("Command", () => {
           `the reason of ${key} is empty`,
         );
       }
-    }));
+    }),
+  );
 
   it.effect("keys every entry by its own name", () =>
     Effect.sync(() => {
@@ -80,7 +77,8 @@ describe("Command", () => {
           `the entry for ${key} carries the name ${definition.name}`,
         );
       }
-    }));
+    }),
+  );
 
   it.effect("gives every command a known group and a description", () =>
     Effect.sync(() => {
@@ -91,7 +89,8 @@ describe("Command", () => {
         );
         assert.isAbove(definition.description.length, 0, `${key} has no text`);
       }
-    }));
+    }),
+  );
 
   it.effect("names only commands that exist in DEFAULT_MAPPINGS", () =>
     Effect.sync(() => {
@@ -109,7 +108,8 @@ describe("Command", () => {
           `${binding.command} is bound but is not in the catalogue`,
         );
       }
-    }));
+    }),
+  );
 
   it.effect("binds a large part of the catalogue by default", () =>
     Effect.sync(() => {
@@ -117,18 +117,18 @@ describe("Command", () => {
         knownCommands: names,
         rejectReservedShortcuts: true,
       });
-      const bound = new Set(
-        compiled.bindings.map((binding) => binding.command),
-      );
+      const bound = new Set(compiled.bindings.map((binding) => binding.command));
       assert.isAbove(bound.size, 40);
-    }));
+    }),
+  );
 
   it.effect("types the name of each entry as a command name", () =>
     Effect.sync(() => {
       // The type and the data must agree. `scrollDown` is in both.
       const name: CommandName = "scrollDown";
       assert.strictEqual(COMMANDS[name].name, name);
-    }));
+    }),
+  );
 
   /**
    * The shipped Option bindings, as WebKit reports them.
@@ -237,6 +237,7 @@ describe("Command", () => {
           row.command,
           `${notation} runs no default binding`,
         );
-      }));
+      }),
+    );
   }
 });

@@ -40,8 +40,7 @@ test.describe("SPA navigation", () => {
     await expect(page.locator("#status")).toHaveText(/^detail:/);
 
     await vw.press("j");
-    await expect.poll(async () => (await vw.scrollOffsets()).y)
-      .toBeGreaterThan(0);
+    await expect.poll(async () => (await vw.scrollOffsets()).y).toBeGreaterThan(0);
   });
 
   test("hints find links in DOM that did not exist at boot", async ({ vw, page }) => {
@@ -88,8 +87,7 @@ test.describe("SPA navigation", () => {
     await expect(page.locator("#status")).toHaveText(/^home:/);
 
     await vw.press("j");
-    await expect.poll(async () => (await vw.scrollOffsets()).y)
-      .toBeGreaterThan(0);
+    await expect.poll(async () => (await vw.scrollOffsets()).y).toBeGreaterThan(0);
   });
 
   /**
@@ -99,7 +97,10 @@ test.describe("SPA navigation", () => {
    * keystroke after a soft navigation was then read as a command, and typing
    * into a search box scrolled the page instead (CORE-01).
    */
-  test("typing into an input still reaches the page after a pushState navigation", async ({ vw, page }) => {
+  test("typing into an input still reaches the page after a pushState navigation", async ({
+    vw,
+    page,
+  }) => {
     await vw.open("/spa.html");
 
     await page.locator("#go-detail").click();
@@ -141,7 +142,6 @@ test.describe("pre-existing focus", () => {
     await vw.press("Escape");
 
     await vw.press("j");
-    await expect.poll(async () => (await vw.scrollOffsets()).y)
-      .toBeGreaterThan(0);
+    await expect.poll(async () => (await vw.scrollOffsets()).y).toBeGreaterThan(0);
   });
 });

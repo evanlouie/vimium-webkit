@@ -70,11 +70,7 @@ const Observability = Layer.mergeAll(
 );
 
 /** The browser and the userscript manager. */
-const PlatformLayer = Layer.mergeAll(
-  Realm.layer,
-  Gm.layer,
-  Lifecycle.layer,
-).pipe(
+const PlatformLayer = Layer.mergeAll(Realm.layer, Gm.layer, Lifecycle.layer).pipe(
   Layer.provideMerge(Dom.layer),
   Layer.provideMerge(Observability),
 );
@@ -94,10 +90,7 @@ const CoreLayer = Layer.mergeAll(
   Modes.layer.pipe(Layer.provideMerge(HandlerStack.layer)),
   Commands.layer,
   Report.layer,
-).pipe(
-  Layer.provideMerge(Settings.layer),
-  Layer.provideMerge(StorageLayer),
-);
+).pipe(Layer.provideMerge(Settings.layer), Layer.provideMerge(StorageLayer));
 
 /**
  * The keyboard.
@@ -109,10 +102,7 @@ const CoreLayer = Layer.mergeAll(
 const KeyboardLayer = Keyboard.layer.pipe(Layer.provideMerge(CoreLayer));
 
 /** The overlay. */
-const UiLayer = Layer.mergeAll(
-  Hud.layer,
-  Dialog.layer,
-).pipe(
+const UiLayer = Layer.mergeAll(Hud.layer, Dialog.layer).pipe(
   Layer.provideMerge(Ui.layer),
   Layer.provideMerge(KeyboardLayer),
 );

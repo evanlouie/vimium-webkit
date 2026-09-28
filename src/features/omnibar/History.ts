@@ -27,10 +27,7 @@
 
 import { Clock, Effect, Option, Predicate, Ref, type Scope } from "effect";
 import { Settings } from "~/core/Settings.ts";
-import type {
-  HistoryIndex as HistoryIndexData,
-  Visit,
-} from "~/domain/Persisted.ts";
+import type { HistoryIndex as HistoryIndexData, Visit } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Storage, type StorageError } from "~/platform/Storage.ts";
 
@@ -55,10 +52,7 @@ export const globToRegExp = (pattern: string): RegExp => {
   return new RegExp(`^${source}$`, "u");
 };
 
-export const matchesDenylist = (
-  url: string,
-  patterns: readonly string[],
-): boolean =>
+export const matchesDenylist = (url: string, patterns: readonly string[]): boolean =>
   patterns.some((pattern) => {
     const trimmed = pattern.trim();
     if (trimmed.length === 0) return false;
@@ -103,7 +97,7 @@ export const mergeVisit = (
     // An empty title on a second visit keeps the title that we already have.
     // A navigation inside a single-page application often happens before the
     // page sets the title.
-    title: entry.title.length > 0 ? entry.title : existing?.title ?? "",
+    title: entry.title.length > 0 ? entry.title : (existing?.title ?? ""),
     visitCount: (existing?.visitCount ?? 0) + 1,
     lastVisit: entry.at,
   };
@@ -200,9 +194,7 @@ type StorageEstimator = () => Promise<StorageEstimate>;
  *
  * A userscript does not own its globals, so call this inside `Dom.probeOr`.
  */
-const storageEstimator = (
-  window: Window & typeof globalThis,
-): Option.Option<StorageEstimator> => {
+const storageEstimator = (window: Window & typeof globalThis): Option.Option<StorageEstimator> => {
   const manager: unknown = window.navigator.storage;
   if (!Predicate.hasProperty(manager, "estimate")) return Option.none();
   const estimate: unknown = Reflect.get(manager, "estimate");
@@ -230,8 +222,8 @@ const storageEstimator = (
  * The estimate is the one promise in this feature. ARCHITECTURE.md section 1
  * rule 5 asks for the wrap to happen once, at the edge. This is that edge.
  */
-export const detectPrivateBrowsing: Effect.Effect<PrivacyProbe, never, Dom> =
-  Effect.gen(function*() {
+export const detectPrivateBrowsing: Effect.Effect<PrivacyProbe, never, Dom> = Effect.gen(
+  function* () {
     const dom = yield* Dom;
 
     const wrote = yield* dom.probeOr(() => {
@@ -258,14 +250,12 @@ export const detectPrivateBrowsing: Effect.Effect<PrivacyProbe, never, Dom> =
       (): StorageEstimate => ({}),
     );
     const quota = estimate.quota;
-    if (
-      typeof quota === "number" && quota > 0 &&
-      quota < PRIVATE_QUOTA_CEILING_BYTES
-    ) {
+    if (typeof quota === "number" && quota > 0 && quota < PRIVATE_QUOTA_CEILING_BYTES) {
       return "tiny-quota";
     }
     return "clear";
-  });
+  },
+);
 
 // ---------------------------------------------------------------------------
 // The interface
@@ -313,22 +303,18 @@ export const makeHistoryIndex: Effect.Effect<
   HistoryIndex,
   never,
   Dom | Settings | Storage | Scope.Scope
-> = Effect.gen(function*() {
+> = Effect.gen(function* () {
   const dom = yield* Dom;
   const settings = yield* Settings;
   const storage = yield* Storage;
 
   const privacy = yield* Ref.make(Option.none<PrivacyProbe>());
   yield* Effect.forkScoped(
-    Effect.flatMap(
-      detectPrivateBrowsing,
-      (result) => Ref.set(privacy, Option.some(result)),
-    ),
+    Effect.flatMap(detectPrivateBrowsing, (result) => Ref.set(privacy, Option.some(result))),
   );
 
-  const blockedBy = Effect.fn("HistoryIndex.blockedBy")(function*() {
-    const block = (reason: RecordingBlock): Option.Option<RecordingBlock> =>
-      Option.some(reason);
+  const blockedBy = Effect.fn("HistoryIndex.blockedBy")(function* () {
+    const block = (reason: RecordingBlock): Option.Option<RecordingBlock> => Option.some(reason);
     const current = yield* settings.current;
 
     // Gate 1. Read on every call, and not captured once, so that the setting
@@ -358,7 +344,7 @@ export const makeHistoryIndex: Effect.Effect<
     return Option.none<RecordingBlock>();
   });
 
-  const record = Effect.fn("HistoryIndex.record")(function*() {
+  const record = Effect.fn("HistoryIndex.record")(function* () {
     if (Option.isSome(yield* blockedBy())) return;
 
     const url = canonicaliseUrl(yield* dom.href);
@@ -377,11 +363,7 @@ export const makeHistoryIndex: Effect.Effect<
     yield* Effect.ignore(
       storage.history.update((index): HistoryIndexData => ({
         visits: [
-          ...mergeVisit(
-            index.visits,
-            { url: url.value, title, at },
-            current.historyIndexLimit,
-          ),
+          ...mergeVisit(index.visits, { url: url.value, title, at }, current.historyIndexLimit),
         ],
       })),
     );

@@ -10,15 +10,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import {
-  Effect,
-  Layer,
-  Logger,
-  Option,
-  References,
-  Stream,
-  SubscriptionRef,
-} from "effect";
+import { Effect, Layer, Logger, Option, References, Stream, SubscriptionRef } from "effect";
 import { Exclusions } from "~/core/Exclusions.ts";
 import { Settings } from "~/core/Settings.ts";
 import {
@@ -32,24 +24,23 @@ import { Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
 
 /** A backend that already holds the settings that a test needs. */
-const storedSettings = (
-  rules: readonly ExclusionRule[],
-): Layer.Layer<KeyValueStore> =>
+const storedSettings = (rules: readonly ExclusionRule[]): Layer.Layer<KeyValueStore> =>
   Layer.sync(KeyValueStore, () => {
-    const map = new Map<string, string>([[
-      `${STORAGE_PREFIX}settings`,
-      JSON.stringify({
-        schemaVersion: SETTINGS_SCHEMA_VERSION,
-        data: { ...defaultSettings(), exclusionRules: rules },
-      }),
-    ]]);
+    const map = new Map<string, string>([
+      [
+        `${STORAGE_PREFIX}settings`,
+        JSON.stringify({
+          schemaVersion: SETTINGS_SCHEMA_VERSION,
+          data: { ...defaultSettings(), exclusionRules: rules },
+        }),
+      ],
+    ]);
     return KeyValueStore.of({
       kind: "memory",
       durable: false,
       watchable: false,
       managerPrivate: false,
-      get: (key) =>
-        Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
+      get: (key) => Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
       set: (key, value) =>
         Effect.sync(() => {
           map.set(key, value);
@@ -90,22 +81,15 @@ const realmAs = (isTop: boolean): Layer.Layer<Realm, never, Dom> =>
     Realm.layer,
   );
 
-const layerFor = (
-  options: {
-    readonly url: string;
-    readonly isTop: boolean;
-    readonly rules: readonly ExclusionRule[];
-  },
-): Layer.Layer<Exclusions | Settings | Storage> => {
+const layerFor = (options: {
+  readonly url: string;
+  readonly isTop: boolean;
+  readonly rules: readonly ExclusionRule[];
+}): Layer.Layer<Exclusions | Settings | Storage> => {
   const dom = domAt(options.url);
   const storage = Layer.provide(Storage.layer, storedSettings(options.rules));
   const settings = Layer.provide(Settings.layer, storage);
-  const base = Layer.mergeAll(
-    dom,
-    Layer.provide(realmAs(options.isTop), dom),
-    settings,
-    storage,
-  );
+  const base = Layer.mergeAll(dom, Layer.provide(realmAs(options.isTop), dom), settings, storage);
   return Layer.provideMerge(Exclusions.layer, base);
 };
 
@@ -122,7 +106,7 @@ const EXCLUDED: readonly ExclusionRule[] = [
 
 describe("Exclusions", () => {
   it.effect("resolves the verdict from the URL of the top frame", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const settings = yield* Settings;
       const exclusions = yield* Exclusions;
 
@@ -135,59 +119,68 @@ describe("Exclusions", () => {
 
       // The top frame keeps its own verdict up to date from the settings.
       const applied = yield* Stream.runHead(
-        Stream.filter(
-          SubscriptionRef.changes(exclusions.effective),
-          (rule) => !rule.enabled,
-        ),
+        Stream.filter(SubscriptionRef.changes(exclusions.effective), (rule) => !rule.enabled),
       );
       assert.isTrue(Option.isSome(applied));
       assert.isFalse(yield* exclusions.isEnabled);
       assert.isFalse(exclusions.effectiveUnsafe().enabled);
-    }).pipe(Effect.provide(layerFor({
-      url: "https://excluded.test/inbox",
-      isTop: true,
-      rules: EXCLUDED,
-    }))));
+    }).pipe(
+      Effect.provide(
+        layerFor({
+          url: "https://excluded.test/inbox",
+          isTop: true,
+          rules: EXCLUDED,
+        }),
+      ),
+    ),
+  );
 
   it.effect("matches any URL against the current rules", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const settings = yield* Settings;
       const exclusions = yield* Exclusions;
       yield* settings.reload;
 
-      assert.deepEqual(
-        yield* exclusions.match("https://partial.test/doc"),
-        { enabled: true, passKeys: "jk" },
-      );
-      assert.deepEqual(
-        yield* exclusions.match("https://other.test/"),
-        { enabled: true, passKeys: "" },
-      );
-    }).pipe(Effect.provide(layerFor({
-      url: "https://other.test/",
-      isTop: true,
-      rules: EXCLUDED,
-    }))));
+      assert.deepEqual(yield* exclusions.match("https://partial.test/doc"), {
+        enabled: true,
+        passKeys: "jk",
+      });
+      assert.deepEqual(yield* exclusions.match("https://other.test/"), {
+        enabled: true,
+        passKeys: "",
+      });
+    }).pipe(
+      Effect.provide(
+        layerFor({
+          url: "https://other.test/",
+          isTop: true,
+          rules: EXCLUDED,
+        }),
+      ),
+    ),
+  );
 
   it.effect("stays fully enabled when no rule matches this frame", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const settings = yield* Settings;
       const exclusions = yield* Exclusions;
       yield* settings.reload;
 
-      assert.deepEqual(
-        yield* exclusions.resolveLocal,
-        { enabled: true, passKeys: "" },
-      );
+      assert.deepEqual(yield* exclusions.resolveLocal, { enabled: true, passKeys: "" });
       assert.isTrue(yield* exclusions.isEnabled);
-    }).pipe(Effect.provide(layerFor({
-      url: "https://other.test/",
-      isTop: true,
-      rules: EXCLUDED,
-    }))));
+    }).pipe(
+      Effect.provide(
+        layerFor({
+          url: "https://other.test/",
+          isTop: true,
+          rules: EXCLUDED,
+        }),
+      ),
+    ),
+  );
 
   it.effect("replaces the verdict with the answer of the top frame", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const exclusions = yield* Exclusions;
 
       // A child frame starts fully enabled. It must not read its own URL.
@@ -195,25 +188,30 @@ describe("Exclusions", () => {
 
       yield* exclusions.adopt({ enabled: false, passKeys: "" });
       assert.isFalse(yield* exclusions.isEnabled);
-      assert.deepEqual(
-        yield* SubscriptionRef.get(exclusions.effective),
-        { enabled: false, passKeys: "" },
-      );
+      assert.deepEqual(yield* SubscriptionRef.get(exclusions.effective), {
+        enabled: false,
+        passKeys: "",
+      });
 
       yield* exclusions.adopt({ enabled: true, passKeys: "jk" });
       assert.deepEqual(exclusions.effectiveUnsafe(), {
         enabled: true,
         passKeys: "jk",
       });
-    }).pipe(Effect.provide(layerFor({
-      // The URL of the child frame is excluded, and it must be ignored.
-      url: "https://excluded.test/advert",
-      isTop: false,
-      rules: EXCLUDED,
-    }))));
+    }).pipe(
+      Effect.provide(
+        layerFor({
+          // The URL of the child frame is excluded, and it must be ignored.
+          url: "https://excluded.test/advert",
+          isTop: false,
+          rules: EXCLUDED,
+        }),
+      ),
+    ),
+  );
 
   it.effect("says which rule it dropped, and how long a URL it reads", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const settings = yield* Settings;
       const exclusions = yield* Exclusions;
       yield* settings.reload;
@@ -224,30 +222,32 @@ describe("Exclusions", () => {
       });
 
       yield* Effect.provide(
-        Effect.gen(function*() {
+        Effect.gen(function* () {
           // The rule is dropped, so the page is active again. The user must
           // learn that from the log.
-          assert.deepEqual(
-            yield* exclusions.match("https://excluded.test/inbox"),
-            { enabled: true, passKeys: "" },
-          );
+          assert.deepEqual(yield* exclusions.match("https://excluded.test/inbox"), {
+            enabled: true,
+            passKeys: "",
+          });
           // A URL above the cap cannot be read by a raw expression, and that
           // is said as well.
           yield* exclusions.match(`https://a.test/${"a".repeat(2000)}`);
         }),
-        Layer.merge(
-          Logger.layer([capture]),
-          Layer.succeed(References.MinimumLogLevel, "Trace"),
-        ),
+        Layer.merge(Logger.layer([capture]), Layer.succeed(References.MinimumLogLevel, "Trace")),
       );
 
       const joined = written.join("\n");
       assert.include(joined, "was dropped");
       assert.include(joined, "(a+)+$");
       assert.include(joined, "longer than");
-    }).pipe(Effect.provide(layerFor({
-      url: "https://other.test/",
-      isTop: true,
-      rules: DROPPED,
-    }))));
+    }).pipe(
+      Effect.provide(
+        layerFor({
+          url: "https://other.test/",
+          isTop: true,
+          rules: DROPPED,
+        }),
+      ),
+    ),
+  );
 });

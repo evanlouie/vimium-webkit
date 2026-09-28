@@ -7,7 +7,7 @@ import { Gm, type GmSurface } from "~/platform/Gm.ts";
 
 describe("Gm value API selection", () => {
   it.effect("prefers a complete synchronous surface when both forms exist", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const syncCalls: string[] = [];
       const asyncCalls: string[] = [];
       const surface: GmSurface = {
@@ -46,7 +46,7 @@ describe("Gm value API selection", () => {
         windowClose: null,
       };
 
-      yield* Effect.gen(function*() {
+      yield* Effect.gen(function* () {
         const gm = yield* Gm;
         assert.isTrue(Option.isSome(gm.values));
         if (Option.isNone(gm.values)) return;
@@ -57,15 +57,9 @@ describe("Gm value API selection", () => {
         yield* values.set("two", "value");
         yield* values.remove("three");
 
-        assert.deepEqual(syncCalls, [
-          "get:one",
-          "set:two:value",
-          "delete:three",
-        ]);
+        assert.deepEqual(syncCalls, ["get:one", "set:two:value", "delete:three"]);
         assert.deepEqual(asyncCalls, []);
-      }).pipe(
-        Effect.provide(Gm.layerFrom(surface)),
-        Effect.provide(Dom.layer),
-      );
-    }));
+      }).pipe(Effect.provide(Gm.layerFrom(surface)), Effect.provide(Dom.layer));
+    }),
+  );
 });

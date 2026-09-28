@@ -53,22 +53,16 @@ const BUNDLED_COPYRIGHT_HOLDERS: readonly string[] = [
  * would never have noticed Effect being dropped. These strings come from the
  * dependency itself, so they only appear if it shipped.
  */
-const BUNDLED_DEPENDENCY_MARKERS: ReadonlyArray<
-  { readonly name: string; readonly marker: string }
-> = [
-  { name: "effect", marker: "effect/Effect" },
-];
+const BUNDLED_DEPENDENCY_MARKERS: ReadonlyArray<{
+  readonly name: string;
+  readonly marker: string;
+}> = [{ name: "effect", marker: "effect/Effect" }];
 
 /** Files exempt from the "all manager access goes through the gate" rule. */
-const GM_SHIM_FILES: ReadonlySet<string> = new Set([
-  "src/platform/Gm.ts",
-  "src/platform/GmApi.ts",
-]);
+const GM_SHIM_FILES: ReadonlySet<string> = new Set(["src/platform/Gm.ts", "src/platform/GmApi.ts"]);
 
 /** The one documented place where a `<style>` element may be made. */
-const STYLE_ELEMENT_FILES: ReadonlySet<string> = new Set([
-  "src/ui/Ui.ts",
-]);
+const STYLE_ELEMENT_FILES: ReadonlySet<string> = new Set(["src/ui/Ui.ts"]);
 
 /**
  * The files that may name a global that somebody else can replace.
@@ -114,8 +108,7 @@ const SYNCHRONOUS_KEY_PATH: ReadonlySet<string> = new Set([
 ]);
 
 /** The combinators that suspend. None of them may be on the key path. */
-const SUSPENDING_COMBINATORS =
-  /Effect\s*\.\s*(sleep|promise|tryPromise|async|callback|timeout)\b/g;
+const SUSPENDING_COMBINATORS = /Effect\s*\.\s*(sleep|promise|tryPromise|async|callback|timeout)\b/g;
 
 const sourceFiles = async (root: string): Promise<string[]> => {
   const entries = await readdir(`${root}/src`, {
@@ -223,7 +216,8 @@ export const hasNodeSpecifier = (source: string): boolean => {
 
     const node = value as Record<string, unknown>;
     if (
-      node["type"] === "Literal" && typeof node["value"] === "string" &&
+      node["type"] === "Literal" &&
+      typeof node["value"] === "string" &&
       node["value"].startsWith("node:")
     ) {
       return true;
@@ -231,12 +225,10 @@ export const hasNodeSpecifier = (source: string): boolean => {
     if (node["type"] === "TemplateElement") {
       const templateValue = node["value"];
       if (
-        typeof templateValue === "object" && templateValue !== null &&
+        typeof templateValue === "object" &&
+        templateValue !== null &&
         typeof (templateValue as Record<string, unknown>)["raw"] === "string" &&
-        ((templateValue as Record<string, unknown>)["raw"] as string)
-          .startsWith(
-            "node:",
-          )
+        ((templateValue as Record<string, unknown>)["raw"] as string).startsWith("node:")
       ) {
         return true;
       }
@@ -253,9 +245,9 @@ const scan = (
   options: { readonly keepStrings?: boolean } = {},
 ): ReadonlyArray<{ line: number; text: string }> => {
   const hits: Array<{ line: number; text: string }> = [];
-  const code = (options.keepStrings === true
-    ? stripComments(contents)
-    : stripNonCode(contents)).split("\n");
+  const code = (
+    options.keepStrings === true ? stripComments(contents) : stripNonCode(contents)
+  ).split("\n");
   const original = contents.split("\n");
   for (let index = 0; index < code.length; index++) {
     pattern.lastIndex = 0;
@@ -266,9 +258,7 @@ const scan = (
   return hits;
 };
 
-export const checkInvariants = async (
-  input: InvariantInput,
-): Promise<readonly Violation[]> => {
+export const checkInvariants = async (input: InvariantInput): Promise<readonly Violation[]> => {
   const violations: Violation[] = [];
   const files = await sourceFiles(input.root);
   const sources = await Promise.all(
@@ -282,13 +272,11 @@ export const checkInvariants = async (
     // 1. No dynamic code evaluation. Beyond the obvious security argument,
     //    every one of these is blocked outright by a page CSP with
     //    `script-src` restrictions — which is most of the sites that matter.
-    for (
-      const hit of scan(
-        contents,
-        /\beval\s*\(|new\s+Function\s*\(|document\s*\.\s*write\s*\(|\bsetTimeout\s*\(\s*["'`]/g,
-        { keepStrings: true },
-      )
-    ) {
+    for (const hit of scan(
+      contents,
+      /\beval\s*\(|new\s+Function\s*\(|document\s*\.\s*write\s*\(|\bsetTimeout\s*\(\s*["'`]/g,
+      { keepStrings: true },
+    )) {
       violations.push({
         rule: "no-dynamic-code",
         file: rel,
@@ -301,17 +289,14 @@ export const checkInvariants = async (
     //    Safari applies the page's `style-src` to content-script-injected nodes,
     //    so a `<style>` here is silently dropped on CSP-hardened sites.
     if (!STYLE_ELEMENT_FILES.has(rel)) {
-      for (
-        const hit of scan(contents, /createElement\s*\(\s*["'`]style["'`]/g, {
-          keepStrings: true,
-        })
-      ) {
+      for (const hit of scan(contents, /createElement\s*\(\s*["'`]style["'`]/g, {
+        keepStrings: true,
+      })) {
         violations.push({
           rule: "no-style-element",
           file: rel,
           line: hit.line,
-          message:
-            `create a constructable stylesheet via ui.addStyle instead: ${hit.text}`,
+          message: `create a constructable stylesheet via ui.addStyle instead: ${hit.text}`,
         });
       }
     }
@@ -331,9 +316,7 @@ export const checkInvariants = async (
     // 8. A global that a page or a manager can replace is read through one
     //    guarded probe, and never inline. See `AMBIENT_GLOBAL_FILES`.
     if (!AMBIENT_GLOBAL_FILES.has(rel)) {
-      for (
-        const hit of scan(contents, /(?<![\w$.])(navigator|unsafeWindow)\b/g)
-      ) {
+      for (const hit of scan(contents, /(?<![\w$.])(navigator|unsafeWindow)\b/g)) {
         violations.push({
           rule: "ambient-globals",
           file: rel,
@@ -354,19 +337,16 @@ export const checkInvariants = async (
           rule: "synchronous-key-path",
           file: rel,
           line: hit.line,
-          message:
-            `this suspends, and a keydown listener reaches this file: ${hit.text}`,
+          message: `this suspends, and a keydown listener reaches this file: ${hit.text}`,
         });
       }
     }
 
     // Inline event-handler strings would also be CSP-blocked, and are a common
     // accidental regression when porting DOM code.
-    for (
-      const hit of scan(contents, /setAttribute\s*\(\s*["'`]on[a-z]+["'`]/g, {
-        keepStrings: true,
-      })
-    ) {
+    for (const hit of scan(contents, /setAttribute\s*\(\s*["'`]on[a-z]+["'`]/g, {
+      keepStrings: true,
+    })) {
       violations.push({
         rule: "no-inline-handlers",
         file: rel,
@@ -379,12 +359,10 @@ export const checkInvariants = async (
     //    prose as load-bearing — link text, page titles and search suggestions
     //    are all page-supplied and all end up inside our own overlay — and
     //    nothing enforced it. `textContent` on the parts is the only way in.
-    for (
-      const hit of scan(
-        contents,
-        /\.(inner|outer)HTML\b|insertAdjacentHTML\s*\(|createContextualFragment\s*\(|\bsrcdoc\s*=/g,
-      )
-    ) {
+    for (const hit of scan(
+      contents,
+      /\.(inner|outer)HTML\b|insertAdjacentHTML\s*\(|createContextualFragment\s*\(|\bsrcdoc\s*=/g,
+    )) {
       violations.push({
         rule: "no-html-sinks",
         file: rel,
@@ -400,8 +378,7 @@ export const checkInvariants = async (
     violations.push({
       rule: "bundle-budget",
       file: "dist/vimium-webkit.user.js",
-      message: `bundle is ${bundleBytes} bytes, over the ` +
-        `${BUNDLE_BUDGET_BYTES}-byte budget`,
+      message: `bundle is ${bundleBytes} bytes, over the ` + `${BUNDLE_BUDGET_BYTES}-byte budget`,
     });
   }
 
@@ -416,8 +393,7 @@ export const checkInvariants = async (
     violations.push({
       rule: "version-match",
       file: "build/metadata.ts",
-      message:
-        `metadata @version does not match package.json (${input.declaredVersion})`,
+      message: `metadata @version does not match package.json (${input.declaredVersion})`,
     });
   }
 
@@ -470,12 +446,10 @@ export const checkInvariants = async (
   //
   //     Scanned in the code with comments and strings blanked, so prose about
   //     an "in-process channel" does not fire it.
-  for (
-    const hit of scan(
-      input.code,
-      /(?<![\w$.])(process|Buffer|__dirname|__filename)(?![\w$])|(?<![\w$.])globalThis\s*\??\.\s*(process|Buffer)(?![\w$])|(?<![\w$.])global\s*[.[]|(?<![\w$.])require\s*\(/g,
-    )
-  ) {
+  for (const hit of scan(
+    input.code,
+    /(?<![\w$.])(process|Buffer|__dirname|__filename)(?![\w$])|(?<![\w$.])globalThis\s*\??\.\s*(process|Buffer)(?![\w$])|(?<![\w$.])global\s*[.[]|(?<![\w$.])require\s*\(/g,
+  )) {
     violations.push({
       rule: "no-node-globals",
       file: "dist/vimium-webkit.user.js",
@@ -549,11 +523,9 @@ const checkCommandBodies = async (
       const name = match[1];
       if (name !== undefined) registered.add(name);
     }
-    for (
-      const match of code.matchAll(
-        /(?:^|[\s{,])"?([A-Za-z][\w.-]*)"?\s*:\s*(?:\(|function|Effect|[A-Za-z_$][\w$]*\s*\()/g,
-      )
-    ) {
+    for (const match of code.matchAll(
+      /(?:^|[\s{,])"?([A-Za-z][\w.-]*)"?\s*:\s*(?:\(|function|Effect|[A-Za-z_$][\w$]*\s*\()/g,
+    )) {
       const name = match[1];
       if (name !== undefined) registered.add(name);
     }
@@ -587,20 +559,20 @@ const checkCommandBodies = async (
  * The catalogue is imported and read, and not matched with a pattern, so a
  * command that arrives by any route is covered.
  */
-const checkCommandTiers = async (
-  root: string,
-): Promise<readonly Violation[]> => {
+const checkCommandTiers = async (root: string): Promise<readonly Violation[]> => {
   const file = "src/domain/Command.ts";
   const violations: Violation[] = [];
   const module = await import(pathToFileURL(`${root}/${file}`).href);
   const catalogue: unknown = (module as Record<string, unknown>)["COMMANDS"];
 
   if (typeof catalogue !== "object" || catalogue === null) {
-    return [{
-      rule: "command-tiers",
-      file,
-      message: "COMMANDS is not exported",
-    }];
+    return [
+      {
+        rule: "command-tiers",
+        file,
+        message: "COMMANDS is not exported",
+      },
+    ];
   }
 
   for (const [key, entry] of Object.entries(catalogue)) {
@@ -647,10 +619,9 @@ const checkCommandTiers = async (
 
 export const formatViolations = (violations: readonly Violation[]): string =>
   violations
-    .map((violation) =>
-      `  ${violation.rule}: ${violation.file}` +
-      `${
-        violation.line === undefined ? "" : `:${violation.line}`
-      } — ${violation.message}`
+    .map(
+      (violation) =>
+        `  ${violation.rule}: ${violation.file}` +
+        `${violation.line === undefined ? "" : `:${violation.line}`} — ${violation.message}`,
     )
     .join("\n");

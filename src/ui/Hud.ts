@@ -78,10 +78,7 @@ export interface HudPromptOptions<R = never> {
    * does nothing more with it. This body must not suspend, because
    * `preventDefault` works only inside the dispatch of the browser.
    */
-  readonly onKeydown?: (
-    event: KeyboardEvent,
-    value: string,
-  ) => Effect.Effect<boolean, never, R>;
+  readonly onKeydown?: (event: KeyboardEvent, value: string) => Effect.Effect<boolean, never, R>;
 }
 
 export interface HudLine {
@@ -168,410 +165,388 @@ const asKeyboardEvent = (event: Event): Option.Option<KeyboardEvent> =>
 const cancelsPrompt = (event: KeyboardEvent): boolean =>
   event.key === "Escape" || (event.ctrlKey && event.key === "[");
 
-export class Hud extends Context.Service<Hud, {
-  readonly show: (text: string, durationMs?: number) => Effect.Effect<void>;
-  readonly error: (text: string) => Effect.Effect<void>;
-  readonly hide: Effect.Effect<void>;
-  /** Ask the user for a line of text. `None` when the user cancels. */
-  readonly prompt: <R>(
-    options: HudPromptOptions<R>,
-  ) => Effect.Effect<Option.Option<string>, never, R>;
-  readonly ownsFocus: (target: EventTarget | null) => boolean;
-}>()("vimium/ui/Hud") {
-  static readonly layer: Layer.Layer<
-    Hud,
-    never,
-    Ui | Dom | Settings | Modes | Keyboard | Report
-  > = Layer.effect(
-    Hud,
-    Effect.gen(function*() {
-      const ui = yield* Ui;
-      const dom = yield* Dom;
-      const settings = yield* Settings;
-      const modes = yield* Modes;
-      const keyboard = yield* Keyboard;
-      const report = yield* Report;
+export class Hud extends Context.Service<
+  Hud,
+  {
+    readonly show: (text: string, durationMs?: number) => Effect.Effect<void>;
+    readonly error: (text: string) => Effect.Effect<void>;
+    readonly hide: Effect.Effect<void>;
+    /** Ask the user for a line of text. `None` when the user cancels. */
+    readonly prompt: <R>(
+      options: HudPromptOptions<R>,
+    ) => Effect.Effect<Option.Option<string>, never, R>;
+    readonly ownsFocus: (target: EventTarget | null) => boolean;
+  }
+>()("vimium/ui/Hud") {
+  static readonly layer: Layer.Layer<Hud, never, Ui | Dom | Settings | Modes | Keyboard | Report> =
+    Layer.effect(
+      Hud,
+      Effect.gen(function* () {
+        const ui = yield* Ui;
+        const dom = yield* Dom;
+        const settings = yield* Settings;
+        const modes = yield* Modes;
+        const keyboard = yield* Keyboard;
+        const report = yield* Report;
 
-      const doc = dom.document;
-      const hudLayer = yield* ui.layer("hud");
+        const doc = dom.document;
+        const hudLayer = yield* ui.layer("hud");
 
-      // The HUD layer stays in the accessibility tree for the whole session.
-      // A live region must exist before its text changes, or the change is
-      // never announced. Both regions are empty while the HUD says nothing,
-      // and the other layers stay hidden, so this adds no noise for a user who
-      // reads the page. The host therefore keeps `aria-hidden` off from here
-      // to the end of the session.
-      yield* ui.expose(hudLayer);
+        // The HUD layer stays in the accessibility tree for the whole session.
+        // A live region must exist before its text changes, or the change is
+        // never announced. Both regions are empty while the HUD says nothing,
+        // and the other layers stay hidden, so this adds no noise for a user who
+        // reads the page. The host therefore keeps `aria-hidden` off from here
+        // to the end of the session.
+        yield* ui.expose(hudLayer);
 
-      const element = yield* Effect.acquireRelease(
-        Effect.sync(() => {
-          const div = doc.createElement("div");
-          div.className = "vw-hud";
-          div.dataset["visible"] = "false";
-          div.dataset["tone"] = "info";
-          hudLayer.appendChild(div);
-          return div;
-        }),
-        (div) =>
+        const element = yield* Effect.acquireRelease(
           Effect.sync(() => {
-            div.remove();
+            const div = doc.createElement("div");
+            div.className = "vw-hud";
+            div.dataset["visible"] = "false";
+            div.dataset["tone"] = "info";
+            hudLayer.appendChild(div);
+            return div;
           }),
-      );
-
-      const regions = yield* Effect.acquireRelease(
-        Effect.sync(() => {
-          // Two regions, built once, and never changed again. The one line of
-          // the HUD is a status message: a mode name, a pending key sequence,
-          // a count, or a failure. A reader keeps the politeness that a region
-          // had when it entered the tree, so a region whose `aria-live`
-          // changed with its text could speak an error politely, or not at
-          // all. `aria-atomic` makes a reader speak the whole line instead of
-          // the characters that changed.
-          const make = (role: string, urgency: string): HTMLSpanElement => {
-            const span = doc.createElement("span");
-            span.setAttribute("role", role);
-            span.setAttribute("aria-live", urgency);
-            span.setAttribute("aria-atomic", "true");
-            element.appendChild(span);
-            return span;
-          };
-          return {
-            polite: make("status", "polite"),
-            urgent: make("alert", "assertive"),
-          };
-        }),
-        (built) =>
-          Effect.sync(() => {
-            built.polite.remove();
-            built.urgent.remove();
-          }),
-      );
-
-      /** Put the line in the region that fits its tone, and clear the other. */
-      const writeLine = (line: Option.Option<HudLine>): void => {
-        const text = regionText(line);
-        regions.polite.textContent = text.polite;
-        regions.urgent.textContent = text.urgent;
-      };
-
-      const state = yield* Ref.make<HudState>(EMPTY_STATE);
-      const nextPromptId = yield* Ref.make(0);
-      const timer = yield* FiberHandle.make<void, never>();
-
-      const render: Effect.Effect<void> = Effect.gen(function*() {
-        const current = yield* Ref.get(state);
-        // The host can be gone: a single-page application replaces the
-        // document element, and a hostile page removes what it can name. A
-        // message that nobody sees is worse than no message.
-        yield* ui.ensureAttached;
-        yield* Effect.sync(() => {
-          if (Option.isSome(current.prompt)) {
-            // The message slot sits beside the field, so an error that
-            // arrives during a search stays on screen instead of vanishing.
-            const line = current.transient;
-            writeLine(line);
-            element.dataset["tone"] = Option.isSome(line)
-              ? line.value.tone
-              : "info";
-            element.dataset["visible"] = "true";
-            current.prompt.value.status.textContent = statusText(current);
-            return;
-          }
-          const line = visibleLine(current);
-          writeLine(line);
-          if (Option.isNone(line)) {
-            element.dataset["visible"] = "false";
-            return;
-          }
-          element.dataset["tone"] = line.value.tone;
-          element.dataset["visible"] = "true";
-        });
-      });
-
-      const patch = (
-        change: (current: HudState) => HudState,
-      ): Effect.Effect<void> =>
-        Effect.andThen(Ref.update(state, change), render);
-
-      /**
-       * Take the message away after `durationMs`.
-       *
-       * A fiber that sleeps, and not a timeout. The handle holds one fiber, so
-       * a new message interrupts the one before it, and the layer scope
-       * interrupts the last one.
-       */
-      const arm = Effect.fn("Hud.arm")(function*(durationMs: number) {
-        if (durationMs <= 0) {
-          yield* FiberHandle.clear(timer);
-          return;
-        }
-        yield* FiberHandle.run(
-          timer,
-          Effect.andThen(
-            Effect.sleep(durationMs),
-            patch((current) => ({ ...current, transient: Option.none() })),
-          ),
+          (div) =>
+            Effect.sync(() => {
+              div.remove();
+            }),
         );
-      });
 
-      const draw = Effect.fn("Hud.draw")(
-        function*(line: HudLine, durationMs: number) {
+        const regions = yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            // Two regions, built once, and never changed again. The one line of
+            // the HUD is a status message: a mode name, a pending key sequence,
+            // a count, or a failure. A reader keeps the politeness that a region
+            // had when it entered the tree, so a region whose `aria-live`
+            // changed with its text could speak an error politely, or not at
+            // all. `aria-atomic` makes a reader speak the whole line instead of
+            // the characters that changed.
+            const make = (role: string, urgency: string): HTMLSpanElement => {
+              const span = doc.createElement("span");
+              span.setAttribute("role", role);
+              span.setAttribute("aria-live", urgency);
+              span.setAttribute("aria-atomic", "true");
+              element.appendChild(span);
+              return span;
+            };
+            return {
+              polite: make("status", "polite"),
+              urgent: make("alert", "assertive"),
+            };
+          }),
+          (built) =>
+            Effect.sync(() => {
+              built.polite.remove();
+              built.urgent.remove();
+            }),
+        );
+
+        /** Put the line in the region that fits its tone, and clear the other. */
+        const writeLine = (line: Option.Option<HudLine>): void => {
+          const text = regionText(line);
+          regions.polite.textContent = text.polite;
+          regions.urgent.textContent = text.urgent;
+        };
+
+        const state = yield* Ref.make<HudState>(EMPTY_STATE);
+        const nextPromptId = yield* Ref.make(0);
+        const timer = yield* FiberHandle.make<void, never>();
+
+        const render: Effect.Effect<void> = Effect.gen(function* () {
+          const current = yield* Ref.get(state);
+          // The host can be gone: a single-page application replaces the
+          // document element, and a hostile page removes what it can name. A
+          // message that nobody sees is worse than no message.
+          yield* ui.ensureAttached;
+          yield* Effect.sync(() => {
+            if (Option.isSome(current.prompt)) {
+              // The message slot sits beside the field, so an error that
+              // arrives during a search stays on screen instead of vanishing.
+              const line = current.transient;
+              writeLine(line);
+              element.dataset["tone"] = Option.isSome(line) ? line.value.tone : "info";
+              element.dataset["visible"] = "true";
+              current.prompt.value.status.textContent = statusText(current);
+              return;
+            }
+            const line = visibleLine(current);
+            writeLine(line);
+            if (Option.isNone(line)) {
+              element.dataset["visible"] = "false";
+              return;
+            }
+            element.dataset["tone"] = line.value.tone;
+            element.dataset["visible"] = "true";
+          });
+        });
+
+        const patch = (change: (current: HudState) => HudState): Effect.Effect<void> =>
+          Effect.andThen(Ref.update(state, change), render);
+
+        /**
+         * Take the message away after `durationMs`.
+         *
+         * A fiber that sleeps, and not a timeout. The handle holds one fiber, so
+         * a new message interrupts the one before it, and the layer scope
+         * interrupts the last one.
+         */
+        const arm = Effect.fn("Hud.arm")(function* (durationMs: number) {
+          if (durationMs <= 0) {
+            yield* FiberHandle.clear(timer);
+            return;
+          }
+          yield* FiberHandle.run(
+            timer,
+            Effect.andThen(
+              Effect.sleep(durationMs),
+              patch((current) => ({ ...current, transient: Option.none() })),
+            ),
+          );
+        });
+
+        const draw = Effect.fn("Hud.draw")(function* (line: HudLine, durationMs: number) {
           yield* patch((current) => ({
             ...current,
             transient: Option.some(line),
           }));
           yield* arm(durationMs);
-        },
-      );
+        });
 
-      // `currentUnsafe`, because a command body reaches this from the key
-      // path, and nothing on that path may suspend. Every other step of `show`
-      // is a `Ref` write or a fork.
-      const show = Effect.fn("Hud.show")(
-        function*(text: string, durationMs: number = DEFAULT_HUD_DURATION_MS) {
+        // `currentUnsafe`, because a command body reaches this from the key
+        // path, and nothing on that path may suspend. Every other step of `show`
+        // is a `Ref` write or a fork.
+        const show = Effect.fn("Hud.show")(function* (
+          text: string,
+          durationMs: number = DEFAULT_HUD_DURATION_MS,
+        ) {
           if (settings.currentUnsafe().hideHud) return;
           yield* draw({ text, tone: "info" }, durationMs);
-        },
-      );
+        });
 
-      // An error ignores `hideHud`. A refused capability that says nothing is
-      // the exact failure that `Report` exists to prevent.
-      const error = (text: string): Effect.Effect<void> =>
-        draw({ text, tone: "error" }, ERROR_HUD_DURATION_MS);
+        // An error ignores `hideHud`. A refused capability that says nothing is
+        // the exact failure that `Report` exists to prevent.
+        const error = (text: string): Effect.Effect<void> =>
+          draw({ text, tone: "error" }, ERROR_HUD_DURATION_MS);
 
-      const hide = Effect.gen(function*() {
-        const current = yield* Ref.get(state);
-        // A prompt owns the line. Hiding it would leave a modal that has the
-        // keyboard and no place on screen.
-        if (Option.isSome(current.prompt)) return;
-        yield* FiberHandle.clear(timer);
-        yield* patch((one) => ({ ...one, transient: Option.none() }));
-      });
+        const hide = Effect.gen(function* () {
+          const current = yield* Ref.get(state);
+          // A prompt owns the line. Hiding it would leave a modal that has the
+          // keyboard and no place on screen.
+          if (Option.isSome(current.prompt)) return;
+          yield* FiberHandle.clear(timer);
+          yield* patch((one) => ({ ...one, transient: Option.none() }));
+        });
 
-      // ---------------------------------------------------------------
-      // Derived state
-      // ---------------------------------------------------------------
+        // ---------------------------------------------------------------
+        // Derived state
+        // ---------------------------------------------------------------
 
-      yield* Effect.forkScoped(
-        Stream.runForEach(
-          SubscriptionRef.changes(modes.indicator),
-          (value) =>
+        yield* Effect.forkScoped(
+          Stream.runForEach(SubscriptionRef.changes(modes.indicator), (value) =>
             patch((current) => ({
               ...current,
               indicator: Option.fromNullishOr(value),
             })),
-        ),
-      );
+          ),
+        );
 
-      yield* Effect.forkScoped(
-        Stream.runForEach(
-          SubscriptionRef.changes(keyboard.pending),
-          (value) =>
+        yield* Effect.forkScoped(
+          Stream.runForEach(SubscriptionRef.changes(keyboard.pending), (value) =>
             patch((current) => ({
               ...current,
               pending: Option.fromNullishOr(value),
             })),
-        ),
-      );
+          ),
+        );
 
-      // The one route from a failure to the user. A storage failure, a
-      // clipboard refusal and a command failure all arrive here.
-      yield* Effect.forkScoped(
-        Stream.runForEach(
-          report.messages,
-          (message) =>
-            message.level === "error"
-              ? error(message.text)
-              : show(message.text),
-        ),
-      );
+        // The one route from a failure to the user. A storage failure, a
+        // clipboard refusal and a command failure all arrive here.
+        yield* Effect.forkScoped(
+          Stream.runForEach(report.messages, (message) =>
+            message.level === "error" ? error(message.text) : show(message.text),
+          ),
+        );
 
-      // ---------------------------------------------------------------
-      // The prompt
-      // ---------------------------------------------------------------
+        // ---------------------------------------------------------------
+        // The prompt
+        // ---------------------------------------------------------------
 
-      const promptIn = <R>(
-        options: HudPromptOptions<R>,
-      ): Effect.Effect<Option.Option<string>, never, R | Scope.Scope> =>
-        Effect.gen(function*() {
-          const done = yield* Deferred.make<Option.Option<string>>();
-          const settle = (
-            value: Option.Option<string>,
-          ): Effect.Effect<void> =>
-            Effect.asVoid(Deferred.succeed(done, value));
+        const promptIn = <R>(
+          options: HudPromptOptions<R>,
+        ): Effect.Effect<Option.Option<string>, never, R | Scope.Scope> =>
+          Effect.gen(function* () {
+            const done = yield* Deferred.make<Option.Option<string>>();
+            const settle = (value: Option.Option<string>): Effect.Effect<void> =>
+              Effect.asVoid(Deferred.succeed(done, value));
 
-          // A second prompt replaces the first one. Each prompt owns its own
-          // container, so the removal of the old one cannot take the new one
-          // with it.
-          const previous = (yield* Ref.get(state)).prompt;
-          if (Option.isSome(previous)) yield* previous.value.cancel;
-          yield* FiberHandle.clear(timer);
+            // A second prompt replaces the first one. Each prompt owns its own
+            // container, so the removal of the old one cannot take the new one
+            // with it.
+            const previous = (yield* Ref.get(state)).prompt;
+            if (Option.isSome(previous)) yield* previous.value.cancel;
+            yield* FiberHandle.clear(timer);
 
-          const id = yield* Ref.modify(nextPromptId, (n) => [n, n + 1]);
+            const id = yield* Ref.modify(nextPromptId, (n) => [n, n + 1]);
 
-          const parts = yield* Effect.acquireRelease(
-            Effect.sync(() => {
-              const container = doc.createElement("span");
-              // A group with a name, so that a reader says what the field
-              // belongs to before it reads the field itself.
-              container.setAttribute("role", "group");
-
-              const label = doc.createElement("span");
-              label.className = "vw-hud-label";
-              label.textContent = options.label;
-              // The visible label is one character, and the field carries the
-              // same name in words. A reader that spoke both would say the
-              // punctuation twice.
-              label.setAttribute("aria-hidden", "true");
-
-              const input = doc.createElement("input");
-              input.className = "vw-hud-input";
-              input.type = "text";
-              input.value = options.initialValue ?? "";
-              input.placeholder = options.placeholder ?? "";
-              // Every autofill and correction aid harms a command line, and
-              // iOS turns all of them on by default.
-              input.autocapitalize = "off";
-              input.autocomplete = "off";
-              input.spellcheck = false;
-              input.setAttribute("autocorrect", "off");
-
-              const status = doc.createElement("span");
-              status.className = "vw-hud-count";
-              // The status beside the field: the mode indicator, or the
-              // half-typed keys. The id is unique in this shadow root, and the
-              // description makes a reader say the status after the value of
-              // the field.
-              const statusId = `vw-hud-status-${id}`;
-              status.id = statusId;
-              status.setAttribute("aria-live", "polite");
-              status.setAttribute("aria-atomic", "true");
-
-              const name = options.ariaLabel ?? options.label;
-              container.setAttribute("aria-label", name);
-              input.setAttribute("aria-label", name);
-              input.setAttribute("aria-describedby", statusId);
-
-              container.append(label, input, status);
-              element.appendChild(container);
-              return { container, input, status };
-            }),
-            (built) =>
+            const parts = yield* Effect.acquireRelease(
               Effect.sync(() => {
-                built.container.remove();
+                const container = doc.createElement("span");
+                // A group with a name, so that a reader says what the field
+                // belongs to before it reads the field itself.
+                container.setAttribute("role", "group");
+
+                const label = doc.createElement("span");
+                label.className = "vw-hud-label";
+                label.textContent = options.label;
+                // The visible label is one character, and the field carries the
+                // same name in words. A reader that spoke both would say the
+                // punctuation twice.
+                label.setAttribute("aria-hidden", "true");
+
+                const input = doc.createElement("input");
+                input.className = "vw-hud-input";
+                input.type = "text";
+                input.value = options.initialValue ?? "";
+                input.placeholder = options.placeholder ?? "";
+                // Every autofill and correction aid harms a command line, and
+                // iOS turns all of them on by default.
+                input.autocapitalize = "off";
+                input.autocomplete = "off";
+                input.spellcheck = false;
+                input.setAttribute("autocorrect", "off");
+
+                const status = doc.createElement("span");
+                status.className = "vw-hud-count";
+                // The status beside the field: the mode indicator, or the
+                // half-typed keys. The id is unique in this shadow root, and the
+                // description makes a reader say the status after the value of
+                // the field.
+                const statusId = `vw-hud-status-${id}`;
+                status.id = statusId;
+                status.setAttribute("aria-live", "polite");
+                status.setAttribute("aria-atomic", "true");
+
+                const name = options.ariaLabel ?? options.label;
+                container.setAttribute("aria-label", name);
+                input.setAttribute("aria-label", name);
+                input.setAttribute("aria-describedby", statusId);
+
+                container.append(label, input, status);
+                element.appendChild(container);
+                return { container, input, status };
               }),
-          );
+              (built) =>
+                Effect.sync(() => {
+                  built.container.remove();
+                }),
+            );
 
-          // The HUD layer must take pointer events while the prompt is live,
-          // so that a click into the field does not fall through to the page.
-          yield* acceptPointerEvents(hudLayer);
+            // The HUD layer must take pointer events while the prompt is live,
+            // so that a click into the field does not fall through to the page.
+            yield* acceptPointerEvents(hudLayer);
 
-          yield* patch((current) => ({
-            ...current,
-            prompt: Option.some({
-              id,
-              status: parts.status,
-              cancel: settle(Option.none()),
-            }),
-          }));
+            yield* patch((current) => ({
+              ...current,
+              prompt: Option.some({
+                id,
+                status: parts.status,
+                cancel: settle(Option.none()),
+              }),
+            }));
 
-          yield* Effect.addFinalizer(() =>
-            patch((current) =>
-              Option.isSome(current.prompt) && current.prompt.value.id === id
-                ? {
-                  ...current,
-                  transient: Option.none(),
-                  prompt: Option.none(),
-                }
-                : current
-            )
-          );
+            yield* Effect.addFinalizer(() =>
+              patch((current) =>
+                Option.isSome(current.prompt) && current.prompt.value.id === id
+                  ? {
+                      ...current,
+                      transient: Option.none(),
+                      prompt: Option.none(),
+                    }
+                  : current,
+              ),
+            );
 
-          const inputFiber = yield* FiberHandle.make<void, never>();
+            const inputFiber = yield* FiberHandle.make<void, never>();
 
-          if (options.onInput !== undefined) {
-            const onInput = options.onInput;
-            yield* dom.listenOn(parts.input, "input", () =>
-              // Forked, because a body such as the live search of find can
-              // suspend. A newer keystroke interrupts the older search.
-              Effect.asVoid(
-                FiberHandle.run(inputFiber, onInput(parts.input.value)),
-              ));
-          }
+            if (options.onInput !== undefined) {
+              const onInput = options.onInput;
+              yield* dom.listenOn(parts.input, "input", () =>
+                // Forked, because a body such as the live search of find can
+                // suspend. A newer keystroke interrupts the older search.
+                Effect.asVoid(FiberHandle.run(inputFiber, onInput(parts.input.value))),
+              );
+            }
 
-          // The capture phase, and `stopPropagation` for every key: the prompt
-          // owns the keyboard while it is open, and the handler stack must not
-          // see these events at all.
-          yield* dom.listenOn(
-            parts.input,
-            "keydown",
-            (event) =>
-              Effect.gen(function*() {
-                event.stopPropagation();
-                const key = asKeyboardEvent(event);
-                if (Option.isNone(key)) return;
-                if (options.onKeydown !== undefined) {
-                  const taken = yield* options.onKeydown(
-                    key.value,
-                    parts.input.value,
-                  );
-                  if (taken) {
+            // The capture phase, and `stopPropagation` for every key: the prompt
+            // owns the keyboard while it is open, and the handler stack must not
+            // see these events at all.
+            yield* dom.listenOn(
+              parts.input,
+              "keydown",
+              (event) =>
+                Effect.gen(function* () {
+                  event.stopPropagation();
+                  const key = asKeyboardEvent(event);
+                  if (Option.isNone(key)) return;
+                  if (options.onKeydown !== undefined) {
+                    const taken = yield* options.onKeydown(key.value, parts.input.value);
+                    if (taken) {
+                      event.preventDefault();
+                      return;
+                    }
+                  }
+                  if (key.value.key === "Enter") {
                     event.preventDefault();
+                    yield* settle(Option.some(parts.input.value));
                     return;
                   }
-                }
-                if (key.value.key === "Enter") {
-                  event.preventDefault();
-                  yield* settle(Option.some(parts.input.value));
-                  return;
-                }
-                if (cancelsPrompt(key.value)) {
-                  event.preventDefault();
-                  yield* settle(Option.none());
-                }
-              }),
-            { capture: true },
-          );
-
-          yield* dom.listenOn(parts.input, "blur", () =>
-            // The page or the user moved on. Treat it as a cancel, and do not
-            // leave an invisible modal that holds the keyboard.
-            settle(Option.none()));
-
-          yield* Effect.sync(() => {
-            // `preventScroll` matters. Without it the page scrolls to the
-            // overlay, which sits at the bottom of the viewport.
-            parts.input.focus({ preventScroll: true });
-            parts.input.setSelectionRange(
-              parts.input.value.length,
-              parts.input.value.length,
+                  if (cancelsPrompt(key.value)) {
+                    event.preventDefault();
+                    yield* settle(Option.none());
+                  }
+                }),
+              { capture: true },
             );
+
+            yield* dom.listenOn(parts.input, "blur", () =>
+              // The page or the user moved on. Treat it as a cancel, and do not
+              // leave an invisible modal that holds the keyboard.
+              settle(Option.none()),
+            );
+
+            yield* Effect.sync(() => {
+              // `preventScroll` matters. Without it the page scrolls to the
+              // overlay, which sits at the bottom of the viewport.
+              parts.input.focus({ preventScroll: true });
+              parts.input.setSelectionRange(parts.input.value.length, parts.input.value.length);
+            });
+
+            return yield* Deferred.await(done);
           });
 
-          return yield* Deferred.await(done);
+        const prompt = <R>(
+          options: HudPromptOptions<R>,
+        ): Effect.Effect<Option.Option<string>, never, R> => Effect.scoped(promptIn(options));
+
+        return Hud.of({
+          show,
+          error,
+          hide,
+          prompt,
+          /**
+           * Does this target belong to the overlay?
+           *
+           * Given to the UI root, which knows about the retargeting of a closed
+           * shadow root. It is wider than "the prompt has focus" on purpose:
+           * every caller asks the same question. Insert mode must not claim a
+           * field of ours, and every modal mode must know whether a key press
+           * was aimed at its own input or at the page.
+           */
+          ownsFocus: (target) => ui.owns(target),
         });
-
-      const prompt = <R>(
-        options: HudPromptOptions<R>,
-      ): Effect.Effect<Option.Option<string>, never, R> =>
-        Effect.scoped(promptIn(options));
-
-      return Hud.of({
-        show,
-        error,
-        hide,
-        prompt,
-        /**
-         * Does this target belong to the overlay?
-         *
-         * Given to the UI root, which knows about the retargeting of a closed
-         * shadow root. It is wider than "the prompt has focus" on purpose:
-         * every caller asks the same question. Insert mode must not claim a
-         * field of ours, and every modal mode must know whether a key press
-         * was aimed at its own input or at the page.
-         */
-        ownsFocus: (target) => ui.owns(target),
-      });
-    }),
-  );
+      }),
+    );
 }

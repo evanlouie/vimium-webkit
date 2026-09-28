@@ -70,10 +70,7 @@ export interface GmXhrHandle {
  */
 export interface GmNamespace {
   readonly info?: unknown;
-  readonly getValue?: (
-    key: string,
-    defaultValue?: GmValue,
-  ) => Promise<GmValue | undefined>;
+  readonly getValue?: (key: string, defaultValue?: GmValue) => Promise<GmValue | undefined>;
   readonly setValue?: (key: string, value: GmValue) => Promise<void>;
   readonly deleteValue?: (key: string) => Promise<void>;
   readonly openInTab?: (
@@ -90,10 +87,7 @@ export interface GmNamespace {
     accessKey?: string,
   ) => unknown;
   readonly addStyle?: (css: string) => unknown;
-  readonly addElement?: (
-    tagName: string,
-    attributes: Readonly<Record<string, string>>,
-  ) => Element;
+  readonly addElement?: (tagName: string, attributes: Readonly<Record<string, string>>) => Element;
 }
 
 declare global {
@@ -104,10 +98,7 @@ declare global {
   // `unknown` on purpose: the shape is manager-defined, so it gets validated.
   const GM_info: unknown;
 
-  function GM_getValue(
-    key: string,
-    defaultValue?: GmValue,
-  ): GmValue | undefined;
+  function GM_getValue(key: string, defaultValue?: GmValue): GmValue | undefined;
   function GM_setValue(key: string, value: GmValue): void;
   function GM_deleteValue(key: string): void;
   function GM_addValueChangeListener(

@@ -26,9 +26,7 @@ const matches = (pattern: string, url: string): boolean | null => {
   return Option.isNone(compiled) ? null : compiled.value(url);
 };
 
-const rules = (
-  ...entries: readonly ExclusionRule[]
-): readonly ExclusionRule[] => entries;
+const rules = (...entries: readonly ExclusionRule[]): readonly ExclusionRule[] => entries;
 
 describe("Exclusion", () => {
   it.effect("uses `*` as the only wildcard and anchors both ends", () =>
@@ -37,39 +35,27 @@ describe("Exclusion", () => {
       assert.strictEqual(matches(pattern, "https://example.com/a/b"), true);
       assert.strictEqual(matches(pattern, "https://example.com/"), true);
       // Anchoring matters. Without it an attacker chooses the host.
-      assert.strictEqual(
-        matches(pattern, "https://evil.example.com.co/"),
-        false,
-      );
+      assert.strictEqual(matches(pattern, "https://evil.example.com.co/"), false);
       assert.strictEqual(matches(pattern, "http://example.com/"), false);
-    }));
+    }),
+  );
 
   it.effect("matches interior wildcards in order", () =>
     Effect.sync(() => {
       const pattern = "https://*.example.com/*/edit";
-      assert.strictEqual(
-        matches(pattern, "https://a.example.com/doc/edit"),
-        true,
-      );
-      assert.strictEqual(
-        matches(pattern, "https://a.example.com/edit/doc"),
-        false,
-      );
-      assert.strictEqual(
-        matches(pattern, "https://a.example.com/x/y/edit"),
-        true,
-      );
-    }));
+      assert.strictEqual(matches(pattern, "https://a.example.com/doc/edit"), true);
+      assert.strictEqual(matches(pattern, "https://a.example.com/edit/doc"), false);
+      assert.strictEqual(matches(pattern, "https://a.example.com/x/y/edit"), true);
+    }),
+  );
 
   it.effect("treats a pattern with no wildcard as an exact match", () =>
     Effect.sync(() => {
       const pattern = "https://example.com/only";
       assert.strictEqual(matches(pattern, "https://example.com/only"), true);
-      assert.strictEqual(
-        matches(pattern, "https://example.com/only/more"),
-        false,
-      );
-    }));
+      assert.strictEqual(matches(pattern, "https://example.com/only/more"), false);
+    }),
+  );
 
   it.effect("cannot be made to backtrack by a glob", () =>
     Effect.sync(() => {
@@ -84,31 +70,32 @@ describe("Exclusion", () => {
 
       // Two orders of magnitude of slack. The point is "not seconds".
       assert.isBelow(elapsed, 200, `the glob match took ${elapsed}ms`);
-    }));
+    }),
+  );
 
   it.effect("honours a pattern that is delimited by slashes", () =>
     Effect.sync(() => {
       const pattern = "/https://(mail|inbox)\\.google\\.com/.*/";
       assert.strictEqual(matches(pattern, "https://mail.google.com/u/0"), true);
-      assert.strictEqual(
-        matches(pattern, "https://drive.google.com/u/0"),
-        false,
-      );
-    }));
+      assert.strictEqual(matches(pattern, "https://drive.google.com/u/0"), false);
+    }),
+  );
 
   it.effect("keeps a regex metacharacter literal inside a glob", () =>
     Effect.sync(() => {
       const pattern = "https://example.com/a+b";
       assert.strictEqual(matches(pattern, "https://example.com/a+b"), true);
       assert.strictEqual(matches(pattern, "https://example.com/aaab"), false);
-    }));
+    }),
+  );
 
   it.effect("drops a malformed pattern instead of failing", () =>
     Effect.sync(() => {
       assert.isTrue(Option.isNone(compilePattern("/[unclosed/")));
       assert.isTrue(Option.isNone(compilePattern("   ")));
       assert.isTrue(Option.isNone(compilePattern(`/${"a".repeat(2000)}/`)));
-    }));
+    }),
+  );
 
   it.effect("drops a raw expression that can backtrack", () =>
     Effect.sync(() => {
@@ -125,16 +112,11 @@ describe("Exclusion", () => {
         "/(\\w+\\s?)*$/",
       ];
       for (const pattern of slow) {
-        assert.isTrue(
-          Option.isNone(compilePattern(pattern)),
-          `${pattern} compiled`,
-        );
-        assert.isTrue(
-          Option.isNone(patternToRegExp(pattern)),
-          `${pattern} was still described`,
-        );
+        assert.isTrue(Option.isNone(compilePattern(pattern)), `${pattern} compiled`);
+        assert.isTrue(Option.isNone(patternToRegExp(pattern)), `${pattern} was still described`);
       }
-    }));
+    }),
+  );
 
   it.effect("keeps a raw expression that matches in linear time", () =>
     Effect.sync(() => {
@@ -157,13 +139,15 @@ describe("Exclusion", () => {
       }
       const elapsed = performance.now() - started;
       assert.isBelow(elapsed, 200, `the match took ${elapsed}ms`);
-    }));
+    }),
+  );
 
   it.effect("refuses an absurdly long URL instead of scanning it", () =>
     Effect.sync(() => {
       assert.strictEqual(matches("/.*/", "https://example.com/"), true);
       assert.strictEqual(matches("/.*/", "x".repeat(5000)), false);
-    }));
+    }),
+  );
 
   it.effect("keeps the rules that a user writes", () =>
     Effect.sync(() => {
@@ -172,10 +156,7 @@ describe("Exclusion", () => {
       // first one: the inner loop cannot take the dot that ends each
       // iteration, so the division into iterations is fixed.
       const wanted: ReadonlyArray<readonly [string, string]> = [
-        [
-          "/^https?://([a-z0-9-]+\\.)*example\\.com/.*$/",
-          "https://a.b.example.com/x",
-        ],
+        ["/^https?://([a-z0-9-]+\\.)*example\\.com/.*$/", "https://a.b.example.com/x"],
         ["/https://(?:\\w+\\.)+test/.*/", "https://a.b.test/x"],
         ["/https://\\d{1,3}(\\.\\d{1,3}){3}/.*/", "https://10.0.0.1/x"],
         ["/https://[a-z]+(-[a-z]+)*\\.test/.*/", "https://a-b-c.test/x"],
@@ -184,13 +165,12 @@ describe("Exclusion", () => {
       for (const [pattern, url] of wanted) {
         assert.isTrue(
           Option.isNone(patternProblem(pattern)),
-          `${pattern} was dropped: ${
-            Option.getOrElse(patternProblem(pattern), () => "")
-          }`,
+          `${pattern} was dropped: ${Option.getOrElse(patternProblem(pattern), () => "")}`,
         );
         assert.strictEqual(matches(pattern, url), true, pattern);
       }
-    }));
+    }),
+  );
 
   it.effect("says why it dropped a rule", () =>
     Effect.sync(() => {
@@ -200,22 +180,23 @@ describe("Exclusion", () => {
       const reason = patternProblem("/(a+)+$/");
       assert.deepEqual(
         reason,
-        Option.some(
-          "a quantifier whose body can grow past its own end can hang the page",
-        ),
+        Option.some("a quantifier whose body can grow past its own end can hang the page"),
       );
       assert.isTrue(Option.isSome(patternProblem("   ")));
       assert.isTrue(Option.isSome(patternProblem("/[unclosed/")));
       assert.isTrue(Option.isNone(patternProblem("https://example.com/*")));
-    }));
+    }),
+  );
 
   it.effect("lists every rule that it dropped", () =>
     Effect.sync(() => {
-      const set = makeExclusionSet(rules(
-        { pattern: "https://good.test/*", passKeys: "" },
-        { pattern: "/(a+)+$/", passKeys: "" },
-        { pattern: "/[unclosed/", passKeys: "" },
-      ));
+      const set = makeExclusionSet(
+        rules(
+          { pattern: "https://good.test/*", passKeys: "" },
+          { pattern: "/(a+)+$/", passKeys: "" },
+          { pattern: "/[unclosed/", passKeys: "" },
+        ),
+      );
 
       assert.strictEqual(set.size, 1);
       assert.deepEqual(
@@ -225,20 +206,17 @@ describe("Exclusion", () => {
       for (const rule of set.dropped) {
         assert.isAbove(rule.reason.length, 0, `${rule.pattern} gave no reason`);
       }
-    }));
+    }),
+  );
 
   it.effect("marks the line of every rule that is dropped", () =>
     Effect.sync(() => {
       // A rule that gives no matcher is dropped, and the page then stops being
       // excluded. Before this list the drop was silent, and a user saw an
       // active script on a site that they had turned off.
-      const text = [
-        "# a comment",
-        "https://example.com/*",
-        "/(a+)+$/ jk",
-        "",
-        "/[unclosed/",
-      ].join("\n");
+      const text = ["# a comment", "https://example.com/*", "/(a+)+$/ jk", "", "/[unclosed/"].join(
+        "\n",
+      );
 
       const problems = exclusionProblems(text);
       assert.strictEqual(problems.length, 2);
@@ -246,7 +224,8 @@ describe("Exclusion", () => {
       assert.include(problems[0] ?? "", "/(a+)+$/");
       assert.include(problems[0] ?? "", "can hang the page");
       assert.include(problems[1] ?? "", "line 5");
-    }));
+    }),
+  );
 
   it.effect("says nothing about the rules that a user writes", () =>
     Effect.sync(() => {
@@ -258,7 +237,8 @@ describe("Exclusion", () => {
       ].join("\n");
 
       assert.deepEqual(exclusionProblems(text), []);
-    }));
+    }),
+  );
 
   it.effect("reads the settings text as the settings dialog reads it", () =>
     Effect.sync(() => {
@@ -276,7 +256,8 @@ describe("Exclusion", () => {
           `the two readers disagree about ${JSON.stringify(text)}`,
         );
       }
-    }));
+    }),
+  );
 
   it.effect("describes a glob that holds two wildcards side by side", () =>
     Effect.sync(() => {
@@ -284,21 +265,16 @@ describe("Exclusion", () => {
       // and the safety check refuses that shape. A glob never backtracks, so
       // the check belongs to the raw form only, and a run of `*` collapses.
       for (const glob of ["**", "https://example.com/**", "a**b"]) {
-        assert.isTrue(
-          Option.isSome(compilePattern(glob)),
-          `${glob} gave no matcher`,
-        );
-        assert.isTrue(
-          Option.isSome(patternToRegExp(glob)),
-          `${glob} was not described`,
-        );
+        assert.isTrue(Option.isSome(compilePattern(glob)), `${glob} gave no matcher`);
+        assert.isTrue(Option.isSome(patternToRegExp(glob)), `${glob} was not described`);
       }
 
       const described = patternToRegExp("https://example.com/**");
       if (Option.isNone(described)) return;
       assert.isTrue(described.value.test("https://example.com/a/b"));
       assert.isFalse(described.value.test("https://evil.test/"));
-    }));
+    }),
+  );
 
   it.effect("still describes what a glob means", () =>
     Effect.sync(() => {
@@ -309,61 +285,69 @@ describe("Exclusion", () => {
       assert.isFalse(pattern.value.test("https://evil.example.com.co/"));
       assert.isTrue(Option.isNone(patternToRegExp("/[unclosed/")));
       assert.isTrue(Option.isNone(patternToRegExp("   ")));
-    }));
+    }),
+  );
 
   it.effect("leaves us fully enabled when no rule matches", () =>
     Effect.sync(() => {
-      const set = makeExclusionSet(
-        rules({ pattern: "https://example.com/*", passKeys: "" }),
-      );
+      const set = makeExclusionSet(rules({ pattern: "https://example.com/*", passKeys: "" }));
       assert.deepEqual(set.match("https://other.test/"), {
         enabled: true,
         passKeys: "",
       });
-    }));
+    }),
+  );
 
   it.effect("disables us entirely when passKeys is empty", () =>
     Effect.sync(() => {
-      const set = makeExclusionSet(
-        rules({ pattern: "https://mail.test/*", passKeys: "" }),
-      );
+      const set = makeExclusionSet(rules({ pattern: "https://mail.test/*", passKeys: "" }));
       assert.deepEqual(set.match("https://mail.test/inbox"), {
         enabled: false,
         passKeys: "",
       });
-    }));
+    }),
+  );
 
   it.effect("joins the pass keys of every rule that matches", () =>
     Effect.sync(() => {
-      const set = makeExclusionSet(rules(
-        { pattern: "https://app.test/*", passKeys: "jk" },
-        { pattern: "https://app.test/editor*", passKeys: "kl" },
-      ));
+      const set = makeExclusionSet(
+        rules(
+          { pattern: "https://app.test/*", passKeys: "jk" },
+          { pattern: "https://app.test/editor*", passKeys: "kl" },
+        ),
+      );
       const rule = set.match("https://app.test/editor/1");
       assert.isTrue(rule.enabled);
       assert.strictEqual([...rule.passKeys].sort().join(""), "jkl");
-    }));
+    }),
+  );
 
   it.effect("lets a full exclusion win over a partial one", () =>
     Effect.sync(() => {
       // This order makes "disable Vimium here" behave as the user expects.
-      const set = makeExclusionSet(rules(
-        { pattern: "https://app.test/*", passKeys: "jk" },
-        { pattern: "https://app.test/editor*", passKeys: "" },
-      ));
+      const set = makeExclusionSet(
+        rules(
+          { pattern: "https://app.test/*", passKeys: "jk" },
+          { pattern: "https://app.test/editor*", passKeys: "" },
+        ),
+      );
       assert.isFalse(set.match("https://app.test/editor/1").enabled);
-    }));
+    }),
+  );
 
   it.effect("does not count a rule whose pattern cannot compile", () =>
     Effect.sync(() => {
-      const set = makeExclusionSet(rules(
-        { pattern: "/[unclosed/", passKeys: "" },
-        { pattern: "/(a+)+$/", passKeys: "" },
-        { pattern: "https://app.test/*", passKeys: "j" },
-      ));
+      const set = makeExclusionSet(
+        rules(
+          { pattern: "/[unclosed/", passKeys: "" },
+          { pattern: "/(a+)+$/", passKeys: "" },
+          { pattern: "https://app.test/*", passKeys: "j" },
+        ),
+      );
       assert.strictEqual(set.size, 1);
       assert.strictEqual(set.match("https://app.test/x").passKeys, "j");
-    }));
+    }),
+  );
 
   it.effect("caches repeated lookups within a limit", () =>
     Effect.sync(() => {
@@ -374,7 +358,8 @@ describe("Exclusion", () => {
       // A single-page application makes unlimited URLs. The set must not grow
       // without a limit, and it must still answer correctly.
       assert.strictEqual(set.match("https://spa.test/#/route/0").passKeys, "j");
-    }));
+    }),
+  );
 
   it.effect("accepts only a single character as a pass key", () =>
     Effect.sync(() => {
@@ -383,5 +368,6 @@ describe("Exclusion", () => {
       assert.isFalse(isPassKey(rule, "l"));
       // `passKeys` is a set of characters, so `<c-j>` can never be in it.
       assert.isFalse(isPassKey(rule, "<c-j>"));
-    }));
+    }),
+  );
 });

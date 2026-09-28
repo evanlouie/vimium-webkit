@@ -81,11 +81,7 @@ const AXIS_PROPERTIES = {
   },
 } as const;
 
-const SCROLLABLE_OVERFLOW: ReadonlySet<string> = new Set([
-  "auto",
-  "scroll",
-  "overlay",
-]);
+const SCROLLABLE_OVERFLOW: ReadonlySet<string> = new Set(["auto", "scroll", "overlay"]);
 
 // ---------------------------------------------------------------------------
 // Pure geometry
@@ -98,21 +94,13 @@ const durationFor = (amount: number): number =>
 const readOffset = (element: Element, axis: ScrollAxis): number =>
   axis === "y" ? element.scrollTop : element.scrollLeft;
 
-const writeOffset = (
-  element: Element,
-  axis: ScrollAxis,
-  value: number,
-): void => {
+const writeOffset = (element: Element, axis: ScrollAxis, value: number): void => {
   if (axis === "y") element.scrollTop = value;
   else element.scrollLeft = value;
 };
 
 /** Apply one offset change, and answer how far the element truly moved. */
-const applyOffset = (
-  element: Element,
-  axis: ScrollAxis,
-  delta: number,
-): number => {
+const applyOffset = (element: Element, axis: ScrollAxis, delta: number): number => {
   const before = readOffset(element, axis);
   writeOffset(element, axis, before + delta);
   return readOffset(element, axis) - before;
@@ -236,9 +224,7 @@ const merge = (animation: Animation, amount: number): Animation => ({
   ...animation,
   origin: animation.applied,
   amount: animation.amount + amount,
-  duration: durationFor(
-    Math.abs(animation.amount + amount - animation.applied),
-  ),
+  duration: durationFor(Math.abs(animation.amount + amount - animation.applied)),
   elapsed: 0,
 });
 
@@ -268,110 +254,106 @@ const recalibrate = (calibration: number, animation: Animation): number => {
 // The service
 // ---------------------------------------------------------------------------
 
-export class Scroller extends Context.Service<Scroller, {
-  /** Scroll by a distance in CSS pixels. The event identifies the key press. */
-  readonly scrollBy: (
-    axis: ScrollAxis,
-    amount: number,
-    event: Option.Option<KeyboardEvent>,
-  ) => Effect.Effect<void>;
+export class Scroller extends Context.Service<
+  Scroller,
+  {
+    /** Scroll by a distance in CSS pixels. The event identifies the key press. */
+    readonly scrollBy: (
+      axis: ScrollAxis,
+      amount: number,
+      event: Option.Option<KeyboardEvent>,
+    ) => Effect.Effect<void>;
 
-  /** Scroll by a fraction of the viewport, or of the scroll container. */
-  readonly scrollByViewport: (
-    axis: ScrollAxis,
-    fraction: number,
-    event: Option.Option<KeyboardEvent>,
-  ) => Effect.Effect<void>;
+    /** Scroll by a fraction of the viewport, or of the scroll container. */
+    readonly scrollByViewport: (
+      axis: ScrollAxis,
+      fraction: number,
+      event: Option.Option<KeyboardEvent>,
+    ) => Effect.Effect<void>;
 
-  readonly scrollTo: (
-    axis: ScrollAxis,
-    position: "start" | "end" | number,
-  ) => Effect.Effect<void>;
+    readonly scrollTo: (
+      axis: ScrollAxis,
+      position: "start" | "end" | number,
+    ) => Effect.Effect<void>;
 
-  readonly position: Effect.Effect<ScrollPosition>;
+    readonly position: Effect.Effect<ScrollPosition>;
 
-  readonly restore: (x: number, y: number) => Effect.Effect<void>;
+    readonly restore: (x: number, y: number) => Effect.Effect<void>;
 
-  /** Call this from the key path, before a command runs. */
-  readonly noteKeydown: (event: KeyboardEvent) => Effect.Effect<void>;
+    /** Call this from the key path, before a command runs. */
+    readonly noteKeydown: (event: KeyboardEvent) => Effect.Effect<void>;
 
-  readonly noteKeyup: (event: KeyboardEvent) => Effect.Effect<void>;
-}>()("vimium/features/Scroller") {
-  static readonly layer: Layer.Layer<
-    Scroller,
-    never,
-    Commands | Dom | Report | Settings
-  > = Layer.effect(
-    Scroller,
-    Effect.gen(function*() {
-      const commands = yield* Commands;
-      const dom = yield* Dom;
-      const report = yield* Report;
-      const settings = yield* Settings;
+    readonly noteKeyup: (event: KeyboardEvent) => Effect.Effect<void>;
+  }
+>()("vimium/features/Scroller") {
+  static readonly layer: Layer.Layer<Scroller, never, Commands | Dom | Report | Settings> =
+    Layer.effect(
+      Scroller,
+      Effect.gen(function* () {
+        const commands = yield* Commands;
+        const dom = yield* Dom;
+        const report = yield* Report;
+        const settings = yield* Settings;
 
-      const calibration = yield* Ref.make(1);
-      /** Increased on every keydown that is not a repeat: "this press". */
-      const generation = yield* Ref.make(0);
-      const heldCodes = yield* Ref.make<ReadonlySet<string>>(new Set());
-      const animations: Record<
-        ScrollAxis,
-        Ref.Ref<Option.Option<Animation>>
-      > = {
-        x: yield* Ref.make<Option.Option<Animation>>(Option.none()),
-        y: yield* Ref.make<Option.Option<Animation>>(Option.none()),
-      };
-      // One handle per axis. `x` and `y` animate at the same time, and a new
-      // scroll on one axis must not stop the other one.
-      const fibers: Record<ScrollAxis, FiberHandle.FiberHandle<void>> = {
-        x: yield* FiberHandle.make<void>(),
-        y: yield* FiberHandle.make<void>(),
-      };
+        const calibration = yield* Ref.make(1);
+        /** Increased on every keydown that is not a repeat: "this press". */
+        const generation = yield* Ref.make(0);
+        const heldCodes = yield* Ref.make<ReadonlySet<string>>(new Set());
+        const animations: Record<ScrollAxis, Ref.Ref<Option.Option<Animation>>> = {
+          x: yield* Ref.make<Option.Option<Animation>>(Option.none()),
+          y: yield* Ref.make<Option.Option<Animation>>(Option.none()),
+        };
+        // One handle per axis. `x` and `y` animate at the same time, and a new
+        // scroll on one axis must not stop the other one.
+        const fibers: Record<ScrollAxis, FiberHandle.FiberHandle<void>> = {
+          x: yield* FiberHandle.make<void>(),
+          y: yield* FiberHandle.make<void>(),
+        };
 
-      const rootElement = (): Element =>
-        dom.document.scrollingElement ?? dom.document.documentElement;
+        const rootElement = (): Element =>
+          dom.document.scrollingElement ?? dom.document.documentElement;
 
-      /**
-       * Should this scroll be animated at all?
-       *
-       * `prefers-reduced-motion` is the user telling the platform that
-       * animation makes the web unusable for them. A userscript that animates
-       * anyway overrides an accessibility setting with a preference.
-       */
-      const animated = Effect.gen(function*() {
-        if (!settings.currentUnsafe().smoothScroll) return false;
-        const reduced = yield* dom.probeOr(
-          () =>
-            dom.window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-          false,
-        );
-        return !reduced;
-      });
-
-      /** The element that must absorb the scroll. */
-      const target = (
-        axis: ScrollAxis,
-        amount: number,
-      ): Effect.Effect<Element> =>
-        dom.probeOr(
-          () =>
-            findScrollableAncestor(
-              dom.window,
-              rootElement(),
-              deepActiveElement(dom.document),
-              axis,
-              amount,
-            ),
-          rootElement(),
-        );
-
-      const cancel = (axis: ScrollAxis): Effect.Effect<void> =>
-        Effect.gen(function*() {
-          yield* Ref.set(animations[axis], Option.none());
-          yield* FiberHandle.clear(fibers[axis]);
+        /**
+         * Should this scroll be animated at all?
+         *
+         * `prefers-reduced-motion` is the user telling the platform that
+         * animation makes the web unusable for them. A userscript that animates
+         * anyway overrides an accessibility setting with a preference.
+         */
+        const animated = Effect.gen(function* () {
+          if (!settings.currentUnsafe().smoothScroll) return false;
+          const reduced = yield* dom.probeOr(
+            () => dom.window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+            false,
+          );
+          return !reduced;
         });
 
-      const applyInstant = Effect.fn("Scroller.applyInstant")(
-        function*(element: Element, axis: ScrollAxis, amount: number) {
+        /** The element that must absorb the scroll. */
+        const target = (axis: ScrollAxis, amount: number): Effect.Effect<Element> =>
+          dom.probeOr(
+            () =>
+              findScrollableAncestor(
+                dom.window,
+                rootElement(),
+                deepActiveElement(dom.document),
+                axis,
+                amount,
+              ),
+            rootElement(),
+          );
+
+        const cancel = (axis: ScrollAxis): Effect.Effect<void> =>
+          Effect.gen(function* () {
+            yield* Ref.set(animations[axis], Option.none());
+            yield* FiberHandle.clear(fibers[axis]);
+          });
+
+        const applyInstant = Effect.fn("Scroller.applyInstant")(function* (
+          element: Element,
+          axis: ScrollAxis,
+          amount: number,
+        ) {
           yield* Effect.sync(() => {
             const moved = applyOffset(element, axis, amount);
             // The chosen element refused the scroll, so it lied about being
@@ -381,148 +363,135 @@ export class Scroller extends Context.Service<Scroller, {
               if (root !== element) applyOffset(root, axis, amount);
             }
           });
-        },
-      );
+        });
 
-      /**
-       * One step of the animation.
-       *
-       * It answers `true` while the animation continues. The state is read and
-       * written in two indivisible sections, with the element write between
-       * them, so a key repeat that arrives in the middle is not lost.
-       */
-      const step = (
-        axis: ScrollAxis,
-        timestamp: number,
-      ): Effect.Effect<boolean> =>
-        Effect.gen(function*() {
-          const rate = yield* Ref.get(calibration);
-          const frame = yield* Ref.modify(
-            animations[axis],
-            (state): [Option.Option<Frame>, Option.Option<Animation>] => {
-              if (Option.isNone(state)) return [Option.none(), state];
-              const animation = state.value;
-              const previous = Option.getOrElse(
-                animation.lastTimestamp,
-                () => timestamp - NOMINAL_FRAME_MS,
-              );
-              const delta = Math.min(
-                Math.max(0, timestamp - previous),
-                MAX_FRAME_MS,
-              );
-              const elapsed = animation.elapsed + delta;
-              // The calibration scales the *rate*, and not the distance. A
-              // multiplication of the target distance by it made every scroll
-              // 60% longer than `scrollStepSize` says, as soon as the
-              // calibration reached its ceiling of 1.6 — which takes a few
-              // presses.
-              const progress = Math.min(
-                1,
-                (elapsed * rate) / animation.duration,
-              );
-              const goal = animation.origin +
-                (animation.amount - animation.origin) * progress;
-              return [
-                Option.some({
-                  element: animation.element,
-                  frameDelta: Math.trunc(goal - animation.applied),
-                  progress,
-                }),
-                Option.some({
-                  ...animation,
-                  elapsed,
-                  frames: animation.frames + 1,
-                  lastTimestamp: Option.some(timestamp),
-                }),
-              ];
-            },
-          );
-
-          if (Option.isNone(frame)) return false;
-          const { element, frameDelta, progress } = frame.value;
-
-          const moved = yield* Effect.sync(() =>
-            frameDelta === 0 ? 0 : applyOffset(element, axis, frameDelta)
-          );
-
-          if (frameDelta !== 0 && moved === 0) {
-            // The element refused the scroll. It is at the end of its range, or
-            // it lied about being scrollable. Give the rest to the document
-            // instead of stopping without a word.
-            const state = yield* Ref.get(animations[axis]);
-            const applied = Option.isSome(state) ? state.value.applied : 0;
-            const root = rootElement();
-            if (root !== element && applied === 0) {
-              yield* Effect.sync(() => {
-                applyOffset(root, axis, frameDelta);
-              });
-            }
-            yield* Ref.set(animations[axis], Option.none());
-            return false;
-          }
-
-          const held = yield* Ref.get(heldCodes);
-          const stepSize = settings.currentUnsafe().scrollStepSize;
-
-          const outcome = yield* Ref.modify(
-            animations[axis],
-            (state): [Outcome, Option.Option<Animation>] => {
-              if (Option.isNone(state)) {
-                return [{ running: false, rate }, state];
-              }
-              const animation: Animation = {
-                ...state.value,
-                applied: state.value.applied + moved,
-              };
-              const next = recalibrate(rate, animation);
-              const stillHeld = Option.isSome(animation.code) &&
-                held.has(animation.code.value);
-
-              if (progress >= 1 && !stillHeld) {
-                return [{ running: false, rate: next }, Option.none()];
-              }
-              if (progress >= 1 && stillHeld) {
-                // Key repeat: extend the animation instead of restarting it, so
-                // a held key gives one continuous glide and not a staircase.
+        /**
+         * One step of the animation.
+         *
+         * It answers `true` while the animation continues. The state is read and
+         * written in two indivisible sections, with the element write between
+         * them, so a key repeat that arrives in the middle is not lost.
+         */
+        const step = (axis: ScrollAxis, timestamp: number): Effect.Effect<boolean> =>
+          Effect.gen(function* () {
+            const rate = yield* Ref.get(calibration);
+            const frame = yield* Ref.modify(
+              animations[axis],
+              (state): [Option.Option<Frame>, Option.Option<Animation>] => {
+                if (Option.isNone(state)) return [Option.none(), state];
+                const animation = state.value;
+                const previous = Option.getOrElse(
+                  animation.lastTimestamp,
+                  () => timestamp - NOMINAL_FRAME_MS,
+                );
+                const delta = Math.min(Math.max(0, timestamp - previous), MAX_FRAME_MS);
+                const elapsed = animation.elapsed + delta;
+                // The calibration scales the *rate*, and not the distance. A
+                // multiplication of the target distance by it made every scroll
+                // 60% longer than `scrollStepSize` says, as soon as the
+                // calibration reached its ceiling of 1.6 — which takes a few
+                // presses.
+                const progress = Math.min(1, (elapsed * rate) / animation.duration);
+                const goal = animation.origin + (animation.amount - animation.origin) * progress;
                 return [
-                  { running: true, rate: next },
+                  Option.some({
+                    element: animation.element,
+                    frameDelta: Math.trunc(goal - animation.applied),
+                    progress,
+                  }),
                   Option.some({
                     ...animation,
-                    origin: animation.applied,
-                    amount: animation.amount +
-                      Math.sign(animation.amount) * Math.abs(stepSize),
-                    duration: durationFor(Math.abs(stepSize)),
-                    elapsed: 0,
+                    elapsed,
+                    frames: animation.frames + 1,
+                    lastTimestamp: Option.some(timestamp),
                   }),
                 ];
+              },
+            );
+
+            if (Option.isNone(frame)) return false;
+            const { element, frameDelta, progress } = frame.value;
+
+            const moved = yield* Effect.sync(() =>
+              frameDelta === 0 ? 0 : applyOffset(element, axis, frameDelta),
+            );
+
+            if (frameDelta !== 0 && moved === 0) {
+              // The element refused the scroll. It is at the end of its range, or
+              // it lied about being scrollable. Give the rest to the document
+              // instead of stopping without a word.
+              const state = yield* Ref.get(animations[axis]);
+              const applied = Option.isSome(state) ? state.value.applied : 0;
+              const root = rootElement();
+              if (root !== element && applied === 0) {
+                yield* Effect.sync(() => {
+                  applyOffset(root, axis, frameDelta);
+                });
               }
-              return [{ running: true, rate: next }, Option.some(animation)];
-            },
+              yield* Ref.set(animations[axis], Option.none());
+              return false;
+            }
+
+            const held = yield* Ref.get(heldCodes);
+            const stepSize = settings.currentUnsafe().scrollStepSize;
+
+            const outcome = yield* Ref.modify(
+              animations[axis],
+              (state): [Outcome, Option.Option<Animation>] => {
+                if (Option.isNone(state)) {
+                  return [{ running: false, rate }, state];
+                }
+                const animation: Animation = {
+                  ...state.value,
+                  applied: state.value.applied + moved,
+                };
+                const next = recalibrate(rate, animation);
+                const stillHeld = Option.isSome(animation.code) && held.has(animation.code.value);
+
+                if (progress >= 1 && !stillHeld) {
+                  return [{ running: false, rate: next }, Option.none()];
+                }
+                if (progress >= 1 && stillHeld) {
+                  // Key repeat: extend the animation instead of restarting it, so
+                  // a held key gives one continuous glide and not a staircase.
+                  return [
+                    { running: true, rate: next },
+                    Option.some({
+                      ...animation,
+                      origin: animation.applied,
+                      amount: animation.amount + Math.sign(animation.amount) * Math.abs(stepSize),
+                      duration: durationFor(Math.abs(stepSize)),
+                      elapsed: 0,
+                    }),
+                  ];
+                }
+                return [{ running: true, rate: next }, Option.some(animation)];
+              },
+            );
+
+            yield* Ref.set(calibration, outcome.rate);
+            return outcome.running;
+          });
+
+        const loop = (axis: ScrollAxis): Effect.Effect<void> =>
+          Effect.gen(function* () {
+            let running = true;
+            while (running) {
+              const timestamp = yield* dom.nextFrame;
+              running = yield* step(axis, timestamp);
+            }
+          });
+
+        /** A defect in the animation leaves the page stuck. The user must know. */
+        const animate = (axis: ScrollAxis): Effect.Effect<void> =>
+          Effect.catchDefect(loop(axis), (defect) =>
+            Effect.gen(function* () {
+              yield* Effect.logError("the scroll animation failed", defect);
+              yield* report.error("Scrolling stopped after an internal failure");
+            }),
           );
 
-          yield* Ref.set(calibration, outcome.rate);
-          return outcome.running;
-        });
-
-      const loop = (axis: ScrollAxis): Effect.Effect<void> =>
-        Effect.gen(function*() {
-          let running = true;
-          while (running) {
-            const timestamp = yield* dom.nextFrame;
-            running = yield* step(axis, timestamp);
-          }
-        });
-
-      /** A defect in the animation leaves the page stuck. The user must know. */
-      const animate = (axis: ScrollAxis): Effect.Effect<void> =>
-        Effect.catchDefect(loop(axis), (defect) =>
-          Effect.gen(function*() {
-            yield* Effect.logError("the scroll animation failed", defect);
-            yield* report.error("Scrolling stopped after an internal failure");
-          }));
-
-      const start = Effect.fn("Scroller.start")(
-        function*(
+        const start = Effect.fn("Scroller.start")(function* (
           element: Element,
           axis: ScrollAxis,
           amount: number,
@@ -549,11 +518,9 @@ export class Scroller extends Context.Service<Scroller, {
           const now = yield* dom.now;
           if (!(yield* step(axis, now))) return;
           yield* FiberHandle.run(fibers[axis], animate(axis));
-        },
-      );
+        });
 
-      const scrollElementBy = Effect.fn("Scroller.scrollElementBy")(
-        function*(
+        const scrollElementBy = Effect.fn("Scroller.scrollElementBy")(function* (
           element: Element,
           axis: ScrollAxis,
           amount: number,
@@ -566,10 +533,8 @@ export class Scroller extends Context.Service<Scroller, {
 
           // An empty `code` is not a physical key that we can watch, so it is
           // absent and not a value.
-          const code = Option.flatMap(
-            event,
-            (value) =>
-              value.code === "" ? Option.none() : Option.some(value.code),
+          const code = Option.flatMap(event, (value) =>
+            value.code === "" ? Option.none() : Option.some(value.code),
           );
           const existing = yield* Ref.get(animations[axis]);
           if (Option.isSome(existing) && existing.value.element === element) {
@@ -589,29 +554,21 @@ export class Scroller extends Context.Service<Scroller, {
           }
 
           yield* start(element, axis, amount, code);
-        },
-      );
-
-      /** Extend the running animation when this press already owns it. */
-      const mergeThisPress = (
-        axis: ScrollAxis,
-        amount: number,
-      ): Effect.Effect<boolean> =>
-        Effect.gen(function*() {
-          const existing = yield* Ref.get(animations[axis]);
-          const press = yield* Ref.get(generation);
-          if (Option.isNone(existing) || existing.value.generation !== press) {
-            return false;
-          }
-          yield* Ref.set(
-            animations[axis],
-            Option.some(merge(existing.value, amount)),
-          );
-          return true;
         });
 
-      const scrollBy = Effect.fn("Scroller.scrollBy")(
-        function*(
+        /** Extend the running animation when this press already owns it. */
+        const mergeThisPress = (axis: ScrollAxis, amount: number): Effect.Effect<boolean> =>
+          Effect.gen(function* () {
+            const existing = yield* Ref.get(animations[axis]);
+            const press = yield* Ref.get(generation);
+            if (Option.isNone(existing) || existing.value.generation !== press) {
+              return false;
+            }
+            yield* Ref.set(animations[axis], Option.some(merge(existing.value, amount)));
+            return true;
+          });
+
+        const scrollBy = Effect.fn("Scroller.scrollBy")(function* (
           axis: ScrollAxis,
           amount: number,
           event: Option.Option<KeyboardEvent>,
@@ -623,11 +580,9 @@ export class Scroller extends Context.Service<Scroller, {
           if (yield* mergeThisPress(axis, amount)) return;
           const element = yield* target(axis, amount);
           yield* scrollElementBy(element, axis, amount, event);
-        },
-      );
+        });
 
-      const scrollByViewport = Effect.fn("Scroller.scrollByViewport")(
-        function*(
+        const scrollByViewport = Effect.fn("Scroller.scrollByViewport")(function* (
           axis: ScrollAxis,
           fraction: number,
           event: Option.Option<KeyboardEvent>,
@@ -636,133 +591,101 @@ export class Scroller extends Context.Service<Scroller, {
           // again.
           const element = yield* target(axis, fraction);
           const properties = AXIS_PROPERTIES[axis];
-          const size = element === rootElement()
-            ? dom.window[properties.viewport]
-            : element[properties.clientSize];
+          const size =
+            element === rootElement()
+              ? dom.window[properties.viewport]
+              : element[properties.clientSize];
 
           const amount = Math.round(size * fraction);
           if (amount === 0) return;
           if (yield* mergeThisPress(axis, amount)) return;
           yield* scrollElementBy(element, axis, amount, event);
-        },
-      );
+        });
 
-      const scrollTo = Effect.fn("Scroller.scrollTo")(
-        function*(axis: ScrollAxis, position: "start" | "end" | number) {
+        const scrollTo = Effect.fn("Scroller.scrollTo")(function* (
+          axis: ScrollAxis,
+          position: "start" | "end" | number,
+        ) {
           const element = yield* target(axis, position === "start" ? -1 : 1);
           const properties = AXIS_PROPERTIES[axis];
-          const max = element[properties.scrollSize] -
-            element[properties.clientSize];
-          const value = position === "start"
-            ? 0
-            : position === "end"
-            ? max
-            : position;
+          const max = element[properties.scrollSize] - element[properties.clientSize];
+          const value = position === "start" ? 0 : position === "end" ? max : position;
           yield* cancel(axis);
           yield* Effect.sync(() => {
             writeOffset(element, axis, value);
           });
-        },
-      );
+        });
 
-      const noteKeydown = Effect.fn("Scroller.noteKeydown")(
-        function*(event: KeyboardEvent) {
+        const noteKeydown = Effect.fn("Scroller.noteKeydown")(function* (event: KeyboardEvent) {
           if (event.repeat) return;
           yield* Ref.update(generation, (value) => value + 1);
           if (event.code) {
-            yield* Ref.update(
-              heldCodes,
-              (codes) => new Set(codes).add(event.code),
-            );
+            yield* Ref.update(heldCodes, (codes) => new Set(codes).add(event.code));
           }
-        },
-      );
+        });
 
-      const noteKeyup = Effect.fn("Scroller.noteKeyup")(
-        function*(event: KeyboardEvent) {
+        const noteKeyup = Effect.fn("Scroller.noteKeyup")(function* (event: KeyboardEvent) {
           if (!event.code) return;
           yield* Ref.update(heldCodes, (codes) => {
             const next = new Set(codes);
             next.delete(event.code);
             return next;
           });
-        },
-      );
+        });
 
-      // A lost `keyup` — the window loses focus in the middle of a repeat —
-      // would otherwise leave an animation running for ever.
-      //
-      // Bubble phase, and not capture: `blur` does not bubble, so a capturing
-      // `window` listener ran for *every element blur on the page*. That is
-      // thousands of calls on a form-heavy site, to answer a question that only
-      // the blur of the window can answer.
-      yield* dom.listen(
-        "window",
-        "blur",
-        () => Ref.set(heldCodes, new Set()),
-      );
+        // A lost `keyup` — the window loses focus in the middle of a repeat —
+        // would otherwise leave an animation running for ever.
+        //
+        // Bubble phase, and not capture: `blur` does not bubble, so a capturing
+        // `window` listener ran for *every element blur on the page*. That is
+        // thousands of calls on a form-heavy site, to answer a question that only
+        // the blur of the window can answer.
+        yield* dom.listen("window", "blur", () => Ref.set(heldCodes, new Set()));
 
-      const service = Scroller.of({
-        scrollBy,
-        scrollByViewport,
-        scrollTo,
-        position: Effect.sync(() => {
-          const root = rootElement();
-          return { x: root.scrollLeft, y: root.scrollTop };
-        }),
-        restore: (x, y) =>
-          Effect.sync(() => {
-            // `instant`: a restore is a jump. A smooth restore would fight with
-            // whatever the user does next.
-            rootElement().scrollTo({ left: x, top: y, behavior: "instant" });
+        const service = Scroller.of({
+          scrollBy,
+          scrollByViewport,
+          scrollTo,
+          position: Effect.sync(() => {
+            const root = rootElement();
+            return { x: root.scrollLeft, y: root.scrollTop };
           }),
-        noteKeydown,
-        noteKeyup,
-      });
+          restore: (x, y) =>
+            Effect.sync(() => {
+              // `instant`: a restore is a jump. A smooth restore would fight with
+              // whatever the user does next.
+              rootElement().scrollTo({ left: x, top: y, behavior: "instant" });
+            }),
+          noteKeydown,
+          noteKeyup,
+        });
 
-      const configuredStep = (): number =>
-        settings.currentUnsafe().scrollStepSize;
+        const configuredStep = (): number => settings.currentUnsafe().scrollStepSize;
 
-      yield* commands.registerAll({
-        scrollDown: ({ count, event }) =>
-          service.scrollBy(
-            "y",
-            configuredStep() * count,
-            Option.fromNullOr(event),
-          ),
-        scrollUp: ({ count, event }) =>
-          service.scrollBy(
-            "y",
-            -configuredStep() * count,
-            Option.fromNullOr(event),
-          ),
-        scrollLeft: ({ count, event }) =>
-          service.scrollBy(
-            "x",
-            -configuredStep() * count,
-            Option.fromNullOr(event),
-          ),
-        scrollRight: ({ count, event }) =>
-          service.scrollBy(
-            "x",
-            configuredStep() * count,
-            Option.fromNullOr(event),
-          ),
-        scrollPageDown: ({ count, event }) =>
-          service.scrollByViewport("y", 0.5 * count, Option.fromNullOr(event)),
-        scrollPageUp: ({ count, event }) =>
-          service.scrollByViewport("y", -0.5 * count, Option.fromNullOr(event)),
-        scrollFullPageDown: ({ count, event }) =>
-          service.scrollByViewport("y", 1 * count, Option.fromNullOr(event)),
-        scrollFullPageUp: ({ count, event }) =>
-          service.scrollByViewport("y", -1 * count, Option.fromNullOr(event)),
-        scrollToTop: () => service.scrollTo("y", "start"),
-        scrollToBottom: () => service.scrollTo("y", "end"),
-        scrollToLeft: () => service.scrollTo("x", "start"),
-        scrollToRight: () => service.scrollTo("x", "end"),
-      });
+        yield* commands.registerAll({
+          scrollDown: ({ count, event }) =>
+            service.scrollBy("y", configuredStep() * count, Option.fromNullOr(event)),
+          scrollUp: ({ count, event }) =>
+            service.scrollBy("y", -configuredStep() * count, Option.fromNullOr(event)),
+          scrollLeft: ({ count, event }) =>
+            service.scrollBy("x", -configuredStep() * count, Option.fromNullOr(event)),
+          scrollRight: ({ count, event }) =>
+            service.scrollBy("x", configuredStep() * count, Option.fromNullOr(event)),
+          scrollPageDown: ({ count, event }) =>
+            service.scrollByViewport("y", 0.5 * count, Option.fromNullOr(event)),
+          scrollPageUp: ({ count, event }) =>
+            service.scrollByViewport("y", -0.5 * count, Option.fromNullOr(event)),
+          scrollFullPageDown: ({ count, event }) =>
+            service.scrollByViewport("y", 1 * count, Option.fromNullOr(event)),
+          scrollFullPageUp: ({ count, event }) =>
+            service.scrollByViewport("y", -1 * count, Option.fromNullOr(event)),
+          scrollToTop: () => service.scrollTo("y", "start"),
+          scrollToBottom: () => service.scrollTo("y", "end"),
+          scrollToLeft: () => service.scrollTo("x", "start"),
+          scrollToRight: () => service.scrollTo("x", "end"),
+        });
 
-      return service;
-    }),
-  );
+        return service;
+      }),
+    );
 }

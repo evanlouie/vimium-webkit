@@ -17,10 +17,7 @@
 import { fileURLToPath } from "node:url";
 import type { InlineConfig } from "vite";
 
-export const ROOT = fileURLToPath(new URL("..", import.meta.url)).replace(
-  /\/$/,
-  "",
-);
+export const ROOT = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "");
 
 /**
  * Safari 16.4 is the floor (`adoptedStyleSheets` on `ShadowRoot`), so the
@@ -45,9 +42,7 @@ export const bundleConfig = (options: BundleOptions): InlineConfig => ({
   },
   define: {
     // Nothing bundled here should ever take a Node branch.
-    "process.env.NODE_ENV": JSON.stringify(
-      options.dev ? "development" : "production",
-    ),
+    "process.env.NODE_ENV": JSON.stringify(options.dev ? "development" : "production"),
     // Effect reads `globalThis.process` for `hrtime`. That is harmless in
     // Node and not harmless here: a page or a sandboxing manager can make
     // `process` an accessor that *throws*, and this artefact is one IIFE

@@ -10,12 +10,7 @@ import { Context, Effect, Layer, Option, Schema } from "effect";
 import { Dom } from "./Dom.ts";
 import { Gm } from "./Gm.ts";
 
-export const TabFailureReason = Schema.Literals([
-  "unavailable",
-  "blocked",
-  "failed",
-  "unsafe-url",
-]);
+export const TabFailureReason = Schema.Literals(["unavailable", "blocked", "failed", "unsafe-url"]);
 
 export type TabFailureReason = typeof TabFailureReason.Type;
 
@@ -26,11 +21,7 @@ export class TabError extends Schema.TaggedError<TabError>()("TabError", {
   nativeAlternative: Schema.optional(Schema.String),
 }) {}
 
-const tabError = (
-  reason: TabFailureReason,
-  detail: string,
-  nativeAlternative?: string,
-): TabError =>
+const tabError = (reason: TabFailureReason, detail: string, nativeAlternative?: string): TabError =>
   new TabError({
     reason,
     detail,
@@ -75,11 +66,7 @@ const INTERNAL_SCHEMES: ReadonlySet<string> = new Set([
 ]);
 
 /** Is this URL one that we will go to, given where it came from? */
-export const isNavigableUrl = (
-  url: string,
-  baseUri: string,
-  trust: UrlTrust = "page",
-): boolean => {
+export const isNavigableUrl = (url: string, baseUri: string, trust: UrlTrust = "page"): boolean => {
   try {
     const parsed = new URL(url, baseUri);
     const allowed = trust === "internal" ? INTERNAL_SCHEMES : PAGE_SCHEMES;
@@ -105,115 +92,101 @@ export interface OpenTabOutcome {
   readonly close: Option.Option<Effect.Effect<void>>;
 }
 
-export class Tabs extends Context.Service<Tabs, {
-  /**
-   * Open a URL in a new tab.
-   *
-   * Always prefer this to `window.open`. On WebKit `window.open` needs fresh
-   * synchronous activation and cannot make a background tab, so a `t` command
-   * through it either takes the focus or is stopped by the popup blocker.
-   */
-  readonly open: (
-    url: string,
-    options?: OpenTabOptions,
-  ) => Effect.Effect<OpenTabOutcome, TabError>;
+export class Tabs extends Context.Service<
+  Tabs,
+  {
+    /**
+     * Open a URL in a new tab.
+     *
+     * Always prefer this to `window.open`. On WebKit `window.open` needs fresh
+     * synchronous activation and cannot make a background tab, so a `t` command
+     * through it either takes the focus or is stopped by the popup blocker.
+     */
+    readonly open: (
+      url: string,
+      options?: OpenTabOptions,
+    ) => Effect.Effect<OpenTabOutcome, TabError>;
 
-  /**
-   * Close this tab.
-   *
-   * It needs `@grant window.close`, which Violentmonkey and Tampermonkey
-   * honour and the others do not. When it is absent, the caller must show the
-   * message on the error, and must not do nothing.
-   */
-  readonly closeCurrent: Effect.Effect<void, TabError>;
+    /**
+     * Close this tab.
+     *
+     * It needs `@grant window.close`, which Violentmonkey and Tampermonkey
+     * honour and the others do not. When it is absent, the caller must show the
+     * message on the error, and must not do nothing.
+     */
+    readonly closeCurrent: Effect.Effect<void, TabError>;
 
-  /** Go to a URL in this tab. One place decides what a safe URL is. */
-  readonly navigate: (
-    url: string,
-    options?: { readonly replace?: boolean; readonly trust?: UrlTrust },
-  ) => Effect.Effect<void, TabError>;
-}>()("vimium/platform/Tabs") {
+    /** Go to a URL in this tab. One place decides what a safe URL is. */
+    readonly navigate: (
+      url: string,
+      options?: { readonly replace?: boolean; readonly trust?: UrlTrust },
+    ) => Effect.Effect<void, TabError>;
+  }
+>()("vimium/platform/Tabs") {
   static readonly layer: Layer.Layer<Tabs, never, Gm | Dom> = Layer.effect(
     Tabs,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const gm = yield* Gm;
       const dom = yield* Dom;
 
-      const open = Effect.fn("Tabs.open")(
-        function*(url: string, options: OpenTabOptions = {}) {
-          const base = dom.document.baseURI;
-          if (!isNavigableUrl(url, base, options.trust ?? "page")) {
-            return yield* tabError(
-              "unsafe-url",
-              `refusing to open ${url.slice(0, 60)}`,
-            );
-          }
+      const open = Effect.fn("Tabs.open")(function* (url: string, options: OpenTabOptions = {}) {
+        const base = dom.document.baseURI;
+        if (!isNavigableUrl(url, base, options.trust ?? "page")) {
+          return yield* tabError("unsafe-url", `refusing to open ${url.slice(0, 60)}`);
+        }
 
-          const absolute = new URL(url, base).href;
-          const active = options.active ?? true;
+        const absolute = new URL(url, base).href;
+        const active = options.active ?? true;
 
-          const result = yield* Effect.mapError(
-            gm.openInTab(absolute, {
-              active,
-              insert: options.insert ?? true,
-              setParent: true,
-              // Tampermonkey's older spelling. Others ignore it.
-              loadInBackground: !active,
-            }),
-            (cause) =>
-              tabError(
-                cause.reason === "unavailable" ? "unavailable" : "blocked",
-                cause.detail,
-              ),
-          );
+        const result = yield* Effect.mapError(
+          gm.openInTab(absolute, {
+            active,
+            insert: options.insert ?? true,
+            setParent: true,
+            // Tampermonkey's older spelling. Others ignore it.
+            loadInBackground: !active,
+          }),
+          (cause) =>
+            tabError(cause.reason === "unavailable" ? "unavailable" : "blocked", cause.detail),
+        );
 
-          const handle = result.handle;
-          return {
-            url: absolute,
-            viaManager: result.viaManager,
-            close: handle?.close === undefined ? Option.none() : Option.some(
-              Effect.sync(() => {
-                handle.close?.();
-              }),
-            ),
-          };
-        },
+        const handle = result.handle;
+        return {
+          url: absolute,
+          viaManager: result.viaManager,
+          close:
+            handle?.close === undefined
+              ? Option.none()
+              : Option.some(
+                  Effect.sync(() => {
+                    handle.close?.();
+                  }),
+                ),
+        };
+      });
+
+      const closeCurrent = Effect.mapError(gm.closeWindow, (cause) =>
+        cause.reason === "unavailable"
+          ? tabError("unavailable", "closing a tab needs Tampermonkey or Violentmonkey", "⌘W")
+          : tabError("failed", cause.detail, "⌘W"),
       );
 
-      const closeCurrent = Effect.mapError(
-        gm.closeWindow,
-        (cause) =>
-          cause.reason === "unavailable"
-            ? tabError(
-              "unavailable",
-              "closing a tab needs Tampermonkey or Violentmonkey",
-              "⌘W",
-            )
-            : tabError("failed", cause.detail, "⌘W"),
-      );
-
-      const navigate = Effect.fn("Tabs.navigate")(
-        function*(
-          url: string,
-          options: { readonly replace?: boolean; readonly trust?: UrlTrust } =
-            {},
-        ) {
-          const base = dom.document.baseURI;
-          if (!isNavigableUrl(url, base, options.trust ?? "page")) {
-            return yield* tabError(
-              "unsafe-url",
-              `refusing to go to ${url.slice(0, 60)}`,
-            );
-          }
-          return yield* Effect.mapError(
-            dom.attempt("location.assign", () => {
-              if (options.replace === true) dom.window.location.replace(url);
-              else dom.window.location.assign(url);
-            }),
-            (cause) => tabError("failed", cause.detail),
-          );
-        },
-      );
+      const navigate = Effect.fn("Tabs.navigate")(function* (
+        url: string,
+        options: { readonly replace?: boolean; readonly trust?: UrlTrust } = {},
+      ) {
+        const base = dom.document.baseURI;
+        if (!isNavigableUrl(url, base, options.trust ?? "page")) {
+          return yield* tabError("unsafe-url", `refusing to go to ${url.slice(0, 60)}`);
+        }
+        return yield* Effect.mapError(
+          dom.attempt("location.assign", () => {
+            if (options.replace === true) dom.window.location.replace(url);
+            else dom.window.location.assign(url);
+          }),
+          (cause) => tabError("failed", cause.detail),
+        );
+      });
 
       return Tabs.of({ open, closeCurrent, navigate });
     }),

@@ -27,70 +27,70 @@ export const STORAGE_PREFIX = "vimium-webkit:";
 
 export type KeyValueKind = "gm-async" | "gm-sync" | "memory";
 
-export class KeyValueStore extends Context.Service<KeyValueStore, {
-  readonly kind: KeyValueKind;
-  /** True when the backend survives a page load. */
-  readonly durable: boolean;
-  /** True when another tab's write can be seen without a poll. */
-  readonly watchable: boolean;
+export class KeyValueStore extends Context.Service<
+  KeyValueStore,
+  {
+    readonly kind: KeyValueKind;
+    /** True when the backend survives a page load. */
+    readonly durable: boolean;
+    /** True when another tab's write can be seen without a poll. */
+    readonly watchable: boolean;
 
-  /**
-   * True when the store belongs to the userscript manager.
-   *
-   * Two properties come with that store, and a service that holds a secret
-   * needs both: page code cannot read it, and every frame of the page reads the
-   * same values, whatever the origin of the frame. `frames/Auth.ts` keeps the
-   * frame credential only when this is true.
-   */
-  readonly managerPrivate: boolean;
+    /**
+     * True when the store belongs to the userscript manager.
+     *
+     * Two properties come with that store, and a service that holds a secret
+     * needs both: page code cannot read it, and every frame of the page reads the
+     * same values, whatever the origin of the frame. `frames/Auth.ts` keeps the
+     * frame credential only when this is true.
+     */
+    readonly managerPrivate: boolean;
 
-  readonly get: (key: string) => Effect.Effect<Option.Option<string>, GmError>;
-  readonly set: (key: string, value: string) => Effect.Effect<void, GmError>;
-  readonly remove: (key: string) => Effect.Effect<void, GmError>;
-  /**
-   * Write now when the selected backend is synchronous.
-   *
-   * The promise-backed manager API gives `null`. Storage sends those writes
-   * through its actor before the page exit.
-   */
-  readonly setUnsafe: ((key: string, value: string) => void) | null;
-  /** Values written by another tab. Empty when the backend cannot report them. */
-  readonly changes: (key: string) => Stream.Stream<Option.Option<string>>;
-}>()("vimium/platform/KeyValueStore") {
-  static readonly layer: Layer.Layer<KeyValueStore, never, Gm> = Layer
-    .effect(
-      KeyValueStore,
-      Effect.gen(function*() {
-        const gm = yield* Gm;
+    readonly get: (key: string) => Effect.Effect<Option.Option<string>, GmError>;
+    readonly set: (key: string, value: string) => Effect.Effect<void, GmError>;
+    readonly remove: (key: string) => Effect.Effect<void, GmError>;
+    /**
+     * Write now when the selected backend is synchronous.
+     *
+     * The promise-backed manager API gives `null`. Storage sends those writes
+     * through its actor before the page exit.
+     */
+    readonly setUnsafe: ((key: string, value: string) => void) | null;
+    /** Values written by another tab. Empty when the backend cannot report them. */
+    readonly changes: (key: string) => Stream.Stream<Option.Option<string>>;
+  }
+>()("vimium/platform/KeyValueStore") {
+  static readonly layer: Layer.Layer<KeyValueStore, never, Gm> = Layer.effect(
+    KeyValueStore,
+    Effect.gen(function* () {
+      const gm = yield* Gm;
 
-        const fromGm = Option.map(gm.values, (api) =>
-          KeyValueStore.of({
-            kind: api.kind,
-            durable: true,
-            watchable: Option.isSome(api.changes),
-            managerPrivate: true,
-            get: api.get,
-            set: api.set,
-            remove: api.remove,
-            // The API kind is the existing capability probe. Do not infer
-            // durability from a manager name or from a user agent.
-            setUnsafe: api.kind === "gm-async" ? null : api.setUnsafe,
-            changes: (key) =>
-              Option.match(api.changes, {
-                onNone: () => Stream.empty,
-                onSome: (make) => make(key),
-              }),
-          }));
+      const fromGm = Option.map(gm.values, (api) =>
+        KeyValueStore.of({
+          kind: api.kind,
+          durable: true,
+          watchable: Option.isSome(api.changes),
+          managerPrivate: true,
+          get: api.get,
+          set: api.set,
+          remove: api.remove,
+          // The API kind is the existing capability probe. Do not infer
+          // durability from a manager name or from a user agent.
+          setUnsafe: api.kind === "gm-async" ? null : api.setUnsafe,
+          changes: (key) =>
+            Option.match(api.changes, {
+              onNone: () => Stream.empty,
+              onSome: (make) => make(key),
+            }),
+        }),
+      );
 
-        return Option.getOrElse(fromGm, memoryStore);
-      }),
-    );
+      return Option.getOrElse(fromGm, memoryStore);
+    }),
+  );
 
   /** An in-memory layer. For a test, and for a realm with no storage at all. */
-  static readonly layerMemory: Layer.Layer<KeyValueStore> = Layer.sync(
-    KeyValueStore,
-    memoryStore,
-  );
+  static readonly layerMemory: Layer.Layer<KeyValueStore> = Layer.sync(KeyValueStore, memoryStore);
 }
 
 function memoryStore(): KeyValueStore["Service"] {

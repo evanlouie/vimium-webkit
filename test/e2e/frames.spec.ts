@@ -31,9 +31,10 @@ const markerCount = async (page: Page): Promise<number> => {
           const host = globalThis as unknown as {
             __vimiumHarness?: { shadow: ShadowRoot | null };
           };
-          return host.__vimiumHarness?.shadow?.querySelectorAll(
-            ".vw-hint:not(.vw-hint--hidden)",
-          ).length ?? 0;
+          return (
+            host.__vimiumHarness?.shadow?.querySelectorAll(".vw-hint:not(.vw-hint--hidden)")
+              .length ?? 0
+          );
         });
       } catch {
         return 0;
@@ -51,35 +52,32 @@ test.describe("nested same-origin frames", () => {
     await vw.startHints();
     await vw.activateHint("Level two link");
 
-    await expect.poll(() => {
-      const frame = page.frames().find((candidate) =>
-        candidate.url().includes("level2.html")
-      );
-      return frame?.url() ?? "";
-    }).toContain("#level2-target");
+    await expect
+      .poll(() => {
+        const frame = page.frames().find((candidate) => candidate.url().includes("level2.html"));
+        return frame?.url() ?? "";
+      })
+      .toContain("#level2-target");
   });
 
   test("a persisted restore keeps the top endpoint admitted", async ({ vw, page }) => {
     await vw.open("/nested-frames.html");
     await vw.bootAllFrames();
 
-    await page.evaluate(() =>
-      new Promise<void>((resolve) => {
-        globalThis.dispatchEvent(
-          new PageTransitionEvent("pagehide", { persisted: true }),
-        );
-        globalThis.dispatchEvent(
-          new PageTransitionEvent("pageshow", { persisted: true }),
-        );
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-      })
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          globalThis.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+          globalThis.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        }),
     );
 
     await vw.startHints();
     await vw.activateHint("Level two link");
-    await expect.poll(async () =>
-      page.frames().some((frame) => frame.url().endsWith("#level2-target"))
-    ).toBe(true);
+    await expect
+      .poll(async () => page.frames().some((frame) => frame.url().endsWith("#level2-target")))
+      .toBe(true);
   });
 
   test("activates a hint owned by the middle frame", async ({ vw, page }) => {
@@ -89,12 +87,12 @@ test.describe("nested same-origin frames", () => {
     await vw.startHints();
     await vw.activateHint("Level one link");
 
-    await expect.poll(() => {
-      const frame = page.frames().find((candidate) =>
-        candidate.url().includes("level1.html")
-      );
-      return frame?.url() ?? "";
-    }).toContain("#level1-target");
+    await expect
+      .poll(() => {
+        const frame = page.frames().find((candidate) => candidate.url().includes("level1.html"));
+        return frame?.url() ?? "";
+      })
+      .toContain("#level1-target");
   });
 
   test("shows a remote refusal in the origin frame", async ({ vw, page }) => {
@@ -102,12 +100,9 @@ test.describe("nested same-origin frames", () => {
     await vw.bootAllFrames();
     await vw.startHints();
 
-    const frame = page.frames().find((candidate) =>
-      candidate.url().includes("level2.html")
-    );
+    const frame = page.frames().find((candidate) => candidate.url().includes("level2.html"));
     expect(frame).toBeDefined();
-    await expect.poll(() => vw.hintLabelFor("Level two link"))
-      .not.toBeNull();
+    await expect.poll(() => vw.hintLabelFor("Level two link")).not.toBeNull();
     const label = await vw.hintLabelFor("Level two link");
     await frame?.evaluate(() => {
       const link = document.getElementById("level2-link");
@@ -158,12 +153,12 @@ test.describe("cross-origin frames", () => {
     await vw.startHints();
     await vw.activateHint("Remote frame link");
 
-    await expect.poll(() => {
-      const frame = page.frames().find((candidate) =>
-        candidate.url().includes("remote.html")
-      );
-      return frame?.url() ?? "";
-    }).toContain("#remote-target");
+    await expect
+      .poll(() => {
+        const frame = page.frames().find((candidate) => candidate.url().includes("remote.html"));
+        return frame?.url() ?? "";
+      })
+      .toContain("#remote-target");
 
     expect(errors).toEqual([]);
   });

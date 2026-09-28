@@ -52,20 +52,22 @@ test.describe("an Alt chord", () => {
     // gives the expected value. Chromium and Firefox on a Linux runner are not
     // Apple platforms, and Playwright's WebKit reports a Mac on every host.
     const expected = await page.evaluate(() =>
-      /Mac|iPhone|iPad|iPod/.test(
-        `${navigator.userAgent} ${navigator.platform}`,
-      )
+      /Mac|iPhone|iPad|iPod/.test(`${navigator.userAgent} ${navigator.platform}`),
     );
     await page.keyboard.press("?");
 
     // The diagnostics are the report that `Keyboard` receives. This checks the
     // browser navigator, the probe and the service as one path.
-    await expect.poll(async () => {
-      const diagnostics = await overlayText(page, ".vw-diagnostics");
-      return diagnostics?.split("\n").some((line) =>
-        new RegExp(`^applePlatform\\s+${expected}$`).test(line)
-      ) ?? false;
-    }).toBe(true);
+    await expect
+      .poll(async () => {
+        const diagnostics = await overlayText(page, ".vw-diagnostics");
+        return (
+          diagnostics
+            ?.split("\n")
+            .some((line) => new RegExp(`^applePlatform\\s+${expected}$`).test(line)) ?? false
+        );
+      })
+      .toBe(true);
   });
 
   test("carries the legacy key code that the rule reads", async ({ vw }) => {
@@ -79,16 +81,20 @@ test.describe("an Alt chord", () => {
         __chords?: { key: string; code: string; keyCode: number }[];
       };
       host.__chords = [];
-      addEventListener("keydown", (event) => {
-        // The press of Alt itself is a keydown as well. It carries no
-        // character, and the rule never reads it.
-        if (event.key === "Alt") return;
-        host.__chords?.push({
-          key: event.key,
-          code: event.code,
-          keyCode: event.keyCode,
-        });
-      }, { capture: true });
+      addEventListener(
+        "keydown",
+        (event) => {
+          // The press of Alt itself is a keydown as well. It carries no
+          // character, and the rule never reads it.
+          if (event.key === "Alt") return;
+          host.__chords?.push({
+            key: event.key,
+            code: event.code,
+            keyCode: event.keyCode,
+          });
+        },
+        { capture: true },
+      );
     });
 
     await vw.page.keyboard.press("Alt+q");

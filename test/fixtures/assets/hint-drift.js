@@ -28,9 +28,13 @@ globalThis.moveShifty = () => {
 /** Move the target from a page handler inside synthetic dispatch. */
 globalThis.moveShiftyOnPointerover = () => {
   const shifty = document.getElementById("shifty");
-  shifty?.addEventListener("pointerover", () => {
-    shifty.style.transform = "translateY(140px)";
-  }, { once: true });
+  shifty?.addEventListener(
+    "pointerover",
+    () => {
+      shifty.style.transform = "translateY(140px)";
+    },
+    { once: true },
+  );
 };
 
 /** Imitate the fractional reflow that follows a completed font load. */

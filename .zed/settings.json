@@ -16,7 +16,7 @@
       "formatter": {
         "external": {
           "command": "npx",
-          "arguments": ["dprint", "fmt", "--stdin", "{buffer_path}"]
+          "arguments": ["oxfmt", "--stdin-filepath", "{buffer_path}"]
         }
       }
     },
@@ -24,7 +24,7 @@
       "formatter": {
         "external": {
           "command": "npx",
-          "arguments": ["dprint", "fmt", "--stdin", "{buffer_path}"]
+          "arguments": ["oxfmt", "--stdin-filepath", "{buffer_path}"]
         }
       }
     },
@@ -32,7 +32,7 @@
       "formatter": {
         "external": {
           "command": "npx",
-          "arguments": ["dprint", "fmt", "--stdin", "{buffer_path}"]
+          "arguments": ["oxfmt", "--stdin-filepath", "{buffer_path}"]
         }
       }
     },
@@ -40,7 +40,7 @@
       "formatter": {
         "external": {
           "command": "npx",
-          "arguments": ["dprint", "fmt", "--stdin", "{buffer_path}"]
+          "arguments": ["oxfmt", "--stdin-filepath", "{buffer_path}"]
         }
       }
     },
@@ -48,7 +48,7 @@
       "formatter": {
         "external": {
           "command": "npx",
-          "arguments": ["dprint", "fmt", "--stdin", "{buffer_path}"]
+          "arguments": ["oxfmt", "--stdin-filepath", "{buffer_path}"]
         }
       }
     }

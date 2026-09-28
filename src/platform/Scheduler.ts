@@ -41,9 +41,8 @@ interface IdleWindow {
  * The read can throw, because a userscript does not own its globals. Call this
  * inside `Dom.probeOr`.
  */
-export const hasNativeIdleCallback = (
-  window: Window & typeof globalThis,
-): boolean => Predicate.isFunction((window as IdleWindow).requestIdleCallback);
+export const hasNativeIdleCallback = (window: Window & typeof globalThis): boolean =>
+  Predicate.isFunction((window as IdleWindow).requestIdleCallback);
 
 export interface ChunkedOptions {
   /** The time budget for one slice, in milliseconds. */
@@ -70,7 +69,7 @@ export const mapChunked = <A, B, R = never>(
   transform: (item: A, index: number) => Option.Option<B>,
   options?: ChunkedOptions,
 ): Effect.Effect<ReadonlyArray<B>, never, R | Dom> =>
-  Effect.gen(function*() {
+  Effect.gen(function* () {
     const dom = yield* Dom;
     const budget = options?.budgetMs ?? CHUNK_BUDGET_MS;
     const checkEvery = options?.checkEvery ?? DEFAULT_CHECK_EVERY;

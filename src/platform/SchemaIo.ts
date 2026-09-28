@@ -16,9 +16,9 @@ export type DecodeResult<A> = Result.Result<A, Schema.SchemaError>;
 
 /** Decode `unknown`, and keep the detail of a failure. It never throws. */
 export const decodeUnknown =
-  <A, E>(schema: Schema.Codec<A, E>) => (input: unknown): DecodeResult<A> =>
+  <A, E>(schema: Schema.Codec<A, E>) =>
+  (input: unknown): DecodeResult<A> =>
     Schema.decodeUnknownResult(schema)(input);
 
 /** The readable half of a decode failure, for a HUD line or a log. */
-export const describeSchemaError = (error: Schema.SchemaError): string =>
-  error.message;
+export const describeSchemaError = (error: Schema.SchemaError): string => error.message;

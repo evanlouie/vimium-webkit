@@ -59,53 +59,50 @@ const EVAL_BUDGET_MS: Readonly<Record<string, number>> = {
 };
 
 test.describe("performance", () => {
-  test(
-    "the artefact stays affordable to evaluate in every frame",
-    async ({ page }, testInfo) => {
-      const source = readBundle();
-      const budget = EVAL_BUDGET_MS[testInfo.project.name];
-      // Rather than defaulting: an unknown project would otherwise be handed the
-      // loosest ceiling silently, which is how a new engine gets no gate at all.
-      if (budget === undefined) {
-        throw new Error(`no evaluation budget for ${testInfo.project.name}`);
-      }
+  test("the artefact stays affordable to evaluate in every frame", async ({ page }, testInfo) => {
+    const source = readBundle();
+    const budget = EVAL_BUDGET_MS[testInfo.project.name];
+    // Rather than defaulting: an unknown project would otherwise be handed the
+    // loosest ceiling silently, which is how a new engine gets no gate at all.
+    if (budget === undefined) {
+      throw new Error(`no evaluation budget for ${testInfo.project.name}`);
+    }
 
-      await page.setContent(
-        `<!doctype html><html><body>${
-          Array.from(
-            { length: EVAL_FRAMES },
-            () => `<iframe src="about:blank"></iframe>`,
-          ).join("")
-        }</body></html>`,
-      );
+    await page.setContent(
+      `<!doctype html><html><body>${Array.from(
+        { length: EVAL_FRAMES },
+        () => `<iframe src="about:blank"></iframe>`,
+      ).join("")}</body></html>`,
+    );
 
-      // Every frame, because that is what a manager does at `document-start`.
-      let total = 0;
-      let measured = 0;
-      for (const frame of page.frames()) {
-        // Sequential on purpose: evaluating twenty frames at once would measure
-        // contention rather than the per-frame cost.
-        // oxlint-disable-next-line no-await-in-loop
-        const ms = await frame.evaluate((code) => {
+    // Every frame, because that is what a manager does at `document-start`.
+    let total = 0;
+    let measured = 0;
+    for (const frame of page.frames()) {
+      // Sequential on purpose: evaluating twenty frames at once would measure
+      // contention rather than the per-frame cost.
+      // oxlint-disable-next-line no-await-in-loop
+      const ms = await frame
+        .evaluate((code) => {
           const started = performance.now();
           // Evaluating the artefact is what this test measures. The indirect
           // form runs it in global scope, as a manager does.
           // oxlint-disable-next-line no-eval
           (0, eval)(code);
           return performance.now() - started;
-        }, source).catch(() => null);
-        if (typeof ms === "number") {
-          total += ms;
-          measured++;
-        }
+        }, source)
+        .catch(() => null);
+      if (typeof ms === "number") {
+        total += ms;
+        measured++;
       }
+    }
 
-      // Every frame, not merely most of them: a frame that failed to evaluate
-      // would otherwise make the total look good.
-      expect(measured).toBe(EVAL_FRAMES + 1);
-      expect(total).toBeLessThan(budget);
-    },
-  );
+    // Every frame, not merely most of them: a frame that failed to evaluate
+    // would otherwise make the total look good.
+    expect(measured).toBe(EVAL_FRAMES + 1);
+    expect(total).toBeLessThan(budget);
+  });
 
   test("hint generation on a link-dense page stays under budget", async ({ vw }) => {
     await vw.open("/link-dense.html");
@@ -114,10 +111,9 @@ test.describe("performance", () => {
     await vw.startHints();
     const elapsed = Date.now() - started;
 
-    expect(
-      elapsed,
-      `hint generation took ${elapsed}ms for 2400 links`,
-    ).toBeLessThan(HINT_BUDGET_MS);
+    expect(elapsed, `hint generation took ${elapsed}ms for 2400 links`).toBeLessThan(
+      HINT_BUDGET_MS,
+    );
   });
 
   test("a second session on the same page is not slower", async ({ vw }) => {
@@ -179,9 +175,7 @@ test.describe("performance", () => {
     await vw.open("/nested-frames.html");
     await page.waitForTimeout(2_000);
 
-    const frame = page.frames().find((candidate) =>
-      candidate.url().includes("level2.html")
-    );
+    const frame = page.frames().find((candidate) => candidate.url().includes("level2.html"));
     expect(frame).toBeDefined();
 
     const counters = await frame?.evaluate(() => {

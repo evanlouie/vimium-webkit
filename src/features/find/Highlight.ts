@@ -134,10 +134,7 @@ export interface Highlighter {
    *
    * `currentIndex` may be out of range, which means "none".
    */
-  readonly render: (
-    matches: ReadonlyArray<FindMatch>,
-    currentIndex: number,
-  ) => Effect.Effect<void>;
+  readonly render: (matches: ReadonlyArray<FindMatch>, currentIndex: number) => Effect.Effect<void>;
 
   /** Hide every rectangle, and keep the elements for the next search. */
   readonly clear: Effect.Effect<void>;
@@ -149,66 +146,64 @@ export interface Highlighter {
  * Close that scope to remove the overlay, the listeners and the fiber that
  * follows the scroll.
  */
-export const makeHighlighter: Effect.Effect<
-  Highlighter,
-  never,
-  Dom | Ui | Scope.Scope
-> = Effect.gen(function*() {
-  const dom = yield* Dom;
-  const ui = yield* Ui;
-  const doc = dom.document;
-  const win = dom.window;
+export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope.Scope> =
+  Effect.gen(function* () {
+    const dom = yield* Dom;
+    const ui = yield* Ui;
+    const doc = dom.document;
+    const win = dom.window;
 
-  // The scope of the highlighter is kept, so that a rectangle element which is
-  // made later still belongs to it. `render` has no scope of its own, and an
-  // element must live as long as the overlay.
-  const scope = yield* Scope.Scope;
-  const scoped = <A, E>(
-    effect: Effect.Effect<A, E, Scope.Scope>,
-  ): Effect.Effect<A, E> => Effect.provideService(effect, Scope.Scope, scope);
+    // The scope of the highlighter is kept, so that a rectangle element which is
+    // made later still belongs to it. `render` has no scope of its own, and an
+    // element must live as long as the overlay.
+    const scope = yield* Scope.Scope;
+    const scoped = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>): Effect.Effect<A, E> =>
+      Effect.provideService(effect, Scope.Scope, scope);
 
-  const findLayer = yield* ui.layer("find");
+    const findLayer = yield* ui.layer("find");
 
-  const container = yield* Effect.acquireRelease(
-    Effect.sync(() => {
-      const element = doc.createElement("div");
-      element.className = "vw-find";
-      findLayer.appendChild(element);
-      return element;
-    }),
-    (element) =>
+    const container = yield* Effect.acquireRelease(
       Effect.sync(() => {
-        element.remove();
+        const element = doc.createElement("div");
+        element.className = "vw-find";
+        findLayer.appendChild(element);
+        return element;
       }),
-  );
+      (element) =>
+        Effect.sync(() => {
+          element.remove();
+        }),
+    );
 
-  const rects = yield* Ref.make<ReadonlyArray<HTMLElement>>([]);
-  const origin = yield* Ref.make<Origin>({ x: 0, y: 0 });
+    const rects = yield* Ref.make<ReadonlyArray<HTMLElement>>([]);
+    const origin = yield* Ref.make<Origin>({ x: 0, y: 0 });
 
-  const readScroll: Effect.Effect<Origin> = dom.probeOr(
-    () => ({ x: win.scrollX, y: win.scrollY }),
-    { x: 0, y: 0 },
-  );
+    const readScroll: Effect.Effect<Origin> = dom.probeOr(
+      () => ({ x: win.scrollX, y: win.scrollY }),
+      { x: 0, y: 0 },
+    );
 
-  /**
-   * Move the container by the difference in the scroll since the measurement.
-   *
-   * The offset of the visual viewport is added, because the host of the overlay
-   * is already moved by it.
-   */
-  const applyOffset = Effect.fn("Highlighter.applyOffset")(function*() {
-    const viewport = yield* ui.viewport;
-    const start = yield* Ref.get(origin);
-    const scroll = yield* readScroll;
-    const dx = scroll.x - start.x + viewport.offsetLeft;
-    const dy = scroll.y - start.y + viewport.offsetTop;
-    yield* Effect.sync(() => {
-      container.style.transform = `translate(${-dx}px, ${-dy}px)`;
+    /**
+     * Move the container by the difference in the scroll since the measurement.
+     *
+     * The offset of the visual viewport is added, because the host of the overlay
+     * is already moved by it.
+     */
+    const applyOffset = Effect.fn("Highlighter.applyOffset")(function* () {
+      const viewport = yield* ui.viewport;
+      const start = yield* Ref.get(origin);
+      const scroll = yield* readScroll;
+      const dx = scroll.x - start.x + viewport.offsetLeft;
+      const dy = scroll.y - start.y + viewport.offsetTop;
+      yield* Effect.sync(() => {
+        container.style.transform = `translate(${-dx}px, ${-dy}px)`;
+      });
     });
-  });
 
-  const measure = Effect.fn("Highlighter.measure")(
-    function*(matches: ReadonlyArray<FindMatch>, currentIndex: number) {
+    const measure = Effect.fn("Highlighter.measure")(function* (
+      matches: ReadonlyArray<FindMatch>,
+      currentIndex: number,
+    ) {
       const viewport = yield* ui.viewport;
       const minTop = -VIEWPORT_MARGIN;
       const maxTop = viewport.height + VIEWPORT_MARGIN;
@@ -243,33 +238,33 @@ export const makeHighlighter: Effect.Effect<
         }
         return placed;
       }, []);
-    },
-  );
+    });
 
-  /** Make sure that the pool holds at least `count` elements. */
-  const grow = Effect.fn("Highlighter.grow")(function*(count: number) {
-    let pool = yield* Ref.get(rects);
-    while (pool.length < count) {
-      const element = yield* scoped(Effect.acquireRelease(
-        Effect.sync(() => {
-          const div = doc.createElement("div");
-          div.className = "vw-find__rect";
-          container.appendChild(div);
-          return div;
-        }),
-        (div) =>
-          Effect.sync(() => {
-            div.remove();
-          }),
-      ));
-      pool = [...pool, element];
-      yield* Ref.set(rects, pool);
-    }
-    return pool;
-  });
+    /** Make sure that the pool holds at least `count` elements. */
+    const grow = Effect.fn("Highlighter.grow")(function* (count: number) {
+      let pool = yield* Ref.get(rects);
+      while (pool.length < count) {
+        const element = yield* scoped(
+          Effect.acquireRelease(
+            Effect.sync(() => {
+              const div = doc.createElement("div");
+              div.className = "vw-find__rect";
+              container.appendChild(div);
+              return div;
+            }),
+            (div) =>
+              Effect.sync(() => {
+                div.remove();
+              }),
+          ),
+        );
+        pool = [...pool, element];
+        yield* Ref.set(rects, pool);
+      }
+      return pool;
+    });
 
-  const paint = Effect.fn("Highlighter.paint")(
-    function*(placed: ReadonlyArray<PlacedRect>) {
+    const paint = Effect.fn("Highlighter.paint")(function* (placed: ReadonlyArray<PlacedRect>) {
       const pool = yield* grow(placed.length);
       yield* Effect.sync(() => {
         for (let index = 0; index < pool.length; index++) {
@@ -288,67 +283,67 @@ export const makeHighlighter: Effect.Effect<
           element.style.transform = `translate(${rect.left}px, ${rect.top}px)`;
         }
       });
-    },
-  );
+    });
 
-  const render = Effect.fn("Highlighter.render")(
-    function*(matches: ReadonlyArray<FindMatch>, currentIndex: number) {
+    const render = Effect.fn("Highlighter.render")(function* (
+      matches: ReadonlyArray<FindMatch>,
+      currentIndex: number,
+    ) {
       // A new measurement sets the scroll baseline again. Everything after this
       // call is a difference from here.
       yield* Ref.set(origin, yield* readScroll);
       yield* paint(yield* measure(matches, currentIndex));
       yield* applyOffset();
-    },
-  );
-
-  const clear = Effect.gen(function*() {
-    const pool = yield* Ref.get(rects);
-    yield* Effect.sync(() => {
-      for (const element of pool) {
-        element.className = "vw-find__rect vw-find__rect--hidden";
-      }
     });
+
+    const clear = Effect.gen(function* () {
+      const pool = yield* Ref.get(rects);
+      yield* Effect.sync(() => {
+        for (const element of pool) {
+          element.className = "vw-find__rect vw-find__rect--hidden";
+        }
+      });
+    });
+
+    // ---------------------------------------------------------------------
+    // Following the scroll
+    // ---------------------------------------------------------------------
+
+    const repositionFiber = yield* FiberHandle.make<void, never>();
+
+    /**
+     * One correction for each animation frame.
+     *
+     * `onlyIfMissing` gives the behaviour of the old `rafCoalesce`: the first
+     * event of a frame asks for the correction, and every later event of the same
+     * frame is dropped instead of starting the wait again.
+     */
+    const reposition = Effect.asVoid(
+      FiberHandle.run(repositionFiber, Effect.andThen(dom.nextFrame, applyOffset()), {
+        onlyIfMissing: true,
+      }),
+    );
+
+    // The capture phase: `scroll` does not bubble out of an element that
+    // scrolls, and a match inside an inner scroll container must follow it too.
+    yield* dom.listen("document", "scroll", () => reposition, {
+      capture: true,
+      passive: true,
+    });
+    yield* dom.listen("window", "resize", () => reposition, { passive: true });
+
+    const visualViewport = yield* dom.probeOr(
+      () => Option.fromNullishOr(win.visualViewport),
+      Option.none<VisualViewport>(),
+    );
+    if (Option.isSome(visualViewport)) {
+      const visual = visualViewport.value;
+      yield* dom.listenOn(visual, "resize", () => reposition, { passive: true });
+      yield* dom.listenOn(visual, "scroll", () => reposition, { passive: true });
+    }
+
+    yield* Ref.set(origin, yield* readScroll);
+    yield* applyOffset();
+
+    return { render, clear };
   });
-
-  // ---------------------------------------------------------------------
-  // Following the scroll
-  // ---------------------------------------------------------------------
-
-  const repositionFiber = yield* FiberHandle.make<void, never>();
-
-  /**
-   * One correction for each animation frame.
-   *
-   * `onlyIfMissing` gives the behaviour of the old `rafCoalesce`: the first
-   * event of a frame asks for the correction, and every later event of the same
-   * frame is dropped instead of starting the wait again.
-   */
-  const reposition = Effect.asVoid(FiberHandle.run(
-    repositionFiber,
-    Effect.andThen(dom.nextFrame, applyOffset()),
-    { onlyIfMissing: true },
-  ));
-
-  // The capture phase: `scroll` does not bubble out of an element that
-  // scrolls, and a match inside an inner scroll container must follow it too.
-  yield* dom.listen("document", "scroll", () => reposition, {
-    capture: true,
-    passive: true,
-  });
-  yield* dom.listen("window", "resize", () => reposition, { passive: true });
-
-  const visualViewport = yield* dom.probeOr(
-    () => Option.fromNullishOr(win.visualViewport),
-    Option.none<VisualViewport>(),
-  );
-  if (Option.isSome(visualViewport)) {
-    const visual = visualViewport.value;
-    yield* dom.listenOn(visual, "resize", () => reposition, { passive: true });
-    yield* dom.listenOn(visual, "scroll", () => reposition, { passive: true });
-  }
-
-  yield* Ref.set(origin, yield* readScroll);
-  yield* applyOffset();
-
-  return { render, clear };
-});

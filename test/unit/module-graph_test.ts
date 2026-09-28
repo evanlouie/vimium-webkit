@@ -44,7 +44,7 @@ describe("module graph", () => {
   it.effect(
     "imports every module in src/ with no DOM",
     () =>
-      Effect.gen(function*() {
+      Effect.gen(function* () {
         const files = (yield* sourceFiles).filter(
           (path) => relative(ROOT, path).replaceAll("\\", "/") !== ENTRY_POINT,
         );
@@ -72,23 +72,20 @@ describe("module graph", () => {
         assert.deepEqual(
           failures,
           [],
-          `these modules do work when they are imported:\n  ${
-            failures.join("\n  ")
-          }`,
+          `these modules do work when they are imported:\n  ${failures.join("\n  ")}`,
         );
       }),
     30_000,
   );
 
   it.effect("keeps the entry point out of that list on purpose", () =>
-    Effect.gen(function*() {
-      const files = (yield* sourceFiles).map(
-        (path) => relative(ROOT, path).replaceAll("\\", "/"),
-      );
+    Effect.gen(function* () {
+      const files = (yield* sourceFiles).map((path) => relative(ROOT, path).replaceAll("\\", "/"));
       assert.include(
         files,
         ENTRY_POINT,
         "main.ts must exist, so the exclusion above still means something",
       );
-    }));
+    }),
+  );
 });

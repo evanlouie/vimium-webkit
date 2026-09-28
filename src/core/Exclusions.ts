@@ -36,43 +36,39 @@ export type { EffectiveRule };
 const warnAboutDropped = (set: ExclusionSet): Effect.Effect<void> =>
   Effect.forEach(
     set.dropped,
-    (rule) =>
-      Effect.logWarning(
-        `the exclusion rule "${rule.pattern}" was dropped: ${rule.reason}`,
-      ),
+    (rule) => Effect.logWarning(`the exclusion rule "${rule.pattern}" was dropped: ${rule.reason}`),
     { discard: true },
   );
 
-export class Exclusions extends Context.Service<Exclusions, {
-  /** The verdict in force for this frame. */
-  readonly effective: SubscriptionRef.SubscriptionRef<EffectiveRule>;
+export class Exclusions extends Context.Service<
+  Exclusions,
+  {
+    /** The verdict in force for this frame. */
+    readonly effective: SubscriptionRef.SubscriptionRef<EffectiveRule>;
 
-  /** The verdict, read synchronously. For the key path only. */
-  readonly effectiveUnsafe: () => EffectiveRule;
+    /** The verdict, read synchronously. For the key path only. */
+    readonly effectiveUnsafe: () => EffectiveRule;
 
-  /**
-   * Work the verdict out from this frame's own URL and settings.
-   *
-   * Correct in the top frame. A child frame uses `adopt` instead.
-   */
-  readonly resolveLocal: Effect.Effect<EffectiveRule>;
+    /**
+     * Work the verdict out from this frame's own URL and settings.
+     *
+     * Correct in the top frame. A child frame uses `adopt` instead.
+     */
+    readonly resolveLocal: Effect.Effect<EffectiveRule>;
 
-  /** Match a URL against the current rules. The top frame answers with this. */
-  readonly match: (url: string) => Effect.Effect<EffectiveRule>;
+    /** Match a URL against the current rules. The top frame answers with this. */
+    readonly match: (url: string) => Effect.Effect<EffectiveRule>;
 
-  /** Take a verdict that the top frame sent. */
-  readonly adopt: (rule: EffectiveRule) => Effect.Effect<void>;
+    /** Take a verdict that the top frame sent. */
+    readonly adopt: (rule: EffectiveRule) => Effect.Effect<void>;
 
-  /** True when this frame must act on keys at all. */
-  readonly isEnabled: Effect.Effect<boolean>;
-}>()("vimium/core/Exclusions") {
-  static readonly layer: Layer.Layer<
+    /** True when this frame must act on keys at all. */
+    readonly isEnabled: Effect.Effect<boolean>;
+  }
+>()("vimium/core/Exclusions") {
+  static readonly layer: Layer.Layer<Exclusions, never, Settings | Dom | Realm> = Layer.effect(
     Exclusions,
-    never,
-    Settings | Dom | Realm
-  > = Layer.effect(
-    Exclusions,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const settings = yield* Settings;
       const dom = yield* Dom;
       const realm = yield* Realm;
@@ -83,7 +79,7 @@ export class Exclusions extends Context.Service<Exclusions, {
       // changes only when the user changes the rules.
       const warned = yield* Ref.make("");
       const warnOnce = (set: ExclusionSet): Effect.Effect<void> =>
-        Effect.gen(function*() {
+        Effect.gen(function* () {
           const signature = set.dropped.map((rule) => rule.pattern).join("\n");
           if (signature.length === 0) return;
           const last = yield* Ref.getAndSet(warned, signature);
@@ -92,7 +88,7 @@ export class Exclusions extends Context.Service<Exclusions, {
         });
 
       const match = (url: string): Effect.Effect<EffectiveRule> =>
-        Effect.gen(function*() {
+        Effect.gen(function* () {
           const current = yield* settings.current;
           const set = makeExclusionSet(current.exclusionRules);
           yield* warnOnce(set);
@@ -119,10 +115,8 @@ export class Exclusions extends Context.Service<Exclusions, {
       if (realm.isTop) {
         yield* Effect.forkScoped(
           Stream.runForEach(settings.changes, () =>
-            Effect.flatMap(
-              resolveLocal,
-              (rule) => SubscriptionRef.set(effective, rule),
-            )),
+            Effect.flatMap(resolveLocal, (rule) => SubscriptionRef.set(effective, rule)),
+          ),
         );
       }
 
@@ -132,10 +126,7 @@ export class Exclusions extends Context.Service<Exclusions, {
         resolveLocal,
         match,
         adopt: (rule) => SubscriptionRef.set(effective, rule),
-        isEnabled: Effect.map(
-          SubscriptionRef.get(effective),
-          (rule) => rule.enabled,
-        ),
+        isEnabled: Effect.map(SubscriptionRef.get(effective), (rule) => rule.enabled),
       });
     }),
   );

@@ -23,10 +23,7 @@ import {
 const event = (): Event => new Event("scroll", { cancelable: true });
 
 /** A handler that writes its name into `seen` and lets the walk continue. */
-const record = (
-  name: string,
-  seen: Ref.Ref<readonly string[]>,
-): Handler<never> => ({
+const record = (name: string, seen: Ref.Ref<readonly string[]>): Handler<never> => ({
   name,
   scroll: () =>
     Effect.as(
@@ -37,7 +34,7 @@ const record = (
 
 describe("HandlerStack", () => {
   it.effect("lets push and unshift decide who sees an event first", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const stack = yield* HandlerStack;
       const seen = yield* Ref.make<readonly string[]>([]);
 
@@ -51,10 +48,11 @@ describe("HandlerStack", () => {
       yield* stack.bubble("scroll", event());
       // The innermost handler first, and the bottom handler last.
       assert.deepEqual(yield* Ref.get(seen), ["second", "first", "bottom"]);
-    }).pipe(Effect.provide(HandlerStack.layer)));
+    }).pipe(Effect.provide(HandlerStack.layer)),
+  );
 
   it.effect("runs every handler below the top exactly once", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       // The walk takes a snapshot. A handler that removes an entry below
       // itself would otherwise move every lower entry up by one, so one entry
       // is visited twice and one is not visited at all.
@@ -66,7 +64,7 @@ describe("HandlerStack", () => {
       yield* stack.push({
         name: "C",
         scroll: () =>
-          Effect.gen(function*() {
+          Effect.gen(function* () {
             yield* Ref.update(seen, (current) => [...current, "C"]);
             yield* stack.remove(middle);
             return CONTINUE_BUBBLING;
@@ -75,10 +73,11 @@ describe("HandlerStack", () => {
 
       yield* stack.bubble("scroll", event());
       assert.deepEqual(yield* Ref.get(seen), ["C", "A"]);
-    }).pipe(Effect.provide(HandlerStack.layer)));
+    }).pipe(Effect.provide(HandlerStack.layer)),
+  );
 
   it.effect("does not give the event to a handler that was removed", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const stack = yield* HandlerStack;
       const seen = yield* Ref.make<readonly string[]>([]);
 
@@ -86,7 +85,7 @@ describe("HandlerStack", () => {
       yield* stack.push({
         name: "remover",
         scroll: () =>
-          Effect.gen(function*() {
+          Effect.gen(function* () {
             yield* Ref.update(seen, (current) => [...current, "remover"]);
             yield* stack.remove(victim);
             return CONTINUE_BUBBLING;
@@ -96,10 +95,11 @@ describe("HandlerStack", () => {
       yield* stack.bubble("scroll", event());
       assert.deepEqual(yield* Ref.get(seen), ["remover"]);
       assert.isFalse(yield* stack.has(victim));
-    }).pipe(Effect.provide(HandlerStack.layer)));
+    }).pipe(Effect.provide(HandlerStack.layer)),
+  );
 
   it.effect("suppresses the default action and the propagation", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const stack = yield* HandlerStack;
       const seen = yield* Ref.make<readonly string[]>([]);
 
@@ -113,10 +113,11 @@ describe("HandlerStack", () => {
       assert.isFalse(yield* stack.bubble("scroll", target));
       assert.isTrue(target.defaultPrevented);
       assert.deepEqual(yield* Ref.get(seen), []);
-    }).pipe(Effect.provide(HandlerStack.layer)));
+    }).pipe(Effect.provide(HandlerStack.layer)),
+  );
 
   it.effect("leaves the default action alone for a propagation stop", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const stack = yield* HandlerStack;
       yield* stack.push({
         name: "top",
@@ -126,10 +127,11 @@ describe("HandlerStack", () => {
       const target = event();
       assert.isFalse(yield* stack.bubble("scroll", target));
       assert.isFalse(target.defaultPrevented);
-    }).pipe(Effect.provide(HandlerStack.layer)));
+    }).pipe(Effect.provide(HandlerStack.layer)),
+  );
 
   it.effect("stops the walk and leaves the event alone for the page", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const stack = yield* HandlerStack;
       const seen = yield* Ref.make<readonly string[]>([]);
 
@@ -143,10 +145,11 @@ describe("HandlerStack", () => {
       assert.isTrue(yield* stack.bubble("scroll", target));
       assert.isFalse(target.defaultPrevented);
       assert.deepEqual(yield* Ref.get(seen), []);
-    }).pipe(Effect.provide(HandlerStack.layer)));
+    }).pipe(Effect.provide(HandlerStack.layer)),
+  );
 
   it.effect("runs the whole stack again after a restart", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const stack = yield* HandlerStack;
       const seen = yield* Ref.make<readonly string[]>([]);
       const opened = yield* Ref.make(false);
@@ -154,7 +157,7 @@ describe("HandlerStack", () => {
       yield* stack.push({
         name: "opener",
         scroll: () =>
-          Effect.gen(function*() {
+          Effect.gen(function* () {
             yield* Ref.update(seen, (current) => [...current, "opener"]);
             if (yield* Ref.getAndSet(opened, true)) return CONTINUE_BUBBLING;
             yield* stack.push({
@@ -171,10 +174,11 @@ describe("HandlerStack", () => {
 
       assert.isFalse(yield* stack.bubble("scroll", event()));
       assert.deepEqual(yield* Ref.get(seen), ["opener", "opened"]);
-    }).pipe(Effect.provide(HandlerStack.layer)));
+    }).pipe(Effect.provide(HandlerStack.layer)),
+  );
 
   it.effect("lets an event with no interested handler reach the page", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const stack = yield* HandlerStack;
       // The handler answers for `keydown` only, and the event is a `scroll`.
       yield* stack.push({
@@ -184,10 +188,11 @@ describe("HandlerStack", () => {
       const target = event();
       assert.isTrue(yield* stack.bubble("scroll", target));
       assert.isFalse(target.defaultPrevented);
-    }).pipe(Effect.provide(HandlerStack.layer)));
+    }).pipe(Effect.provide(HandlerStack.layer)),
+  );
 
   it.effect("drops a handler that fails and continues the walk", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const stack = yield* HandlerStack;
       const seen = yield* Ref.make<readonly string[]>([]);
 
@@ -203,14 +208,12 @@ describe("HandlerStack", () => {
         ["below"],
         "a failing frame must not block the key path",
       );
-      assert.isFalse(
-        yield* stack.has(failing),
-        "and it must not stay on the stack",
-      );
-    }).pipe(Effect.provide(HandlerStack.layer)));
+      assert.isFalse(yield* stack.has(failing), "and it must not stay on the stack");
+    }).pipe(Effect.provide(HandlerStack.layer)),
+  );
 
   it.effect("tells the owner of a handler that failed", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       // A frame is one part of something larger. Only the owner can release
       // the rest of it, so the stack must not drop the frame in silence.
       const stack = yield* HandlerStack;
@@ -225,10 +228,11 @@ describe("HandlerStack", () => {
       assert.isTrue(yield* stack.bubble("scroll", event()));
       assert.deepEqual(yield* Ref.get(cleaned), ["owned"]);
       assert.isFalse(yield* stack.has(failing));
-    }).pipe(Effect.provide(HandlerStack.layer)));
+    }).pipe(Effect.provide(HandlerStack.layer)),
+  );
 
   it.effect("continues the walk when the cleanup itself fails", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const stack = yield* HandlerStack;
       const seen = yield* Ref.make<readonly string[]>([]);
 
@@ -241,17 +245,18 @@ describe("HandlerStack", () => {
 
       assert.isTrue(yield* stack.bubble("scroll", event()));
       assert.deepEqual(yield* Ref.get(seen), ["below"]);
-    }).pipe(Effect.provide(HandlerStack.layer)));
+    }).pipe(Effect.provide(HandlerStack.layer)),
+  );
 
   it.effect("lets a handler remove itself while it runs", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const stack = yield* HandlerStack;
       const self = yield* Ref.make(0);
 
       const id = yield* stack.push({
         name: "self-removing",
         scroll: () =>
-          Effect.gen(function*() {
+          Effect.gen(function* () {
             yield* stack.remove(yield* Ref.get(self));
             return CONTINUE_BUBBLING;
           }),
@@ -261,10 +266,11 @@ describe("HandlerStack", () => {
       yield* stack.bubble("scroll", event());
       assert.isFalse(yield* stack.has(id));
       assert.strictEqual(yield* stack.depth, 0);
-    }).pipe(Effect.provide(HandlerStack.layer)));
+    }).pipe(Effect.provide(HandlerStack.layer)),
+  );
 
   it.effect("drops everything on a reset", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const stack = yield* HandlerStack;
       const seen = yield* Ref.make<readonly string[]>([]);
 
@@ -274,10 +280,11 @@ describe("HandlerStack", () => {
 
       assert.strictEqual(yield* stack.depth, 0);
       assert.deepEqual(yield* stack.names, []);
-    }).pipe(Effect.provide(HandlerStack.layer)));
+    }).pipe(Effect.provide(HandlerStack.layer)),
+  );
 
   it.effect("gives each handler its own identity", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const stack = yield* HandlerStack;
       const seen = yield* Ref.make<readonly string[]>([]);
 
@@ -288,5 +295,6 @@ describe("HandlerStack", () => {
       yield* stack.remove(first);
       assert.isFalse(yield* stack.has(first));
       assert.isTrue(yield* stack.has(second));
-    }).pipe(Effect.provide(HandlerStack.layer)));
+    }).pipe(Effect.provide(HandlerStack.layer)),
+  );
 });

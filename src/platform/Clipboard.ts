@@ -44,13 +44,11 @@ export const ClipboardFailureReason = Schema.Literals([
 
 export type ClipboardFailureReason = typeof ClipboardFailureReason.Type;
 
-export class ClipboardError
-  extends Schema.TaggedError<ClipboardError>()("ClipboardError", {
-    reason: ClipboardFailureReason,
-    detail: Schema.String,
-    cause: Schema.optional(Schema.Defect()),
-  })
-{}
+export class ClipboardError extends Schema.TaggedError<ClipboardError>()("ClipboardError", {
+  reason: ClipboardFailureReason,
+  detail: Schema.String,
+  cause: Schema.optional(Schema.Defect()),
+}) {}
 
 const clipboardError = (
   reason: ClipboardFailureReason,
@@ -85,9 +83,7 @@ export type ClipboardReader = () => Promise<string>;
  * This read can throw, because a userscript does not own its globals. Call it
  * inside `Dom.probeOr`.
  */
-export const clipboardWriter = (
-  window: Window & typeof globalThis,
-): ClipboardWriter | null => {
+export const clipboardWriter = (window: Window & typeof globalThis): ClipboardWriter | null => {
   const clipboard: unknown = window.navigator.clipboard;
   if (!Predicate.hasProperty(clipboard, "writeText")) return null;
   const write: unknown = Reflect.get(clipboard, "writeText");
@@ -97,9 +93,7 @@ export const clipboardWriter = (
 };
 
 /** `navigator.clipboard.readText`, already bound. The same rules apply. */
-export const clipboardReader = (
-  window: Window & typeof globalThis,
-): ClipboardReader | null => {
+export const clipboardReader = (window: Window & typeof globalThis): ClipboardReader | null => {
   const clipboard: unknown = window.navigator.clipboard;
   if (!Predicate.hasProperty(clipboard, "readText")) return null;
   const read: unknown = Reflect.get(clipboard, "readText");
@@ -112,44 +106,41 @@ export const clipboardReader = (
 // The service
 // ---------------------------------------------------------------------------
 
-export class Clipboard extends Context.Service<Clipboard, {
-  /**
-   * Write text.
-   *
-   * This must stay synchronous up to the first attempt. Do not put an effect
-   * that suspends in front of the manager write.
-   */
-  readonly write: (text: string) => Effect.Effect<void, ClipboardError>;
+export class Clipboard extends Context.Service<
+  Clipboard,
+  {
+    /**
+     * Write text.
+     *
+     * This must stay synchronous up to the first attempt. Do not put an effect
+     * that suspends in front of the manager write.
+     */
+    readonly write: (text: string) => Effect.Effect<void, ClipboardError>;
 
-  /**
-   * Read the clipboard.
-   *
-   * On WebKit this either shows a native paste control or fails, unless the
-   * same origin wrote the text. Treat a failure as normal: `p` and `P` open a
-   * HUD input, and they only try to fill it first. Put a deadline on the read
-   * at the call site with `Effect.timeoutTo`.
-   */
-  readonly read: Effect.Effect<string, ClipboardError>;
+    /**
+     * Read the clipboard.
+     *
+     * On WebKit this either shows a native paste control or fails, unless the
+     * same origin wrote the text. Treat a failure as normal: `p` and `P` open a
+     * HUD input, and they only try to fill it first. Put a deadline on the read
+     * at the call site with `Effect.timeoutTo`.
+     */
+    readonly read: Effect.Effect<string, ClipboardError>;
 
-  readonly canRead: boolean;
-  readonly canWrite: boolean;
-}>()("vimium/platform/Clipboard") {
+    readonly canRead: boolean;
+    readonly canWrite: boolean;
+  }
+>()("vimium/platform/Clipboard") {
   static readonly layer: Layer.Layer<Clipboard, never, Gm | Dom> = Layer.effect(
     Clipboard,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const gm = yield* Gm;
       const dom = yield* Dom;
 
       // The accessors are read once, when the layer is built. The key path
       // then holds two plain values, and it does no global read of its own.
-      const writer = yield* dom.probeOr(
-        () => clipboardWriter(dom.window),
-        null,
-      );
-      const reader = yield* dom.probeOr(
-        () => clipboardReader(dom.window),
-        null,
-      );
+      const writer = yield* dom.probeOr(() => clipboardWriter(dom.window), null);
+      const reader = yield* dom.probeOr(() => clipboardReader(dom.window), null);
       const canExec = yield* dom.probeOr(() => {
         const exec: unknown = Reflect.get(dom.document, "execCommand");
         return Predicate.isFunction(exec);
@@ -163,14 +154,10 @@ export class Clipboard extends Context.Service<Clipboard, {
        * because an element that is not rendered cannot be selected.
        * `position:fixed` keeps the focus call from scrolling the page.
        */
-      const execCommandCopy = (
-        text: string,
-      ): Effect.Effect<void, ClipboardError> =>
+      const execCommandCopy = (text: string): Effect.Effect<void, ClipboardError> =>
         Effect.suspend(() => {
           if (!canExec) {
-            return Effect.fail(
-              clipboardError("unavailable", "document.execCommand is absent"),
-            );
+            return Effect.fail(clipboardError("unavailable", "document.execCommand is absent"));
           }
           const doc = dom.document;
           const previous = doc.activeElement;
@@ -187,16 +174,11 @@ export class Clipboard extends Context.Service<Clipboard, {
             area.select();
             area.setSelectionRange(0, text.length);
             const copied = doc.execCommand("copy");
-            return copied ? Effect.void : Effect.fail(
-              clipboardError(
-                "failed",
-                "document.execCommand('copy') gave false",
-              ),
-            );
+            return copied
+              ? Effect.void
+              : Effect.fail(clipboardError("failed", "document.execCommand('copy') gave false"));
           } catch (cause) {
-            return Effect.fail(
-              clipboardError("failed", describe(cause), cause),
-            );
+            return Effect.fail(clipboardError("failed", describe(cause), cause));
           } finally {
             area.remove();
             if (previous instanceof HTMLElement) {
@@ -220,10 +202,7 @@ export class Clipboard extends Context.Service<Clipboard, {
         Effect.suspend(() => {
           if (writer === null) {
             return Effect.fail(
-              clipboardError(
-                "unavailable",
-                "navigator.clipboard.writeText is absent",
-              ),
+              clipboardError("unavailable", "navigator.clipboard.writeText is absent"),
             );
           }
           const started = writer(text);
@@ -242,7 +221,7 @@ export class Clipboard extends Context.Service<Clipboard, {
               cause.reason === "unavailable" ? "unavailable" : "failed",
               cause.detail,
               cause,
-            )
+            ),
           ),
           Effect.catch(() => asyncCopy(text)),
           // The last try. The activation is spent if the asynchronous write
@@ -250,18 +229,13 @@ export class Clipboard extends Context.Service<Clipboard, {
           // where the asynchronous API is absent and nothing suspended. The
           // reported error stays the one from the asynchronous write, because
           // that path is the only one that gives a true reason.
-          Effect.catch((denied) =>
-            Effect.mapError(execCommandCopy(text), () => denied)
-          ),
+          Effect.catch((denied) => Effect.mapError(execCommandCopy(text), () => denied)),
         );
 
       const read: Effect.Effect<string, ClipboardError> = Effect.suspend(() => {
         if (reader === null) {
           return Effect.fail(
-            clipboardError(
-              "unavailable",
-              "navigator.clipboard.readText is absent",
-            ),
+            clipboardError("unavailable", "navigator.clipboard.readText is absent"),
           );
         }
         return Effect.tryPromise({

@@ -67,27 +67,23 @@ export type HandlerEventName = keyof HandlerEventMap;
  * `R` is what the handler bodies need. `push` captures those services once, so
  * the stored handler needs nothing when the key path runs it.
  */
-export type Handler<R = never> =
-  & {
-    readonly name: string;
-    /**
-     * Clean up after a body of this handler failed.
-     *
-     * The stack removes the frame first, and then calls this. The frame is
-     * usually one part of something larger — a mode holds an indicator, a
-     * singleton group, an overlay and its exit bodies — and only the owner can
-     * release the rest. This body must not suspend. See `ARCHITECTURE.md`
-     * section 3.
-     */
-    readonly onDefect?: (
-      cause: Cause.Cause<never>,
-    ) => Effect.Effect<void, never, R>;
-  }
-  & {
-    readonly [K in HandlerEventName]?: (
-      event: HandlerEventMap[K],
-    ) => Effect.Effect<HandlerResult, never, R>;
-  };
+export type Handler<R = never> = {
+  readonly name: string;
+  /**
+   * Clean up after a body of this handler failed.
+   *
+   * The stack removes the frame first, and then calls this. The frame is
+   * usually one part of something larger — a mode holds an indicator, a
+   * singleton group, an overlay and its exit bodies — and only the owner can
+   * release the rest. This body must not suspend. See `ARCHITECTURE.md`
+   * section 3.
+   */
+  readonly onDefect?: (cause: Cause.Cause<never>) => Effect.Effect<void, never, R>;
+} & {
+  readonly [K in HandlerEventName]?: (
+    event: HandlerEventMap[K],
+  ) => Effect.Effect<HandlerResult, never, R>;
+};
 
 export type HandlerId = number;
 
@@ -120,47 +116,44 @@ const suppressEvent = (event: Event): void => {
   event.stopImmediatePropagation();
 };
 
-export class HandlerStack extends Context.Service<HandlerStack, {
-  /** Put a handler on top. It sees an event first. */
-  readonly push: <R>(
-    handler: Handler<R>,
-  ) => Effect.Effect<HandlerId, never, R>;
+export class HandlerStack extends Context.Service<
+  HandlerStack,
+  {
+    /** Put a handler on top. It sees an event first. */
+    readonly push: <R>(handler: Handler<R>) => Effect.Effect<HandlerId, never, R>;
 
-  /** Put a handler at the bottom. It sees an event last. */
-  readonly unshift: <R>(
-    handler: Handler<R>,
-  ) => Effect.Effect<HandlerId, never, R>;
+    /** Put a handler at the bottom. It sees an event last. */
+    readonly unshift: <R>(handler: Handler<R>) => Effect.Effect<HandlerId, never, R>;
 
-  readonly remove: (id: HandlerId) => Effect.Effect<void>;
-  readonly has: (id: HandlerId) => Effect.Effect<boolean>;
+    readonly remove: (id: HandlerId) => Effect.Effect<void>;
+    readonly has: (id: HandlerId) => Effect.Effect<boolean>;
 
-  /**
-   * Give each handler, from the top, a chance at the event.
-   *
-   * Answers `true` when the event may continue to the page.
-   */
-  readonly bubble: <K extends HandlerEventName>(
-    name: K,
-    event: HandlerEventMap[K],
-  ) => Effect.Effect<boolean>;
+    /**
+     * Give each handler, from the top, a chance at the event.
+     *
+     * Answers `true` when the event may continue to the page.
+     */
+    readonly bubble: <K extends HandlerEventName>(
+      name: K,
+      event: HandlerEventMap[K],
+    ) => Effect.Effect<boolean>;
 
-  /** Drop every handler. */
-  readonly reset: Effect.Effect<void>;
+    /** Drop every handler. */
+    readonly reset: Effect.Effect<void>;
 
-  /** The live handler names, innermost last. For diagnostics. */
-  readonly names: Effect.Effect<ReadonlyArray<string>>;
+    /** The live handler names, innermost last. For diagnostics. */
+    readonly names: Effect.Effect<ReadonlyArray<string>>;
 
-  readonly depth: Effect.Effect<number>;
-}>()("vimium/core/HandlerStack") {
+    readonly depth: Effect.Effect<number>;
+  }
+>()("vimium/core/HandlerStack") {
   static readonly layer: Layer.Layer<HandlerStack> = Layer.effect(
     HandlerStack,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const state = yield* Ref.make<StackState>({ entries: [], nextId: 0 });
 
-      const bind = <R>(
-        handler: Handler<R>,
-      ): Effect.Effect<BoundHandler, never, R> =>
-        Effect.gen(function*() {
+      const bind = <R>(handler: Handler<R>): Effect.Effect<BoundHandler, never, R> =>
+        Effect.gen(function* () {
           const services = yield* Effect.context<R>();
           const bound: Record<string, unknown> = { name: handler.name };
 
@@ -170,9 +163,7 @@ export class HandlerStack extends Context.Service<HandlerStack, {
             if (key === "name" || key === "onDefect") continue;
             const body = (handler as Record<string, unknown>)[key];
             if (typeof body !== "function") continue;
-            const run = body as (
-              event: Event,
-            ) => Effect.Effect<HandlerResult, never, R>;
+            const run = body as (event: Event) => Effect.Effect<HandlerResult, never, R>;
             bound[key] = (event: Event): Effect.Effect<HandlerResult> =>
               Effect.provideContext(run(event), services);
           }
@@ -181,20 +172,15 @@ export class HandlerStack extends Context.Service<HandlerStack, {
           // bound on its own. A member with another shape must not compile.
           const onDefect = handler.onDefect;
           if (onDefect !== undefined) {
-            bound["onDefect"] = (
-              cause: Cause.Cause<never>,
-            ): Effect.Effect<void> =>
+            bound["onDefect"] = (cause: Cause.Cause<never>): Effect.Effect<void> =>
               Effect.provideContext(onDefect(cause), services);
           }
 
           return bound as unknown as BoundHandler;
         });
 
-      const insert = <R>(
-        handler: Handler<R>,
-        onTop: boolean,
-      ): Effect.Effect<HandlerId, never, R> =>
-        Effect.gen(function*() {
+      const insert = <R>(handler: Handler<R>, onTop: boolean): Effect.Effect<HandlerId, never, R> =>
+        Effect.gen(function* () {
           const bound = yield* bind(handler);
           return yield* Ref.modify(state, (current) => {
             const id = current.nextId + 1;
@@ -203,9 +189,7 @@ export class HandlerStack extends Context.Service<HandlerStack, {
               id,
               {
                 nextId: id,
-                entries: onTop
-                  ? [...current.entries, entry]
-                  : [entry, ...current.entries],
+                entries: onTop ? [...current.entries, entry] : [entry, ...current.entries],
               },
             ];
           });
@@ -218,10 +202,7 @@ export class HandlerStack extends Context.Service<HandlerStack, {
         }));
 
       const has = (id: HandlerId): Effect.Effect<boolean> =>
-        Effect.map(
-          Ref.get(state),
-          (current) => current.entries.some((entry) => entry.id === id),
-        );
+        Effect.map(Ref.get(state), (current) => current.entries.some((entry) => entry.id === id));
 
       const bodyOf = (
         handler: BoundHandler,
@@ -229,9 +210,7 @@ export class HandlerStack extends Context.Service<HandlerStack, {
       ): Option.Option<(event: Event) => Effect.Effect<HandlerResult>> => {
         const body = (handler as Record<string, unknown>)[name];
         return typeof body === "function"
-          ? Option.some(
-            body as (event: Event) => Effect.Effect<HandlerResult>,
-          )
+          ? Option.some(body as (event: Event) => Effect.Effect<HandlerResult>)
           : Option.none();
       };
 
@@ -239,7 +218,7 @@ export class HandlerStack extends Context.Service<HandlerStack, {
         name: K,
         event: HandlerEventMap[K],
       ): Effect.Effect<boolean> =>
-        Effect.gen(function*() {
+        Effect.gen(function* () {
           // A real snapshot. Handlers push and pop modes while the walk is in
           // progress, and indexing into the live array while it changes skips
           // frames: a handler that removed itself moved every entry below it up
@@ -274,13 +253,11 @@ export class HandlerStack extends Context.Service<HandlerStack, {
               yield* remove(entry.id);
               const onDefect = entry.handler.onDefect;
               if (onDefect !== undefined) {
-                yield* Effect.catchCause(
-                  onDefect(outcome.cause),
-                  (cause) =>
-                    Effect.logError(
-                      `the owner of "${entry.handler.name}" failed to clean up`,
-                      Cause.pretty(cause),
-                    ),
+                yield* Effect.catchCause(onDefect(outcome.cause), (cause) =>
+                  Effect.logError(
+                    `the owner of "${entry.handler.name}" failed to clean up`,
+                    Cause.pretty(cause),
+                  ),
                 );
               }
               result = CONTINUE_BUBBLING;
@@ -316,9 +293,8 @@ export class HandlerStack extends Context.Service<HandlerStack, {
         has,
         bubble,
         reset: Ref.update(state, (current) => ({ ...current, entries: [] })),
-        names: Effect.map(
-          Ref.get(state),
-          (current) => current.entries.map((entry) => entry.handler.name),
+        names: Effect.map(Ref.get(state), (current) =>
+          current.entries.map((entry) => entry.handler.name),
         ),
         depth: Effect.map(Ref.get(state), (current) => current.entries.length),
       });

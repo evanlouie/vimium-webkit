@@ -26,42 +26,29 @@ test.describe("smooth scrolling (shipped default)", () => {
     await vw.open("/scrollables.html");
 
     await vw.press("j");
-    await expect.poll(
-      async () => (await vw.scrollOffsets()).y,
-      { timeout: SETTLE_MS },
-    ).toBe(STEP);
+    await expect.poll(async () => (await vw.scrollOffsets()).y, { timeout: SETTLE_MS }).toBe(STEP);
   });
 
   test("`j` then `k` returns to where it started", async ({ vw }) => {
     await vw.open("/scrollables.html");
 
     await vw.press("j");
-    await expect.poll(
-      async () => (await vw.scrollOffsets()).y,
-      { timeout: SETTLE_MS },
-    ).toBe(STEP);
+    await expect.poll(async () => (await vw.scrollOffsets()).y, { timeout: SETTLE_MS }).toBe(STEP);
 
     await vw.press("k");
-    await expect.poll(
-      async () => (await vw.scrollOffsets()).y,
-      { timeout: SETTLE_MS },
-    ).toBe(0);
+    await expect.poll(async () => (await vw.scrollOffsets()).y, { timeout: SETTLE_MS }).toBe(0);
   });
 
   test("`G` and `gg` reach the ends", async ({ vw }) => {
     await vw.open("/scrollables.html");
 
     await vw.press("G");
-    await expect.poll(
-      async () => (await vw.scrollOffsets()).y,
-      { timeout: SETTLE_MS },
-    ).toBeGreaterThan(STEP * 4);
+    await expect
+      .poll(async () => (await vw.scrollOffsets()).y, { timeout: SETTLE_MS })
+      .toBeGreaterThan(STEP * 4);
 
     await vw.press("g", "g");
-    await expect.poll(
-      async () => (await vw.scrollOffsets()).y,
-      { timeout: SETTLE_MS },
-    ).toBe(0);
+    await expect.poll(async () => (await vw.scrollOffsets()).y, { timeout: SETTLE_MS }).toBe(0);
   });
 
   test("a nested scroller absorbs the scroll, not the document", async ({ vw }) => {
@@ -73,10 +60,9 @@ test.describe("smooth scrolling (shipped default)", () => {
     });
 
     await vw.press("j");
-    await expect.poll(
-      async () => (await vw.scrollOffsets("#inner")).y,
-      { timeout: SETTLE_MS },
-    ).toBe(STEP);
+    await expect
+      .poll(async () => (await vw.scrollOffsets("#inner")).y, { timeout: SETTLE_MS })
+      .toBe(STEP);
     expect((await vw.scrollOffsets()).y).toBe(0);
   });
 
@@ -87,19 +73,17 @@ test.describe("smooth scrolling (shipped default)", () => {
     // is a backwards jump on the first repeat frame, from `applied` not being
     // rebased when the elapsed clock resets.
     await vw.press("j", "j", "j");
-    await expect.poll(
-      async () => (await vw.scrollOffsets()).y,
-      { timeout: SETTLE_MS },
-    ).toBe(STEP * 3);
+    await expect
+      .poll(async () => (await vw.scrollOffsets()).y, { timeout: SETTLE_MS })
+      .toBe(STEP * 3);
   });
 
   test("a count prefix multiplies the step", async ({ vw }) => {
     await vw.open("/scrollables.html");
 
     await vw.press("3", "j");
-    await expect.poll(
-      async () => (await vw.scrollOffsets()).y,
-      { timeout: SETTLE_MS },
-    ).toBe(STEP * 3);
+    await expect
+      .poll(async () => (await vw.scrollOffsets()).y, { timeout: SETTLE_MS })
+      .toBe(STEP * 3);
   });
 });

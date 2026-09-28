@@ -33,8 +33,7 @@ test.describe("scrolling", () => {
     // key must land while the guard is still building the application.
     await vw.page.goto("/scrollables.html");
     await vw.page.evaluate(() => {
-      (globalThis as typeof globalThis & { __pageKeys?: number }).__pageKeys =
-        0;
+      (globalThis as typeof globalThis & { __pageKeys?: number }).__pageKeys = 0;
       globalThis.addEventListener("keydown", () => {
         const scope = globalThis as typeof globalThis & { __pageKeys?: number };
         scope.__pageKeys = (scope.__pageKeys ?? 0) + 1;
@@ -44,8 +43,8 @@ test.describe("scrolling", () => {
     await vw.page.keyboard.press("j");
     await expect.poll(async () => (await vw.scrollOffsets()).y).toBe(STEP);
     expect(
-      await vw.page.evaluate(() =>
-        (globalThis as typeof globalThis & { __pageKeys?: number }).__pageKeys
+      await vw.page.evaluate(
+        () => (globalThis as typeof globalThis & { __pageKeys?: number }).__pageKeys,
       ),
     ).toBe(0);
   });
@@ -67,8 +66,7 @@ test.describe("scrolling", () => {
     await vw.open("/scrollables.html");
 
     await vw.press("G");
-    await expect.poll(async () => (await vw.scrollOffsets()).y)
-      .toBeGreaterThan(1000);
+    await expect.poll(async () => (await vw.scrollOffsets()).y).toBeGreaterThan(1000);
 
     await vw.press("g", "g");
     await expect.poll(async () => (await vw.scrollOffsets()).y).toBe(0);
@@ -76,9 +74,7 @@ test.describe("scrolling", () => {
 
   test("`d` and `u` move by half a viewport", async ({ vw }) => {
     await vw.open("/scrollables.html");
-    const half = Math.round(
-      (await vw.page.evaluate(() => globalThis.innerHeight)) * 0.5,
-    );
+    const half = Math.round((await vw.page.evaluate(() => globalThis.innerHeight)) * 0.5);
 
     await vw.press("d");
     await expect.poll(async () => (await vw.scrollOffsets()).y).toBe(half);
@@ -93,8 +89,7 @@ test.describe("scrolling", () => {
 
     await vw.press("j");
 
-    await expect.poll(async () => (await vw.scrollOffsets("#inner")).y)
-      .toBe(STEP);
+    await expect.poll(async () => (await vw.scrollOffsets("#inner")).y).toBe(STEP);
     expect((await vw.scrollOffsets("#outer")).y).toBe(0);
     expect((await vw.scrollOffsets()).y).toBe(0);
   });
@@ -118,8 +113,7 @@ test.describe("scrolling", () => {
 
     await vw.press("j");
 
-    await expect.poll(async () => (await vw.scrollOffsets("#outer")).y)
-      .toBe(STEP);
+    await expect.poll(async () => (await vw.scrollOffsets("#outer")).y).toBe(STEP);
     expect((await vw.scrollOffsets()).y).toBe(0);
   });
 

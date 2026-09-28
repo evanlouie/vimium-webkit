@@ -96,7 +96,7 @@ const check = (
   files: Readonly<Record<string, string>>,
   overrides: Partial<Omit<InvariantInput, "root">> = {},
 ): Effect.Effect<readonly Violation[], never, Scope.Scope> =>
-  Effect.gen(function*() {
+  Effect.gen(function* () {
     const root = yield* project({
       "src/domain/Command.ts": CLEAN_CATALOGUE,
       "src/features/Demo.ts": CLEAN_FEATURE,
@@ -111,7 +111,7 @@ const check = (
         metadataBlock,
         bundle: overrides.bundle ?? `${metadataBlock}${NOTICES}${code}`,
         declaredVersion: overrides.declaredVersion ?? "0.1.1",
-      })
+      }),
     );
   });
 
@@ -132,7 +132,8 @@ describe("invariants", () => {
       assert.notInclude(stripped, "node:assert");
       assert.strictEqual(stripped.length, source.length);
       assert.lengthOf(stripped.split("\n"), 3);
-    }));
+    }),
+  );
 
   it.effect("does not let a stray apostrophe swallow the file", () =>
     Effect.sync(() => {
@@ -140,7 +141,8 @@ describe("invariants", () => {
       const source = "const a = 'it's prose\nconst dependency = \"kept\";";
       const stripped = stripNonCode(source);
       assert.include(stripped, "const dependency");
-    }));
+    }),
+  );
 
   it.effect("ignores a module example inside a comment", () =>
     Effect.sync(() => {
@@ -152,37 +154,36 @@ describe("invariants", () => {
 
       assert.isFalse(hasNodeSpecifier(source));
       assert.notInclude(stripNonCode(source), "node:assert");
-    }));
+    }),
+  );
 
   it.effect("is not fooled by a regular expression", () =>
     Effect.sync(() => {
-      const source = [
-        "const protocol = /https?:\\/\\//;",
-        'const dependency = "node:fs";',
-      ].join("\n");
+      const source = ["const protocol = /https?:\\/\\//;", 'const dependency = "node:fs";'].join(
+        "\n",
+      );
       assert.isTrue(hasNodeSpecifier(source));
-    }));
+    }),
+  );
 
   it.effect("finds a module specifier inside a template", () =>
     Effect.sync(() => {
       assert.isTrue(hasNodeSpecifier("const dependency = `node:path`;"));
       assert.isFalse(hasNodeSpecifier("const dependency = `browser`;"));
-    }));
+    }),
+  );
 
   it.effect("gives no violation for a clean project", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const violations = yield* check({
         "src/ui/Ui.ts": "const sheet = new CSSStyleSheet();\n",
       });
-      assert.deepEqual(
-        violations,
-        [],
-        `unexpected violations:\n${formatViolations(violations)}`,
-      );
-    }));
+      assert.deepEqual(violations, [], `unexpected violations:\n${formatViolations(violations)}`);
+    }),
+  );
 
   it.effect("refuses dynamic code evaluation", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const violations = yield* check({
         "src/features/Bad.ts": [
           "// eval( in a comment must not fire",
@@ -191,10 +192,11 @@ describe("invariants", () => {
       });
       assert.deepEqual(rulesOf(violations), ["no-dynamic-code"]);
       assert.strictEqual(violations[0]?.line, 2);
-    }));
+    }),
+  );
 
   it.effect("refuses a `<style>` element outside the documented file", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const source = 'const node = document.createElement("style");\n';
       const banned = yield* check({ "src/features/Bad.ts": source });
       assert.deepEqual(rulesOf(banned), ["no-style-element"]);
@@ -202,20 +204,22 @@ describe("invariants", () => {
       // The one documented place may still do it.
       const allowed = yield* check({ "src/ui/Ui.ts": source });
       assert.deepEqual(rulesOf(allowed), []);
-    }));
+    }),
+  );
 
   it.effect("sends every manager call through the capability gate", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const source = 'const value = GM_getValue("key");\n';
       const banned = yield* check({ "src/features/Bad.ts": source });
       assert.deepEqual(rulesOf(banned), ["gm-through-shim"]);
 
       const allowed = yield* check({ "src/platform/Gm.ts": source });
       assert.deepEqual(rulesOf(allowed), []);
-    }));
+    }),
+  );
 
   it.effect("reads a replaceable global through one guarded probe", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       // A page or a manager can exchange `navigator` for an accessor, and an
       // accessor can throw where an absent API only gives `undefined`.
       const source = "const agent = navigator.userAgent;\n";
@@ -224,10 +228,11 @@ describe("invariants", () => {
 
       const allowed = yield* check({ "src/platform/Dom.ts": source });
       assert.deepEqual(rulesOf(allowed), []);
-    }));
+    }),
+  );
 
   it.effect("keeps the key path free of anything that suspends", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       // `preventDefault` works only during synchronous dispatch, and a fiber
       // yield becomes a macrotask on Safari.
       const source = "const wait = Effect.sleep(10);\n";
@@ -236,18 +241,20 @@ describe("invariants", () => {
 
       const allowed = yield* check({ "src/features/Slow.ts": source });
       assert.deepEqual(rulesOf(allowed), []);
-    }));
+    }),
+  );
 
   it.effect("refuses an inline event-handler attribute", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const violations = yield* check({
         "src/ui/Bad.ts": 'node.setAttribute("onclick", "go()");\n',
       });
       assert.deepEqual(rulesOf(violations), ["no-inline-handlers"]);
-    }));
+    }),
+  );
 
   it.effect("refuses every HTML sink", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       // Link text, page titles and search suggestions all come from the page
       // and all end inside our own overlay.
       const violations = yield* check({
@@ -257,72 +264,92 @@ describe("invariants", () => {
         ].join("\n"),
       });
       assert.deepEqual(rulesOf(violations), ["no-html-sinks", "no-html-sinks"]);
-    }));
+    }),
+  );
 
   it.effect("refuses a Node global in the artefact", () =>
-    Effect.gen(function*() {
-      const violations = yield* check({}, {
-        code: `${CLEAN_CODE}const home = process.env.HOME;\n`,
-      });
+    Effect.gen(function* () {
+      const violations = yield* check(
+        {},
+        {
+          code: `${CLEAN_CODE}const home = process.env.HOME;\n`,
+        },
+      );
       assert.deepEqual(rulesOf(violations), ["no-node-globals"]);
-    }));
+    }),
+  );
 
   it.effect("refuses a `node:` module specifier in the artefact", () =>
-    Effect.gen(function*() {
-      const violations = yield* check({}, {
-        code: `${CLEAN_CODE}const fs = "node:fs";\n`,
-      });
+    Effect.gen(function* () {
+      const violations = yield* check(
+        {},
+        {
+          code: `${CLEAN_CODE}const fs = "node:fs";\n`,
+        },
+      );
       assert.deepEqual(rulesOf(violations), ["no-node-globals"]);
-    }));
+    }),
+  );
 
   it.effect("demands the metadata block first, with the declared version", () =>
-    Effect.gen(function*() {
-      const late = yield* check({}, {
-        bundle: `${CLEAN_CODE}${METADATA}${NOTICES}`,
-      });
+    Effect.gen(function* () {
+      const late = yield* check(
+        {},
+        {
+          bundle: `${CLEAN_CODE}${METADATA}${NOTICES}`,
+        },
+      );
       assert.include(rulesOf(late), "metadata-first");
 
       const mismatched = yield* check({}, { declaredVersion: "9.9.9" });
       assert.deepEqual(rulesOf(mismatched), ["version-match"]);
 
-      const withoutVersion = yield* check({}, {
-        metadataBlock: "// ==UserScript==\n// ==/UserScript==\n",
-        bundle:
-          `// ==UserScript==\n// ==/UserScript==\n${NOTICES}${CLEAN_CODE}`,
-      });
+      const withoutVersion = yield* check(
+        {},
+        {
+          metadataBlock: "// ==UserScript==\n// ==/UserScript==\n",
+          bundle: `// ==UserScript==\n// ==/UserScript==\n${NOTICES}${CLEAN_CODE}`,
+        },
+      );
       assert.deepEqual(rulesOf(withoutVersion), ["version-match"]);
-    }));
+    }),
+  );
 
   it.effect("demands the notice of every bundled dependency", () =>
-    Effect.gen(function*() {
-      const withoutNotices = yield* check({}, {
-        bundle: `${METADATA}${CLEAN_CODE}`,
-      });
-      assert.deepEqual(rulesOf(withoutNotices), [
-        "third-party-notices",
-        "third-party-notices",
-      ]);
+    Effect.gen(function* () {
+      const withoutNotices = yield* check(
+        {},
+        {
+          bundle: `${METADATA}${CLEAN_CODE}`,
+        },
+      );
+      assert.deepEqual(rulesOf(withoutNotices), ["third-party-notices", "third-party-notices"]);
 
       // The other half: the notice is an obligation only when the code is
       // there.
-      const withoutDependency = yield* check({}, {
-        code: "const value = 1;\n",
-        bundle: `${METADATA}${NOTICES}const value = 1;\n`,
-      });
+      const withoutDependency = yield* check(
+        {},
+        {
+          code: "const value = 1;\n",
+          bundle: `${METADATA}${NOTICES}const value = 1;\n`,
+        },
+      );
       assert.deepEqual(rulesOf(withoutDependency), ["third-party-notices"]);
-    }));
+    }),
+  );
 
   it.effect("keeps the bundle under the budget of Greasy Fork", () =>
-    Effect.gen(function*() {
-      const oversized = `${METADATA}${NOTICES}${CLEAN_CODE}${
-        "// pad\n".repeat(Math.ceil(BUNDLE_BUDGET_BYTES / 7) + 1)
-      }`;
+    Effect.gen(function* () {
+      const oversized = `${METADATA}${NOTICES}${CLEAN_CODE}${"// pad\n".repeat(
+        Math.ceil(BUNDLE_BUDGET_BYTES / 7) + 1,
+      )}`;
       const violations = yield* check({}, { bundle: oversized });
       assert.deepEqual(rulesOf(violations), ["bundle-budget"]);
-    }));
+    }),
+  );
 
   it.effect("demands a valid tier and a reason for every command", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const violations = yield* check({
         "src/domain/Command.ts": `
 export const COMMANDS = {
@@ -332,33 +359,31 @@ export const COMMANDS = {
 } as const;
 `,
       });
-      assert.deepEqual(rulesOf(violations), [
-        "command-tiers",
-        "command-tiers",
-        "command-tiers",
-      ]);
-    }));
+      assert.deepEqual(rulesOf(violations), ["command-tiers", "command-tiers", "command-tiers"]);
+    }),
+  );
 
   it.effect("demands a body for every tier A and tier B command", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const violations = yield* check({
         "src/features/Demo.ts": "export const install = () => undefined;\n",
       });
       assert.deepEqual(rulesOf(violations), ["command-bodies"]);
       assert.include(violations[0]?.message ?? "", '"demo"');
-    }));
+    }),
+  );
 
   it.effect("accepts a body that is registered by name", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const violations = yield* check({
-        "src/features/Demo.ts":
-          'export const install = (c) => c.register("demo", run);\n',
+        "src/features/Demo.ts": 'export const install = (c) => c.register("demo", run);\n',
       });
       assert.deepEqual(rulesOf(violations), []);
-    }));
+    }),
+  );
 
   it.effect("asks for no body for a tier C command", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const violations = yield* check({
         "src/domain/Command.ts": `
 export const COMMANDS = {
@@ -374,7 +399,8 @@ export const COMMANDS = {
         "src/features/Demo.ts": "export const install = () => undefined;\n",
       });
       assert.deepEqual(rulesOf(violations), []);
-    }));
+    }),
+  );
 
   it.effect("formats a violation with its file and its line", () =>
     Effect.sync(() => {
@@ -384,5 +410,6 @@ export const COMMANDS = {
       ]);
       assert.include(text, "src/a.ts:7");
       assert.include(text, "src/b.ts —");
-    }));
+    }),
+  );
 });

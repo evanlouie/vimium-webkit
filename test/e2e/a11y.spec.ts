@@ -40,10 +40,7 @@ const ADDED_CONTROLS: readonly string[] = [
 ];
 
 /** Wait until a node matching `selector` exists inside the overlay. */
-const waitForOverlay = async (
-  page: Page,
-  selector: string,
-): Promise<void> => {
+const waitForOverlay = async (page: Page, selector: string): Promise<void> => {
   await page.waitForFunction(
     (query: string) => {
       const host = globalThis as unknown as {
@@ -80,28 +77,24 @@ test.describe("the accessibility tree", () => {
     await vw.press("n");
     await vw.waitForHud("No previous search");
 
-    expect(await overlayAttribute(page, '.vw-hud [role="status"]', "aria-live"))
-      .not.toBeNull();
-    expect(
-      await overlayAttribute(page, '.vw-hud [role="status"]', "aria-atomic"),
-    ).toBe("true");
+    expect(await overlayAttribute(page, '.vw-hud [role="status"]', "aria-live")).not.toBeNull();
+    expect(await overlayAttribute(page, '.vw-hud [role="status"]', "aria-atomic")).toBe("true");
     // A live region under a hidden host is never announced.
-    expect(await overlayAriaHidden(page, '.vw-hud [role="status"]')).toBe(
-      false,
-    );
+    expect(await overlayAriaHidden(page, '.vw-hud [role="status"]')).toBe(false);
   });
 
-  test("an error goes to the assertive region, and stays out of the polite one", async ({ vw, page }) => {
+  test("an error goes to the assertive region, and stays out of the polite one", async ({
+    vw,
+    page,
+  }) => {
     await vw.open("/long-text.html");
 
     // Both regions are built with the HUD, and neither changes its politeness
     // again. A reader keeps the politeness that a region had when it entered
     // the tree, so a region that became assertive with its text could speak an
     // error politely, or not at all.
-    expect(await overlayAttribute(page, '.vw-hud [role="status"]', "aria-live"))
-      .toBe("polite");
-    expect(await overlayAttribute(page, '.vw-hud [role="alert"]', "aria-live"))
-      .toBe("assertive");
+    expect(await overlayAttribute(page, '.vw-hud [role="status"]', "aria-live")).toBe("polite");
+    expect(await overlayAttribute(page, '.vw-hud [role="alert"]', "aria-live")).toBe("assertive");
 
     // A mark that nobody set is a failure, and a failure reaches the user
     // through `Report`, which draws it with the error tone.
@@ -109,13 +102,10 @@ test.describe("the accessibility tree", () => {
     await vw.press("z");
     await vw.waitForHud("is not set");
 
-    expect(await overlayText(page, '.vw-hud [role="alert"]')).toContain(
-      "is not set",
-    );
+    expect(await overlayText(page, '.vw-hud [role="alert"]')).toContain("is not set");
     expect(await overlayText(page, '.vw-hud [role="status"]')).toBe("");
     // The politeness must be the same as before the error.
-    expect(await overlayAttribute(page, '.vw-hud [role="status"]', "aria-live"))
-      .toBe("polite");
+    expect(await overlayAttribute(page, '.vw-hud [role="status"]', "aria-live")).toBe("polite");
   });
 
   test("the find prompt has a name and a live status", async ({ vw, page }) => {
@@ -125,20 +115,13 @@ test.describe("the accessibility tree", () => {
 
     // "/" is the visible label, and no reader can say it. The field carries
     // the same name in words.
-    expect(await overlayAttribute(page, ".vw-hud-input", "aria-label"))
-      .toBe("Find on the page");
+    expect(await overlayAttribute(page, ".vw-hud-input", "aria-label")).toBe("Find on the page");
     expect(await overlayAriaHidden(page, ".vw-hud-input")).toBe(false);
 
-    const describedBy = await overlayAttribute(
-      page,
-      ".vw-hud-input",
-      "aria-describedby",
-    );
+    const describedBy = await overlayAttribute(page, ".vw-hud-input", "aria-describedby");
     expect(describedBy).not.toBeNull();
-    expect(await overlayAttribute(page, ".vw-hud-count", "id"))
-      .toBe(describedBy);
-    expect(await overlayAttribute(page, ".vw-hud-count", "aria-live"))
-      .toBe("polite");
+    expect(await overlayAttribute(page, ".vw-hud-count", "id")).toBe(describedBy);
+    expect(await overlayAttribute(page, ".vw-hud-count", "aria-live")).toBe("polite");
 
     await vw.type("hemisphere");
     // The status beside the field carries the mode, and the count after the
@@ -154,10 +137,8 @@ test.describe("the accessibility tree", () => {
     await waitForOverlay(page, ".vw-dialog");
 
     expect(await overlayAttribute(page, ".vw-dialog", "role")).toBe("dialog");
-    expect(await overlayAttribute(page, ".vw-dialog", "aria-modal"))
-      .toBe("true");
-    expect(await overlayAttribute(page, ".vw-dialog", "aria-label"))
-      .toContain("help");
+    expect(await overlayAttribute(page, ".vw-dialog", "aria-modal")).toBe("true");
+    expect(await overlayAttribute(page, ".vw-dialog", "aria-label")).toContain("help");
     expect(await overlayAriaHidden(page, ".vw-dialog")).toBe(false);
   });
 
@@ -168,13 +149,9 @@ test.describe("the accessibility tree", () => {
     await vw.press("Escape");
     await expect.poll(() => overlayCount(page, ".vw-dialog")).toBe(0);
 
-    expect(
-      await overlayAttribute(
-        page,
-        '.vw-layer[data-layer="dialog"]',
-        "aria-hidden",
-      ),
-    ).toBe("true");
+    expect(await overlayAttribute(page, '.vw-layer[data-layer="dialog"]', "aria-hidden")).toBe(
+      "true",
+    );
   });
 
   test("removes the dialog before it hides the layer", async ({ vw, page }) => {
@@ -192,8 +169,7 @@ test.describe("the accessibility tree", () => {
         __vwCloseLog?: string[];
       };
       const shadow = host.__vimiumHarness?.shadow ?? null;
-      const layer = shadow?.querySelector('.vw-layer[data-layer="dialog"]') ??
-        null;
+      const layer = shadow?.querySelector('.vw-layer[data-layer="dialog"]') ?? null;
       if (layer === null) return false;
       const log: string[] = [];
       host.__vwCloseLog = log;
@@ -241,8 +217,7 @@ test.describe("the accessibility tree", () => {
       const inside = await overlayFocusWithin(page, ".vw-dialog");
       // oxlint-disable-next-line no-await-in-loop
       const active = await overlayActiveElement(page);
-      expect(inside, `press ${press + 1} left the dialog for ${active}`)
-        .toBe(true);
+      expect(inside, `press ${press + 1} left the dialog for ${active}`).toBe(true);
     }
 
     // Shift and Tab must stay inside as well.
@@ -294,8 +269,10 @@ test.describe("the accessibility tree", () => {
       // oxlint-disable-next-line no-await-in-loop
       const name = await overlayActiveElement(page);
       expect(box, `press ${press + 1} focused nothing`).not.toBeNull();
-      expect(box?.top ?? -1, `press ${press + 1} put ${name} above the view`)
-        .toBeGreaterThanOrEqual(-1);
+      expect(
+        box?.top ?? -1,
+        `press ${press + 1} put ${name} above the view`,
+      ).toBeGreaterThanOrEqual(-1);
       expect(
         (box?.top ?? 0) + (box?.height ?? 0),
         `press ${press + 1} put ${name} below the view`,
@@ -324,10 +301,10 @@ test.describe("the accessibility tree", () => {
     });
     expect(await clickOverlayButton(page, "Save")).toBe(true);
 
-    await expect.poll(() => overlayText(page, ".vw-problem"))
+    await expect
+      .poll(() => overlayText(page, ".vw-problem"))
       .toContain("brought into range: Scroll step size (px)");
-    expect(await overlayText(page, ".vw-problem"))
-      .not.toContain("keep their stored value");
+    expect(await overlayText(page, ".vw-problem")).not.toContain("keep their stored value");
   });
 
   test("the dialog gives the focus back when it closes", async ({ vw, page }) => {
@@ -417,7 +394,8 @@ test.describe("the accessibility tree", () => {
     });
     expect(await clickOverlayButton(page, "Save")).toBe(true);
 
-    await expect.poll(() => overlayText(page, ".vw-problem"))
+    await expect
+      .poll(() => overlayText(page, ".vw-problem"))
       .toContain("Digits that choose among filtered hints");
     expect(await overlayAttribute(page, ".vw-problem", "role")).toBe("alert");
   });
@@ -438,16 +416,8 @@ test.describe("the accessibility tree", () => {
 
     // A name of its own, and not the placeholder: the placeholder changes with
     // the source, and a reader that announces it would say it twice.
-    const name = await overlayAttribute(
-      page,
-      ".vw-omnibar__input",
-      "aria-label",
-    );
-    const placeholder = await overlayAttribute(
-      page,
-      ".vw-omnibar__input",
-      "placeholder",
-    );
+    const name = await overlayAttribute(page, ".vw-omnibar__input", "aria-label");
+    const placeholder = await overlayAttribute(page, ".vw-omnibar__input", "placeholder");
     expect(name ?? "").not.toBe("");
     expect(name).not.toBe(placeholder);
     expect(await overlayAriaHidden(page, ".vw-omnibar__input")).toBe(false);

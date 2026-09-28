@@ -8,13 +8,7 @@
 
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Option } from "effect";
-import {
-  type HudLine,
-  type HudState,
-  regionText,
-  statusText,
-  visibleLine,
-} from "~/ui/Hud.ts";
+import { type HudLine, type HudState, regionText, statusText, visibleLine } from "~/ui/Hud.ts";
 import { anyHeld, shiftHold } from "~/ui/Ui.ts";
 
 const EMPTY_STATE: HudState = {
@@ -29,8 +23,16 @@ describe("exposure to assistive technology", () => {
     Effect.sync(() => {
       assert.isFalse(anyHeld(new Map<string, number>()));
       assert.isFalse(anyHeld(new Map([["dialog", 0]])));
-      assert.isTrue(anyHeld(new Map([["hints", 0], ["dialog", 1]])));
-    }));
+      assert.isTrue(
+        anyHeld(
+          new Map([
+            ["hints", 0],
+            ["dialog", 1],
+          ]),
+        ),
+      );
+    }),
+  );
 
   it.effect("keeps a layer open until the last hold goes", () =>
     Effect.sync(() => {
@@ -42,14 +44,16 @@ describe("exposure to assistive technology", () => {
       assert.isTrue(anyHeld(holds));
       holds = shiftHold(holds, "dialog", -1);
       assert.isFalse(anyHeld(holds));
-    }));
+    }),
+  );
 
   it.effect("never counts below zero", () =>
     Effect.sync(() => {
       const holds = shiftHold(new Map<string, number>(), "hud", -1);
       assert.strictEqual(holds.get("hud"), 0);
       assert.isFalse(anyHeld(holds));
-    }));
+    }),
+  );
 });
 
 describe("the two live regions of the HUD", () => {
@@ -70,14 +74,16 @@ describe("the two live regions of the HUD", () => {
         polite: "3/17",
         urgent: "",
       });
-    }));
+    }),
+  );
 
   it.effect("clears both regions while the HUD says nothing", () =>
     Effect.sync(() => {
       // A region that kept the last text would hold two lines on screen, and
       // a reader would say the older one again at the next change.
       assert.deepEqual(regionText(Option.none()), { polite: "", urgent: "" });
-    }));
+    }),
+  );
 });
 
 describe("the HUD line", () => {
@@ -85,7 +91,8 @@ describe("the HUD line", () => {
     Effect.sync(() => {
       assert.isTrue(Option.isNone(visibleLine(EMPTY_STATE)));
       assert.strictEqual(statusText(EMPTY_STATE), "");
-    }));
+    }),
+  );
 
   it.effect("prefers a message, then the keys, then the mode", () =>
     Effect.sync(() => {
@@ -95,10 +102,7 @@ describe("the HUD line", () => {
         pending: Option.some("g"),
         prompt: Option.none(),
       };
-      assert.deepEqual(
-        visibleLine(full),
-        Option.some({ text: "Saved", tone: "info" }),
-      );
+      assert.deepEqual(visibleLine(full), Option.some({ text: "Saved", tone: "info" }));
       assert.deepEqual(
         visibleLine({ ...full, transient: Option.none() }),
         Option.some({ text: "g", tone: "info" }),
@@ -111,17 +115,13 @@ describe("the HUD line", () => {
         }),
         Option.some({ text: "Insert mode", tone: "info" }),
       );
-    }));
+    }),
+  );
 
   it.effect("puts the keys and the mode beside an open prompt", () =>
     Effect.sync(() => {
-      assert.strictEqual(
-        statusText({ ...EMPTY_STATE, pending: Option.some("2g") }),
-        "2g",
-      );
-      assert.strictEqual(
-        statusText({ ...EMPTY_STATE, indicator: Option.some("3/17") }),
-        "3/17",
-      );
-    }));
+      assert.strictEqual(statusText({ ...EMPTY_STATE, pending: Option.some("2g") }), "2g");
+      assert.strictEqual(statusText({ ...EMPTY_STATE, indicator: Option.some("3/17") }), "3/17");
+    }),
+  );
 });

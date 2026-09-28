@@ -32,7 +32,8 @@ describe("FindQuery", () => {
       assert.isFalse(hasUpperCase("привет"));
       // A digit and a punctuation mark have no case, so smartcase stays on.
       assert.isFalse(hasUpperCase("1234-!?"));
-    }));
+    }),
+  );
 
   it.effect("makes a lower-case query case-insensitive", () =>
     Effect.sync(() => {
@@ -40,7 +41,8 @@ describe("FindQuery", () => {
       assert.isTrue(query.ignoreCase);
       assert.isTrue(query.smartcase);
       assert.include(query.flags, "i");
-    }));
+    }),
+  );
 
   it.effect("makes any upper-case character case-sensitive", () =>
     Effect.sync(() => {
@@ -48,7 +50,8 @@ describe("FindQuery", () => {
       assert.isFalse(query.ignoreCase);
       assert.isTrue(query.smartcase);
       assert.notInclude(query.flags, "i");
-    }));
+    }),
+  );
 
   it.effect("lets an explicit directive beat smartcase", () =>
     Effect.sync(() => {
@@ -60,7 +63,8 @@ describe("FindQuery", () => {
       const pinned = parseFindQuery("hello\\I", literal);
       assert.isFalse(pinned.ignoreCase);
       assert.isFalse(pinned.smartcase);
-    }));
+    }),
+  );
 
   it.effect("removes a single escape and keeps a doubled one", () =>
     Effect.sync(() => {
@@ -72,7 +76,8 @@ describe("FindQuery", () => {
       const doubled = stripDirectives("foo\\\\r");
       assert.strictEqual(doubled.text, "foo\\r");
       assert.isTrue(Option.isNone(doubled.isRegex));
-    }));
+    }),
+  );
 
   it.effect("takes the default kind from regexFindMode", () =>
     Effect.sync(() => {
@@ -81,22 +86,14 @@ describe("FindQuery", () => {
       // The directive beats the setting, in both directions.
       assert.strictEqual(parseFindQuery("a.c\\r", literal).kind, "regex");
       assert.strictEqual(parseFindQuery("a.c\\R", regexMode).kind, "literal");
-    }));
+    }),
+  );
 
   it.effect("recognises /pattern/flags", () =>
     Effect.sync(() => {
-      assert.deepEqual(
-        splitRegexLiteral("/foo/"),
-        Option.some({ body: "foo", flags: "" }),
-      );
-      assert.deepEqual(
-        splitRegexLiteral("/foo/i"),
-        Option.some({ body: "foo", flags: "i" }),
-      );
-      assert.deepEqual(
-        splitRegexLiteral("/a\\/b/"),
-        Option.some({ body: "a\\/b", flags: "" }),
-      );
+      assert.deepEqual(splitRegexLiteral("/foo/"), Option.some({ body: "foo", flags: "" }));
+      assert.deepEqual(splitRegexLiteral("/foo/i"), Option.some({ body: "foo", flags: "i" }));
+      assert.deepEqual(splitRegexLiteral("/a\\/b/"), Option.some({ body: "a\\/b", flags: "" }));
 
       // Not literals: no delimiter, an unknown flag, or a repeated flag.
       assert.isTrue(Option.isNone(splitRegexLiteral("foo")));
@@ -104,7 +101,8 @@ describe("FindQuery", () => {
       assert.isTrue(Option.isNone(splitRegexLiteral("/foo/ii")));
       // A plain search that holds a slash stays a plain search.
       assert.isTrue(Option.isNone(splitRegexLiteral("and/or")));
-    }));
+    }),
+  );
 
   it.effect("treats /pattern/ as a regex even with regexFindMode off", () =>
     Effect.sync(() => {
@@ -116,7 +114,8 @@ describe("FindQuery", () => {
       assert.isTrue(Option.isSome(compiled));
       if (Option.isNone(compiled)) return;
       assert.isTrue(compiled.value.test("abc"));
-    }));
+    }),
+  );
 
   it.effect("lets /pattern/i beat smartcase", () =>
     Effect.sync(() => {
@@ -124,14 +123,16 @@ describe("FindQuery", () => {
       assert.isTrue(query.ignoreCase);
       assert.isFalse(query.smartcase);
       assert.strictEqual(query.flags, "gi");
-    }));
+    }),
+  );
 
   it.effect("neutralises a metacharacter", () =>
     Effect.sync(() => {
       const escaped = escapeRegExp("a.c*[x]");
       assert.isTrue(new RegExp(escaped).test("a.c*[x]"));
       assert.isFalse(new RegExp(escaped).test("abc*[x]"));
-    }));
+    }),
+  );
 
   it.effect("accepts collapsed whitespace in a literal query", () =>
     Effect.sync(() => {
@@ -143,7 +144,8 @@ describe("FindQuery", () => {
       if (Option.isNone(compiled)) return;
       assert.isTrue(compiled.value.test("sign  in"));
       assert.notStrictEqual(literalSource("a.b c"), "a.b c");
-    }));
+    }),
+  );
 
   it.effect("treats an empty query as empty and not as an error", () =>
     Effect.sync(() => {
@@ -154,14 +156,16 @@ describe("FindQuery", () => {
 
       // A query of directives alone is also empty.
       assert.isTrue(parseFindQuery("\\i", literal).isEmpty);
-    }));
+    }),
+  );
 
   it.effect("reports a malformed regex instead of throwing", () =>
     Effect.sync(() => {
       const query = parseFindQuery("/a(/", literal);
       assert.isTrue(Option.isSome(query.error));
       assert.isTrue(Option.isNone(toRegExp(query)));
-    }));
+    }),
+  );
 
   it.effect("never treats a literal query as malformed", () =>
     Effect.sync(() => {
@@ -171,7 +175,8 @@ describe("FindQuery", () => {
       assert.isTrue(Option.isSome(compiled));
       if (Option.isNone(compiled)) return;
       assert.isTrue(compiled.value.test("a("));
-    }));
+    }),
+  );
 
   it.effect("gives a new RegExp on every call", () =>
     Effect.sync(() => {
@@ -185,7 +190,8 @@ describe("FindQuery", () => {
       assert.notStrictEqual(first.value, second.value);
       first.value.exec("aaa");
       assert.strictEqual(second.value.lastIndex, 0);
-    }));
+    }),
+  );
 
   it.effect("anchors a word query on word boundaries", () =>
     Effect.sync(() => {
@@ -195,7 +201,8 @@ describe("FindQuery", () => {
       if (Option.isNone(compiled)) return;
       assert.isTrue(compiled.value.test("please find it"));
       assert.isFalse(new RegExp(query.source, "i").test("refinance"));
-    }));
+    }),
+  );
 
   it.effect("does not anchor a token that is not a word", () =>
     Effect.sync(() => {
@@ -205,13 +212,15 @@ describe("FindQuery", () => {
       assert.isTrue(Option.isSome(compiled));
       if (Option.isNone(compiled)) return;
       assert.isTrue(compiled.value.test("a -> b"));
-    }));
+    }),
+  );
 
   it.effect("applies smartcase to a word query", () =>
     Effect.sync(() => {
       assert.isTrue(wordQuery("find").ignoreCase);
       assert.isFalse(wordQuery("Find").ignoreCase);
-    }));
+    }),
+  );
 
   it.effect("refuses a pattern that backtracks catastrophically", () =>
     Effect.sync(() => {
@@ -220,13 +229,11 @@ describe("FindQuery", () => {
       // on every keystroke, so one more character stops the tab.
       for (const source of ["(a+)+$", "(a*)*b", "(\\d+)+$", "(a|a)*$"]) {
         const query = parseFindQuery(source, regexMode);
-        assert.isTrue(
-          Option.isSome(query.error),
-          `${source} compiled with no complaint`,
-        );
+        assert.isTrue(Option.isSome(query.error), `${source} compiled with no complaint`);
         assert.isTrue(Option.isNone(toRegExp(query)));
       }
-    }));
+    }),
+  );
 
   it.effect("decides without running the pattern", () =>
     Effect.sync(() => {
@@ -255,67 +262,54 @@ describe("FindQuery", () => {
       const started = performance.now();
       for (const source of slow) {
         const query = parseFindQuery(source, regexMode);
-        assert.isTrue(
-          Option.isSome(query.error),
-          `${source} compiled with no complaint`,
-        );
+        assert.isTrue(Option.isSome(query.error), `${source} compiled with no complaint`);
         assert.isTrue(Option.isNone(toRegExp(query)));
       }
       const elapsed = performance.now() - started;
       assert.isBelow(elapsed, 50, `the decision took ${elapsed}ms`);
-    }));
+    }),
+  );
 
   it.effect("still allows an ordinary quantifier", () =>
     Effect.sync(() => {
-      for (
-        const source of [
-          "a+",
-          "\\d{2,4}",
-          "(?:foo|bar)+",
-          "[a-z]*x",
-          "colou?r",
-          "^https://(mail|inbox)\\.example\\.com/.*$",
-          // The shapes that the review of pull request 55 asked for.
-          "^https?://([a-z0-9-]+\\.)*example\\.com/.*$",
-          "(?:\\w+\\.)+\\w+",
-          "(cat|car)+",
-          '"(?:[^"\\\\]|\\\\.)*"',
-          "^(?=.*foo)(?=.*bar)",
-        ]
-      ) {
+      for (const source of [
+        "a+",
+        "\\d{2,4}",
+        "(?:foo|bar)+",
+        "[a-z]*x",
+        "colou?r",
+        "^https://(mail|inbox)\\.example\\.com/.*$",
+        // The shapes that the review of pull request 55 asked for.
+        "^https?://([a-z0-9-]+\\.)*example\\.com/.*$",
+        "(?:\\w+\\.)+\\w+",
+        "(cat|car)+",
+        '"(?:[^"\\\\]|\\\\.)*"',
+        "^(?=.*foo)(?=.*bar)",
+      ]) {
         const query = parseFindQuery(source, regexMode);
-        assert.isTrue(
-          Option.isNone(query.error),
-          `${source} was refused`,
-        );
+        assert.isTrue(Option.isNone(query.error), `${source} was refused`);
         assert.isTrue(Option.isSome(toRegExp(query)));
       }
-    }));
+    }),
+  );
 
   it.effect("never refuses a query that a user types as text", () =>
     Effect.sync(() => {
       // A literal query is escaped before it becomes an expression, so the
       // safety check must never take a plain search away from a user.
-      for (
-        const text of [
-          "a+b",
-          "(a*)*",
-          "* * *",
-          "sign   in",
-          "c:\\\\windows",
-          "ПРИВЕТ",
-        ]
-      ) {
+      for (const text of ["a+b", "(a*)*", "* * *", "sign   in", "c:\\\\windows", "ПРИВЕТ"]) {
         const query = parseFindQuery(text, literal);
         assert.isTrue(Option.isNone(query.error), `${text} was refused`);
         assert.isTrue(Option.isSome(toRegExp(query)));
       }
       assert.isTrue(Option.isNone(wordQuery("a+b").error));
-    }));
+    }),
+  );
 
   it.effect("refuses an absurdly long pattern", () =>
     Effect.sync(() => {
       const query = parseFindQuery("a".repeat(600), regexMode);
       assert.isTrue(Option.isSome(query.error));
-    }));
+    }),
+  );
 });

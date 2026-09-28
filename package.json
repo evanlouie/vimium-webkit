@@ -1,17 +1,14 @@
 {
   "name": "@evanlouie/vimium-webkit",
   "version": "0.2.1",
+  "private": true,
   "description": "Vimium-style keyboard control for WebKit userscript managers",
   "license": "MIT",
-  "private": true,
-  "type": "module",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/evanlouie/vimium-webkit.git"
   },
-  "engines": {
-    "node": ">=26"
-  },
+  "type": "module",
   "scripts": {
     "build": "tsx --tsconfig tsconfig.node.json build/build.ts",
     "build:dev": "tsx --tsconfig tsconfig.node.json build/build.ts --dev",
@@ -22,8 +19,8 @@
     "coverage": "vitest run --coverage",
     "lint": "oxlint --disable-nested-config",
     "lint:fix": "oxlint --disable-nested-config --fix",
-    "fmt": "dprint fmt",
-    "fmt:check": "dprint check",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
     "repos:update:effect": "git subtree pull --prefix=repos/effect https://github.com/Effect-TS/effect.git main --squash",
     "serve:fixtures": "tsx --tsconfig tsconfig.node.json test/e2e/harness/server.ts",
     "test:e2e": "playwright test",
@@ -35,15 +32,12 @@
     "effect": "4.0.0-rc.118"
   },
   "devDependencies": {
-    "@dprint/json": "^0.25.0",
-    "@dprint/markdown": "^0.24.0",
-    "@dprint/typescript": "^0.96.1",
     "@effect/tsgo": "^0.46.1",
     "@effect/vitest": "^4.0.0-rc.118",
     "@playwright/test": "^1.63.0",
     "@types/node": "^26.6.3",
     "@vitest/coverage-v8": "^5.0.2",
-    "dprint": "^0.57.4",
+    "oxfmt": "^0.70.0",
     "oxlint": "^1.85.0",
     "oxlint-tsgolint": "^7.0.2003",
     "playwright": "^1.63.0",
@@ -52,5 +46,8 @@
     "typescript": "^7.0.2",
     "vite": "^8.3.1",
     "vitest": "^5.0.2"
+  },
+  "engines": {
+    "node": ">=26"
   }
 }

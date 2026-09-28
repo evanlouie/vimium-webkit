@@ -18,10 +18,9 @@ import { Dom } from "./Dom.ts";
 export const FrameId = Schema.String.pipe(Schema.brand("FrameId"));
 export type FrameId = typeof FrameId.Type;
 
-export class RealmError extends Schema.TaggedError<RealmError>()(
-  "RealmError",
-  { detail: Schema.String },
-) {}
+export class RealmError extends Schema.TaggedError<RealmError>()("RealmError", {
+  detail: Schema.String,
+}) {}
 
 /** How deep the wake walk goes. Ad-heavy pages nest without limit. */
 const MAX_WAKE_DEPTH = 16;
@@ -57,37 +56,36 @@ export const ANNOUNCE_MESSAGE = {
 const randomId = (): string => {
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
-    "",
-  );
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 };
 
-export class Realm extends Context.Service<Realm, {
-  /** This frame's identity on the frame bus. */
-  readonly frameId: FrameId;
-  /** True when this frame is the top document of its tab. */
-  readonly isTop: boolean;
-  /** True when the realm has the globals that the application needs. */
-  readonly isLive: boolean;
+export class Realm extends Context.Service<
+  Realm,
+  {
+    /** This frame's identity on the frame bus. */
+    readonly frameId: FrameId;
+    /** True when this frame is the top document of its tab. */
+    readonly isTop: boolean;
+    /** True when the realm has the globals that the application needs. */
+    readonly isLive: boolean;
 
-  /** Send the wake message to every descendant frame, at every depth. */
-  readonly wakeDescendants: Effect.Effect<void>;
+    /** Send the wake message to every descendant frame, at every depth. */
+    readonly wakeDescendants: Effect.Effect<void>;
 
-  /** Ask every descendant that is already running to announce itself. */
-  readonly askDescendantsToAnnounce: Effect.Effect<void>;
+    /** Ask every descendant that is already running to announce itself. */
+    readonly askDescendantsToAnnounce: Effect.Effect<void>;
 
-  /** True when `source` is this frame's parent or the top frame. */
-  readonly isAncestor: (source: unknown) => Effect.Effect<boolean>;
-}>()("vimium/platform/Realm") {
+    /** True when `source` is this frame's parent or the top frame. */
+    readonly isAncestor: (source: unknown) => Effect.Effect<boolean>;
+  }
+>()("vimium/platform/Realm") {
   static readonly layer: Layer.Layer<Realm, never, Dom> = Layer.effect(
     Realm,
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const dom = yield* Dom;
 
       const isLive = yield* dom.probeOr(
-        () =>
-          dom.window.navigator !== undefined &&
-          dom.window.document !== undefined,
+        () => dom.window.navigator !== undefined && dom.window.document !== undefined,
         false,
       );
 

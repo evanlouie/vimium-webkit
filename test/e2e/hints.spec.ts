@@ -197,8 +197,7 @@ test.describe("hint modes", () => {
 
     // A synthetic modifier-click never opens a tab in WebKit, so new-tab modes
     // must go through `GM_openInTab` (§6.10, verification item V5).
-    await expect.poll(async () => (await vw.snapshot()).openedTabs.length)
-      .toBeGreaterThan(0);
+    await expect.poll(async () => (await vw.snapshot()).openedTabs.length).toBeGreaterThan(0);
     const snapshot = await vw.snapshot();
     expect(snapshot.openedTabs[0]?.url).toContain("#clear-target");
     expect(page.url()).toBe(before);
@@ -264,12 +263,8 @@ test.describe("the synthetic click sequence", () => {
       const real = native.find((event) => event.type === type);
       expect(real, `the true click has no ${type}`).toBeDefined();
       expect(made, `the hint made no ${type}`).toBeDefined();
-      expect(made?.buttons, `${type} reports the wrong buttons`).toBe(
-        real?.buttons,
-      );
-      expect(made?.button, `${type} reports the wrong button`).toBe(
-        real?.button,
-      );
+      expect(made?.buttons, `${type} reports the wrong buttons`).toBe(real?.buttons);
+      expect(made?.button, `${type} reports the wrong button`).toBe(real?.button);
     }
 
     // The pointer events of the sequence, against the specification: the
@@ -296,13 +291,11 @@ test.describe("occlusion probe", () => {
     await expect(page).toHaveURL(/#shadow-component-target$/);
   });
 
-  for (
-    const [label, description] of [
-      ["Clipped link", "clip-path: inset(100%)"],
-      ["Collapsed link", "height: 0; overflow: hidden"],
-      ["Untouchable link", "pointer-events: none"],
-    ] as const
-  ) {
+  for (const [label, description] of [
+    ["Clipped link", "clip-path: inset(100%)"],
+    ["Collapsed link", "height: 0; overflow: hidden"],
+    ["Untouchable link", "pointer-events: none"],
+  ] as const) {
     test(`no phantom hint on ${description}`, async ({ vw, page }) => {
       await vw.open("/overlays.html");
       const before = page.url();

@@ -15,16 +15,12 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Option } from "effect";
 import { compilePattern, MAX_REGEX_URL_LENGTH } from "~/domain/Exclusion.ts";
-import {
-  collectSpans,
-  MAX_MATCH_LENGTH,
-  SEARCH_WINDOW,
-} from "~/features/find/Engine.ts";
+import { collectSpans, MAX_MATCH_LENGTH, SEARCH_WINDOW } from "~/features/find/Engine.ts";
 
 /** A URL that no expression can match, and that every loop must walk. */
 const hostileUrl = (length: number): string => "a".repeat(length);
 
-const matcherFor = (pattern: string): (url: string) => boolean => {
+const matcherFor = (pattern: string): ((url: string) => boolean) => {
   const compiled = compilePattern(pattern);
   assert.isTrue(Option.isSome(compiled), `${pattern} did not compile`);
   return Option.isSome(compiled) ? compiled.value : () => false;
@@ -43,7 +39,8 @@ describe("the exclusion budget", () => {
       const matches = matcherFor("/[a-z]*/");
       assert.isTrue(matches(hostileUrl(MAX_REGEX_URL_LENGTH)));
       assert.isFalse(matches(hostileUrl(MAX_REGEX_URL_LENGTH + 1)));
-    }));
+    }),
+  );
 
   it.effect("answers a hostile URL inside a keystroke", () =>
     Effect.sync(() => {
@@ -57,7 +54,8 @@ describe("the exclusion budget", () => {
       }
       const elapsed = performance.now() - started;
       assert.isBelow(elapsed, 200, `twenty URLs cost ${elapsed}ms`);
-    }));
+    }),
+  );
 
   it.effect("keeps a glob linear at the full URL length", () =>
     Effect.sync(() => {
@@ -66,22 +64,19 @@ describe("the exclusion budget", () => {
       assert.isFalse(matches(`https://${hostileUrl(4000)}`));
       const elapsed = performance.now() - started;
       assert.isBelow(elapsed, 100, `the glob cost ${elapsed}ms`);
-    }));
+    }),
+  );
 });
 
 describe("the find budget", () => {
   it.effect("stops at the deadline and says so", () =>
     Effect.sync(() => {
       const haystack = `${"a".repeat(4000)}x`;
-      const passed = collectSpans(
-        haystack,
-        /x/g,
-        500,
-        performance.now() - 1,
-      );
+      const passed = collectSpans(haystack, /x/g, 500, performance.now() - 1);
       assert.deepEqual(passed.spans, []);
       assert.isTrue(passed.stopped, "the search did not report the stop");
-    }));
+    }),
+  );
 
   it.effect("bounds a slow pattern over a long page", () =>
     Effect.sync(() => {
@@ -96,7 +91,8 @@ describe("the find budget", () => {
       assert.isTrue(passed.stopped, "the search read the whole page");
       assert.deepEqual(passed.spans, []);
       assert.isBelow(elapsed, 1000, `the search cost ${elapsed}ms`);
-    }));
+    }),
+  );
 
   it.effect("finds every match that a whole-text search finds", () =>
     Effect.sync(() => {
@@ -117,8 +113,12 @@ describe("the find budget", () => {
       }
 
       assert.isFalse(passed.stopped);
-      assert.deepEqual(passed.spans.map((span) => span.start), wanted);
-    }));
+      assert.deepEqual(
+        passed.spans.map((span) => span.start),
+        wanted,
+      );
+    }),
+  );
 
   it.effect("keeps the meaning of `^` and `$` at a window edge", () =>
     Effect.sync(() => {
@@ -132,14 +132,12 @@ describe("the find budget", () => {
       // `$` matches at the end of the text, and not at the end of a window.
       const tails = collectSpans(haystack, /a+tail$/g);
       assert.strictEqual(tails.spans.length, 1);
-      assert.strictEqual(
-        tails.spans[0]?.end,
-        haystack.length,
-      );
+      assert.strictEqual(tails.spans[0]?.end, haystack.length);
 
       const nothing = collectSpans(haystack, /a$/g);
       assert.deepEqual(nothing.spans, []);
-    }));
+    }),
+  );
 
   it.effect("gives the spans of a search with no window", () =>
     Effect.sync(() => {
@@ -163,13 +161,7 @@ describe("the find budget", () => {
 
       const filler = "the quick brown fox jumps over the lazy dog. ";
       const text = `${filler.repeat(120)}needle${filler.repeat(120)}needle`;
-      const patterns = [
-        /needle/g,
-        /\bfox\b/g,
-        /qu[a-z]+/g,
-        /o.e[rn]/g,
-        /dog\. the/g,
-      ];
+      const patterns = [/needle/g, /\bfox\b/g, /qu[a-z]+/g, /o.e[rn]/g, /dog\. the/g];
 
       for (const pattern of patterns) {
         const passed = collectSpans(text, pattern, 5000);
@@ -180,7 +172,8 @@ describe("the find budget", () => {
           `${pattern.source} gave other spans`,
         );
       }
-    }));
+    }),
+  );
 
   it.effect("still steps over a match of no width", () =>
     Effect.sync(() => {
@@ -188,7 +181,8 @@ describe("the find budget", () => {
       const passed = collectSpans(haystack, /x*/g);
       assert.deepEqual(passed.spans, []);
       assert.isFalse(passed.stopped);
-    }));
+    }),
+  );
 
   it.effect("keeps the trailing context when the first window is small", () =>
     Effect.sync(() => {
@@ -199,7 +193,8 @@ describe("the find budget", () => {
       const passed = collectSpans(haystack, /Fox(?=.*epsilon)/g);
       assert.deepEqual(passed.spans, [{ start: 0, end: 3 }]);
       assert.isFalse(passed.stopped);
-    }));
+    }),
+  );
 
   it.effect("halves the window after an overrun", () =>
     Effect.sync(() => {
@@ -211,18 +206,14 @@ describe("the find budget", () => {
       const pattern = new RegExp(`(?=${repeated}x)`, "y");
       const haystack = `${"b".repeat(2016)}${"a".repeat(8000)}`;
       const started = performance.now();
-      const passed = collectSpans(
-        haystack,
-        pattern,
-        500,
-        Number.POSITIVE_INFINITY,
-      );
+      const passed = collectSpans(haystack, pattern, 500, Number.POSITIVE_INFINITY);
       const elapsed = performance.now() - started;
 
       assert.deepEqual(passed.spans, []);
       assert.isFalse(passed.stopped, "the search did not read the full text");
       assert.isBelow(elapsed, 600, `the search cost ${elapsed}ms`);
-    }));
+    }),
+  );
 
   it.effect("stops slice growth when one window passes its budget", () =>
     Effect.sync(() => {
@@ -233,18 +224,14 @@ describe("the find budget", () => {
       const repeated = `(?:${unit})+`.repeat(4);
       const pattern = new RegExp(`(?:(?=${repeated}x)|a+)`, "y");
       const started = performance.now();
-      const passed = collectSpans(
-        "a".repeat(20_000),
-        pattern,
-        500,
-        started + 500,
-      );
+      const passed = collectSpans("a".repeat(20_000), pattern, 500, started + 500);
       const elapsed = performance.now() - started;
 
       assert.deepEqual(passed.spans, []);
       assert.isTrue(passed.stopped, "the growth did not report the stop");
       assert.isBelow(elapsed, 500, `the growth cost ${elapsed}ms`);
-    }));
+    }),
+  );
 
   it.effect("gives the whole span of a match of 400 characters", () =>
     Effect.sync(() => {
@@ -254,9 +241,7 @@ describe("the find budget", () => {
       // is worse than a stop.
       const length = 400;
       for (const at of [800, 1000, 1023, 1024]) {
-        const haystack = `${"a".repeat(at)}${"b".repeat(length)}${
-          "a".repeat(4096)
-        }`;
+        const haystack = `${"a".repeat(at)}${"b".repeat(length)}${"a".repeat(4096)}`;
         const passed = collectSpans(haystack, new RegExp(`b{${length}}`, "g"));
         assert.isFalse(passed.stopped, `the search at ${at} stopped`);
         assert.deepEqual(
@@ -265,19 +250,19 @@ describe("the find budget", () => {
           `the match at ${at} moved`,
         );
       }
-    }));
+    }),
+  );
 
   it.effect("gives the whole span of a match of 4500 characters", () =>
     Effect.sync(() => {
       // `/.+/` over a long paragraph. `collectSpans` gave 4096 to 4500 here,
       // and one search over the whole text gives 0 to 4500.
-      const haystack = "the quick brown fox jumps over the lazy dog. "
-        .repeat(200)
-        .slice(0, 4500);
+      const haystack = "the quick brown fox jumps over the lazy dog. ".repeat(200).slice(0, 4500);
       const passed = collectSpans(haystack, /.+/g);
       assert.isFalse(passed.stopped);
       assert.deepEqual(passed.spans, [{ start: 0, end: 4500 }]);
-    }));
+    }),
+  );
 
   it.effect("reports a stop for a match that is longer than the limit", () =>
     Effect.sync(() => {
@@ -288,7 +273,8 @@ describe("the find budget", () => {
       const passed = collectSpans(haystack, /.+/g);
       assert.isTrue(passed.stopped, "the search reported no stop");
       assert.deepEqual(passed.spans, []);
-    }));
+    }),
+  );
 
   it.effect("bounds one window, and not only the whole walk", () =>
     Effect.sync(() => {
@@ -308,5 +294,6 @@ describe("the find budget", () => {
 
       assert.isTrue(passed.stopped, "the search read the whole page");
       assert.isBelow(elapsed, 300, `the search cost ${elapsed}ms`);
-    }));
+    }),
+  );
 });

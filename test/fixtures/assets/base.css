@@ -13,7 +13,11 @@
 body {
   margin: 0;
   padding: 24px;
-  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+  font:
+    16px/1.5 -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
     sans-serif;
   color: #1b1b1b;
   background: #ffffff;

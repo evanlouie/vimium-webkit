@@ -1,25 +1,24 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <title>Image maps with awkward names</title>
     <link rel="stylesheet" href="assets/base.css" />
     <style>
-    .maps img {
-      width: 60px;
-      height: 60px;
-      margin-right: 12px;
-      vertical-align: top;
-    }
+      .maps img {
+        width: 60px;
+        height: 60px;
+        margin-right: 12px;
+        vertical-align: top;
+      }
     </style>
   </head>
   <body>
     <h1>Image maps with awkward names</h1>
     <p class="note">
-      A <code>usemap</code> name belongs to the page. Each name below has a
-      character with a meaning inside a CSS selector. A selector that is built
-      by joining strings throws, or it matches the wrong map, and one bad name
-      used to take every hint on the page with it.
+      A <code>usemap</code> name belongs to the page. Each name below has a character with a meaning
+      inside a CSS selector. A selector that is built by joining strings throws, or it matches the
+      wrong map, and one bad name used to take every hint on the page with it.
     </p>
 
     <p><a id="ordinary" href="#ordinary-target">Ordinary link</a></p>
@@ -72,10 +71,20 @@
       <area shape="rect" coords="0,0,60,60" href="#empty-target" aria-label="Empty area" />
     </map>
     <map name="dupe">
-      <area shape="rect" coords="0,0,60,60" href="#dupe-first-target" aria-label="Dupe first area" />
+      <area
+        shape="rect"
+        coords="0,0,60,60"
+        href="#dupe-first-target"
+        aria-label="Dupe first area"
+      />
     </map>
     <map name="dupe">
-      <area shape="rect" coords="0,0,60,60" href="#dupe-second-target" aria-label="Dupe second area" />
+      <area
+        shape="rect"
+        coords="0,0,60,60"
+        href="#dupe-second-target"
+        aria-label="Dupe second area"
+      />
     </map>
 
     <div class="tall"></div>

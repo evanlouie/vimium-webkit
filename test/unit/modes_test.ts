@@ -29,7 +29,7 @@ const keyEvent = (): KeyboardEvent =>
 
 describe("Modes", () => {
   it.effect("enters a mode, exits it, and enters it again", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const modes = yield* Modes;
       const stack = yield* HandlerStack;
 
@@ -51,10 +51,11 @@ describe("Modes", () => {
       yield* second.exit();
       assert.strictEqual(yield* stack.depth, 0);
       assert.deepEqual(yield* modes.activeNames, []);
-    }).pipe(Effect.provide(layer)));
+    }).pipe(Effect.provide(layer)),
+  );
 
   it.effect("does not grow the stack over repeated cycles", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const modes = yield* Modes;
       const stack = yield* HandlerStack;
 
@@ -65,17 +66,16 @@ describe("Modes", () => {
         assert.strictEqual(yield* stack.depth, 0);
       }
       assert.deepEqual(yield* modes.activeNames, []);
-    }).pipe(Effect.provide(layer)));
+    }).pipe(Effect.provide(layer)),
+  );
 
   it.effect("ignores a second exit", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const modes = yield* Modes;
       const reasons = yield* Ref.make<readonly ExitReason[]>([]);
 
       const mode = yield* modes.enter<never>({ name: "reasons" });
-      yield* mode.onExit((reason) =>
-        Ref.update(reasons, (current) => [...current, reason])
-      );
+      yield* mode.onExit((reason) => Ref.update(reasons, (current) => [...current, reason]));
 
       yield* mode.exit("escape");
       assert.deepEqual(yield* Ref.get(reasons), ["escape"]);
@@ -83,10 +83,11 @@ describe("Modes", () => {
       // A mode that has already exited must not run its bodies again.
       yield* mode.exit("explicit");
       assert.deepEqual(yield* Ref.get(reasons), ["escape"]);
-    }).pipe(Effect.provide(layer)));
+    }).pipe(Effect.provide(layer)),
+  );
 
   it.effect("runs an exit body at once when the mode already exited", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const modes = yield* Modes;
       const fired = yield* Ref.make(0);
 
@@ -95,10 +96,11 @@ describe("Modes", () => {
 
       yield* mode.onExit(() => Ref.update(fired, (count) => count + 1));
       assert.strictEqual(yield* Ref.get(fired), 1);
-    }).pipe(Effect.provide(layer)));
+    }).pipe(Effect.provide(layer)),
+  );
 
   it.effect("queues an exit body while the mode is live", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const modes = yield* Modes;
       const fired = yield* Ref.make(0);
 
@@ -108,10 +110,11 @@ describe("Modes", () => {
 
       yield* mode.exit();
       assert.strictEqual(yield* Ref.get(fired), 1);
-    }).pipe(Effect.provide(layer)));
+    }).pipe(Effect.provide(layer)),
+  );
 
   it.effect("runs the other exit bodies when one of them fails", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const modes = yield* Modes;
       const seen = yield* Ref.make<readonly string[]>([]);
 
@@ -120,18 +123,17 @@ describe("Modes", () => {
         Effect.andThen(
           Ref.update(seen, (current) => [...current, "first"]),
           Effect.die(new Error("boom")),
-        )
+        ),
       );
-      yield* mode.onExit(() =>
-        Ref.update(seen, (current) => [...current, "second"])
-      );
+      yield* mode.onExit(() => Ref.update(seen, (current) => [...current, "second"]));
 
       yield* mode.exit();
       assert.deepEqual(yield* Ref.get(seen), ["first", "second"]);
-    }).pipe(Effect.provide(layer)));
+    }).pipe(Effect.provide(layer)),
+  );
 
   it.effect("keeps exactly one live mode in a singleton group", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const modes = yield* Modes;
       const stack = yield* HandlerStack;
 
@@ -160,10 +162,11 @@ describe("Modes", () => {
 
       yield* third.exit();
       assert.strictEqual(yield* stack.depth, 0);
-    }).pipe(Effect.provide(layer)));
+    }).pipe(Effect.provide(layer)),
+  );
 
   it.effect("gives the singleton exit its own reason", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const modes = yield* Modes;
       const reasons = yield* Ref.make<readonly ExitReason[]>([]);
 
@@ -171,56 +174,44 @@ describe("Modes", () => {
         name: "first",
         singleton: "group",
       });
-      yield* first.onExit((reason) =>
-        Ref.update(reasons, (current) => [...current, reason])
-      );
+      yield* first.onExit((reason) => Ref.update(reasons, (current) => [...current, reason]));
       yield* modes.enter<never>({ name: "second", singleton: "group" });
 
       assert.deepEqual(yield* Ref.get(reasons), ["singleton"]);
-    }).pipe(Effect.provide(layer)));
+    }).pipe(Effect.provide(layer)),
+  );
 
   it.effect("shows the innermost indicator that is not null", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const modes = yield* Modes;
 
       const outer = yield* modes.enter<never>({
         name: "outer",
         indicator: "OUTER",
       });
-      assert.strictEqual(
-        yield* SubscriptionRef.get(modes.indicator),
-        "OUTER",
-      );
+      assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "OUTER");
 
       const silent = yield* modes.enter<never>({ name: "silent" });
-      assert.strictEqual(
-        yield* SubscriptionRef.get(modes.indicator),
-        "OUTER",
-      );
+      assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "OUTER");
 
       const inner = yield* modes.enter<never>({
         name: "inner",
         indicator: "INNER",
       });
-      assert.strictEqual(
-        yield* SubscriptionRef.get(modes.indicator),
-        "INNER",
-      );
+      assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "INNER");
 
       yield* inner.exit();
-      assert.strictEqual(
-        yield* SubscriptionRef.get(modes.indicator),
-        "OUTER",
-      );
+      assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "OUTER");
 
       yield* outer.exit();
       assert.isNull(yield* SubscriptionRef.get(modes.indicator));
 
       yield* silent.exit();
-    }).pipe(Effect.provide(layer)));
+    }).pipe(Effect.provide(layer)),
+  );
 
   it.effect("clears the stack whatever the nesting is", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const modes = yield* Modes;
       const stack = yield* HandlerStack;
 
@@ -235,10 +226,11 @@ describe("Modes", () => {
       assert.isFalse(yield* first.isActive);
       assert.isFalse(yield* second.isActive);
       assert.isFalse(yield* third.isActive);
-    }).pipe(Effect.provide(layer)));
+    }).pipe(Effect.provide(layer)),
+  );
 
   it.effect("exits the whole mode when its handler fails", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       // The stack drops a frame whose body failed. The mode holds an
       // indicator, a singleton group and its exit bodies, and only the mode
       // can release those. A frame that goes away in silence leaves them.
@@ -250,13 +242,8 @@ describe("Modes", () => {
         { name: "defective", indicator: "DEFECTIVE", singleton: "group" },
         { keydown: () => Effect.die(new Error("boom")) },
       );
-      yield* mode.onExit((reason) =>
-        Ref.update(reasons, (current) => [...current, reason])
-      );
-      assert.strictEqual(
-        yield* SubscriptionRef.get(modes.indicator),
-        "DEFECTIVE",
-      );
+      yield* mode.onExit((reason) => Ref.update(reasons, (current) => [...current, reason]));
+      assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "DEFECTIVE");
 
       // The event still reaches the page, because a failed frame decides
       // nothing.
@@ -276,10 +263,11 @@ describe("Modes", () => {
       assert.isTrue(yield* next.isActive);
       assert.deepEqual(yield* modes.activeNames, ["next"]);
       yield* next.exit();
-    }).pipe(Effect.provide(layer)));
+    }).pipe(Effect.provide(layer)),
+  );
 
   it.effect("exits the mode when its handler fails again", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       // A second walk must not find the frame, and a second exit must not run
       // the exit bodies twice.
       const modes = yield* Modes;
@@ -297,25 +285,27 @@ describe("Modes", () => {
 
       assert.strictEqual(yield* Ref.get(fired), 1);
       assert.strictEqual(yield* stack.depth, 0);
-    }).pipe(Effect.provide(layer)));
+    }).pipe(Effect.provide(layer)),
+  );
 
   it.effect("exits the mode when its scope closes", () =>
-    Effect.gen(function*() {
+    Effect.gen(function* () {
       const modes = yield* Modes;
       const stack = yield* HandlerStack;
       const reasons = yield* Ref.make<readonly ExitReason[]>([]);
 
-      const handle = yield* Effect.scoped(Effect.gen(function*() {
-        const mode = yield* modes.enter<never>({ name: "scoped" });
-        yield* mode.onExit((reason) =>
-          Ref.update(reasons, (current) => [...current, reason])
-        );
-        assert.strictEqual(yield* stack.depth, 1);
-        return mode;
-      }));
+      const handle = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const mode = yield* modes.enter<never>({ name: "scoped" });
+          yield* mode.onExit((reason) => Ref.update(reasons, (current) => [...current, reason]));
+          assert.strictEqual(yield* stack.depth, 1);
+          return mode;
+        }),
+      );
 
       assert.isFalse(yield* handle.isActive);
       assert.strictEqual(yield* stack.depth, 0);
       assert.deepEqual(yield* Ref.get(reasons), ["navigation"]);
-    }).pipe(Effect.provide(layer)));
+    }).pipe(Effect.provide(layer)),
+  );
 });

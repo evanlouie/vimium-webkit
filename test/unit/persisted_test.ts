@@ -58,7 +58,8 @@ describe("Persisted", () => {
           `the defaults of ${group.name} failed its own schema`,
         );
       }
-    }));
+    }),
+  );
 
   it.effect("keeps every other field when one field is absent", () =>
     Effect.sync(() => {
@@ -71,20 +72,14 @@ describe("Persisted", () => {
         delete partial[missing];
 
         const parsed = decodeSettings(partial);
-        assert.isTrue(
-          Result.isSuccess(parsed),
-          `dropping ${missing} rejected the whole object`,
-        );
+        assert.isTrue(Result.isSuccess(parsed), `dropping ${missing} rejected the whole object`);
         if (Result.isFailure(parsed)) continue;
         // The defaults are what an empty object decodes to, so the result of
         // dropping one field must be the defaults again.
-        assert.deepEqual(
-          parsed.success,
-          full,
-          `dropping ${missing} changed another field`,
-        );
+        assert.deepEqual(parsed.success, full, `dropping ${missing} changed another field`);
       }
-    }));
+    }),
+  );
 
   it.effect("costs exactly one field when one field is corrupt", () =>
     Effect.sync(() => {
@@ -102,11 +97,9 @@ describe("Persisted", () => {
       assert.deepEqual(parsed.success.exclusionRules, []);
       // The neighbours that nobody touched stay as they are.
       assert.strictEqual(parsed.success.smoothScroll, true);
-      assert.strictEqual(
-        parsed.success.searchUrl,
-        "https://www.google.com/search?q=%s",
-      );
-    }));
+      assert.strictEqual(parsed.success.searchUrl, "https://www.google.com/search?q=%s");
+    }),
+  );
 
   it.effect("drops an unknown key from a newer build", () =>
     Effect.sync(() => {
@@ -117,7 +110,8 @@ describe("Persisted", () => {
       assert.isTrue(Result.isSuccess(parsed));
       if (Result.isFailure(parsed)) return;
       assert.isFalse("somethingFromTheFuture" in parsed.success);
-    }));
+    }),
+  );
 
   it.effect("removes duplicate hint characters during decoding", () =>
     Effect.sync(() => {
@@ -129,7 +123,8 @@ describe("Persisted", () => {
       assert.isTrue(Result.isSuccess(parsed));
       if (Result.isFailure(parsed)) return;
       assert.strictEqual(parsed.success.linkHintCharacters, "abc");
-    }));
+    }),
+  );
 
   /**
    * Hint alphabets that a case fold breaks.
@@ -255,11 +250,9 @@ describe("Persisted", () => {
         });
         assert.isTrue(Result.isSuccess(parsed));
         if (Result.isFailure(parsed)) return;
-        assert.strictEqual(
-          parsed.success.linkHintCharacters,
-          row.expected ?? "sadfjklewcmpgh",
-        );
-      }));
+        assert.strictEqual(parsed.success.linkHintCharacters, row.expected ?? "sadfjklewcmpgh");
+      }),
+    );
   }
 
   it.effect("repairs hint number characters during decoding", () =>
@@ -271,7 +264,8 @@ describe("Persisted", () => {
       assert.isTrue(Result.isSuccess(parsed));
       if (Result.isFailure(parsed)) return;
       assert.strictEqual(parsed.success.linkHintNumbers, "0123");
-    }));
+    }),
+  );
 
   it.effect("falls back on a search URL that has no %s", () =>
     Effect.sync(() => {
@@ -281,11 +275,9 @@ describe("Persisted", () => {
       });
       assert.isTrue(Result.isSuccess(parsed));
       if (Result.isFailure(parsed)) return;
-      assert.strictEqual(
-        parsed.success.searchUrl,
-        "https://www.google.com/search?q=%s",
-      );
-    }));
+      assert.strictEqual(parsed.success.searchUrl, "https://www.google.com/search?q=%s");
+    }),
+  );
 
   it.effect("ships the documented defaults", () =>
     Effect.sync(() => {
@@ -297,7 +289,8 @@ describe("Persisted", () => {
       assert.strictEqual(settings.enableHistoryIndex, false);
       assert.strictEqual(settings.enableSearchSuggestions, false);
       assert.lengthOf(settings.searchEngines.split("\n"), 5);
-    }));
+    }),
+  );
 
   it.effect("gives each group a distinct storage name", () =>
     Effect.sync(() => {
@@ -306,27 +299,23 @@ describe("Persisted", () => {
       for (const group of GROUPS) {
         assert.isAtLeast(group.schemaVersion, 1);
       }
-    }));
+    }),
+  );
 
   it.effect("caps the number of URLs and keeps the newest", () =>
     Effect.sync(() => {
       const now = Date.now();
-      const marks = markTable(
-        LOCAL_MARK_URL_LIMIT + 50,
-        (index) => now - index,
-      );
+      const marks = markTable(LOCAL_MARK_URL_LIMIT + 50, (index) => now - index);
       const pruned = pruneMarks(marks, now);
 
       assert.lengthOf(Object.keys(pruned.local), LOCAL_MARK_URL_LIMIT);
-      assert.isTrue(
-        "https://example.com/0" in pruned.local,
-        "the newest stays",
-      );
+      assert.isTrue("https://example.com/0" in pruned.local, "the newest stays");
       assert.isFalse(
         `https://example.com/${LOCAL_MARK_URL_LIMIT + 49}` in pruned.local,
         "the oldest goes",
       );
-    }));
+    }),
+  );
 
   it.effect("expires a stale local mark and keeps every global mark", () =>
     Effect.sync(() => {
@@ -349,5 +338,6 @@ describe("Persisted", () => {
       assert.deepEqual(Object.keys(pruned.local), ["https://fresh.test/"]);
       // The user names a global mark, so it is never expired.
       assert.deepEqual(Object.keys(pruned.global), ["A"]);
-    }));
+    }),
+  );
 });
