@@ -12,77 +12,204 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer, Ref, SubscriptionRef, pipe, Struct } from "effect";
+import {
+  Array,
+  type Context,
+  Effect,
+  Layer,
+  Option,
+  Ref,
+  SubscriptionRef,
+  Struct,
+  pipe,
+} from "effect";
 import { attachKeyBridge } from "~/boot/KeyBridge.ts";
 import { CONTINUE_BUBBLING, HandlerStack } from "~/core/HandlerStack.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
-import { Dom } from "~/platform/Dom.ts";
+import { Dom, type Listener, type TargetEventMap } from "~/platform/Dom.ts";
 
 // ---------------------------------------------------------------------------
 // The stubs
 // ---------------------------------------------------------------------------
 
-interface Attached {
-  readonly type: string;
-  readonly run: (event: Event) => Effect.Effect<void>;
-}
+/**
+ * The events of one dispatch, by target and by type.
+ *
+ * A recorded listener takes the event for its own target and type, so each
+ * listener gets the kind of event that it asked for.
+ */
+type Dispatch = {
+  readonly [K in keyof TargetEventMap]?: {
+    readonly [T in keyof TargetEventMap[K]]?: TargetEventMap[K][T];
+  };
+};
+
+/** A recorded listener. It gives the work to run when a dispatch has an event for it. */
+type Attached = (events: Dispatch) => Option.Option<Effect.Effect<void>>;
+
+/** The event of one target and type in a dispatch. */
+const eventFor = <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K]>(
+  events: Dispatch,
+  target: K,
+  type: T,
+): Option.Option<TargetEventMap[K][T]> =>
+  pipe(
+    Option.fromNullishOr(events[target]),
+    Option.flatMap((byType) => Option.fromNullishOr(byType[type])),
+  );
+
+/**
+ * `Dom.listen`, recording each listener instead of touching a window.
+ *
+ * A recorded listener keeps the services of its caller, as the real one does.
+ */
+const recordingListen =
+  (attached: Ref.Ref<ReadonlyArray<Attached>>): Dom["Service"]["listen"] =>
+  <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K], R>(
+    target: K,
+    type: T,
+    handler: Listener<TargetEventMap[K][T], R>,
+  ): Effect.Effect<void, never, R> => {
+    const listener =
+      (services: Context.Context<R>): Attached =>
+      (events) =>
+        pipe(
+          eventFor(events, target, type),
+          Option.map((event) => pipe(handler(event), Effect.provideContext(services))),
+        );
+    return pipe(
+      Effect.context<R>(),
+      Effect.flatMap((services) =>
+        pipe(attached, Ref.update<ReadonlyArray<Attached>>(Array.append(listener(services)))),
+      ),
+    );
+  };
 
 /** `Dom`, with `listen` recording instead of touching a window. */
 const recordingDom = (attached: Ref.Ref<ReadonlyArray<Attached>>): Layer.Layer<Dom> =>
   pipe(
-    Layer.effect(
-      Dom,
-      pipe(
-        Dom,
-        Effect.map((dom) =>
-          Dom.of(
-            pipe(
-              dom,
-              Struct.assign({
-                listen: ((
-                  _target: unknown,
-                  type: unknown,
-                  handler: (event: Event) => Effect.Effect<void>,
-                ) =>
-                  Ref.update(attached, (current) => [
-                    ...current,
-                    { type: String(type), run: handler },
-                  ])) as unknown as Dom["Service"]["listen"],
-              }),
-            ),
-          ),
-        ),
-      ),
-    ),
+    Dom,
+    Effect.map(Struct.assign({ listen: recordingListen(attached) })),
+    Layer.effect(Dom),
     Layer.provide(Dom.layer),
   );
 
 /** `Keyboard`, reduced to the one method that the bridge calls. */
 const stubKeyboard = (forgotten: Ref.Ref<number>): Layer.Layer<Keyboard> =>
-  Layer.effect(
-    Keyboard,
-    pipe(
-      SubscriptionRef.make<string | null>(null),
-      Effect.map((pending) =>
-        Keyboard.of({
-          pending,
-          syncExclusion: Effect.void,
-          passNextKey: () => Effect.void,
-          forgetSuppressed: Ref.update(forgotten, (count) => count + 1),
-        }),
-      ),
+  pipe(
+    SubscriptionRef.make<string | null>(null),
+    Effect.map((pending) =>
+      Keyboard.of({
+        pending,
+        syncExclusion: Effect.void,
+        passNextKey: () => Effect.void,
+        forgetSuppressed: pipe(
+          forgotten,
+          Ref.update((count) => count + 1),
+        ),
+      }),
     ),
+    Layer.effect(Keyboard),
   );
 
-/** Everything that the bridge reads from an event. */
-const event = (isTrusted: boolean): Event => ({ isTrusted, type: "test" }) as unknown as Event;
+/**
+ * A key, a click or a change of focus, as the bridge receives it.
+ *
+ * Node has none of those classes. The double extends Node's own `Event`, and
+ * each member that the three add has the value of a plain event. The bridge
+ * reads `isTrusted`, and the probe handlers read nothing.
+ */
+class BridgeEvent extends Event implements KeyboardEvent, PointerEvent, FocusEvent {
+  readonly detail = 0;
+  readonly view = null;
+  readonly which = 0;
+  readonly altKey = false;
+  readonly ctrlKey = false;
+  readonly metaKey = false;
+  readonly shiftKey = false;
+  readonly charCode = 0;
+  readonly code = "";
+  readonly isComposing = false;
+  readonly key = "";
+  readonly keyCode = 0;
+  readonly location = 0;
+  readonly repeat = false;
+  readonly DOM_KEY_LOCATION_STANDARD = 0;
+  readonly DOM_KEY_LOCATION_LEFT = 1;
+  readonly DOM_KEY_LOCATION_RIGHT = 2;
+  readonly DOM_KEY_LOCATION_NUMPAD = 3;
+  readonly button = 0;
+  readonly buttons = 0;
+  readonly clientX = 0;
+  readonly clientY = 0;
+  readonly layerX = 0;
+  readonly layerY = 0;
+  readonly movementX = 0;
+  readonly movementY = 0;
+  readonly offsetX = 0;
+  readonly offsetY = 0;
+  readonly pageX = 0;
+  readonly pageY = 0;
+  readonly relatedTarget = null;
+  readonly screenX = 0;
+  readonly screenY = 0;
+  readonly x = 0;
+  readonly y = 0;
+  readonly altitudeAngle = 0;
+  readonly azimuthAngle = 0;
+  readonly height = 0;
+  readonly isPrimary = false;
+  readonly persistentDeviceId = 0;
+  readonly pointerId = 0;
+  readonly pointerType = "";
+  readonly pressure = 0;
+  readonly tangentialPressure = 0;
+  readonly tiltX = 0;
+  readonly tiltY = 0;
+  readonly twist = 0;
+  readonly width = 0;
 
-/** Call every listener of this type, as the browser would. */
-const fire = (attached: ReadonlyArray<Attached>, type: string, value: Event): Effect.Effect<void> =>
-  Effect.forEach(
-    attached.filter((entry) => entry.type === type),
-    (entry) => entry.run(value),
-    { discard: true },
+  /** `false` makes the event synthetic, as a page's `dispatchEvent` does. */
+  constructor(
+    type: string,
+    override readonly isTrusted: boolean,
+  ) {
+    super(type);
+  }
+
+  getModifierState(): boolean {
+    return false;
+  }
+
+  getCoalescedEvents(): PointerEvent[] {
+    return [];
+  }
+
+  getPredictedEvents(): PointerEvent[] {
+    return [];
+  }
+
+  initUIEvent(): void {}
+
+  initKeyboardEvent(): void {}
+
+  initMouseEvent(): void {}
+}
+
+/** An event that the user made. */
+const byUser = (type: string): BridgeEvent => new BridgeEvent(type, true);
+
+/** An event that the page made. */
+const byPage = (type: string): BridgeEvent => new BridgeEvent(type, false);
+
+/** Call every listener that has an event in this dispatch, as the browser would. */
+const fire = (attached: ReadonlyArray<Attached>, events: Dispatch): Effect.Effect<void> =>
+  pipe(
+    attached,
+    Array.map((listener) => listener(events)),
+    Array.getSomes,
+    Effect.all,
+    Effect.asVoid,
   );
 
 // ---------------------------------------------------------------------------
@@ -100,42 +227,48 @@ const withBridge = (
   Effect.gen(function* () {
     const attached = yield* Ref.make<ReadonlyArray<Attached>>([]);
     const forgotten = yield* Ref.make(0);
-
-    yield* Effect.provide(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const stack = yield* HandlerStack;
-          const seen = yield* Ref.make<ReadonlyArray<string>>([]);
-          const record = (name: string) => () =>
-            pipe(
-              Ref.update(seen, (current) => [...current, name]),
-              Effect.as(CONTINUE_BUBBLING),
-            );
-
-          yield* stack.push({
-            name: "probe",
-            keydown: record("keydown"),
-            keyup: record("keyup"),
-            click: record("click"),
-            focus: record("focus"),
-            blur: record("blur"),
-          });
-
-          yield* attachKeyBridge;
-          yield* body(yield* Ref.get(attached), seen, forgotten);
-        }),
-      ),
-      Layer.mergeAll(recordingDom(attached), HandlerStack.layer, stubKeyboard(forgotten)),
+    const layer = Layer.mergeAll(
+      recordingDom(attached),
+      HandlerStack.layer,
+      stubKeyboard(forgotten),
     );
+
+    const run = Effect.gen(function* () {
+      const stack = yield* HandlerStack;
+      const seen = yield* Ref.make<ReadonlyArray<string>>([]);
+      const record = (name: string) => () =>
+        pipe(
+          seen,
+          Ref.update<ReadonlyArray<string>>(Array.append(name)),
+          Effect.as(CONTINUE_BUBBLING),
+        );
+
+      yield* stack.push({
+        name: "probe",
+        keydown: record("keydown"),
+        keyup: record("keyup"),
+        click: record("click"),
+        focus: record("focus"),
+        blur: record("blur"),
+      });
+
+      yield* attachKeyBridge;
+      const listeners = yield* Ref.get(attached);
+      yield* body(listeners, seen, forgotten);
+    });
+
+    yield* pipe(run, Effect.scoped, Effect.provide(layer));
   });
 
 describe("the key bridge", () => {
   it.effect("gives the stack an event that the user made", () =>
     withBridge((attached, seen) =>
       Effect.gen(function* () {
-        for (const type of ["keydown", "keyup", "click", "focus", "blur"]) {
-          yield* fire(attached, type, event(true));
-        }
+        yield* fire(attached, { window: { keydown: byUser("keydown") } });
+        yield* fire(attached, { window: { keyup: byUser("keyup") } });
+        yield* fire(attached, { window: { click: byUser("click") } });
+        yield* fire(attached, { window: { focus: byUser("focus") } });
+        yield* fire(attached, { window: { blur: byUser("blur") } });
         assert.deepEqual(yield* Ref.get(seen), ["keydown", "keyup", "click", "focus", "blur"]);
       }),
     ),
@@ -144,8 +277,8 @@ describe("the key bridge", () => {
   it.effect("drops a key that the page made", () =>
     withBridge((attached, seen) =>
       Effect.gen(function* () {
-        yield* fire(attached, "keydown", event(false));
-        yield* fire(attached, "keyup", event(false));
+        yield* fire(attached, { window: { keydown: byPage("keydown") } });
+        yield* fire(attached, { window: { keyup: byPage("keyup") } });
 
         assert.deepEqual(yield* Ref.get(seen), []);
       }),
@@ -157,8 +290,8 @@ describe("the key bridge", () => {
       Effect.gen(function* () {
         // A page-made `blur` would leave insert mode, and the next true key of
         // the user would then run a command inside a text field.
-        yield* fire(attached, "focus", event(false));
-        yield* fire(attached, "blur", event(false));
+        yield* fire(attached, { window: { focus: byPage("focus") } });
+        yield* fire(attached, { window: { blur: byPage("blur") } });
 
         assert.deepEqual(yield* Ref.get(seen), []);
       }),
@@ -170,7 +303,7 @@ describe("the key bridge", () => {
       Effect.gen(function* () {
         // Hint activation dispatches its own pointer events, and a mode that
         // exits on a click must still see them.
-        yield* fire(attached, "click", event(false));
+        yield* fire(attached, { window: { click: byPage("click") } });
 
         assert.deepEqual(yield* Ref.get(seen), ["click"]);
       }),
@@ -180,10 +313,10 @@ describe("the key bridge", () => {
   it.effect("forgets the taken presses on a true window blur only", () =>
     withBridge((attached, _seen, forgotten) =>
       Effect.gen(function* () {
-        yield* fire(attached, "blur", event(false));
+        yield* fire(attached, { window: { blur: byPage("blur") } });
         assert.strictEqual(yield* Ref.get(forgotten), 0);
 
-        yield* fire(attached, "blur", event(true));
+        yield* fire(attached, { window: { blur: byUser("blur") } });
         assert.strictEqual(yield* Ref.get(forgotten), 1);
       }),
     ),

@@ -11,21 +11,70 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Exit, Layer, Ref, Scope, pipe, Struct } from "effect";
-import { type ExitHook, Lifecycle, type PageExit } from "~/boot/Lifecycle.ts";
-import { Dom } from "~/platform/Dom.ts";
+import { Array, type Context, Effect, Exit, Layer, Option, Ref, Scope, Struct, pipe } from "effect";
+import { type ExitHook, Lifecycle, PageExit } from "~/boot/Lifecycle.ts";
+import { Dom, type Listener, type TargetEventMap } from "~/platform/Dom.ts";
 
 // ---------------------------------------------------------------------------
 // The stubs
 // ---------------------------------------------------------------------------
 
-interface Attached {
-  readonly type: string;
-  readonly run: (event: Event) => Effect.Effect<void>;
-}
+/**
+ * The events of one dispatch, by target and by type.
+ *
+ * A recorded listener takes the event for its own target and type, so each
+ * listener gets the kind of event that it asked for.
+ */
+type Dispatch = {
+  readonly [K in keyof TargetEventMap]?: {
+    readonly [T in keyof TargetEventMap[K]]?: TargetEventMap[K][T];
+  };
+};
 
+/** A recorded listener. It gives the work to run when a dispatch has an event for it. */
+type Attached = (events: Dispatch) => Option.Option<Effect.Effect<void>>;
+
+/** The event of one target and type in a dispatch. */
+const eventFor = <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K]>(
+  events: Dispatch,
+  target: K,
+  type: T,
+): Option.Option<TargetEventMap[K][T]> =>
+  pipe(
+    Option.fromNullishOr(events[target]),
+    Option.flatMap((byType) => Option.fromNullishOr(byType[type])),
+  );
+
+/**
+ * `Dom.listen`, recording each listener instead of touching a window.
+ *
+ * A recorded listener keeps the services of its caller, as the real one does.
+ */
+const recordingListen =
+  (attached: Ref.Ref<ReadonlyArray<Attached>>): Dom["Service"]["listen"] =>
+  <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K], R>(
+    target: K,
+    type: T,
+    handler: Listener<TargetEventMap[K][T], R>,
+  ): Effect.Effect<void, never, R> => {
+    const listener =
+      (services: Context.Context<R>): Attached =>
+      (events) =>
+        pipe(
+          eventFor(events, target, type),
+          Option.map((event) => pipe(handler(event), Effect.provideContext(services))),
+        );
+    return pipe(
+      Effect.context<R>(),
+      Effect.flatMap((services) =>
+        pipe(attached, Ref.update<ReadonlyArray<Attached>>(Array.append(listener(services)))),
+      ),
+    );
+  };
+
+/** The one field of the document that the lifecycle reads. */
 interface FakeDocument {
-  visibilityState: "visible" | "hidden";
+  visibilityState: DocumentVisibilityState;
 }
 
 /** `Dom`, with `listen` recording, and with a document that a test can hide. */
@@ -34,42 +83,49 @@ const recordingDom = (
   document: FakeDocument,
 ): Layer.Layer<Dom> =>
   pipe(
-    Layer.effect(
-      Dom,
-      pipe(
-        Dom,
-        Effect.map((dom) =>
-          Dom.of(
-            pipe(
-              dom,
-              Struct.assign({
-                document: document as unknown as Document,
-                href: Effect.succeed("https://example.test/one"),
-                // The cast says what the stub already is: every listener of the
-                // lifecycle needs no service, so a recorded body is an `Effect<void>`.
-                listen: ((
-                  _target: unknown,
-                  type: unknown,
-                  handler: (event: Event) => Effect.Effect<void>,
-                ) =>
-                  Ref.update(attached, (current) => [
-                    ...current,
-                    { type: String(type), run: handler },
-                  ])) as unknown as Dom["Service"]["listen"],
-              }),
-            ),
-          ),
-        ),
-      ),
+    Dom,
+    Effect.map(
+      Struct.assign({
+        // Node has no `Document`, and a whole one is hundreds of members. The
+        // lifecycle reads `visibilityState` and nothing else, so the stub says
+        // that it is a document. This is the one assertion in the file.
+        document: document as Document,
+        href: Effect.succeed("https://example.test/one"),
+        listen: recordingListen(attached),
+      }),
     ),
+    Layer.effect(Dom),
     Layer.provide(Dom.layer),
   );
 
-/** A `pagehide` event, with the one field that the code reads. */
-const pageHide = (persisted: boolean): Event =>
-  ({ type: "pagehide", persisted }) as unknown as Event;
+/** A `pagehide` or a `pageshow`, with the one field that the lifecycle reads. */
+class PageTransition extends Event implements PageTransitionEvent {
+  constructor(
+    type: "pagehide" | "pageshow",
+    readonly persisted: boolean,
+  ) {
+    super(type);
+  }
+}
 
-const visibilityChange = (): Event => ({ type: "visibilitychange" }) as unknown as Event;
+const pageHide = (persisted: boolean): Dispatch => ({
+  window: { pagehide: new PageTransition("pagehide", persisted) },
+});
+
+const visibilityChange = (): Dispatch => ({
+  document: { visibilitychange: new Event("visibilitychange") },
+});
+
+/** The work of every listener that has an event in this dispatch, in the order of registration. */
+const listenersFor = (
+  attached: ReadonlyArray<Attached>,
+  events: Dispatch,
+): ReadonlyArray<Effect.Effect<void>> =>
+  pipe(
+    attached,
+    Array.map((listener) => listener(events)),
+    Array.getSomes,
+  );
 
 /**
  * Dispatch an event exactly as the browser does.
@@ -80,15 +136,16 @@ const visibilityChange = (): Event => ({ type: "visibilitychange" }) as unknown 
  */
 const dispatch = (
   attached: ReadonlyArray<Attached>,
-  type: string,
-  event: Event,
+  events: Dispatch,
 ): Effect.Effect<Exit.Exit<void>> =>
-  Effect.sync(() => {
-    const outcomes = attached
-      .filter((entry) => entry.type === type)
-      .map((entry) => Effect.runSyncExit(entry.run(event)));
-    return outcomes.find(Exit.isFailure) ?? Exit.void;
-  });
+  Effect.sync(() =>
+    pipe(
+      listenersFor(attached, events),
+      Array.map((work) => Effect.runSyncExit(work)),
+      Array.findFirst(Exit.isFailure),
+      Option.getOrElse(() => Exit.void),
+    ),
+  );
 
 /**
  * Dispatch an event without the drain that `runSyncExit` does.
@@ -99,14 +156,16 @@ const dispatch = (
  */
 const dispatchOnStack = (
   attached: ReadonlyArray<Attached>,
-  type: string,
-  event: Event,
+  events: Dispatch,
 ): Effect.Effect<void> =>
-  Effect.sync(() => {
-    for (const entry of attached.filter((other) => other.type === type)) {
-      Effect.runFork(entry.run(event));
-    }
-  });
+  Effect.sync(() =>
+    pipe(
+      listenersFor(attached, events),
+      Array.forEach((work) => {
+        Effect.runFork(work);
+      }),
+    ),
+  );
 
 // ---------------------------------------------------------------------------
 // The harness
@@ -127,20 +186,15 @@ const withLifecycle = (
   Effect.gen(function* () {
     const attached = yield* Ref.make<ReadonlyArray<Attached>>([]);
     const document: FakeDocument = { visibilityState: "visible" };
+    const layer = pipe(Lifecycle.layer, Layer.provide(recordingDom(attached, document)));
 
-    yield* Effect.provide(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const lifecycle = yield* Lifecycle;
-          yield* body({
-            attached: yield* Ref.get(attached),
-            lifecycle,
-            document,
-          });
-        }),
-      ),
-      pipe(Lifecycle.layer, Layer.provide(recordingDom(attached, document))),
-    );
+    const run = Effect.gen(function* () {
+      const lifecycle = yield* Lifecycle;
+      const listeners = yield* Ref.get(attached);
+      yield* body({ attached: listeners, lifecycle, document });
+    });
+
+    yield* pipe(run, Effect.scoped, Effect.provide(layer));
   });
 
 /** A hook that records the exit that it received. */
@@ -149,6 +203,14 @@ const record =
   (exit) =>
     Effect.sync(() => {
       started.push(exit);
+    });
+
+/** A hook that writes one value, as the exit path of storage does. */
+const writing =
+  (written: string[], value: string): ExitHook =>
+  () =>
+    Effect.sync(() => {
+      written.push(value);
     });
 
 // ---------------------------------------------------------------------------
@@ -164,13 +226,9 @@ describe("the pagehide dispatch", () => {
         const written: string[] = [];
         const pending = "the mark that the user just set";
 
-        yield* lifecycle.onExit(() =>
-          Effect.sync(() => {
-            written.push(pending);
-          }),
-        );
+        yield* lifecycle.onExit(writing(written, pending));
 
-        const outcome = yield* dispatch(attached, "pagehide", pageHide(false));
+        const outcome = yield* dispatch(attached, pageHide(false));
 
         // Both assertions matter. The work happened, and the listener did
         // not become a defect on the way to it.
@@ -188,13 +246,9 @@ describe("the pagehide dispatch", () => {
         // and in a page that task is `setTimeout(f, 0)`. A `pagehide`
         // handler never sees one.
         const written: string[] = [];
-        yield* lifecycle.onExit(() =>
-          Effect.sync(() => {
-            written.push("the held value");
-          }),
-        );
+        yield* lifecycle.onExit(writing(written, "the held value"));
 
-        yield* dispatchOnStack(attached, "pagehide", pageHide(false));
+        yield* dispatchOnStack(attached, pageHide(false));
 
         assert.deepStrictEqual(
           written,
@@ -209,18 +263,10 @@ describe("the pagehide dispatch", () => {
     withLifecycle(({ attached, lifecycle }) =>
       Effect.gen(function* () {
         const order: string[] = [];
-        yield* lifecycle.onExit(() =>
-          Effect.sync(() => {
-            order.push("first");
-          }),
-        );
-        yield* lifecycle.onExit(() =>
-          Effect.sync(() => {
-            order.push("second");
-          }),
-        );
+        yield* lifecycle.onExit(writing(order, "first"));
+        yield* lifecycle.onExit(writing(order, "second"));
 
-        yield* dispatch(attached, "pagehide", pageHide(false));
+        yield* dispatch(attached, pageHide(false));
 
         assert.deepStrictEqual(order, ["first", "second"]);
       }),
@@ -232,13 +278,9 @@ describe("the pagehide dispatch", () => {
       Effect.gen(function* () {
         const written: string[] = [];
         yield* lifecycle.onExit(() => Effect.die("a broken hook"));
-        yield* lifecycle.onExit(() =>
-          Effect.sync(() => {
-            written.push("the good hook");
-          }),
-        );
+        yield* lifecycle.onExit(writing(written, "the good hook"));
 
-        const outcome = yield* dispatch(attached, "pagehide", pageHide(false));
+        const outcome = yield* dispatch(attached, pageHide(false));
 
         assert.deepStrictEqual(written, ["the good hook"]);
         assert.isTrue(Exit.isSuccess(outcome));
@@ -254,9 +296,9 @@ describe("what an exit means", () => {
         const started: PageExit[] = [];
         yield* lifecycle.onExit(record(started));
 
-        yield* dispatch(attached, "pagehide", pageHide(false));
+        yield* dispatch(attached, pageHide(false));
 
-        assert.deepStrictEqual(started, [{ final: true }]);
+        assert.deepStrictEqual(started, [PageExit.Final()]);
       }),
     ),
   );
@@ -269,9 +311,9 @@ describe("what an exit means", () => {
 
         // `persisted === true`: the page may come back from the
         // back/forward cache, and it never runs its scripts again.
-        yield* dispatch(attached, "pagehide", pageHide(true));
+        yield* dispatch(attached, pageHide(true));
 
-        assert.deepStrictEqual(started, [{ final: false }]);
+        assert.deepStrictEqual(started, [PageExit.Resumable()]);
       }),
     ),
   );
@@ -284,9 +326,9 @@ describe("what an exit means", () => {
 
         // The last moment that mobile WebKit reliably gives us.
         document.visibilityState = "hidden";
-        const outcome = yield* dispatch(attached, "visibilitychange", visibilityChange());
+        const outcome = yield* dispatch(attached, visibilityChange());
 
-        assert.deepStrictEqual(started, [{ final: false }]);
+        assert.deepStrictEqual(started, [PageExit.Resumable()]);
         assert.isTrue(Exit.isSuccess(outcome));
       }),
     ),
@@ -299,7 +341,7 @@ describe("what an exit means", () => {
         yield* lifecycle.onExit(record(started));
 
         document.visibilityState = "visible";
-        yield* dispatch(attached, "visibilitychange", visibilityChange());
+        yield* dispatch(attached, visibilityChange());
 
         assert.deepStrictEqual(started, []);
       }),
@@ -313,10 +355,10 @@ describe("the life of a hook", () => {
       Effect.gen(function* () {
         const started: PageExit[] = [];
         const scope = yield* Scope.make();
-        yield* Scope.provide(lifecycle.onExit(record(started)), scope);
+        yield* pipe(lifecycle.onExit(record(started)), Scope.provide(scope));
         yield* Scope.close(scope, Exit.void);
 
-        yield* dispatch(attached, "pagehide", pageHide(false));
+        yield* dispatch(attached, pageHide(false));
 
         assert.deepStrictEqual(started, []);
       }),
@@ -333,15 +375,15 @@ describe("the life of a hook", () => {
 
         const first = yield* Scope.make();
         const second = yield* Scope.make();
-        yield* Scope.provide(lifecycle.onExit(shared), first);
-        yield* Scope.provide(lifecycle.onExit(shared), second);
+        yield* pipe(lifecycle.onExit(shared), Scope.provide(first));
+        yield* pipe(lifecycle.onExit(shared), Scope.provide(second));
         yield* Scope.close(first, Exit.void);
 
-        yield* dispatch(attached, "pagehide", pageHide(false));
+        yield* dispatch(attached, pageHide(false));
 
         assert.deepStrictEqual(
           started,
-          [{ final: true }],
+          [PageExit.Final()],
           "the registration that is still open must run, and only once",
         );
         yield* Scope.close(second, Exit.void);

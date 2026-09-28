@@ -76,26 +76,21 @@ const PlatformLayer = pipe(
   Layer.provideMerge(Observability),
 );
 
+const StoreLayer = pipe(Storage.layer, Layer.provideMerge(KeyValueStore.layer));
+
+const CapabilityLayer = pipe(Capabilities.layer, Layer.provide(KeyValueStore.layer));
+
 /** Storage, and the services that read it. */
 const StorageLayer = pipe(
-  Layer.mergeAll(
-    pipe(Storage.layer, Layer.provideMerge(KeyValueStore.layer)),
-    pipe(Capabilities.layer, Layer.provide(KeyValueStore.layer)),
-    Clipboard.layer,
-    Tabs.layer,
-  ),
+  Layer.mergeAll(StoreLayer, CapabilityLayer, Clipboard.layer, Tabs.layer),
   Layer.provideMerge(PlatformLayer),
 );
 
+const ModeLayer = pipe(Modes.layer, Layer.provideMerge(HandlerStack.layer));
+
 /** Settings, the key trie, modes and the command registry. */
 const CoreLayer = pipe(
-  Layer.mergeAll(
-    Mappings.layer,
-    Exclusions.layer,
-    pipe(Modes.layer, Layer.provideMerge(HandlerStack.layer)),
-    Commands.layer,
-    Report.layer,
-  ),
+  Layer.mergeAll(Mappings.layer, Exclusions.layer, ModeLayer, Commands.layer, Report.layer),
   Layer.provideMerge(Settings.layer),
   Layer.provideMerge(StorageLayer),
 );
@@ -124,6 +119,13 @@ const FramesLayer = pipe(
   Layer.provideMerge(UiLayer),
 );
 
+const MarksLayer = pipe(Marks.layer, Layer.provide(Scroller.layer));
+
+// `UrlClipboard` opens a URL that the user pasted, which is the same step that
+// `Navigation` takes for a typed URL. It asks for that service rather than
+// repeating the rule about what a bare word means.
+const UrlClipboardLayer = pipe(UrlClipboard.layer, Layer.provide(Navigation.layer));
+
 /**
  * The features.
  *
@@ -136,16 +138,13 @@ const FeatureLayer = pipe(
   Layer.mergeAll(
     Scroller.layer,
     Insert.layer,
-    pipe(Marks.layer, Layer.provide(Scroller.layer)),
+    MarksLayer,
     Hints.layer,
     Find.layer,
     Visual.layer,
     Omnibar.layer,
     TabControl.layer,
-    // `UrlClipboard` opens a URL that the user pasted, which is the same step
-    // that `Navigation` takes for a typed URL. It asks for that service rather
-    // than repeating the rule about what a bare word means.
-    pipe(UrlClipboard.layer, Layer.provide(Navigation.layer)),
+    UrlClipboardLayer,
     Navigation.layer,
   ),
   Layer.provideMerge(FramesLayer),
