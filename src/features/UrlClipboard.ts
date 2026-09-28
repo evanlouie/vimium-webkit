@@ -8,13 +8,25 @@
  * that only calls the manager completes inside that window.
  */
 
-import { Context, Effect, Layer, Option, pipe } from "effect";
+import { Context, Effect, Layer, Match, Option, pipe } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Report } from "~/core/Report.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Hud } from "~/ui/Hud.ts";
-import { Navigation } from "./Navigation.ts";
+import { type Destination, Navigation } from "./Navigation.ts";
+
+/** Text with something in it besides white space. */
+const hasContent = (text: string): boolean => text.trim().length > 0;
+
+/** What the prompt asks, for each place that the URL opens in. */
+const promptLabel = (destination: Destination): string =>
+  pipe(
+    Match.value(destination),
+    Match.when("this-tab", () => "Open:"),
+    Match.when("new-tab", () => "Open in new tab:"),
+    Match.exhaustive,
+  );
 
 export class UrlClipboard extends Context.Service<
   UrlClipboard,
@@ -38,13 +50,27 @@ export class UrlClipboard extends Context.Service<
       const report = yield* Report;
 
       const copy = Effect.fn("UrlClipboard.copy")(function* (text: string, label: string) {
-        const outcome = yield* Effect.exit(clipboard.write(text));
-        if (outcome._tag === "Failure") {
-          yield* report.error(`Could not copy the ${label}`);
-          return;
-        }
-        yield* hud.show(`Copied ${label}`);
+        yield* pipe(
+          clipboard.write(text),
+          Effect.matchCauseEffect({
+            onFailure: () => report.error(`Could not copy the ${label}`),
+            onSuccess: () => hud.show(`Copied ${label}`),
+          }),
+        );
       });
+
+      /** Show what the clipboard holds, when it holds anything. */
+      const previewClipboard = pipe(
+        clipboard.read,
+        Effect.map(Option.liftPredicate(hasContent)),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (text) => hud.show(`Clipboard: ${text.slice(0, 80)}`),
+          }),
+        ),
+        Effect.ignore,
+      );
 
       /**
        * Open a URL that the user pastes.
@@ -54,26 +80,21 @@ export class UrlClipboard extends Context.Service<
        * clipboard. The read below is only an attempt to fill the prompt, and it
        * starts first, so that it races the user and not the other way round.
        */
-      const openPasted = Effect.fn("UrlClipboard.openPasted")(function* (newTab: boolean) {
-        yield* Effect.forkDetach(
-          Effect.ignore(
-            pipe(
-              clipboard.read,
-              Effect.flatMap((text) =>
-                text.trim().length === 0
-                  ? Effect.void
-                  : hud.show(`Clipboard: ${text.slice(0, 80)}`),
-              ),
-            ),
-          ),
-        );
+      const openPasted = Effect.fn("UrlClipboard.openPasted")(function* (destination: Destination) {
+        yield* pipe(previewClipboard, Effect.forkDetach);
 
         const answer = yield* hud.prompt<never>({
-          label: newTab ? "Open in new tab:" : "Open:",
+          label: promptLabel(destination),
           placeholder: "paste a URL (⌘V)",
         });
-        if (Option.isNone(answer) || answer.value.trim().length === 0) return;
-        yield* navigation.go(answer.value.trim(), { newTab });
+        yield* pipe(
+          answer,
+          Option.filter(hasContent),
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (input) => navigation.go(input.trim(), destination),
+          }),
+        );
       });
 
       yield* commands.registerAll({
@@ -89,8 +110,8 @@ export class UrlClipboard extends Context.Service<
             Effect.flatMap((title) => copy(title, "title")),
           ),
 
-        openCopiedUrlInCurrentTab: () => openPasted(false),
-        openCopiedUrlInNewTab: () => openPasted(true),
+        openCopiedUrlInCurrentTab: () => openPasted("this-tab"),
+        openCopiedUrlInNewTab: () => openPasted("new-tab"),
       });
 
       return UrlClipboard.of({ copy });

@@ -14,7 +14,22 @@
  * user stops typing.
  */
 
-import { Context, Effect, Exit, Layer, Option, Ref, Scope, pipe, Struct } from "effect";
+import {
+  Array,
+  Boolean,
+  Context,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  Predicate,
+  Ref,
+  Scope,
+  Struct,
+  flow,
+  pipe,
+} from "effect";
+import { constVoid } from "effect/Function";
 import { Commands } from "~/core/Commands.ts";
 import {
   CONTINUE_BUBBLING,
@@ -31,7 +46,7 @@ import { deepActiveElement } from "~/platform/Elements.ts";
 /** What the HUD shows while the user types. */
 const INSERT_INDICATOR = "Insert mode";
 
-const EDITABLE_INPUT_TYPES: ReadonlySet<string> = new Set([
+const EDITABLE_INPUT_TYPES: ReadonlyArray<string> = [
   "text",
   "search",
   "email",
@@ -44,10 +59,13 @@ const EDITABLE_INPUT_TYPES: ReadonlySet<string> = new Set([
   "week",
   "time",
   "tel",
-]);
+];
+
+const isHTMLElement = (node: EventTarget | null): node is HTMLElement =>
+  node instanceof HTMLElement;
 
 /**
- * Can the user type into this node *now*?
+ * Can the user type into this element *now*?
  *
  * This is a stricter question than `isEditable` in `~/platform/Elements.ts`.
  * That one asks whether a node is a text-entry element, which is what the boot
@@ -55,19 +73,20 @@ const EDITABLE_INPUT_TYPES: ReadonlySet<string> = new Set([
  * type of the input: a page that gives every key to a disabled field costs the
  * user every command.
  */
-const acceptsTyping = (node: EventTarget | null): node is HTMLElement => {
-  if (!(node instanceof HTMLElement)) return false;
-  if (node.isContentEditable) return true;
-  if (node instanceof HTMLTextAreaElement) {
-    return !node.disabled && !node.readOnly;
-  }
-  if (node instanceof HTMLSelectElement) return !node.disabled;
-  if (node instanceof HTMLInputElement) {
-    if (node.disabled || node.readOnly) return false;
-    return EDITABLE_INPUT_TYPES.has(node.type.toLowerCase());
-  }
-  return false;
-};
+const acceptsTyping = (element: HTMLElement): boolean =>
+  element.isContentEditable ||
+  (element instanceof HTMLTextAreaElement && !element.disabled && !element.readOnly) ||
+  (element instanceof HTMLSelectElement && !element.disabled) ||
+  (element instanceof HTMLInputElement &&
+    !element.disabled &&
+    !element.readOnly &&
+    pipe(EDITABLE_INPUT_TYPES, Array.contains(element.type.toLowerCase())));
+
+/** The node, when it is an element that the user can type into now. */
+const typingTarget: (node: EventTarget | null) => Option.Option<HTMLElement> = flow(
+  Option.liftPredicate(isHTMLElement),
+  Option.filter(acceptsTyping),
+);
 
 /**
  * The tag of our own overlay host.
@@ -86,6 +105,12 @@ const OVERLAY_TAG = "vimium-webkit-overlay";
 const ownsFocus = (target: EventTarget | null): boolean =>
   target instanceof Element && target.closest(OVERLAY_TAG) !== null;
 
+/** The element that a focus gives the keys to. Our own overlay never takes them. */
+const adoptable: (node: EventTarget | null) => Option.Option<HTMLElement> = flow(
+  Option.liftPredicate(Predicate.not(ownsFocus)),
+  Option.flatMap(typingTarget),
+);
+
 /**
  * The node that the event truly started at.
  *
@@ -98,32 +123,69 @@ const ownsFocus = (target: EventTarget | null): boolean =>
  * gives the host, which is the correct answer there and is what our own
  * overlay needs.
  */
-export const composedTarget = (event: Event): EventTarget | null => {
-  const path = event.composedPath();
-  return path[0] ?? event.target;
+export const composedTarget = (event: Pick<Event, "composedPath" | "target">): EventTarget | null =>
+  pipe(
+    event.composedPath(),
+    Array.head,
+    Option.getOrElse(() => event.target),
+  );
+
+/** An element with no box at all is not on the screen. */
+const hasBox = (element: Element): boolean => {
+  const { width, height } = element.getBoundingClientRect();
+  return width !== 0 || height !== 0;
 };
 
-const isVisible = (view: Window, element: Element): boolean => {
-  const rect = element.getBoundingClientRect();
-  if (rect.width === 0 && rect.height === 0) return false;
-  const style = view.getComputedStyle(element);
-  return style.visibility !== "hidden" && style.display !== "none";
-};
+const isRendered = (style: CSSStyleDeclaration): boolean =>
+  style.visibility !== "hidden" && style.display !== "none";
+
+const isVisible = (view: Window, element: Element): boolean =>
+  hasBox(element) && isRendered(view.getComputedStyle(element));
+
+const NO_ELEMENTS: ReadonlyArray<Element> = [];
+
+/** Every element below a root, with the elements of each open shadow root after its host. */
+const deepElements = (root: ParentNode): ReadonlyArray<Element> =>
+  pipe(
+    root.querySelectorAll("*"),
+    Array.fromIterable,
+    Array.flatMap((element) => [element, ...shadowElements(element.shadowRoot)]),
+  );
+
+/**
+ * Every element below an open shadow root. A closed root, or none, gives none.
+ *
+ * The match is built once, and not for each element, because the walk asks it
+ * about every element of the page.
+ */
+const shadowElements: (shadow: ShadowRoot | null) => ReadonlyArray<Element> = flow(
+  Option.fromNullOr,
+  Option.match({ onNone: () => NO_ELEMENTS, onSome: deepElements }),
+);
 
 /** Every text-entry target that `gi` may choose, in document order. */
-const focusableInputs = (view: Window, root: ParentNode): ReadonlyArray<HTMLElement> => {
-  const found: HTMLElement[] = [];
-  const walk = (scope: ParentNode): void => {
-    for (const element of scope.querySelectorAll("*")) {
-      if (acceptsTyping(element) && isVisible(view, element)) {
-        found.push(element);
-      }
-      const shadow = element.shadowRoot;
-      if (shadow) walk(shadow);
-    }
-  };
-  walk(root);
-  return found;
+const focusableInputs = (view: Window, root: ParentNode): ReadonlyArray<HTMLElement> =>
+  pipe(
+    root,
+    deepElements,
+    Array.filter(isHTMLElement),
+    Array.filter((element) => acceptsTyping(element) && isVisible(view, element)),
+  );
+
+/** The input that a count names: the first without a count, and the last past the end. */
+const nthInput = (
+  inputs: Array.NonEmptyReadonlyArray<HTMLElement>,
+  count: number,
+): Option.Option<HTMLElement> =>
+  pipe(inputs, Array.get(Math.min(Math.max(1, count), inputs.length) - 1));
+
+const isTextField = (element: HTMLElement): element is HTMLInputElement | HTMLTextAreaElement =>
+  element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement;
+
+/** The caret goes to the end, as upstream does. */
+const caretToEnd = (field: HTMLInputElement | HTMLTextAreaElement): void => {
+  const end = field.value.length;
+  field.setSelectionRange(end, end);
 };
 
 /** A live mode frame, and the scope that owns it. */
@@ -138,6 +200,9 @@ interface InsertState {
   /** Global insert mode: every key goes to the page, whatever has focus. */
   readonly global: boolean;
 }
+
+/** Nobody is typing. */
+const IDLE: InsertState = { element: Option.none(), global: false };
 
 export class Insert extends Context.Service<
   Insert,
@@ -173,27 +238,53 @@ export class Insert extends Context.Service<
         const report = yield* Report;
         const settings = yield* Settings;
 
-        const state = yield* Ref.make<InsertState>({
-          element: Option.none(),
-          global: false,
+        const state = yield* Ref.make<InsertState>(IDLE);
+        const base = yield* Ref.make(Option.none<Frame>());
+        const badge = yield* Ref.make(Option.none<Frame>());
+
+        const isOpen = (cell: Ref.Ref<Option.Option<Frame>>): Effect.Effect<boolean> =>
+          pipe(
+            Ref.get(cell),
+            Effect.flatMap(
+              Option.match({
+                onNone: () => Effect.succeed(false),
+                onSome: (frame) => frame.handle.isActive,
+              }),
+            ),
+          );
+
+        const closeFrame: (cell: Ref.Ref<Option.Option<Frame>>) => Effect.Effect<void> = flow(
+          Ref.getAndSet(Option.none<Frame>()),
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.void,
+              onSome: (frame) => Scope.close(frame.scope, Exit.void),
+            }),
+          ),
+        );
+
+        /** Open a mode frame in a scope of its own, and keep it in the cell. */
+        const openFrame = Effect.fnUntraced(function* (
+          cell: Ref.Ref<Option.Option<Frame>>,
+          enter: Effect.Effect<ModeHandle, never, Scope.Scope>,
+        ) {
+          yield* closeFrame(cell);
+          const scope = yield* Scope.make();
+          const handle = yield* pipe(enter, Scope.provide(scope));
+          yield* pipe(cell, Ref.set(Option.some({ scope, handle })));
         });
-        const base = yield* Ref.make<Option.Option<Frame>>(Option.none());
-        const badge = yield* Ref.make<Option.Option<Frame>>(Option.none());
 
-        const isOpen = (cell: Ref.Ref<Option.Option<Frame>>) =>
-          Effect.gen(function* () {
-            const frame = yield* Ref.get(cell);
-            if (Option.isNone(frame)) return false;
-            return yield* frame.value.handle.isActive;
-          });
-
-        const closeFrame = (cell: Ref.Ref<Option.Option<Frame>>) =>
-          Effect.gen(function* () {
-            const frame = yield* Ref.getAndSet(cell, Option.none());
-            if (Option.isSome(frame)) {
-              yield* Scope.close(frame.value.scope, Exit.void);
-            }
-          });
+        /** Open the frame again, unless the cell holds one that is still live. */
+        const ensureFrame = Effect.fnUntraced(function* (
+          cell: Ref.Ref<Option.Option<Frame>>,
+          enter: Effect.Effect<ModeHandle, never, Scope.Scope>,
+        ) {
+          const open = yield* isOpen(cell);
+          yield* pipe(
+            open,
+            Boolean.match({ onFalse: () => openFrame(cell, enter), onTrue: () => Effect.void }),
+          );
+        });
 
         const isInserting = pipe(
           Ref.get(state),
@@ -208,38 +299,60 @@ export class Insert extends Context.Service<
          * indicator while it lives, and insert mode gets it back afterwards.
          */
         const showIndicator = Effect.fn("Insert.showIndicator")(function* () {
-          if (yield* isOpen(badge)) return;
-          yield* closeFrame(badge);
-          const scope = yield* Scope.make();
-          const handle = yield* Effect.provideService(
+          yield* ensureFrame(
+            badge,
             modes.enter<never>({
               name: "insert-indicator",
               indicator: INSERT_INDICATOR,
               singleton: "insert-indicator",
             }),
-            Scope.Scope,
-            scope,
           );
-          yield* Ref.set(badge, Option.some({ scope, handle }));
         });
 
         const hideIndicator = closeFrame(badge);
 
-        const onKeydown = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-          Effect.gen(function* () {
-            if (!(yield* isInserting)) return CONTINUE_BUBBLING;
+        /** Give the keys to an element that has the focus. */
+        const adopt = (element: HTMLElement): Effect.Effect<void> =>
+          pipe(
+            state,
+            Ref.update(Struct.assign({ element: Option.some(element) })),
+            Effect.andThen(showIndicator()),
+          );
 
-            if (isEscape(event)) {
-              yield* exitInsert();
+        /** The page may have detached the element already. */
+        const blurElement = (element: HTMLElement): Effect.Effect<void> =>
+          pipe(
+            dom.attempt("HTMLElement.blur", () => {
+              element.blur();
+            }),
+            Effect.ignore,
+          );
+
+        /** A key while the user types. */
+        const typedKey = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
+          pipe(
+            isEscape(event),
+            Boolean.match({
+              // `PASS_EVENT_TO_PAGE`, and not `CONTINUE_BUBBLING`: normal mode is
+              // below us on the stack, and it must not see the keystroke.
+              onFalse: () => Effect.succeed(PASS_EVENT_TO_PAGE),
               // Suppressed: many pages read Escape as "close this widget", and a
               // user who presses Escape to leave insert mode does not ask for
               // that.
-              return SUPPRESS_EVENT;
-            }
-            // `PASS_EVENT_TO_PAGE`, and not `CONTINUE_BUBBLING`: normal mode is
-            // below us on the stack, and it must not see the keystroke.
-            return PASS_EVENT_TO_PAGE;
-          });
+              onTrue: () => pipe(exitInsert(), Effect.as(SUPPRESS_EVENT)),
+            }),
+          );
+
+        const onKeydown = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
+          pipe(
+            isInserting,
+            Effect.flatMap(
+              Boolean.match({
+                onFalse: () => Effect.succeed(CONTINUE_BUBBLING),
+                onTrue: () => typedKey(event),
+              }),
+            ),
+          );
 
         /**
          * The focused node, through an open shadow root.
@@ -251,34 +364,39 @@ export class Insert extends Context.Service<
         const focusedNode = (event: FocusEvent): Effect.Effect<EventTarget | null> =>
           dom.probeOr(() => composedTarget(event), event.target);
 
-        const onFocus = (event: FocusEvent): Effect.Effect<HandlerResult> =>
-          Effect.gen(function* () {
-            const target = yield* focusedNode(event);
-            if (ownsFocus(target)) return CONTINUE_BUBBLING;
-            if (acceptsTyping(target)) {
-              yield* Ref.update(state, (current) =>
-                pipe(current, Struct.assign({ element: Option.some(target) })),
-              );
-              yield* showIndicator();
-            }
-            return CONTINUE_BUBBLING;
-          });
+        const onFocus = Effect.fnUntraced(function* (event: FocusEvent) {
+          const target = yield* focusedNode(event);
+          yield* pipe(
+            adoptable(target),
+            Option.match({ onNone: () => Effect.void, onSome: adopt }),
+          );
+          return CONTINUE_BUBBLING;
+        });
 
-        const onBlur = (event: FocusEvent): Effect.Effect<HandlerResult> =>
-          Effect.gen(function* () {
-            const current = yield* Ref.get(state);
-            // The same rule as the focus above. The blur of a field inside an
-            // open shadow root names the host, so a compare against
-            // `event.target` never matched. Insert mode then stayed on after the
-            // field went away.
-            const target = yield* focusedNode(event);
-            if (Option.isNone(current.element) || target !== current.element.value) {
-              return CONTINUE_BUBBLING;
-            }
-            yield* Ref.set(state, pipe(current, Struct.assign({ element: Option.none() })));
-            if (!current.global) yield* hideIndicator;
-            return CONTINUE_BUBBLING;
-          });
+        /** The element that had the keys lost the focus. Global insert mode keeps its indicator. */
+        const leave = Effect.fnUntraced(function* (current: InsertState) {
+          const left: InsertState = pipe(current, Struct.assign({ element: Option.none() }));
+          yield* pipe(state, Ref.set(left));
+          yield* pipe(
+            current.global,
+            Boolean.match({ onFalse: () => hideIndicator, onTrue: () => Effect.void }),
+          );
+        });
+
+        const onBlur = Effect.fnUntraced(function* (event: FocusEvent) {
+          const current = yield* Ref.get(state);
+          // The same rule as the focus above. The blur of a field inside an
+          // open shadow root names the host, so a compare against
+          // `event.target` never matched. Insert mode then stayed on after the
+          // field went away.
+          const target = yield* focusedNode(event);
+          yield* pipe(
+            current.element,
+            Option.filter((element) => element === target),
+            Option.match({ onNone: () => Effect.void, onSome: () => leave(current) }),
+          );
+          return CONTINUE_BUBBLING;
+        });
 
         /**
          * Make sure that the stack frame of insert mode is live.
@@ -288,10 +406,8 @@ export class Insert extends Context.Service<
          * builds the service a second time (CORE-01).
          */
         const ensureEntered = Effect.fn("Insert.ensureEntered")(function* () {
-          if (yield* isOpen(base)) return;
-          yield* closeFrame(base);
-          const scope = yield* Scope.make();
-          const handle = yield* Effect.provideService(
+          yield* ensureFrame(
+            base,
             modes.enter(
               {
                 name: "insert",
@@ -304,90 +420,94 @@ export class Insert extends Context.Service<
                 blur: onBlur,
               },
             ),
-            Scope.Scope,
-            scope,
           );
-          yield* Ref.set(base, Option.some({ scope, handle }));
         });
 
         const enterGlobal = Effect.fn("Insert.enter")(function* () {
           yield* ensureEntered();
-          yield* Ref.update(state, (current) => pipe(current, Struct.assign({ global: true })));
+          yield* pipe(state, Ref.update(Struct.assign({ global: true })));
           yield* showIndicator();
         });
 
         const exitInsert = Effect.fn("Insert.exit")(function* () {
-          const current = yield* Ref.getAndSet(state, {
-            element: Option.none(),
-            global: false,
-          });
-          if (Option.isSome(current.element)) {
-            const element = current.element.value;
-            // The page may have detached the element already.
-            yield* Effect.ignore(
-              dom.attempt("HTMLElement.blur", () => {
-                element.blur();
-              }),
-            );
-          }
+          const current = yield* pipe(state, Ref.getAndSet(IDLE));
+          yield* pipe(
+            current.element,
+            Option.match({ onNone: () => Effect.void, onSome: blurElement }),
+          );
           yield* hideIndicator;
         });
+
+        /** Focus an input, and give it the keys. */
+        const focusElement = Effect.fnUntraced(function* (target: HTMLElement) {
+          yield* pipe(
+            dom.attempt("HTMLElement.focus", () => {
+              target.focus({ preventScroll: false });
+              // `setSelectionRange` fails on an input type that does not
+              // support it, and the focus above still holds.
+              pipe(
+                target,
+                Option.liftPredicate(isTextField),
+                Option.match({ onNone: constVoid, onSome: caretToEnd }),
+              );
+            }),
+            Effect.ignore,
+          );
+          yield* adopt(target);
+        });
+
+        const focusNth: (target: Option.Option<HTMLElement>) => Effect.Effect<void> = Option.match({
+          onNone: () => Effect.void,
+          onSome: focusElement,
+        });
+
+        /**
+         * Choose among the inputs.
+         *
+         * More than one input, and no count to choose between them. Upstream
+         * shows hints on the inputs, and so do we. The hints service is asked by
+         * name through the registry: a feature must never import another
+         * feature. A build with no hints answers "unavailable", and the count
+         * path runs instead.
+         */
+        const chooseInput = (
+          inputs: Array.NonEmptyReadonlyArray<HTMLElement>,
+          count: number,
+        ): Effect.Effect<void> =>
+          pipe(
+            inputs.length > 1 && count <= 1,
+            Boolean.match({
+              onFalse: () => focusNth(nthInput(inputs, count)),
+              onTrue: () =>
+                pipe(
+                  commands.run("LinkHints.activateModeToFocus", {
+                    count: 1,
+                    options: {},
+                    event: null,
+                  }),
+                  Effect.catch(() => focusNth(nthInput(inputs, count))),
+                ),
+            }),
+          );
 
         /**
          * `gi` — focus a text input.
          *
-         * With a count, go straight to the nth input. There is no hand-off to
-         * link hints when several inputs match: a feature does not call another
-         * feature.
+         * With a count, go straight to the nth input. When several inputs match
+         * and there is no count, the hints choose, through the registry.
          */
         const focusInput = Effect.fn("Insert.focusInput")(function* (count: number) {
-          const inputs = yield* dom.probeOr<ReadonlyArray<HTMLElement>>(
+          const inputs = yield* dom.probeOr(
             () => focusableInputs(dom.window, dom.document),
-            [],
+            Array.empty<HTMLElement>(),
           );
-          if (inputs.length === 0) {
-            yield* report.info("No text inputs on this page");
-            return;
-          }
-
-          // More than one input, and no count to choose between them. Upstream
-          // shows hints on the inputs, and so do we. The hints service is asked
-          // by name through the registry: a feature must never import another
-          // feature. A build with no hints answers "unavailable", and the count
-          // path below still works.
-          if (inputs.length > 1 && count <= 1) {
-            const handedOver = yield* pipe(
-              commands.run("LinkHints.activateModeToFocus", {
-                count: 1,
-                options: {},
-                event: null,
-              }),
-              Effect.match({ onFailure: () => false, onSuccess: () => true }),
-            );
-            if (handedOver) return;
-          }
-
-          const index = Math.min(Math.max(1, count), inputs.length) - 1;
-          const target = inputs[index];
-          if (target === undefined) return;
-
-          yield* Effect.ignore(
-            dom.attempt("HTMLElement.focus", () => {
-              target.focus({ preventScroll: false });
-              if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
-                // The caret goes to the end, as upstream does.
-                // `setSelectionRange` fails on an input type that does not
-                // support it, and the focus above still holds.
-                const end = target.value.length;
-                target.setSelectionRange(end, end);
-              }
+          yield* pipe(
+            inputs,
+            Array.match({
+              onEmpty: () => report.info("No text inputs on this page"),
+              onNonEmpty: (found) => chooseInput(found, count),
             }),
           );
-
-          yield* Ref.update(state, (current) =>
-            pipe(current, Struct.assign({ element: Option.some(target) })),
-          );
-          yield* showIndicator();
         });
 
         /**
@@ -400,13 +520,19 @@ export class Insert extends Context.Service<
          * commands (OSU-02).
          */
         const seedFromFocus = Effect.fn("Insert.seedFromFocus")(function* () {
-          const active = deepActiveElement(dom.document);
-          if (ownsFocus(active)) return;
-          if (!acceptsTyping(active)) return;
-          yield* Ref.update(state, (current) =>
-            pipe(current, Struct.assign({ element: Option.some(active) })),
+          yield* pipe(
+            dom.document,
+            deepActiveElement,
+            adoptable,
+            Option.match({ onNone: () => Effect.void, onSome: adopt }),
           );
-          yield* showIndicator();
+        });
+
+        /** Blur the field that the page focused, and take the keys back from it. */
+        const giveBack = Effect.fnUntraced(function* (field: HTMLElement) {
+          yield* blurElement(field);
+          yield* pipe(state, Ref.update(Struct.assign({ element: Option.none<HTMLElement>() })));
+          yield* hideIndicator;
         });
 
         /**
@@ -421,20 +547,16 @@ export class Insert extends Context.Service<
          * who is already a second into a query.
          */
         const grabBackFocus = Effect.fn("Insert.grabBackFocus")(function* (userHasTyped: boolean) {
-          if (userHasTyped) return;
           // The setting is read here, so that one place decides it.
-          if (!settings.currentUnsafe().grabBackFocus) return;
-          const active = deepActiveElement(dom.document);
-          if (!acceptsTyping(active)) return;
-          yield* Effect.ignore(
-            dom.attempt("HTMLElement.blur", () => {
-              active.blur();
+          const wanted = !userHasTyped && settings.currentUnsafe().grabBackFocus;
+          yield* pipe(
+            wanted,
+            Boolean.match({
+              onFalse: () => Option.none<HTMLElement>(),
+              onTrue: () => pipe(dom.document, deepActiveElement, typingTarget),
             }),
+            Option.match({ onNone: () => Effect.void, onSome: giveBack }),
           );
-          yield* Ref.update(state, (current) =>
-            pipe(current, Struct.assign({ element: Option.none() })),
-          );
-          yield* hideIndicator;
         });
 
         // The base frame belongs to the layer scope. A caller that survives a
@@ -444,12 +566,7 @@ export class Insert extends Context.Service<
         // Both frames live in a scope of their own, so that `ensureEntered` can
         // replace one. This gives them back to the layer scope, which closes
         // them when the runtime stops.
-        yield* Effect.addFinalizer(() =>
-          Effect.gen(function* () {
-            yield* closeFrame(badge);
-            yield* closeFrame(base);
-          }),
-        );
+        yield* Effect.addFinalizer(() => pipe(closeFrame(badge), Effect.andThen(closeFrame(base))));
 
         const service = Insert.of({
           enter: enterGlobal(),

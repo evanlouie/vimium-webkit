@@ -12,11 +12,25 @@
  * user set (§7.4).
  */
 
-import { Clock, Context, Effect, Layer, Option } from "effect";
+import {
+  Array,
+  Boolean,
+  Clock,
+  Context,
+  Data,
+  Effect,
+  Layer,
+  Match,
+  Option,
+  Record,
+  Struct,
+  flow,
+  pipe,
+} from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
-import type { Marks as MarksData } from "~/domain/Persisted.ts";
+import type { GlobalMark, LocalMark, Marks as MarksData } from "~/domain/Persisted.ts";
 import { pruneMarks } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Storage } from "~/platform/Storage.ts";
@@ -25,25 +39,46 @@ import { Hud } from "~/ui/Hud.ts";
 import { captureNextKey } from "./CaptureKey.ts";
 import { Scroller } from "./Scroller.ts";
 
+const parseUrl = Option.liftThrowable((href: string) => new URL(href));
+
+/** The URL as text, without its fragment. */
+const withoutFragment = (url: URL): string => {
+  url.hash = "";
+  return url.href;
+};
+
 /**
  * A mark is keyed by the URL without the fragment, as upstream does.
  *
  * A stored mark holds any string that reached storage, so `new URL` can fail
  * here. The raw text is then the key, which keeps the mark reachable.
  */
-export const markKeyForUrl = (href: string): string => {
-  try {
-    const url = new URL(href);
-    url.hash = "";
-    return url.href;
-  } catch {
-    return href;
-  }
-};
+export const markKeyForUrl = (href: string): string =>
+  pipe(
+    href,
+    parseUrl,
+    Option.map(withoutFragment),
+    Option.getOrElse(() => href),
+  );
+
+/** A mark letter, and where the mark lives. */
+type MarkLetter = Data.TaggedEnum<{
+  /** A mark on this page, keyed by its URL. */
+  Local: { readonly letter: string };
+  /** A mark that remembers its URL, and that any page can go to. */
+  Global: { readonly letter: string };
+}>;
+const MarkLetter = Data.taggedEnum<MarkLetter>();
 
 /** An upper-case letter is a global mark, as in Vim. */
-const isGlobalLetter = (letter: string): boolean =>
-  letter.length === 1 && letter >= "A" && letter <= "Z";
+const markLetter = (letter: string): MarkLetter =>
+  pipe(
+    letter.length === 1 && letter >= "A" && letter <= "Z",
+    Boolean.match({
+      onFalse: () => MarkLetter.Local({ letter }),
+      onTrue: () => MarkLetter.Global({ letter }),
+    }),
+  );
 
 /**
  * The schemes that a stored mark may open.
@@ -55,15 +90,78 @@ const isGlobalLetter = (letter: string): boolean =>
  * storage, which the interface of the manager can edit, so a poisoned mark is a
  * realistic source. There is no fallback here. A refusal is final.
  */
-const SAFE_PROTOCOLS: ReadonlySet<string> = new Set(["http:", "https:"]);
+const SAFE_PROTOCOLS: ReadonlyArray<string> = ["http:", "https:"];
 
-const isSafeMarkUrl = (href: string): boolean => {
-  try {
-    return SAFE_PROTOCOLS.has(new URL(href).protocol);
-  } catch {
-    return false;
-  }
-};
+const isSafeMarkUrl: (href: string) => boolean = flow(
+  parseUrl,
+  Option.exists((url) => pipe(SAFE_PROTOCOLS, Array.contains(url.protocol))),
+);
+
+/** Set a global mark. */
+const withGlobalMark =
+  (letter: string, mark: GlobalMark) =>
+  (marks: MarksData): MarksData => {
+    const global = pipe(marks.global, Record.set(letter, mark));
+    return pipe(marks, Struct.assign({ global }));
+  };
+
+/** Set one letter among the local marks of a page, and keep its other letters. */
+const withLocalMark =
+  (key: string, letter: string, mark: LocalMark) =>
+  (marks: MarksData): MarksData => {
+    const letters = pipe(
+      marks.local,
+      Record.get(key),
+      Option.getOrElse(() => Record.empty<string, LocalMark>()),
+      Record.set(letter, mark),
+    );
+    const local = pipe(marks.local, Record.set(key, letters));
+    return pipe(marks, Struct.assign({ local }));
+  };
+
+/** The local mark of this letter on the page with this key. */
+const localMark = (marks: MarksData, key: string, letter: string): Option.Option<LocalMark> =>
+  pipe(marks.local, Record.get(key), Option.flatMap(Record.get(letter)));
+
+/** A variant that carries no data. */
+type NoFields = Record.ReadonlyRecord<never, never>;
+
+/** What a jump to a global mark does. */
+type GlobalJump = Data.TaggedEnum<{
+  /** No mark has the letter. */
+  Unset: NoFields;
+  /** The mark is on this page, so the jump is a scroll. */
+  Here: { readonly mark: GlobalMark };
+  /** The mark points at a URL that we will not open. */
+  Unsafe: NoFields;
+  /** The mark is on another page. */
+  Away: { readonly url: string };
+}>;
+const GlobalJump = Data.taggedEnum<GlobalJump>();
+
+/** Decide what a jump to a global mark does, from the stored marks and the URL of this page. */
+const globalJump = (marks: MarksData, letter: string, href: string): GlobalJump =>
+  pipe(
+    marks.global,
+    Record.get(letter),
+    Option.match({
+      onNone: () => GlobalJump.Unset(),
+      onSome: (mark) =>
+        pipe(
+          Match.value(mark),
+          Match.withReturnType<GlobalJump>(),
+          Match.when(
+            ({ url }) => markKeyForUrl(url) === markKeyForUrl(href),
+            (here) => GlobalJump.Here({ mark: here }),
+          ),
+          Match.when(
+            ({ url }) => isSafeMarkUrl(url),
+            ({ url }) => GlobalJump.Away({ url }),
+          ),
+          Match.orElse(() => GlobalJump.Unsafe()),
+        ),
+    }),
+  );
 
 export class Marks extends Context.Service<
   Marks,
@@ -104,100 +202,106 @@ export class Marks extends Context.Service<
        * `Date.now()` calls did not share one.
        */
       const update = Effect.fn("Marks.update")(function* (
-        mutate: (marks: MarksData, now: number) => MarksData,
+        change: (now: number) => (marks: MarksData) => MarksData,
       ) {
         const now = yield* Clock.currentTimeMillis;
         // Pruned on every write, and not on a timer: a local mark is keyed by
         // URL, nothing else ever removes one, so the table only grew — and
         // the whole of it is rewritten on every mark.
-        yield* Effect.catch(
-          storage.marks.update((marks) => pruneMarks(mutate(marks, now), now)),
-          (error) => report.error(`Could not save mark: ${error.detail}`),
+        yield* pipe(
+          storage.marks.update(flow(change(now), (marks) => pruneMarks(marks, now))),
+          Effect.catch((error) => report.error(`Could not save mark: ${error.detail}`)),
         );
       });
 
       const setGlobal = Effect.fn("Marks.setGlobal")(function* (letter: string) {
         const { x, y } = yield* scroller.position;
         const href = yield* dom.href;
-        yield* update((marks, now) => ({
-          ...marks,
-          global: {
-            ...marks.global,
-            [letter]: { url: href, scrollX: x, scrollY: y, savedAt: now },
-          },
-        }));
+        yield* update((now) =>
+          withGlobalMark(letter, { url: href, scrollX: x, scrollY: y, savedAt: now }),
+        );
         yield* hud.show(`Global mark "${letter}" set`);
       });
 
-      const setLocal = Effect.fn("Marks.setLocal")(function* (letter: string) {
-        if (isGlobalLetter(letter)) {
-          yield* setGlobal(letter);
-          return;
-        }
-        const key = markKeyForUrl(yield* dom.href);
+      const setOnPage = Effect.fnUntraced(function* (letter: string) {
+        const href = yield* dom.href;
+        const key = markKeyForUrl(href);
         const { x, y } = yield* scroller.position;
-        yield* update((marks, now) => ({
-          ...marks,
-          local: {
-            ...marks.local,
-            [key]: {
-              ...marks.local[key],
-              [letter]: { scrollX: x, scrollY: y, savedAt: now },
-            },
-          },
-        }));
+        yield* update((now) =>
+          withLocalMark(key, letter, { scrollX: x, scrollY: y, savedAt: now }),
+        );
         yield* hud.show(`Mark "${letter}" set`);
+      });
+
+      const setLocal = Effect.fn("Marks.setLocal")(function* (letter: string) {
+        yield* pipe(
+          markLetter(letter),
+          MarkLetter.$match({
+            Local: ({ letter: local }) => setOnPage(local),
+            Global: ({ letter: global }) => setGlobal(global),
+          }),
+        );
+      });
+
+      /**
+       * Go to a mark on another page.
+       *
+       * The scroll position of the mark is lost across the navigation. There is
+       * no channel that survives a document change, and the next document
+       * cannot know which letter brought it there.
+       */
+      const goToMark = Effect.fnUntraced(function* (letter: string, url: string) {
+        yield* hud.show(`Going to global mark "${letter}" (a userscript cannot focus another tab)`);
+        // Through the tab service, which is the one place that decides what a
+        // safe URL is. A refusal is final; there is no fallback.
+        yield* pipe(
+          tabs.navigate(url),
+          Effect.catch((error) => report.error(`Could not go to the mark: ${error.detail}`)),
+        );
       });
 
       const jumpGlobal = Effect.fn("Marks.jumpGlobal")(function* (letter: string) {
         const marks = yield* storage.marks.current;
-        const mark = Option.fromNullishOr(marks.global[letter]);
-        if (Option.isNone(mark)) {
-          yield* report.error(`Global mark "${letter}" is not set`);
-          return;
-        }
-
         const href = yield* dom.href;
-        if (markKeyForUrl(mark.value.url) === markKeyForUrl(href)) {
-          yield* scroller.restore(mark.value.scrollX, mark.value.scrollY);
-          return;
-        }
-
-        if (!isSafeMarkUrl(mark.value.url)) {
-          yield* report.error(
-            `Global mark "${letter}" points somewhere unsafe; ` + "it will not be opened",
-          );
-          return;
-        }
-
-        const target = mark.value.url;
-        yield* hud.show(
-          `Going to global mark "${letter}" ` + "(a userscript cannot focus another tab)",
+        yield* pipe(
+          globalJump(marks, letter, href),
+          GlobalJump.$match({
+            Unset: () => report.error(`Global mark "${letter}" is not set`),
+            Here: ({ mark }) => scroller.restore(mark.scrollX, mark.scrollY),
+            Unsafe: () =>
+              report.error(
+                `Global mark "${letter}" points somewhere unsafe; it will not be opened`,
+              ),
+            Away: ({ url }) => goToMark(letter, url),
+          }),
         );
-        // The scroll position of the mark is lost across the navigation.
-        // There is no channel that survives a document change, and the next
-        // document cannot know which letter brought it there.
-        // Through the tab service, which is the one place that decides
-        // what a safe URL is. A refusal is final; there is no fallback.
-        yield* Effect.catch(tabs.navigate(target), (error) =>
-          report.error(`Could not go to the mark: ${error.detail}`),
+      });
+
+      const jumpOnPage = Effect.fnUntraced(function* (letter: string) {
+        const href = yield* dom.href;
+        const key = markKeyForUrl(href);
+        const marks = yield* storage.marks.current;
+        yield* pipe(
+          localMark(marks, key, letter),
+          Option.match({
+            onNone: () => report.error(`Mark "${letter}" is not set on this page`),
+            onSome: (mark) =>
+              pipe(
+                scroller.restore(mark.scrollX, mark.scrollY),
+                Effect.andThen(hud.show(`Jumped to mark "${letter}"`)),
+              ),
+          }),
         );
       });
 
       const jumpLocal = Effect.fn("Marks.jumpLocal")(function* (letter: string) {
-        if (isGlobalLetter(letter)) {
-          yield* jumpGlobal(letter);
-          return;
-        }
-        const key = markKeyForUrl(yield* dom.href);
-        const marks = yield* storage.marks.current;
-        const mark = Option.fromNullishOr(marks.local[key]?.[letter]);
-        if (Option.isNone(mark)) {
-          yield* report.error(`Mark "${letter}" is not set on this page`);
-          return;
-        }
-        yield* scroller.restore(mark.value.scrollX, mark.value.scrollY);
-        yield* hud.show(`Jumped to mark "${letter}"`);
+        yield* pipe(
+          markLetter(letter),
+          MarkLetter.$match({
+            Local: ({ letter: local }) => jumpOnPage(local),
+            Global: ({ letter: global }) => jumpGlobal(global),
+          }),
+        );
       });
 
       const service = Marks.of({
@@ -209,15 +313,15 @@ export class Marks extends Context.Service<
 
       yield* commands.registerAll({
         "Marks.activateCreateMode": () =>
-          Effect.gen(function* () {
-            const letter = yield* captureNextKey({ prompt: "Set mark:" });
-            if (Option.isSome(letter)) yield* service.setLocal(letter.value);
-          }),
+          pipe(
+            captureNextKey({ prompt: "Set mark:" }),
+            Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: service.setLocal })),
+          ),
         "Marks.activateGotoMode": () =>
-          Effect.gen(function* () {
-            const letter = yield* captureNextKey({ prompt: "Go to mark:" });
-            if (Option.isSome(letter)) yield* service.jumpLocal(letter.value);
-          }),
+          pipe(
+            captureNextKey({ prompt: "Go to mark:" }),
+            Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: service.jumpLocal })),
+          ),
       });
 
       return service;
