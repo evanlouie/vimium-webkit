@@ -7,7 +7,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option, pipe } from "effect";
+import { Array, Effect, Option, String as Str, pipe } from "effect";
 import {
   compilePattern,
   exclusionProblems,
@@ -21,12 +21,52 @@ import {
 import { parseExclusionText } from "~/ui/Dialog.ts";
 
 /** Test a compiled pattern. `null` means that the pattern did not compile. */
-const matches = (pattern: string, url: string): boolean | null => {
-  const compiled = compilePattern(pattern);
-  return Option.isNone(compiled) ? null : compiled.value(url);
-};
+const matches = (pattern: string, url: string): boolean | null =>
+  pipe(
+    compilePattern(pattern),
+    Option.map((matcher) => matcher(url)),
+    Option.getOrNull,
+  );
+
+/** Test the regular expression that describes a pattern. `None` when there is none. */
+const described = (pattern: string, url: string): Option.Option<boolean> =>
+  pipe(
+    patternToRegExp(pattern),
+    Option.map((regexp) => regexp.test(url)),
+  );
 
 const rules = (...entries: readonly ExclusionRule[]): readonly ExclusionRule[] => entries;
+
+/**
+ * Raw expressions that can backtrack.
+ *
+ * The page chooses the URL. A raw expression with this shape turns one crafted
+ * URL into a startup that does not end. A limit on the length of the URL does
+ * not help on its own: `(a+)+$` needs minutes against forty characters. Such a
+ * rule is dropped, and the user keeps every other rule.
+ */
+const BACKTRACKING: ReadonlyArray<string> = [
+  "/(a+)+$/",
+  "/(a|a)*$/",
+  "/https://(x|x)+\\.test/",
+  "/.*.*x/",
+  "/(\\w+\\s?)*$/",
+];
+
+/**
+ * Rules that a user writes, each with a URL that it matches.
+ *
+ * Every row of this table was refused by the first version of the safety
+ * check, and every row is safe. The canonical subdomain rule is the first one:
+ * the inner loop cannot take the dot that ends each iteration, so the division
+ * into iterations is fixed.
+ */
+const WANTED: ReadonlyArray<readonly [string, string]> = [
+  ["/^https?://([a-z0-9-]+\\.)*example\\.com/.*$/", "https://a.b.example.com/x"],
+  ["/https://(?:\\w+\\.)+test/.*/", "https://a.b.test/x"],
+  ["/https://\\d{1,3}(\\.\\d{1,3}){3}/.*/", "https://10.0.0.1/x"],
+  ["/https://[a-z]+(-[a-z]+)*\\.test/.*/", "https://a-b-c.test/x"],
+];
 
 describe("Exclusion", () => {
   it.effect("uses `*` as the only wildcard and anchors both ends", () =>
@@ -81,24 +121,10 @@ describe("Exclusion", () => {
     }),
   );
 
-  it.effect("drops a raw expression that can backtrack", () =>
+  it.effect.each(BACKTRACKING)("drops a raw expression that can backtrack: %s", (pattern) =>
     Effect.sync(() => {
-      // The page chooses the URL. A raw expression with this shape turns one
-      // crafted URL into a startup that does not end. A limit on the length of
-      // the URL does not help on its own: `(a+)+$` needs minutes against forty
-      // characters. Such a rule is dropped, and the user keeps every other
-      // rule.
-      const slow = [
-        "/(a+)+$/",
-        "/(a|a)*$/",
-        "/https://(x|x)+\\.test/",
-        "/.*.*x/",
-        "/(\\w+\\s?)*$/",
-      ];
-      for (const pattern of slow) {
-        assert.isTrue(Option.isNone(compilePattern(pattern)), `${pattern} compiled`);
-        assert.isTrue(Option.isNone(patternToRegExp(pattern)), `${pattern} was still described`);
-      }
+      assert.isTrue(Option.isNone(compilePattern(pattern)), `${pattern} compiled`);
+      assert.isTrue(Option.isNone(patternToRegExp(pattern)), `${pattern} was still described`);
     }),
   );
 
@@ -109,29 +135,17 @@ describe("Exclusion", () => {
     }),
   );
 
-  it.effect("keeps the rules that a user writes", () =>
+  it.effect.each(WANTED)("keeps the rules that a user writes: %s", ([pattern, url]) =>
     Effect.sync(() => {
-      // Every row of this table was refused by the first version of the safety
-      // check, and every row is safe. The canonical subdomain rule is the
-      // first one: the inner loop cannot take the dot that ends each
-      // iteration, so the division into iterations is fixed.
-      const wanted: ReadonlyArray<readonly [string, string]> = [
-        ["/^https?://([a-z0-9-]+\\.)*example\\.com/.*$/", "https://a.b.example.com/x"],
-        ["/https://(?:\\w+\\.)+test/.*/", "https://a.b.test/x"],
-        ["/https://\\d{1,3}(\\.\\d{1,3}){3}/.*/", "https://10.0.0.1/x"],
-        ["/https://[a-z]+(-[a-z]+)*\\.test/.*/", "https://a-b-c.test/x"],
-      ];
-
-      for (const [pattern, url] of wanted) {
-        assert.isTrue(
-          Option.isNone(patternProblem(pattern)),
-          `${pattern} was dropped: ${pipe(
-            patternProblem(pattern),
-            Option.getOrElse(() => ""),
-          )}`,
-        );
-        assert.strictEqual(matches(pattern, url), true, pattern);
-      }
+      const problem = patternProblem(pattern);
+      assert.isTrue(
+        Option.isNone(problem),
+        `${pattern} was dropped: ${pipe(
+          problem,
+          Option.getOrElse(() => ""),
+        )}`,
+      );
+      assert.strictEqual(matches(pattern, url), true, pattern);
     }),
   );
 
@@ -161,14 +175,18 @@ describe("Exclusion", () => {
         ),
       );
 
-      assert.strictEqual(set.size, 1);
-      assert.deepEqual(
-        set.dropped.map((rule) => rule.pattern),
-        ["/(a+)+$/", "/[unclosed/"],
+      const patterns = pipe(
+        set.dropped,
+        Array.map((rule) => rule.pattern),
       );
-      for (const rule of set.dropped) {
-        assert.isAbove(rule.reason.length, 0, `${rule.pattern} gave no reason`);
-      }
+      assert.strictEqual(set.size, 1);
+      assert.deepEqual(patterns, ["/(a+)+$/", "/[unclosed/"]);
+      pipe(
+        set.dropped,
+        Array.forEach((rule) => {
+          assert.isAbove(rule.reason.length, 0, `${rule.pattern} gave no reason`);
+        }),
+      );
     }),
   );
 
@@ -177,27 +195,41 @@ describe("Exclusion", () => {
       // A rule that gives no matcher is dropped, and the page then stops being
       // excluded. Before this list the drop was silent, and a user saw an
       // active script on a site that they had turned off.
-      const text = ["# a comment", "https://example.com/*", "/(a+)+$/ jk", "", "/[unclosed/"].join(
-        "\n",
+      const text = pipe(
+        ["# a comment", "https://example.com/*", "/(a+)+$/ jk", "", "/[unclosed/"],
+        Array.join("\n"),
       );
 
       const problems = exclusionProblems(text);
+      const first = pipe(
+        problems,
+        Array.head,
+        Option.getOrElse(() => ""),
+      );
+      const second = pipe(
+        problems,
+        Array.get(1),
+        Option.getOrElse(() => ""),
+      );
       assert.strictEqual(problems.length, 2);
-      assert.include(problems[0] ?? "", "line 3");
-      assert.include(problems[0] ?? "", "/(a+)+$/");
-      assert.include(problems[0] ?? "", "can hang the page");
-      assert.include(problems[1] ?? "", "line 5");
+      assert.include(first, "line 3");
+      assert.include(first, "/(a+)+$/");
+      assert.include(first, "can hang the page");
+      assert.include(second, "line 5");
     }),
   );
 
   it.effect("says nothing about the rules that a user writes", () =>
     Effect.sync(() => {
-      const text = [
-        "https://example.com/*",
-        "https://*.example.com/*  jk",
-        "/^https?://([a-z0-9-]+\\.)*example\\.com/.*$/",
-        "**",
-      ].join("\n");
+      const text = pipe(
+        [
+          "https://example.com/*",
+          "https://*.example.com/*  jk",
+          "/^https?://([a-z0-9-]+\\.)*example\\.com/.*$/",
+          "**",
+        ],
+        Array.join("\n"),
+      );
 
       assert.deepEqual(exclusionProblems(text), []);
     }),
@@ -212,13 +244,20 @@ describe("Exclusion", () => {
         "# a comment\n\nhttps://a.test/*  jk\n  /(a+)+$/   x y  \n",
         "  \n#\nhttps://b.test/*\n\t/x*/\tjk\n",
       ];
-      for (const text of texts) {
-        assert.deepEqual(
-          parseExclusionLines(text).map((entry) => entry.rule),
-          [...parseExclusionText(text)],
-          `the two readers disagree about ${JSON.stringify(text)}`,
-        );
-      }
+      pipe(
+        texts,
+        Array.forEach((text) => {
+          const numbered = pipe(
+            parseExclusionLines(text),
+            Array.map((entry) => entry.rule),
+          );
+          assert.deepEqual(
+            numbered,
+            parseExclusionText(text),
+            `the two readers disagree about ${JSON.stringify(text)}`,
+          );
+        }),
+      );
     }),
   );
 
@@ -227,25 +266,36 @@ describe("Exclusion", () => {
       // `**` becomes `^.*.*$` when it is translated one wildcard at a time,
       // and the safety check refuses that shape. A glob never backtracks, so
       // the check belongs to the raw form only, and a run of `*` collapses.
-      for (const glob of ["**", "https://example.com/**", "a**b"]) {
-        assert.isTrue(Option.isSome(compilePattern(glob)), `${glob} gave no matcher`);
-        assert.isTrue(Option.isSome(patternToRegExp(glob)), `${glob} was not described`);
-      }
+      pipe(
+        ["**", "https://example.com/**", "a**b"],
+        Array.forEach((glob) => {
+          assert.isTrue(Option.isSome(compilePattern(glob)), `${glob} gave no matcher`);
+          assert.isTrue(Option.isSome(patternToRegExp(glob)), `${glob} was not described`);
+        }),
+      );
 
-      const described = patternToRegExp("https://example.com/**");
-      if (Option.isNone(described)) return;
-      assert.isTrue(described.value.test("https://example.com/a/b"));
-      assert.isFalse(described.value.test("https://evil.test/"));
+      assert.deepEqual(
+        described("https://example.com/**", "https://example.com/a/b"),
+        Option.some(true),
+      );
+      assert.deepEqual(
+        described("https://example.com/**", "https://evil.test/"),
+        Option.some(false),
+      );
     }),
   );
 
   it.effect("still describes what a glob means", () =>
     Effect.sync(() => {
-      const pattern = patternToRegExp("https://example.com/*");
-      assert.isTrue(Option.isSome(pattern));
-      if (Option.isNone(pattern)) return;
-      assert.isTrue(pattern.value.test("https://example.com/a"));
-      assert.isFalse(pattern.value.test("https://evil.example.com.co/"));
+      assert.isTrue(Option.isSome(patternToRegExp("https://example.com/*")));
+      assert.deepEqual(
+        described("https://example.com/*", "https://example.com/a"),
+        Option.some(true),
+      );
+      assert.deepEqual(
+        described("https://example.com/*", "https://evil.example.com.co/"),
+        Option.some(false),
+      );
       assert.isTrue(Option.isNone(patternToRegExp("/[unclosed/")));
       assert.isTrue(Option.isNone(patternToRegExp("   ")));
     }),
@@ -280,8 +330,14 @@ describe("Exclusion", () => {
         ),
       );
       const rule = set.match("https://app.test/editor/1");
+      const passKeys = pipe(
+        rule.passKeys,
+        Array.fromIterable,
+        Array.sort(Str.Order),
+        Array.join(""),
+      );
       assert.isTrue(rule.enabled);
-      assert.strictEqual([...rule.passKeys].sort().join(""), "jkl");
+      assert.strictEqual(passKeys, "jkl");
     }),
   );
 
@@ -315,9 +371,12 @@ describe("Exclusion", () => {
   it.effect("caches repeated lookups within a limit", () =>
     Effect.sync(() => {
       const set = makeExclusionSet(rules({ pattern: "*", passKeys: "j" }));
-      for (let index = 0; index < 200; index++) {
-        set.match(`https://spa.test/#/route/${index}`);
-      }
+      pipe(
+        Array.range(0, 199),
+        Array.forEach((index) => {
+          set.match(`https://spa.test/#/route/${index}`);
+        }),
+      );
       // A single-page application makes unlimited URLs. The set must not grow
       // without a limit, and it must still answer correctly.
       assert.strictEqual(set.match("https://spa.test/#/route/0").passKeys, "j");
