@@ -107,7 +107,7 @@ import { Capabilities } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { type FrameId, FrameRole } from "~/platform/Realm.ts";
-import { Tabs } from "~/platform/Tabs.ts";
+import { OpenInTabResult, Tabs } from "~/platform/Tabs.ts";
 import { Hud } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
 import { detectHints, type HintRect, HintTargets, isSecondary, type LocalHint } from "./Detect.ts";
@@ -1812,16 +1812,23 @@ export class Hints extends Context.Service<
           Effect.ignore,
         );
 
+      /**
+       * `window.open` cannot put a tab in the background. Say so, instead of
+       * letting the user believe that the setting was honoured.
+       */
+      const noteForeground: (active: boolean) => Effect.Effect<void> = Boolean.match({
+        onFalse: () => hud.show("Opened in the foreground: there is no GM.openInTab."),
+        onTrue: () => Effect.void,
+      });
+
       const openInNewTab = Effect.fn("Hints.openInNewTab")(
         function* (url: string, active: boolean) {
-          const opened = yield* tabs.open(url, { active });
-          // `window.open` cannot put a tab in the background. Say so, instead
-          // of letting the user believe that the setting was honoured.
+          const { opened } = yield* tabs.open(url, { active });
           yield* pipe(
-            !opened.viaManager && !active,
-            Boolean.match({
-              onFalse: () => Effect.void,
-              onTrue: () => hud.show("Opened in the foreground: there is no GM.openInTab."),
+            opened,
+            OpenInTabResult.$match({
+              Manager: () => Effect.void,
+              Window: () => noteForeground(active),
             }),
           );
         },

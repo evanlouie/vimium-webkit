@@ -7,10 +7,11 @@
  */
 
 import { Array, Boolean, Context, Effect, Layer, Match, Option, Schema, pipe } from "effect";
-import { flow } from "effect/Function";
 import { Dom } from "./Dom.ts";
 import { Gm, type GmError, OpenInTabResult } from "./Gm.ts";
-import type { GmTabHandle } from "./GmApi.ts";
+
+/** How a tab was opened, as the manager reports it. `Tabs.open` gives it back. */
+export { OpenInTabResult };
 
 export const TabFailureReason = Schema.Literals(["unavailable", "blocked", "failed", "unsafe-url"]);
 
@@ -108,25 +109,6 @@ const closeFailure = (cause: GmError): TabError =>
     Match.exhaustive,
   );
 
-/** The effect that closes a tab, when the manager gave a handle that can. */
-const closeOf = flow(
-  OpenInTabResult.$match({
-    Manager: ({ handle }) => handle,
-    Window: () => Option.none<GmTabHandle>(),
-  }),
-  Option.flatMap((tab) =>
-    pipe(
-      tab.close,
-      Option.fromNullishOr,
-      Option.map((close) =>
-        Effect.sync(() => {
-          close.call(tab);
-        }),
-      ),
-    ),
-  ),
-);
-
 export interface OpenTabOptions {
   /** `false` asks for a background tab. Violentmonkey and Tampermonkey obey. */
   readonly active?: boolean;
@@ -138,9 +120,8 @@ export interface OpenTabOptions {
 
 export interface OpenTabOutcome {
   readonly url: string;
-  /** `false` means that `window.open` was used, and the tab took focus. */
-  readonly viaManager: boolean;
-  readonly close: Option.Option<Effect.Effect<void>>;
+  /** `Window` means that `window.open` was used, and the tab took focus. */
+  readonly opened: OpenInTabResult;
 }
 
 export class Tabs extends Context.Service<
@@ -209,11 +190,7 @@ export class Tabs extends Context.Service<
           Effect.mapError(openFailure),
         );
 
-        return {
-          url: target.href,
-          viaManager: OpenInTabResult.$is("Manager")(opened),
-          close: closeOf(opened),
-        };
+        return { url: target.href, opened };
       });
 
       const closeCurrent = pipe(gm.closeWindow, Effect.mapError(closeFailure));
