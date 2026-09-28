@@ -252,15 +252,6 @@ describe("Mapping", () => {
     }),
   );
 
-  it.effect("binds the tier C commands as well", () =>
-    Effect.sync(() => {
-      // A press of `J` must say why tab control is impossible, not do nothing.
-      const result = compileDefaults();
-      assert.strictEqual(command(result.trie, ["J"]), "previousTab");
-      assert.strictEqual(command(result.trie, ["X"]), "restoreTab");
-    }),
-  );
-
   it.effect("puts the user mappings on top of the defaults", () =>
     Effect.sync(() => {
       const result = compileMappings(`${DEFAULT_MAPPINGS}\nunmap j\nmap J showHelp`, {

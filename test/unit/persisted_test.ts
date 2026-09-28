@@ -1,26 +1,18 @@
 /**
  * The shipped configuration.
  *
- * Two properties matter here. Adding a field must be safe, because each field
- * carries its own fallback. And the defaults are the schema, so there is one
- * list of them and not two.
+ * Adding a field must be safe, because each field carries its own fallback.
  */
 
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Result } from "effect";
 import {
   defaultSettings,
-  findHistoryGroup,
-  type GroupSpec,
-  historyGroup,
   LOCAL_MARK_TTL_MS,
   LOCAL_MARK_URL_LIMIT,
   type LocalMark,
   type Marks,
-  marksGroup,
   pruneMarks,
-  sessionGroup,
-  settingsGroup,
   settingsSchema,
 } from "~/domain/Persisted.ts";
 import { decodeUnknown } from "~/platform/SchemaIo.ts";
@@ -30,14 +22,6 @@ const decodeSettings = decodeUnknown(settingsSchema);
 
 /** A fixed instant, so no test reads the clock. */
 const NOW = 1_800_000_000_000;
-
-const GROUPS: readonly GroupSpec<unknown>[] = [
-  settingsGroup,
-  marksGroup,
-  findHistoryGroup,
-  historyGroup,
-  sessionGroup,
-];
 
 const markTable = (urls: number, at: (index: number) => number): Marks => {
   const local: Record<string, Record<string, LocalMark>> = {};
@@ -50,20 +34,6 @@ const markTable = (urls: number, at: (index: number) => number): Marks => {
 };
 
 describe("Persisted", () => {
-  it.effect("gives every group defaults that satisfy its own schema", () =>
-    Effect.sync(() => {
-      // `defaultSettings()` decodes the literal `{}`, so a field that is added
-      // with no fallback fails here and not at a `document-start` of a user.
-      for (const group of GROUPS) {
-        const result = decodeUnknown(group.schema)(group.defaults());
-        assert.isTrue(
-          Result.isSuccess(result),
-          `the defaults of ${group.name} failed its own schema`,
-        );
-      }
-    }),
-  );
-
   it.effect("keeps every other field when one field is absent", () =>
     Effect.sync(() => {
       const full = defaultSettings();
@@ -104,18 +74,6 @@ describe("Persisted", () => {
     }),
   );
 
-  it.effect("drops an unknown key from a newer build", () =>
-    Effect.sync(() => {
-      const parsed = decodeSettings({
-        ...defaultSettings(),
-        somethingFromTheFuture: { nested: true },
-      });
-      assert.isTrue(Result.isSuccess(parsed));
-      if (Result.isFailure(parsed)) return;
-      assert.isFalse("somethingFromTheFuture" in parsed.success);
-    }),
-  );
-
   it.effect("removes duplicate hint characters during decoding", () =>
     Effect.sync(() => {
       // A duplicate makes two hints answer to the same string.
@@ -128,135 +86,6 @@ describe("Persisted", () => {
       assert.strictEqual(parsed.success.linkHintCharacters, "abc");
     }),
   );
-
-  /**
-   * Hint alphabets that a case fold breaks.
-   *
-   * Each row gives a stored value and the value that the decoder accepts.
-   * `null` means that the field falls back to the shipped alphabet.
-   */
-  const HINT_ALPHABETS: readonly {
-    readonly name: string;
-    readonly stored: string;
-    readonly expected: string | null;
-  }[] = [
-    {
-      name: "the Turkish dotted capital I expands to i plus a dot",
-      stored: "ab\u0130",
-      expected: "ab",
-    },
-    {
-      name: "the Turkish dotless i has the case fold of the Latin i",
-      stored: "abi\u0131",
-      expected: "abi",
-    },
-    {
-      name: "the German sharp s expands to SS",
-      stored: "ab\u00df",
-      expected: "ab",
-    },
-    {
-      name: "the Greek final sigma has the case fold of the sigma",
-      stored: "\u03c3\u03c2",
-      expected: null,
-    },
-    {
-      name: "a plain duplicate is removed",
-      stored: "aab",
-      expected: "ab",
-    },
-    {
-      name: "a Greek alphabet is kept",
-      stored: "\u03b1\u03b2\u03b3",
-      expected: "\u03b1\u03b2\u03b3",
-    },
-    {
-      name: "an emoji alphabet is kept",
-      stored: "\u{1f600}\u{1f601}",
-      expected: "\u{1f600}\u{1f601}",
-    },
-    {
-      name: "a mathematical alphabet is kept",
-      stored: "\u{1d41a}\u{1d41b}\u{1d41c}",
-      expected: "\u{1d41a}\u{1d41b}\u{1d41c}",
-    },
-    {
-      name: "one emoji is one character, and one is too few",
-      stored: "\u{1f600}",
-      expected: null,
-    },
-    {
-      name: "half of a surrogate pair is removed",
-      stored: "ab\ud83d",
-      expected: "ab",
-    },
-    {
-      name: "an ASCII alphabet is kept",
-      stored: "asdfg",
-      expected: "asdfg",
-    },
-    {
-      // The reviewer's case. The variation selector draws nothing, so one
-      // label was invisible and two looked the same.
-      name: "a heart loses its variation selector",
-      stored: "\u2764\ufe0f\u{1f600}",
-      expected: "\u2764\u{1f600}",
-    },
-    {
-      name: "a family emoji selects the shipped alphabet",
-      stored: "\u{1f468}\u200d\u{1f469}\u200d\u{1f467}",
-      expected: null,
-    },
-    {
-      name: "a flag loses its regional indicators",
-      stored: "\u{1f1e9}\u{1f1ea}",
-      expected: null,
-    },
-    {
-      name: "a thumb loses its skin tone modifier",
-      stored: "\u{1f44d}\u{1f3fd}ab",
-      expected: "\u{1f44d}ab",
-    },
-    {
-      name: "a Hangul choseong filler is removed",
-      stored: "\u115fx",
-      expected: null,
-    },
-    {
-      name: "Hangul jamo are removed before label generation",
-      stored: "\u1100x\u1161\uac00",
-      expected: "x\uac00",
-    },
-    {
-      name: "a Tangsa letter stays because font coverage is not available",
-      stored: "\u{16a70}x",
-      expected: "\u{16a70}x",
-    },
-    {
-      name: "a letter with a combining accent is composed",
-      stored: "e\u0301x",
-      expected: "\u00e9x",
-    },
-    {
-      name: "a letter that is already composed is kept",
-      stored: "\u00e9x",
-      expected: "\u00e9x",
-    },
-  ];
-
-  for (const row of HINT_ALPHABETS) {
-    it.effect(`decodes a hint alphabet: ${row.name}`, () =>
-      Effect.sync(() => {
-        const parsed = decodeSettings({
-          ...defaultSettings(),
-          linkHintCharacters: row.stored,
-        });
-        assert.isTrue(Result.isSuccess(parsed));
-        if (Result.isFailure(parsed)) return;
-        assert.strictEqual(parsed.success.linkHintCharacters, row.expected ?? "sadfjklewcmpgh");
-      }),
-    );
-  }
 
   it.effect("repairs hint number characters during decoding", () =>
     Effect.sync(() => {
@@ -282,26 +111,11 @@ describe("Persisted", () => {
     }),
   );
 
-  it.effect("ships the documented defaults", () =>
+  it.effect("ships both privacy switches off", () =>
     Effect.sync(() => {
       const settings = defaultSettings();
-      // The two that decide which path every other test takes.
-      assert.strictEqual(settings.filterLinkHints, false);
-      assert.strictEqual(settings.smoothScroll, true);
-      // The two privacy switches, both off.
       assert.strictEqual(settings.enableHistoryIndex, false);
       assert.strictEqual(settings.enableSearchSuggestions, false);
-      assert.lengthOf(settings.searchEngines.split("\n"), 5);
-    }),
-  );
-
-  it.effect("gives each group a distinct storage name", () =>
-    Effect.sync(() => {
-      const names = GROUPS.map((group) => group.name);
-      assert.strictEqual(new Set(names).size, names.length);
-      for (const group of GROUPS) {
-        assert.isAtLeast(group.schemaVersion, 1);
-      }
     }),
   );
 

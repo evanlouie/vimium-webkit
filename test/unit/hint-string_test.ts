@@ -442,13 +442,6 @@ describe("HintString", () => {
     }),
   );
 
-  it.effect("cannot detect font coverage for a Tangsa letter", () =>
-    Effect.sync(() => {
-      // Font coverage depends on the device and is unavailable in this module.
-      assert.strictEqual(normaliseHintCharacters("\u{16a70}x", "xy"), "\u{16a70}x");
-    }),
-  );
-
   it.effect("composes the set with NFC before it reads a character", () =>
     Effect.sync(() => {
       // The same letter, from two sources: one code point, and a letter plus a

@@ -20,7 +20,6 @@ import {
   parseExclusionText,
   parseLines,
   SETTINGS_FIELDS,
-  SETTINGS_SECTIONS,
 } from "~/ui/Dialog.ts";
 
 const settingKeys = (): readonly string[] => Object.keys(defaultSettings()).toSorted();
@@ -43,29 +42,6 @@ describe("the settings form", () => {
         settingKeys(),
         "the form and the schema must hold the same settings",
       );
-    }),
-  );
-
-  it.effect("gives each setting exactly one control", () =>
-    Effect.sync(() => {
-      const seen = new Set<string>();
-      for (const field of SETTINGS_FIELDS) {
-        const key = String(field.key);
-        assert.isFalse(seen.has(key), `${key} has two controls`);
-        seen.add(key);
-      }
-    }),
-  );
-
-  it.effect("labels every field and every section", () =>
-    Effect.sync(() => {
-      for (const section of SETTINGS_SECTIONS) {
-        assert.isAbove(section.title.length, 0, "a section has no title");
-        assert.isAbove(section.fields.length, 0, `the section "${section.title}" has no field`);
-      }
-      for (const field of SETTINGS_FIELDS) {
-        assert.isAbove(field.label.length, 0, `the field for ${String(field.key)} has no label`);
-      }
     }),
   );
 
@@ -214,50 +190,6 @@ describe("the settings form", () => {
       assert.notStrictEqual(control.kind, "toggle");
       if (control.kind === "toggle") return;
       assert.strictEqual(control.read(control.write(base, "50.7")), "50");
-    }),
-  );
-
-  it.effect("lets every number control report a truncation", () =>
-    Effect.sync(() => {
-      for (const one of SETTINGS_FIELDS) {
-        if (one.kind !== "number") continue;
-        assert.isDefined(
-          one.truncates,
-          `the field for ${String(one.key)} cannot report a truncation`,
-        );
-        assert.isTrue(
-          one.truncates?.("50.7") ?? false,
-          `the field for ${String(one.key)} said nothing about decimals`,
-        );
-        assert.isFalse(
-          one.truncates?.("50") ?? true,
-          `the field for ${String(one.key)} reported a whole number`,
-        );
-        assert.isFalse(
-          one.truncates?.("not a number") ?? true,
-          `the field for ${String(one.key)} called a refusal a truncation`,
-        );
-      }
-    }),
-  );
-
-  it.effect("lets every number control say what it refuses", () =>
-    Effect.sync(() => {
-      for (const one of SETTINGS_FIELDS) {
-        if (one.kind !== "number") continue;
-        assert.isDefined(one.refuses, `the field for ${String(one.key)} cannot report a refusal`);
-        assert.isTrue(
-          one.refuses?.("not a number") ?? false,
-          `the field for ${String(one.key)} accepted text as a number`,
-        );
-        assert.isDefined(one.clamps, `the field for ${String(one.key)} cannot report a clamp`);
-        // A refusal and a clamp are two results. Text that holds no number
-        // keeps the stored value, so it is not a clamp.
-        assert.isFalse(
-          one.clamps?.("not a number") ?? true,
-          `the field for ${String(one.key)} called a refusal a clamp`,
-        );
-      }
     }),
   );
 

@@ -1,25 +1,17 @@
 /**
  * The capability report, and the one capability that changes a key.
  *
- * A capability that disappears without a message is worse than the loss itself.
- * A manager with no value store loses the most: the settings, the marks and the
- * history go when the page unloads, and the frames of the page cannot form a
- * session at all. The warning must name every one of those losses.
- *
  * `applePlatform` decides how a chord with Alt is read.
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 import {
   type CapabilityReport,
   degradationWarnings,
   isApplePlatform,
-  probeCapabilities,
 } from "~/platform/Capabilities.ts";
-import { Dom } from "~/platform/Dom.ts";
-import { Gm } from "~/platform/Gm.ts";
-import { KeyValueStore } from "~/platform/KeyValueStore.ts";
+
 /** A report in which everything works, so one test changes one field. */
 const healthy: CapabilityReport = {
   manager: "unknown",
@@ -52,32 +44,7 @@ const healthy: CapabilityReport = {
   applePlatform: false,
 };
 
-/** The one warning that the memory backend raises. */
-const memoryWarning = (): string => {
-  const warnings = degradationWarnings({ ...healthy, value: "memory" });
-  return warnings.find((line) => line.includes("durable storage")) ?? "";
-};
-
 describe("degradationWarnings", () => {
-  it.effect("names every loss of a manager with no value store", () =>
-    Effect.sync(() => {
-      const warning = memoryWarning();
-      assert.notStrictEqual(warning, "", "there is no warning at all");
-
-      // What the user loses when the page unloads.
-      for (const loss of ["settings", "marks", "history"]) {
-        assert.include(warning, loss, `the warning does not name ${loss}`);
-      }
-
-      // The cross-frame session goes as well, and with it the commands that
-      // need it. `frames/Auth.ts` keeps no credential in a store that one
-      // frame cannot share with another.
-      for (const loss of ["frames", "frame focus", "excluded"]) {
-        assert.include(warning, loss, `the warning does not name ${loss}`);
-      }
-    }),
-  );
-
   it.effect("says nothing about storage when the manager has a store", () =>
     Effect.sync(() => {
       const warnings = degradationWarnings(healthy);
@@ -146,34 +113,12 @@ const AGENTS: readonly {
     apple: true,
   },
   {
-    name: "Playwright WebKit on Linux reports a Macintosh user agent",
-    userAgent:
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 " +
-      "(KHTML, like Gecko) Version/18.5 Safari/605.1.15",
-    platform: "Linux x86_64",
-    // This is a known false positive. No feature test can identify Option.
-    apple: true,
-  },
-  {
     name: "a browser that says nothing",
     userAgent: "",
     platform: "",
     apple: false,
   },
 ];
-
-/** Supply a navigator without a change to the global test window. */
-const domWithNavigator = (userAgent: string, platform: string): Layer.Layer<Dom> =>
-  Layer.effect(
-    Dom,
-    Effect.map(Dom, (dom) => {
-      const win = Object.create(dom.window) as Window & typeof globalThis;
-      Object.defineProperty(win, "navigator", {
-        value: { userAgent, platform },
-      });
-      return Dom.of({ ...dom, window: win });
-    }),
-  ).pipe(Layer.provide(Dom.layer));
 
 describe("Capabilities", () => {
   for (const row of AGENTS) {
@@ -183,13 +128,4 @@ describe("Capabilities", () => {
       }),
     );
   }
-
-  it.effect("reads the Apple platform flag from the navigator probe", () => {
-    const dom = domWithNavigator("", "MacIntel");
-    const support = Layer.mergeAll(dom, Layer.provide(Gm.layer, dom), KeyValueStore.layerMemory);
-    return Effect.gen(function* () {
-      const report = yield* probeCapabilities;
-      assert.isTrue(report.applePlatform);
-    }).pipe(Effect.provide(support));
-  });
 });

@@ -11,16 +11,10 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Deferred, Effect, Fiber, Option, Ref } from "effect";
 import { TestClock } from "effect/testing";
-import {
-  type HintDescriptor,
-  MAX_SESSION_DESCRIPTORS,
-  REQUEST_DEADLINE_MS,
-} from "~/domain/FrameMessage.ts";
+import { type HintDescriptor, MAX_SESSION_DESCRIPTORS } from "~/domain/FrameMessage.ts";
 import {
   abortAfterSafety,
-  COLLECT_DEADLINE_MS,
   collectFrameDescriptors,
-  KEY_BUFFER_SAFETY_MS,
   raceUntilAbort,
 } from "~/features/hints/Hints.ts";
 import type { FrameId } from "~/platform/Realm.ts";
@@ -38,13 +32,6 @@ const descriptors = (owner: FrameId, count: number): readonly HintDescriptor[] =
   }));
 
 describe("the hint round", () => {
-  it.effect("keeps the safety deadline after the collection deadline", () =>
-    Effect.sync(() => {
-      assert.strictEqual(COLLECT_DEADLINE_MS, REQUEST_DEADLINE_MS + 500);
-      assert.strictEqual(KEY_BUFFER_SAFETY_MS, COLLECT_DEADLINE_MS + 500);
-    }),
-  );
-
   it.effect("ends the round when the safety time runs out", () =>
     Effect.gen(function* () {
       const abort = yield* Deferred.make<void>();

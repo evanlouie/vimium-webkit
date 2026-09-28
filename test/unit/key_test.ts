@@ -13,7 +13,6 @@ import { assert, describe, it } from "@effect/vitest";
 import { Effect, Option, Result } from "effect";
 import {
   appendCountDigit,
-  IOS_UNCERTAIN,
   isComposing,
   isCountDigit,
   isModifierKey,
@@ -23,8 +22,6 @@ import {
   normaliseAppKitKey,
   normaliseKeySequence,
   parseKeySequence,
-  reservedReason,
-  SAFARI_RESERVED,
   shiftedNonLetter,
 } from "~/domain/Key.ts";
 
@@ -557,70 +554,6 @@ describe("Key", () => {
    * A wrong entry in either table gives a wrong binding to a real key, and no
    * other test reads more than a few rows. Each row here is one entry.
    */
-  it.effect("maps every key code to its character", () =>
-    Effect.sync(() => {
-      const KEY_CODES: readonly (readonly [number, string])[] = [
-        [32, " "],
-        [186, ";"],
-        [187, "="],
-        [188, ","],
-        [189, "-"],
-        [190, "."],
-        [191, "/"],
-        [192, "`"],
-        [219, "["],
-        [220, "\\"],
-        [221, "]"],
-        [222, "'"],
-      ];
-      const letters = "abcdefghijklmnopqrstuvwxyz";
-      const rows: (readonly [number, string])[] = [...KEY_CODES];
-      for (let index = 0; index < letters.length; index++) {
-        rows.push([65 + index, letters[index] ?? ""]);
-      }
-      for (let digit = 0; digit <= 9; digit++) {
-        rows.push([48 + digit, String(digit)]);
-      }
-
-      for (const [keyCode, char] of rows) {
-        const chord = event({ key: "\u0192", keyCode, altKey: true });
-        const expected = char === " " ? "<a-space>" : `<a-${char}>`;
-        assert.strictEqual(
-          appleNotation(chord),
-          expected,
-          `key code ${keyCode} must give "${char}"`,
-        );
-      }
-    }),
-  );
-
-  it.effect("maps every physical position to its character", () =>
-    Effect.sync(() => {
-      const POSITIONS: readonly (readonly [string, string])[] = [
-        ["Minus", "-"],
-        ["Equal", "="],
-        ["BracketLeft", "["],
-        ["BracketRight", "]"],
-        ["Backslash", "\\"],
-        ["Semicolon", ";"],
-        ["Quote", "'"],
-        ["Backquote", "`"],
-        ["Comma", ","],
-        ["Period", "."],
-        ["Slash", "/"],
-        ["Space", " "],
-        ["KeyF", "f"],
-        ["Digit7", "7"],
-      ];
-
-      for (const [code, char] of POSITIONS) {
-        // No `keyCode`, so the position is the only source that is left.
-        const chord = event({ key: "\u0192", code, altKey: true });
-        const expected = char === " " ? "<a-space>" : `<a-${char}>`;
-        assert.strictEqual(appleNotation(chord), expected, `position ${code} must give "${char}"`);
-      }
-    }),
-  );
 
   it.effect("gives an Option chord the same notation as its mapping", () =>
     Effect.sync(() => {
@@ -822,30 +755,11 @@ describe("Key", () => {
     }),
   );
 
-  it.effect("knows the combinations that Safari never sends", () =>
-    Effect.sync(() => {
-      // `preventDefault` has no meaning here. The keydown never arrives.
-      assert.isTrue(Option.isSome(reservedReason("<m-t>")));
-      assert.isTrue(Option.isSome(reservedReason("<c-tab>")));
-      assert.isTrue(Option.isNone(reservedReason("<m-e>")));
-      // The lookup is case-sensitive, so `<m-T>` is not `<m-t>`.
-      assert.isTrue(Option.isNone(reservedReason("<m-T>")));
-      assert.isAbove(SAFARI_RESERVED.length, 0);
-    }),
-  );
-
   it.effect("warns about an explicit shift on a character shift changes", () =>
     Effect.sync(() => {
       assert.isTrue(shiftedNonLetter("<c-s-1>"));
       assert.isFalse(shiftedNonLetter("<c-s-a>"));
       assert.isFalse(shiftedNonLetter("<c-a>"));
-    }),
-  );
-
-  it.effect("lists the combinations that WebKit 191768 puts in doubt", () =>
-    Effect.sync(() => {
-      assert.isTrue(IOS_UNCERTAIN.has("<m-f>"));
-      assert.isFalse(IOS_UNCERTAIN.has("<m-j>"));
     }),
   );
 

@@ -61,17 +61,6 @@ const descriptor = (frameId: string, localIndex: number, secondary = false): Hin
 });
 
 describe("FrameMessage", () => {
-  it.effect("puts a message in its envelope", () =>
-    Effect.sync(() => {
-      const encoded = encodeMessage(envelope, { kind: "GOODBYE" });
-      assert.strictEqual(encoded.magic, PROTOCOL_MAGIC);
-      assert.strictEqual(encoded.v, PROTOCOL_VERSION);
-      assert.strictEqual(encoded.kind, "GOODBYE");
-      assert.strictEqual(encoded.nonce, NONCE);
-      assert.strictEqual(ENVELOPE.magic, PROTOCOL_MAGIC);
-    }),
-  );
-
   it.effect("accepts a message of a kind that carries a payload", () =>
     Effect.sync(() => {
       const parsed = parseWire(

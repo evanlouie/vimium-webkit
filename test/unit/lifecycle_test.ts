@@ -150,8 +150,7 @@ describe("the pagehide dispatch", () => {
     withLifecycle(({ attached, lifecycle }) =>
       Effect.gen(function* () {
         // What the hook does is a plain synchronous step, which is what the
-        // exit path of storage is. `test/unit/exit-write_test.ts` drives the
-        // real `Storage` over a real backend.
+        // exit path of storage is.
         const written: string[] = [];
         const pending = "the mark that the user just set";
 

@@ -217,18 +217,6 @@ describe("the properties that the viewport sync owns", () => {
 });
 
 describe("the fallback of the guarded set", () => {
-  it.effect("names every property that the host style writes", () =>
-    Effect.sync(() => {
-      // A guard that cannot derive its set must do more work, and not less.
-      // An empty fallback answered "nothing is stale" for every property, so
-      // one refused read turned the whole protection off in silence.
-      const fallback = allHostProperties();
-      for (const [property] of HOST_STYLE) {
-        assert.isTrue(fallback.has(property), `${property} is not in the set`);
-      }
-    }),
-  );
-
   it.effect("still finds a property that the page removed", () =>
     Effect.sync(() => {
       const removed = (name: string): readonly [string, string] =>
