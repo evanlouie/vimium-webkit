@@ -28,10 +28,28 @@
  * comment above `ElementWalk` for the division of the work.
  */
 
-import { Effect, Option, pipe } from "effect";
+import {
+  Array,
+  Boolean,
+  Data,
+  Effect,
+  Match,
+  Option,
+  Predicate,
+  Record,
+  String as Str,
+  flow,
+  pipe,
+} from "effect";
+import { constTrue } from "effect/Function";
 import type { CapabilityReport } from "~/platform/Capabilities.ts";
-import { Dom } from "~/platform/Dom.ts";
-import { CHUNK_BUDGET_MS, type ChunkedOptions, mapChunked } from "~/platform/Scheduler.ts";
+import type { Dom } from "~/platform/Dom.ts";
+import {
+  CHUNK_BUDGET_MS,
+  type ChunkedOptions,
+  mapChunked,
+  repeatInSlices,
+} from "~/platform/Scheduler.ts";
 import type { ViewportRect } from "~/ui/Ui.ts";
 
 // ---------------------------------------------------------------------------
@@ -125,9 +143,13 @@ export interface DetectionResult {
 // ---------------------------------------------------------------------------
 
 /** The several spellings of Angular. Each one implies a click listener. */
-const FRAMEWORK_CLICK_ATTRIBUTES: readonly string[] = ["ng-click", "data-ng-click", "x-ng-click"];
+const FRAMEWORK_CLICK_ATTRIBUTES: ReadonlyArray<string> = [
+  "ng-click",
+  "data-ng-click",
+  "x-ng-click",
+];
 
-const CLICKABLE_ROLES: ReadonlySet<string> = new Set([
+const CLICKABLE_ROLES: ReadonlyArray<string> = [
   "button",
   "link",
   "checkbox",
@@ -140,149 +162,326 @@ const CLICKABLE_ROLES: ReadonlySet<string> = new Set([
   "switch",
   "treeitem",
   "combobox",
-]);
+];
 
-const EDITABLE_VALUES: ReadonlySet<string> = new Set([
-  "",
-  "contenteditable",
-  "true",
-  "plaintext-only",
-]);
+const EDITABLE_VALUES: ReadonlyArray<string> = ["", "contenteditable", "true", "plaintext-only"];
 
-export interface Classification {
+/** The values of `aria-disabled` that declare an element inert. */
+const DISABLED_VALUES: ReadonlyArray<string> = ["", "true"];
+
+/** The kinds that a weak signal gives. */
+type WeakKind = Extract<HintKind, "class" | "span" | "tabindex">;
+
+/**
+ * Why an element deserves a hint, and how strong the signal is.
+ *
+ * The strength decides two things at once. A weak signal sorts after every
+ * strong one, and it is a suspected false positive.
+ */
+export type Classification = Data.TaggedEnum<{
+  Clickable: {
+    readonly kind: Exclude<HintKind, WeakKind | "area">;
+    /** The `reason` of upstream. It is shown in place of the absent link text. */
+    readonly reason: Option.Option<string>;
+  };
+  /**
+   * The "second-class citizen" of upstream: hinted on a weak signal (a class
+   * name, a bare `<span>`, a `tabindex`).
+   */
+  WeaklyClickable: { readonly kind: WeakKind };
+}>;
+
+export const Classification = Data.taggedEnum<Classification>();
+
+const NATIVE = Classification.Clickable({ kind: "native", reason: Option.none() });
+const OPENS = Classification.Clickable({ kind: "native", reason: Option.some("Open.") });
+const ZOOMS = Classification.Clickable({ kind: "native", reason: Option.some("Zoom.") });
+const SCROLLS = Classification.Clickable({ kind: "native", reason: Option.some("Scroll.") });
+const FRAMEWORK = Classification.Clickable({ kind: "framework", reason: Option.none() });
+const ONCLICK = Classification.Clickable({ kind: "onclick", reason: Option.none() });
+const ROLE = Classification.Clickable({ kind: "role", reason: Option.none() });
+const EDITABLE = Classification.Clickable({ kind: "contenteditable", reason: Option.none() });
+const CLASS = Classification.WeaklyClickable({ kind: "class" });
+const SPAN = Classification.WeaklyClickable({ kind: "span" });
+const TABINDEX = Classification.WeaklyClickable({ kind: "tabindex" });
+
+/** What a hint keeps of the classification that earned it. */
+interface Traits {
   readonly kind: HintKind;
-  readonly secondary: boolean;
-  readonly possibleFalsePositive: boolean;
-  /** The `reason` of upstream. It is shown in place of the absent link text. */
   readonly reason: Option.Option<string>;
+  /** A weak signal makes a hint both second-class and a possible false positive. */
+  readonly secondary: boolean;
 }
 
-const clickable = (
-  kind: HintKind,
-  reason: Option.Option<string> = Option.none(),
-): Option.Option<Classification> =>
-  Option.some({
-    kind,
-    secondary: false,
-    possibleFalsePositive: false,
-    reason,
-  });
+const traitsOf: (classification: Classification) => Traits = Classification.$match({
+  Clickable: ({ kind, reason }) => ({ kind, reason, secondary: false }),
+  WeaklyClickable: ({ kind }) => ({ kind, reason: Option.none(), secondary: true }),
+});
 
-const weaklyClickable = (kind: HintKind): Option.Option<Classification> =>
-  Option.some({
-    kind,
-    secondary: true,
-    possibleFalsePositive: true,
-    reason: Option.none(),
-  });
+// ---------------------------------------------------------------------------
+// Element narrowing
+// ---------------------------------------------------------------------------
+
+const isHtmlElement = (element: Element): element is HTMLElement => element instanceof HTMLElement;
+
+const isInput = (element: Element): element is HTMLInputElement =>
+  element instanceof HTMLInputElement;
+
+const isAnchor = (element: Element): element is HTMLAnchorElement =>
+  element instanceof HTMLAnchorElement;
+
+const isImage = (element: Element): element is HTMLImageElement =>
+  element instanceof HTMLImageElement;
+
+const isLabel = (element: Element): element is HTMLLabelElement =>
+  element instanceof HTMLLabelElement;
+
+const isLink = (element: Element): element is HTMLAnchorElement | HTMLAreaElement =>
+  element instanceof HTMLAnchorElement || element instanceof HTMLAreaElement;
+
+const isShadowRoot = (node: Node): node is ShadowRoot => node instanceof ShadowRoot;
 
 // ---------------------------------------------------------------------------
 // Attribute probes
 // ---------------------------------------------------------------------------
 
+// Classification runs these for every element of the page. Each stage that
+// does not depend on the element is built once, here, and not for each call.
+
+const attributeOf = (element: Element, name: string): Option.Option<string> =>
+  Option.fromNullishOr(element.getAttribute(name));
+
+const hasAttribute =
+  (name: string) =>
+  (element: Element): boolean =>
+    element.hasAttribute(name);
+
+/** Does the attribute, in lower case, hold one of `values`? */
+const attributeIn = (
+  name: string,
+  values: ReadonlyArray<string>,
+): ((element: Element) => boolean) => {
+  const holdsOne = Option.exists<string>((value) =>
+    pipe(values, Array.contains(value.toLowerCase())),
+  );
+  return (element) => holdsOne(attributeOf(element, name));
+};
+
+/** One rule of a `jsaction` attribute, taken apart. */
+interface JsActionBinding {
+  readonly eventType: string;
+  readonly namespace: string;
+  readonly action: string;
+}
+
+/**
+ * Parse one rule, `"eventType:namespace.action"`.
+ *
+ * A rule without an event type binds `click`, and a rule without an action
+ * binds `_`. A rule with more than one colon is not a binding.
+ */
+const jsActionBinding = (rule: string): Option.Option<JsActionBinding> =>
+  pipe(
+    rule.trim(),
+    Str.split(":"),
+    Option.liftPredicate((parts: ReadonlyArray<string>) => parts.length <= 2),
+    Option.map((parts) => {
+      const body = pipe(Array.lastNonEmpty(parts), Str.trim, Str.split("."));
+      return {
+        eventType: pipe(
+          Array.initNonEmpty(parts),
+          Array.head,
+          Option.map(Str.trim),
+          Option.getOrElse(() => "click"),
+        ),
+        namespace: Array.headNonEmpty(body),
+        action: pipe(
+          body,
+          Array.get(1),
+          Option.getOrElse(() => "_"),
+        ),
+      };
+    }),
+  );
+
+/**
+ * An action of `_` means "no handler", and a namespace of `none` means that
+ * the binding is turned off. Both must be excluded, or one half of Google
+ * Search becomes hint soup.
+ */
+const isClickBinding = ({ eventType, namespace, action }: JsActionBinding): boolean =>
+  eventType === "click" && namespace !== "none" && action !== "_";
+
+const isClickRule = flow(jsActionBinding, Option.exists(isClickBinding));
+
+const bindsClick = Option.exists<string>(flow(Str.split(";"), Array.some(isClickRule)));
+
 /**
  * The `jsaction` attribute of Google: `"eventType:namespace.action"`, separated
  * by a semicolon, with `click` as the default event type.
- *
- * An action of `_` means "no handler", and a namespace of `none` means that the
- * binding is turned off. Both must be excluded, or one half of Google Search
- * becomes hint soup.
  */
-const hasJsAction = (element: Element): boolean => {
-  const attribute = element.getAttribute("jsaction");
-  if (attribute === null) return false;
-
-  for (const rule of attribute.split(";")) {
-    const parts = rule.trim().split(":");
-    if (parts.length === 0 || parts.length > 2) continue;
-    const eventType = parts.length === 1 ? "click" : (parts[0]?.trim() ?? "");
-    const body = (parts.length === 1 ? parts[0] : parts[1])?.trim() ?? "";
-    const [namespace, action = "_"] = body.split(".");
-    if (eventType === "click" && namespace !== "none" && action !== "_") {
-      return true;
-    }
-  }
-  return false;
-};
+const hasJsAction = (element: Element): boolean => bindsClick(attributeOf(element, "jsaction"));
 
 const isDisabled = (element: Element): boolean =>
-  (element as Element & { disabled?: unknown }).disabled === true;
+  "disabled" in element && element.disabled === true;
 
-const hrefOf = (element: Element): Option.Option<string> => {
-  if (element instanceof HTMLAnchorElement) {
-    return element.getAttribute("href") === null ? Option.none() : Option.some(element.href);
-  }
-  if (element instanceof HTMLAreaElement) {
-    return element.getAttribute("href") === null ? Option.none() : Option.some(element.href);
-  }
-  return Option.none();
-};
+const isEnabled = Predicate.not(isDisabled);
+
+const hrefOf: (element: Element) => Option.Option<string> = flow(
+  Option.liftPredicate(isLink),
+  Option.filter((link) => link.hasAttribute("href")),
+  Option.map((link) => link.href),
+);
+
+/** Copy-URL and new-tab modes admit only what truly has a URL. */
+const admitsHref =
+  (options: DetectOptions) =>
+  (href: Option.Option<string>): boolean =>
+    !options.requireHref || Option.isSome(href);
 
 // ---------------------------------------------------------------------------
 // Classification
 // ---------------------------------------------------------------------------
 
-const classifyNative = (element: Element, view: Window): Option.Option<Classification> => {
-  switch (element.localName) {
-    case "a":
-      return element.hasAttribute("href") ? clickable("native") : Option.none();
+/** Any `<input>` but a hidden or disabled one. Another kind of `<input>` is not checked. */
+const isActiveInput = (element: Element): boolean =>
+  !isInput(element) || (element.type.toLowerCase() !== "hidden" && !element.disabled);
 
-    case "input": {
-      if (!(element instanceof HTMLInputElement)) return clickable("native");
-      const type = element.type.toLowerCase();
-      return type === "hidden" || element.disabled ? Option.none() : clickable("native");
-    }
+const isWritableTextArea = (element: Element): boolean =>
+  !(element instanceof HTMLTextAreaElement && (element.disabled || element.readOnly));
 
-    case "button":
-    case "select":
-      return isDisabled(element) ? Option.none() : clickable("native");
+/**
+ * A label earns a hint only when its own control did not. The same checkbox
+ * would otherwise get two hints, one on top of the other.
+ */
+const labelsUnhintedControl = (element: Element, view: Window): boolean =>
+  pipe(
+    element,
+    Option.liftPredicate(isLabel),
+    Option.flatMapNullishOr((label) => label.control),
+    Option.exists((control) => isEnabled(control) && Option.isNone(classify(control, view))),
+  );
 
-    case "textarea":
-      return element instanceof HTMLTextAreaElement && (element.disabled || element.readOnly)
-        ? Option.none()
-        : clickable("native");
+const ZOOM_CURSORS: ReadonlyArray<string> = ["zoom-in", "zoom-out"];
 
-    case "object":
-    case "embed":
-      return clickable("native");
+/**
+ * The inline style only, as upstream does. One `getComputedStyle` call for
+ * each image is not worth a rare cursor value.
+ */
+const isZoomable = (element: Element): boolean =>
+  isImage(element) && pipe(ZOOM_CURSORS, Array.contains(element.style.cursor));
 
-    case "label": {
-      if (!(element instanceof HTMLLabelElement)) return Option.none();
-      const control = element.control;
-      if (control === null || isDisabled(control)) return Option.none();
-      // A label earns a hint only when its own control did not. The same
-      // checkbox would otherwise get two hints, one on top of the other.
-      return Option.isNone(classify(control, view)) ? clickable("native") : Option.none();
-    }
+const SCROLLING_OVERFLOW: ReadonlyArray<string> = ["scroll", "auto"];
 
-    case "details":
-      return clickable("native", Option.some("Open."));
+/**
+ * A box that scrolls by itself.
+ *
+ * The cheap geometry test must come before the costly style read. This test
+ * runs for every `<div>` on the page.
+ */
+const scrollsByItself = (element: Element, view: Window): boolean =>
+  isHtmlElement(element) &&
+  element.clientHeight < element.scrollHeight &&
+  pipe(SCROLLING_OVERFLOW, Array.contains(view.getComputedStyle(element).overflowY));
 
-    case "img":
-      // The inline style only, as upstream does. One `getComputedStyle` call
-      // for each image is not worth a rare cursor value.
-      return element instanceof HTMLImageElement &&
-        (element.style.cursor === "zoom-in" || element.style.cursor === "zoom-out")
-        ? clickable("native", Option.some("Zoom."))
-        : Option.none();
+const namesButton = Option.exists<string>((value) => {
+  const name = value.toLowerCase();
+  return name.includes("button") || name.includes("btn");
+});
 
-    case "div":
-    case "ol":
-    case "ul": {
-      // The cheap geometry test must come before the costly style read. This
-      // branch runs for every `<div>` on the page.
-      if (!(element instanceof HTMLElement)) return Option.none();
-      if (element.clientHeight >= element.scrollHeight) return Option.none();
-      const overflow = view.getComputedStyle(element).overflowY;
-      return overflow === "scroll" || overflow === "auto"
-        ? clickable("native", Option.some("Scroll."))
-        : Option.none();
-    }
+/** `getAttribute`, and not `className`: on an SVG element `className` is an `SVGAnimatedString`. */
+const hasButtonClass = (element: Element): boolean => namesButton(attributeOf(element, "class"));
 
-    default:
-      return Option.none();
-  }
+/** A `tabindex` of zero or more. `Number("")` is `0`, so an empty value counts. */
+const isTabIndex = Option.exists<string>((value) => {
+  const index = Number(value);
+  return Number.isFinite(index) && index >= 0;
+});
+
+const hasTabIndex = (element: Element): boolean => isTabIndex(attributeOf(element, "tabindex"));
+
+/**
+ * One signal of a click target, and the verdict that it gives when it holds.
+ *
+ * Each test is a plain predicate, because classification runs it for every
+ * element of the page.
+ */
+interface Signal {
+  readonly holds: (element: Element, view: Window) => boolean;
+  /** `Option.none()` refuses the hint. */
+  readonly verdict: Option.Option<Classification>;
+}
+
+const refuses = (holds: (element: Element) => boolean): Signal => ({
+  holds,
+  verdict: Option.none(),
+});
+
+const gives = (
+  classification: Classification,
+  holds: (element: Element, view: Window) => boolean,
+): Signal => ({ holds, verdict: Option.some(classification) });
+
+/** The signals that any element can give, strongest first. */
+const ATTRIBUTE_SIGNALS: ReadonlyArray<Signal> = [
+  // `aria-disabled` is a hard refusal, before everything else. An element that
+  // the page declares inert must never take a hint, however clickable it looks.
+  refuses(attributeIn("aria-disabled", DISABLED_VALUES)),
+  ...pipe(
+    FRAMEWORK_CLICK_ATTRIBUTES,
+    Array.map((name) => gives(FRAMEWORK, hasAttribute(name))),
+  ),
+  gives(FRAMEWORK, hasJsAction),
+  gives(ONCLICK, hasAttribute("onclick")),
+  gives(ROLE, attributeIn("role", CLICKABLE_ROLES)),
+  gives(EDITABLE, attributeIn("contenteditable", EDITABLE_VALUES)),
+];
+
+/** The signal of each native element, by `localName`. It comes after the attributes. */
+const NATIVE_SIGNALS: Record.ReadonlyRecord<string, Signal> = {
+  a: gives(NATIVE, hasAttribute("href")),
+  input: gives(NATIVE, isActiveInput),
+  button: gives(NATIVE, isEnabled),
+  select: gives(NATIVE, isEnabled),
+  textarea: gives(NATIVE, isWritableTextArea),
+  object: gives(NATIVE, constTrue),
+  embed: gives(NATIVE, constTrue),
+  label: gives(NATIVE, labelsUnhintedControl),
+  details: gives(OPENS, constTrue),
+  img: gives(ZOOMS, isZoomable),
+  div: gives(SCROLLS, scrollsByItself),
+  ol: gives(SCROLLS, scrollsByItself),
+  ul: gives(SCROLLS, scrollsByItself),
 };
+
+/** The weak signals, last of all. */
+const WEAK_SIGNALS: ReadonlyArray<Signal> = [
+  gives(CLASS, hasButtonClass),
+  gives(SPAN, (element) => element.localName === "span"),
+  gives(TABINDEX, hasTabIndex),
+];
+
+/** Every signal, strongest first, with the signals of one kind of element in their place. */
+const signalsWith = (native: ReadonlyArray<Signal>): ReadonlyArray<Signal> =>
+  pipe(ATTRIBUTE_SIGNALS, Array.appendAll(native), Array.appendAll(WEAK_SIGNALS));
+
+/**
+ * The signals that an element can give, by `localName`.
+ *
+ * The lists are built once, so that one element reads only the signals that
+ * its kind can give.
+ */
+const SIGNALS_BY_NAME: Record.ReadonlyRecord<string, ReadonlyArray<Signal>> = pipe(
+  NATIVE_SIGNALS,
+  Record.map((signal) => signalsWith([signal])),
+);
+
+/** The signals of an element that is not one of the native kinds. */
+const COMMON_SIGNALS = signalsWith([]);
+
+const orCommonSignals = Option.getOrElse(() => COMMON_SIGNALS);
+
+const toVerdict = Option.flatMap((signal: Signal) => signal.verdict);
 
 /**
  * Decide whether `element` deserves a hint, in the priority order of upstream.
@@ -291,63 +490,27 @@ const classifyNative = (element: Element, view: Window): Option.Option<Classific
  * `onclick` beats a `<span>`), and a later, weaker signal is marked as a
  * possible false positive, so that the descendant filter can drop it.
  */
-export const classify = (element: Element, view: Window): Option.Option<Classification> => {
-  // `aria-disabled` is a hard refusal, before everything else. An element that
-  // the page declares inert must never take a hint, however clickable it looks.
-  const ariaDisabled = element.getAttribute("aria-disabled")?.toLowerCase();
-  if (ariaDisabled === "" || ariaDisabled === "true") return Option.none();
-
-  for (const attribute of FRAMEWORK_CLICK_ATTRIBUTES) {
-    if (element.hasAttribute(attribute)) return clickable("framework");
-  }
-  if (hasJsAction(element)) return clickable("framework");
-
-  if (element.hasAttribute("onclick")) return clickable("onclick");
-
-  const role = element.getAttribute("role")?.toLowerCase();
-  if (role !== undefined && CLICKABLE_ROLES.has(role)) return clickable("role");
-
-  const editable = element.getAttribute("contenteditable")?.toLowerCase();
-  if (editable !== undefined && EDITABLE_VALUES.has(editable)) {
-    return clickable("contenteditable");
-  }
-
-  const native = classifyNative(element, view);
-  if (Option.isSome(native)) return native;
-
-  // `getAttribute`, and not `className`: on an SVG element `className` is an
-  // `SVGAnimatedString`, and not a string.
-  const classAttribute = element.getAttribute("class")?.toLowerCase() ?? "";
-  if (classAttribute.includes("button") || classAttribute.includes("btn")) {
-    return weaklyClickable("class");
-  }
-
-  if (element.localName === "span") return weaklyClickable("span");
-
-  const tabIndexAttribute = element.getAttribute("tabindex");
-  if (tabIndexAttribute !== null) {
-    const tabIndex = tabIndexAttribute === "" ? 0 : Number(tabIndexAttribute);
-    if (Number.isFinite(tabIndex) && tabIndex >= 0) {
-      return weaklyClickable("tabindex");
-    }
-  }
-
-  return Option.none();
-};
+export const classify = (element: Element, view: Window): Option.Option<Classification> =>
+  pipe(
+    SIGNALS_BY_NAME,
+    Record.get(element.localName),
+    orCommonSignals,
+    Array.findFirst((signal) => signal.holds(element, view)),
+    toVerdict,
+  );
 
 // ---------------------------------------------------------------------------
 // Visibility and geometry
 // ---------------------------------------------------------------------------
 
-interface VisibilityCheckOptions {
-  readonly contentVisibilityAuto?: boolean;
-  readonly opacityProperty?: boolean;
-  readonly visibilityProperty?: boolean;
-}
+const VISIBILITY_CHECK: CheckVisibilityOptions = {
+  contentVisibilityAuto: true,
+  opacityProperty: true,
+  visibilityProperty: true,
+};
 
-interface VisibilityCheckable {
-  readonly checkVisibility?: (options?: VisibilityCheckOptions) => boolean;
-}
+const isStyledVisible = (style: CSSStyleDeclaration): boolean =>
+  style.display !== "none" && style.visibility === "visible" && style.opacity !== "0";
 
 /**
  * `Element.checkVisibility` (Safari 17.4 and later), with a
@@ -358,20 +521,14 @@ interface VisibilityCheckable {
  * old, and `getBoundingClientRect()` reports a rect that looks correct for
  * something that is not rendered at all.
  */
-const isRendered = (element: Element, capabilities: CapabilityReport, view: Window): boolean => {
-  if (capabilities.checkVisibility) {
-    const check = (element as unknown as VisibilityCheckable).checkVisibility;
-    if (typeof check === "function") {
-      return check.call(element, {
-        contentVisibilityAuto: true,
-        opacityProperty: true,
-        visibilityProperty: true,
-      });
-    }
-  }
-  const style = view.getComputedStyle(element);
-  return style.display !== "none" && style.visibility === "visible" && style.opacity !== "0";
-};
+const isRendered = (element: Element, options: DetectOptions): boolean =>
+  pipe(
+    options.capabilities.checkVisibility && typeof element.checkVisibility === "function",
+    Boolean.match({
+      onFalse: () => isStyledVisible(options.window.getComputedStyle(element)),
+      onTrue: () => element.checkVisibility(VISIBILITY_CHECK),
+    }),
+  );
 
 /** The four edges that the crop needs. A `DOMRect` has them all. */
 interface EdgeRect {
@@ -381,6 +538,12 @@ interface EdgeRect {
   readonly bottom: number;
 }
 
+/** A crop that leaves no box, or that starts within 4 pixels of the far edges. */
+const isCroppedAway =
+  (viewport: ViewportRect) =>
+  ({ left, top, width, height }: HintRect): boolean =>
+    top >= viewport.height - 4 || left >= viewport.width - 4 || width <= 0 || height <= 0;
+
 /**
  * Crop to the visible region, as upstream does, but against the viewport rect
  * that the caller gives, and not against `window.innerWidth` and
@@ -389,26 +552,81 @@ interface EdgeRect {
 const cropRectToVisible = (rect: EdgeRect, viewport: ViewportRect): Option.Option<HintRect> => {
   const left = Math.max(rect.left, 0);
   const top = Math.max(rect.top, 0);
-  if (top >= viewport.height - 4 || left >= viewport.width - 4) {
-    return Option.none();
-  }
   // Upstream leaves the far edges uncropped. We clamp them, because our
   // markers live in a layer that is fixed to the viewport, and the occlusion
   // probe samples the corners. An unclamped corner falls outside the viewport,
   // where `elementsFromPoint` gives nothing, and the hint would be refused for
   // being *too large*.
-  const right = Math.min(rect.right, viewport.width);
-  const bottom = Math.min(rect.bottom, viewport.height);
-  const width = right - left;
-  const height = bottom - top;
-  if (width <= 0 || height <= 0) return Option.none();
-  return Option.some({ left, top, width, height });
+  return pipe(
+    {
+      left,
+      top,
+      width: Math.min(rect.right, viewport.width) - left,
+      height: Math.min(rect.bottom, viewport.height) - top,
+    },
+    Option.liftPredicate(Predicate.not(isCroppedAway(viewport))),
+  );
 };
 
 const MIN_HINT_SIZE = 3;
 
-const isUsable = (rect: HintRect): boolean =>
+interface Size {
+  readonly width: number;
+  readonly height: number;
+}
+
+const isUsable = (rect: Size): boolean =>
   rect.width >= MIN_HINT_SIZE && rect.height >= MIN_HINT_SIZE;
+
+/**
+ * Can this child draw the box of a parent that measures zero?
+ *
+ * A floated or positioned child is outside the flow of its parent, and so is a
+ * child that hides its overflow along the axis where the parent measures zero.
+ */
+const carriesCollapsedBox = (box: DOMRectReadOnly, style: CSSStyleDeclaration): boolean =>
+  style.float !== "none" ||
+  style.position === "absolute" ||
+  style.position === "fixed" ||
+  (box.width === 0 && style.overflowX === "hidden") ||
+  (box.height === 0 && style.overflowY === "hidden");
+
+/** A client rect with a box of its own: rendered, cropped, and large enough. */
+const ownRect = (
+  element: Element,
+  clientRect: DOMRectReadOnly,
+  options: DetectOptions,
+): Option.Option<HintRect> =>
+  pipe(
+    clientRect,
+    Option.liftPredicate(() => isRendered(element, options)),
+    Option.flatMap((rect) => cropRectToVisible(rect, options.viewport)),
+    Option.filter(isUsable),
+  );
+
+/** The visible rect of a child that carries the box of a parent that measures zero. */
+const carriedRect =
+  (collapsed: DOMRectReadOnly, options: DetectOptions) =>
+  (child: Element): Option.Option<HintRect> =>
+    pipe(
+      carriesCollapsedBox(collapsed, options.window.getComputedStyle(child)),
+      Boolean.match({
+        onFalse: () => Option.none(),
+        onTrue: () => pipe(visibleClientRect(child, options), Option.filter(isUsable)),
+      }),
+    );
+
+/** The visible rect that one client rect of `element` gives. */
+const clientRectHint =
+  (element: Element, options: DetectOptions) =>
+  (clientRect: DOMRectReadOnly): Option.Option<HintRect> =>
+    pipe(
+      clientRect.width === 0 || clientRect.height === 0,
+      Boolean.match({
+        onFalse: () => ownRect(element, clientRect, options),
+        onTrue: () => pipe(element.children, Array.findFirst(carriedRect(clientRect, options))),
+      }),
+    );
 
 /**
  * The first client rect that is truly visible.
@@ -417,51 +635,59 @@ const isUsable = (rect: HintRect): boolean =>
  * sites: a link that wraps only floated or absolutely positioned children
  * measures 0 by 0 itself, and to skip it would lose the hint in silence.
  */
-const visibleClientRect = (
-  element: Element,
-  capabilities: CapabilityReport,
-  view: Window,
-  viewport: ViewportRect,
-): Option.Option<HintRect> => {
-  const clientRects = element.getClientRects();
-
-  for (const clientRect of clientRects) {
-    if (clientRect.width === 0 || clientRect.height === 0) {
-      for (const child of element.children) {
-        const childStyle = view.getComputedStyle(child);
-        const position = childStyle.position;
-        if (
-          childStyle.float === "none" &&
-          position !== "absolute" &&
-          position !== "fixed" &&
-          !(clientRect.width === 0 && childStyle.overflowX === "hidden") &&
-          !(clientRect.height === 0 && childStyle.overflowY === "hidden")
-        )
-          continue;
-
-        const childRect = visibleClientRect(child, capabilities, view, viewport);
-        if (Option.isNone(childRect) || !isUsable(childRect.value)) continue;
-        return childRect;
-      }
-      continue;
-    }
-
-    if (!isRendered(element, capabilities, view)) continue;
-
-    const cropped = cropRectToVisible(clientRect, viewport);
-    if (Option.isNone(cropped) || !isUsable(cropped.value)) continue;
-    return cropped;
-  }
-
-  return Option.none();
-};
+const visibleClientRect = (element: Element, options: DetectOptions): Option.Option<HintRect> =>
+  pipe(element.getClientRects(), Array.findFirst(clientRectHint(element, options)));
 
 // ---------------------------------------------------------------------------
 // Image maps
 // ---------------------------------------------------------------------------
 
-const parseCoords = (area: HTMLAreaElement): readonly number[] =>
-  area.coords.split(",").map((coord) => Number.parseInt(coord.trim(), 10));
+const parseCoords = (area: HTMLAreaElement): ReadonlyArray<number> =>
+  pipe(
+    area.coords,
+    Str.split(","),
+    Array.map((coord) => Number.parseInt(coord.trim(), 10)),
+  );
+
+/** The corners of an area, relative to its image. */
+interface Corners {
+  readonly x1: number;
+  readonly y1: number;
+  readonly x2: number;
+  readonly y2: number;
+}
+
+/** A coordinate that the area gives, or `0` when it gives fewer. */
+const coordAt = (coords: ReadonlyArray<number>, index: number): number =>
+  pipe(
+    coords,
+    Array.get(index),
+    Option.getOrElse(() => 0),
+  );
+
+/**
+ * The corners of one area. A circle gives the square inside it, `default`
+ * gives the whole image, and every other shape gives its first two points.
+ */
+const cornersOf = (area: HTMLAreaElement, image: DOMRectReadOnly): Corners => {
+  const coords = parseCoords(area);
+  return pipe(
+    Match.value(area.shape.toLowerCase()),
+    Match.whenOr("circle", "circ", (): Corners => {
+      const inset = coordAt(coords, 2) / Math.SQRT2;
+      const x = coordAt(coords, 0);
+      const y = coordAt(coords, 1);
+      return { x1: x - inset, y1: y - inset, x2: x + inset, y2: y + inset };
+    }),
+    Match.when("default", (): Corners => ({ x1: 0, y1: 0, x2: image.width, y2: image.height })),
+    Match.orElse((): Corners => ({
+      x1: coordAt(coords, 0),
+      y1: coordAt(coords, 1),
+      x2: coordAt(coords, 2),
+      y2: coordAt(coords, 3),
+    })),
+  );
+};
 
 /**
  * Parse a `usemap` value as an HTML hash-name reference.
@@ -469,11 +695,27 @@ const parseCoords = (area: HTMLAreaElement): readonly number[] =>
  * The first `#` is the separator. An absent or final separator names no map.
  * The suffix stays exact. The parser folds no case and normalizes no Unicode.
  */
-export const mapNameOf = (usemap: string): Option.Option<string> => {
-  const separator = usemap.indexOf("#");
-  if (separator < 0 || separator === usemap.length - 1) return Option.none();
-  return Option.some(usemap.slice(separator + 1));
-};
+export const mapNameOf = (usemap: string): Option.Option<string> =>
+  pipe(
+    usemap,
+    Str.indexOf("#"),
+    Option.map((separator) => usemap.slice(separator + 1)),
+    Option.filter(Str.isNonEmpty),
+  );
+
+/** What the lookup reads from the image: the root of the tree that holds it. */
+interface InTree {
+  getRootNode(): object;
+}
+
+/**
+ * A root that can be searched.
+ *
+ * The root of an element is a document, a shadow root, or the top element of a
+ * detached tree. Each one is a `ParentNode`, and `querySelectorAll` is the
+ * part of it that says so.
+ */
+const isParentNode = (root: object): root is ParentNode => "querySelectorAll" in root;
 
 /**
  * The `<map>` that `usemap` names, found by iteration.
@@ -495,22 +737,74 @@ export const mapNameOf = (usemap: string): Option.Option<string> => {
  * first map with an equal `id` or `name` wins. A missing map gives
  * `Option.none()`. The image gets no hint, and other elements keep their hints.
  */
-export const findImageMap = (context: Element, usemap: string): Option.Option<Element> => {
-  const name = mapNameOf(usemap);
-  if (Option.isNone(name)) return Option.none();
+export const findImageMap = (context: InTree, usemap: string): Option.Option<Element> =>
+  Option.gen(function* () {
+    const name = yield* mapNameOf(usemap);
+    const root = yield* pipe(context.getRootNode(), Option.liftPredicate(isParentNode));
+    // The fixed selector does not contain page text, so malformed names
+    // cannot change or break it.
+    return yield* pipe(
+      root.querySelectorAll("map"),
+      Array.findFirst(
+        (map) => map.getAttribute("id") === name || map.getAttribute("name") === name,
+      ),
+    );
+  });
 
-  // An element root is a document or a shadow root. The fixed selector does
-  // not contain page text, so malformed names cannot change or break it.
-  const root = context.getRootNode() as Document | ShadowRoot;
-  for (const map of root.querySelectorAll("map")) {
-    if (map.getAttribute("id") === name.value || map.getAttribute("name") === name.value)
-      return Option.some(map);
-  }
-  return Option.none();
-};
+/** An `<img usemap>`. It gives hints for its areas, and never for itself. */
+interface ImageMap {
+  readonly image: HTMLImageElement;
+  readonly usemap: string;
+}
+
+const imageMapOf: (element: Element) => Option.Option<ImageMap> = flow(
+  Option.liftPredicate(isImage),
+  Option.flatMap((image) =>
+    pipe(
+      attributeOf(image, "usemap"),
+      Option.map((usemap) => ({ image, usemap })),
+    ),
+  ),
+);
+
+/** The hint of one `<area>`, placed on the rect of its image. */
+const areaHint =
+  (image: HTMLImageElement, imageRect: DOMRectReadOnly, options: DetectOptions) =>
+  (area: HTMLAreaElement): Option.Option<LocalHint> =>
+    Option.gen(function* () {
+      const { x1, y1, x2, y2 } = yield* pipe(
+        cornersOf(area, imageRect),
+        Option.liftPredicate(
+          (corners) => Number.isFinite(corners.x1) && Number.isFinite(corners.y1),
+        ),
+      );
+      const left = Math.min(x1, x2) + imageRect.left;
+      const top = Math.min(y1, y2) + imageRect.top;
+      const rect = yield* pipe(
+        cropRectToVisible(
+          { left, top, right: left + Math.abs(x2 - x1), bottom: top + Math.abs(y2 - y1) },
+          options.viewport,
+        ),
+        Option.filter(isUsable),
+      );
+      const href = yield* pipe(hrefOf(area), Option.liftPredicate(admitsHref(options)));
+      const { text, show } = linkTextFor(area, Option.none());
+      const hint: LocalHint = {
+        element: area,
+        hitTarget: Option.some(image),
+        rect,
+        kind: "area",
+        secondary: false,
+        possibleFalsePositive: false,
+        linkText: text,
+        showLinkText: show,
+        href,
+      };
+      return hint;
+    });
 
 /**
- * The rects of the `<area>` elements of an image map.
+ * The hints of the `<area>` elements of an image map.
  *
  * Ported from `DomUtils.getClientRectsForAreas`. A circle is approximated by
  * the square inside it, and a polygon by the box around its first two points.
@@ -518,88 +812,123 @@ export const findImageMap = (context: Element, usemap: string): Option.Option<El
  * very rare, and a marker that is a little off still activates the correct
  * area.
  *
- * `Option.none()` means "this is not an image map". An empty array means "this
- * is an image map with no usable area", and the element gets no hint of its
- * own.
+ * An empty result means "this is an image map with no usable area", and the
+ * element gets no hint of its own.
  */
-const imageMapHints = (
-  element: Element,
-  options: DetectOptions,
-): Option.Option<readonly LocalHint[]> => {
-  if (!(element instanceof HTMLImageElement)) return Option.none();
-  const rawName = element.getAttribute("usemap");
-  if (rawName === null) return Option.none();
-
-  const imageRect = element.getClientRects()[0];
-  if (imageRect === undefined) return Option.some([]);
-
-  const map = findImageMap(element, rawName);
-  if (Option.isNone(map)) return Option.some([]);
-  if (!isRendered(element, options.capabilities, options.window)) {
-    return Option.some([]);
-  }
-
-  const hints: LocalHint[] = [];
-  for (const area of map.value.getElementsByTagName("area")) {
-    const coords = parseCoords(area);
-    const shape = area.shape.toLowerCase();
-
-    let x1 = coords[0] ?? 0;
-    let y1 = coords[1] ?? 0;
-    let x2 = coords[2] ?? 0;
-    let y2 = coords[3] ?? 0;
-
-    if (shape === "circle" || shape === "circ") {
-      const [cx = 0, cy = 0, radius = 0] = coords;
-      const inset = radius / Math.SQRT2;
-      x1 = cx - inset;
-      y1 = cy - inset;
-      x2 = cx + inset;
-      y2 = cy + inset;
-    } else if (shape === "default") {
-      x1 = 0;
-      y1 = 0;
-      x2 = imageRect.width;
-      y2 = imageRect.height;
-    }
-
-    if (!Number.isFinite(x1) || !Number.isFinite(y1)) continue;
-
-    const left = Math.min(x1, x2) + imageRect.left;
-    const top = Math.min(y1, y2) + imageRect.top;
-    const rect = cropRectToVisible(
-      {
-        left,
-        top,
-        right: left + Math.abs(x2 - x1),
-        bottom: top + Math.abs(y2 - y1),
-      },
-      options.viewport,
-    );
-    if (Option.isNone(rect) || !isUsable(rect.value)) continue;
-
-    const href = hrefOf(area);
-    if (options.requireHref && Option.isNone(href)) continue;
-
-    const { text, show } = linkTextFor(area, Option.none());
-    hints.push({
-      element: area,
-      hitTarget: Option.some(element),
-      rect: rect.value,
-      kind: "area",
-      secondary: false,
-      possibleFalsePositive: false,
-      linkText: text,
-      showLinkText: show,
-      href,
-    });
-  }
-  return Option.some(hints);
-};
+const areaHints = ({ image, usemap }: ImageMap, options: DetectOptions): ReadonlyArray<LocalHint> =>
+  pipe(
+    Option.gen(function* () {
+      const imageRect = yield* pipe(image.getClientRects().item(0), Option.fromNullishOr);
+      const map = yield* findImageMap(image, usemap);
+      yield* pipe(
+        image,
+        Option.liftPredicate((rendered) => isRendered(rendered, options)),
+      );
+      return pipe(
+        map.getElementsByTagName("area"),
+        Array.fromIterable,
+        Array.map(areaHint(image, imageRect, options)),
+        Array.getSomes,
+      );
+    }),
+    Option.getOrElse(() => Array.empty<LocalHint>()),
+  );
 
 // ---------------------------------------------------------------------------
 // Link text
 // ---------------------------------------------------------------------------
+
+/** The text that filter mode matches, and whether the marker draws it. */
+interface LinkText {
+  readonly text: string;
+  readonly show: boolean;
+}
+
+const quiet = (text: string): LinkText => ({ text, show: false });
+
+const shown = (text: string): LinkText => ({ text, show: true });
+
+const textOf = (node: Node): string => node.textContent ?? "";
+
+/** `aria-label`, or else `title`, drawn beside the marker when it is not empty. */
+const labelText = (element: Element): LinkText =>
+  pipe(
+    attributeOf(element, "aria-label"),
+    Option.orElse(() => attributeOf(element, "title")),
+    Option.map(Str.trim),
+    Option.getOrElse(() => ""),
+    (text) => ({ text, show: Str.isNonEmpty(text) }),
+  );
+
+/** `text` when it is not empty, and the label of `element` otherwise. */
+const textOrLabel = (element: Element, text: string): LinkText =>
+  pipe(
+    text,
+    Option.liftPredicate(Str.isNonEmpty),
+    Option.map(quiet),
+    Option.getOrElse(() => labelText(element)),
+  );
+
+/** The text of a `<label>`, without the colon that often ends it. */
+const labelledText = (label: HTMLLabelElement): string =>
+  pipe(textOf(label), Str.trim, Str.replace(/:$/, ""));
+
+const inputText = (input: HTMLInputElement): LinkText =>
+  pipe(
+    input.labels,
+    Option.fromNullishOr,
+    Option.flatMapNullishOr((labels) => labels.item(0)),
+    Option.match({
+      onSome: (label) => textOrLabel(input, labelledText(label)),
+      onNone: () =>
+        pipe(
+          input.type.toLowerCase() === "file",
+          Boolean.match({
+            onTrue: () => quiet("Choose File"),
+            // `element.value` is never read, and that is deliberate.
+            //
+            // Only `type="password"` used to be excluded, so every other input
+            // gave its *contents* as the label of the hint. That label travels
+            // word for word across a frame boundary in the wire descriptor. A
+            // payment frame (Stripe Elements, Braintree, Adyen) draws a card
+            // number in a `type="text"` input with an `aria-label` and no
+            // `<label>`, which is exactly this branch. A one-time code and an
+            // email address have the same shape.
+            //
+            // The page writes `placeholder`, and the user does not type it, so
+            // it is safe. For filter matching it is usually the better label as
+            // well.
+            onFalse: () => textOrLabel(input, input.placeholder),
+          }),
+        ),
+    }),
+  );
+
+/** The `alt`, or else the `title`, of the image that a link without text wraps. */
+const wrappedImageText = (anchor: HTMLAnchorElement): Option.Option<LinkText> =>
+  pipe(
+    anchor.firstElementChild,
+    Option.fromNullishOr,
+    Option.filter(isImage),
+    // The cheap test first. `textContent` reads the whole subtree.
+    Option.filter(() => Str.isEmpty(textOf(anchor).trim())),
+    Option.map((image) => image.alt || image.title),
+    Option.filter(Str.isNonEmpty),
+    Option.map(shown),
+  );
+
+/** The first 256 characters of the text of an element, trimmed. */
+const ownText = (element: Element): string => textOf(element).slice(0, 256).trim();
+
+/** The text of an element that is not an `<input>`. */
+const textOfOther = (element: Element, reason: Option.Option<string>): LinkText =>
+  pipe(
+    element,
+    Option.liftPredicate(isAnchor),
+    Option.flatMap(wrappedImageText),
+    Option.orElse(() => pipe(reason, Option.map(shown))),
+    Option.getOrElse(() => textOrLabel(element, ownText(element))),
+  );
 
 /**
  * The text that filter mode matches against.
@@ -609,60 +938,36 @@ const imageMapHints = (
  * icon and no text is now usual, and without the fallback it cannot be reached
  * in filter mode.
  */
-export const linkTextFor = (
-  element: Element,
-  reason: Option.Option<string>,
-): { readonly text: string; readonly show: boolean } => {
-  const fallback = (): { text: string; show: boolean } => {
-    const label = element.getAttribute("aria-label") ?? element.getAttribute("title") ?? "";
-    return { text: label.trim(), show: label.trim().length > 0 };
-  };
-
-  if (element instanceof HTMLInputElement) {
-    const labels = element.labels;
-    const firstLabel = labels === null ? undefined : labels[0];
-    if (firstLabel !== undefined) {
-      let text = (firstLabel.textContent ?? "").trim();
-      if (text.endsWith(":")) text = text.slice(0, -1);
-      if (text.length > 0) return { text, show: false };
-      return fallback();
-    }
-    const type = element.type.toLowerCase();
-    if (type === "file") return { text: "Choose File", show: false };
-    // `element.value` is never read, and that is deliberate.
-    //
-    // Only `type="password"` used to be excluded, so every other input gave its
-    // *contents* as the label of the hint. That label travels word for word
-    // across a frame boundary in the wire descriptor. A payment frame (Stripe
-    // Elements, Braintree, Adyen) draws a card number in a `type="text"` input
-    // with an `aria-label` and no `<label>`, which is exactly this branch. A
-    // one-time code and an email address have the same shape.
-    //
-    // The page writes `placeholder`, and the user does not type it, so it is
-    // safe. For filter matching it is usually the better label as well.
-    const text = element.placeholder;
-    return text.length > 0 ? { text, show: false } : fallback();
-  }
-
-  if (element instanceof HTMLAnchorElement) {
-    if ((element.textContent ?? "").trim().length === 0) {
-      const child = element.firstElementChild;
-      if (child instanceof HTMLImageElement) {
-        const text = child.alt || child.title;
-        if (text.length > 0) return { text, show: true };
-      }
-    }
-  }
-
-  if (Option.isSome(reason)) return { text: reason.value, show: true };
-
-  const text = (element.textContent ?? "").slice(0, 256).trim();
-  return text.length > 0 ? { text, show: false } : fallback();
-};
+export const linkTextFor = (element: Element, reason: Option.Option<string>): LinkText =>
+  pipe(
+    element,
+    Option.liftPredicate(isInput),
+    Option.match({ onSome: inputText, onNone: () => textOfOther(element, reason) }),
+  );
 
 // ---------------------------------------------------------------------------
 // Collection
 // ---------------------------------------------------------------------------
+
+/**
+ * What the walk reads from a parent: a document, a shadow root, or an element.
+ *
+ * The walk is generic in the element that it walks. A DOM `Element` is one,
+ * and so is the fake node of a unit test, which gives only what the walk reads.
+ */
+export interface WalkParent<E> {
+  readonly firstElementChild: E | null;
+  readonly lastElementChild: E | null;
+}
+
+/** What the walk reads from an element. */
+export interface WalkElement<E> extends WalkParent<E> {
+  readonly localName: string;
+  readonly nextElementSibling: E | null;
+  readonly shadowRoot: WalkParent<E> | null;
+  readonly childNodes: { readonly length: number };
+  getBoundingClientRect(): Size;
+}
 
 /**
  * Does this look like the host of a shadow root that we cannot see?
@@ -673,20 +978,18 @@ export const linkTextFor = (
  * cannot reach. A false positive costs one HUD line. A false negative costs the
  * user a silent gap in the hints, which is worse.
  */
-const looksLikeClosedShadowHost = (element: Element): boolean => {
-  if (element.shadowRoot !== null) return false;
-  if (!element.localName.includes("-")) return false;
-  if (element.childNodes.length > 0) return false;
-  const rect = element.getBoundingClientRect();
-  return rect.width >= MIN_HINT_SIZE && rect.height >= MIN_HINT_SIZE;
-};
+const looksLikeClosedShadowHost = <E>(element: WalkElement<E>): boolean =>
+  element.shadowRoot === null &&
+  element.localName.includes("-") &&
+  element.childNodes.length === 0 &&
+  isUsable(element.getBoundingClientRect());
 
 /** What one walk of the tree found. */
-export interface Collected {
-  readonly elements: Element[];
-  unreachableHosts: number;
+export interface Collected<E> {
+  readonly elements: ReadonlyArray<E>;
+  readonly unreachableHosts: number;
   /** True when the work limit stopped this walk. */
-  truncated: boolean;
+  readonly truncated: boolean;
 }
 
 /**
@@ -699,8 +1002,8 @@ export interface Collected {
  * **How the work is divided.** The walk is a state machine, and not a
  * recursion. Each stack frame holds one next sibling and one final sibling.
  * `stepWalk` examines at most `count` elements. It never enumerates one whole
- * sibling list. The caller reads the clock after each step. It starts a new
- * slice when the budget of 8 ms is gone.
+ * sibling list. `repeatInSlices` reads the clock after each step. It starts a
+ * new slice when the budget of 8 ms is gone.
  *
  * **Where the thread goes back.** `Dom.yieldToBrowser` runs between two
  * slices. It posts through a `MessageChannel`, so the browser runs its own
@@ -737,90 +1040,110 @@ export interface Collected {
  * One 64-element step took less than 1 ms with one million siblings. Each step
  * now reads at most 64 siblings, so document width cannot enlarge one step.
  */
-interface WalkFrame {
-  next: Element | null;
-  readonly boundary: Element;
+interface WalkFrame<E> {
+  /** The next child to examine. A frame leaves the stack when none is left. */
+  next: E;
+  readonly boundary: E;
 }
 
-export interface ElementWalk {
+export interface ElementWalk<E> {
   /** The child lists that still have elements. The last frame runs next. */
-  readonly pending: WalkFrame[];
-  readonly collected: Collected;
+  readonly pending: Array<WalkFrame<E>>;
+  /** The elements produced so far, in document order. */
+  readonly elements: Array<E>;
   /** Elements already produced. A moved element cannot be produced again. */
-  readonly produced: Set<Element>;
+  readonly produced: Set<E>;
   /** Work includes duplicate elements that mutations put in the walk again. */
   examined: number;
+  unreachableHosts: number;
+  /** True when the work limit stopped this walk. */
+  truncated: boolean;
   readonly limit: number;
 }
 
 /** The maximum examined elements of one hint discovery walk. */
 export const WALK_ELEMENT_LIMIT = 250_000;
 
-/** Capture the current first and final child of one parent. */
-const childFrame = (parent: ParentNode): WalkFrame | undefined => {
-  const first = parent.firstElementChild;
-  const boundary = parent.lastElementChild;
-  return first === null || boundary === null
-    ? undefined
-    : {
-        next: first,
-        boundary,
-      };
-};
+/** Capture the current first and final child of one parent. `startWalk` uses it for the root. */
+const childFrame = <E>(parent: WalkParent<E>): Option.Option<WalkFrame<E>> =>
+  pipe(
+    parent.firstElementChild,
+    Option.fromNullishOr,
+    Option.flatMap((next) =>
+      pipe(
+        parent.lastElementChild,
+        Option.fromNullishOr,
+        Option.map((boundary): WalkFrame<E> => ({ next, boundary })),
+      ),
+    ),
+  );
 
 /** A walk of `root` that has visited nothing yet. */
-export const startWalk = (root: ParentNode, limit = WALK_ELEMENT_LIMIT): ElementWalk => {
-  const first = childFrame(root);
-  return {
-    pending: first === undefined ? [] : [first],
-    collected: { elements: [], unreachableHosts: 0, truncated: false },
-    produced: new Set(),
-    examined: 0,
-    limit,
-  };
-};
+export const startWalk = <E extends WalkElement<E>>(
+  root: WalkParent<E>,
+  limit = WALK_ELEMENT_LIMIT,
+): ElementWalk<E> => ({
+  pending: pipe(childFrame(root), Option.toArray),
+  elements: [],
+  produced: new Set(),
+  examined: 0,
+  unreachableHosts: 0,
+  truncated: false,
+  limit,
+});
 
 /**
  * Examine at most `count` elements. It gives `true` while work is left.
  *
  * The order is document order, and it enters every open shadow root. A slotted
  * light-DOM child is under its host, so the walk does not visit it two times.
+ *
+ * This is the one loop of the module, and it stays a loop on purpose: it runs
+ * once for each element of the page. A throwaway benchmark (Node 26, a fake
+ * tree of 120,037 elements, steps of 64, the median of ten warm runs) measured
+ * this loop at about 14 ms, as fast as the loop before it. A walk without the
+ * loop, over immutable state (a persistent stack, a `HashSet` and a `Chunk`),
+ * took about 205 ms. The same loop with an `Option` for each child frame took
+ * about 18 ms, so the loop captures a child frame with two `null` checks, and
+ * `childFrame` serves only the root.
  */
-export const stepWalk = (walk: ElementWalk, count: number): boolean => {
-  for (let examined = 0; examined < count; examined += 1) {
-    const frame = walk.pending[walk.pending.length - 1];
-    if (frame === undefined) break;
-    const element = frame.next;
-    if (element === null) {
-      walk.pending.pop();
-      examined -= 1;
-      continue;
+export const stepWalk = <E extends WalkElement<E>>(
+  walk: ElementWalk<E>,
+  count: number,
+): boolean => {
+  const pushChildren = (parent: WalkParent<E>): void => {
+    const next = parent.firstElementChild;
+    const boundary = parent.lastElementChild;
+    if (next !== null && boundary !== null) walk.pending.push({ next, boundary });
+  };
+
+  for (let step = 0; step < count; step += 1) {
+    const frame = walk.pending.pop();
+    if (frame === undefined) return false;
+    if (walk.examined >= walk.limit) {
+      walk.truncated = true;
+      walk.pending.length = 0;
+      return false;
     }
 
-    if (walk.examined >= walk.limit) {
-      walk.collected.truncated = true;
-      walk.pending.length = 0;
-      break;
+    const element = frame.next;
+    if (element !== frame.boundary) {
+      const sibling = element.nextElementSibling;
+      if (sibling !== null) {
+        frame.next = sibling;
+        walk.pending.push(frame);
+      }
     }
-    frame.next = element === frame.boundary ? null : element.nextElementSibling;
     walk.examined += 1;
     if (walk.produced.has(element)) continue;
 
     walk.produced.add(element);
-    walk.collected.elements.push(element);
-    const shadow = element.shadowRoot;
+    walk.elements.push(element);
     // Push light children first. Shadow children then run before light children.
-    const lightChildren = childFrame(element);
-    if (lightChildren !== undefined) walk.pending.push(lightChildren);
-    if (shadow !== null) {
-      const shadowChildren = childFrame(shadow);
-      if (shadowChildren !== undefined) walk.pending.push(shadowChildren);
-    } else if (looksLikeClosedShadowHost(element)) {
-      walk.collected.unreachableHosts += 1;
-    }
-  }
-  while (walk.pending[walk.pending.length - 1]?.next === null) {
-    walk.pending.pop();
+    pushChildren(element);
+    const shadow = element.shadowRoot;
+    if (shadow !== null) pushChildren(shadow);
+    else if (looksLikeClosedShadowHost(element)) walk.unreachableHosts += 1;
   }
   return walk.pending.length > 0;
 };
@@ -834,51 +1157,53 @@ export const stepWalk = (walk: ElementWalk, count: number): boolean => {
 const WALK_CHECK_EVERY = 64;
 
 /** Walk `root` in time-boxed slices. Interruption stops it at a slice edge. */
-export const collectElements = (
-  root: ParentNode,
+export const collectElements = Effect.fnUntraced(function* <E extends WalkElement<E>>(
+  root: WalkParent<E>,
   options: ChunkedOptions,
-): Effect.Effect<Collected, never, Dom> =>
-  Effect.gen(function* () {
-    const dom = yield* Dom;
-    const budget = options.budgetMs ?? CHUNK_BUDGET_MS;
-    const checkEvery = options.checkEvery ?? WALK_CHECK_EVERY;
-    const walk = startWalk(root);
-
-    let more = true;
-    while (more) {
-      const sliceStart = yield* dom.now;
-      for (;;) {
-        more = stepWalk(walk, checkEvery);
-        if (!more) break;
-        if ((yield* dom.now) - sliceStart >= budget) break;
-      }
-      // Sequential by design. The browser gets a turn between two slices, and
-      // an interruption of this fiber takes effect here.
-      if (more) yield* dom.yieldToBrowser;
-    }
-
-    if (walk.collected.truncated) {
-      yield* Effect.logWarning(`hint discovery stopped after ${walk.limit} examined elements`);
-    }
-    return walk.collected;
-  });
+): Effect.fn.Return<Collected<E>, never, Dom> {
+  const walk = startWalk(root);
+  const checkEvery = options.checkEvery ?? WALK_CHECK_EVERY;
+  yield* repeatInSlices(
+    Effect.sync(() => stepWalk(walk, checkEvery)),
+    options.budgetMs ?? CHUNK_BUDGET_MS,
+  );
+  yield* pipe(
+    walk.truncated,
+    Boolean.match({
+      onFalse: () => Effect.void,
+      onTrue: () =>
+        Effect.logWarning(`hint discovery stopped after ${walk.limit} examined elements`),
+    }),
+  );
+  const collected: Collected<E> = {
+    elements: walk.elements,
+    unreachableHosts: walk.unreachableHosts,
+    truncated: walk.truncated,
+  };
+  return collected;
+});
 
 // ---------------------------------------------------------------------------
 // Occlusion
 // ---------------------------------------------------------------------------
 
+/** The host of the shadow tree that holds `node`, when that tree is one. */
+const hostOf = (node: Node): Option.Option<Element> =>
+  pipe(
+    node.getRootNode(),
+    Option.liftPredicate(isShadowRoot),
+    Option.map((root) => root.host),
+  );
+
 /** The chain of shadow hosts between `element` and the document. */
-const shadowHostChain = (element: Element): readonly Element[] => {
-  const chain: Element[] = [];
-  let node: Node = element;
-  for (;;) {
-    const root = node.getRootNode();
-    if (!(root instanceof ShadowRoot)) break;
-    chain.push(root.host);
-    node = root.host;
-  }
-  return chain;
-};
+const shadowHostChain = (element: Element): ReadonlyArray<Element> =>
+  pipe(
+    hostOf(element),
+    Option.match({
+      onNone: () => Array.empty<Element>(),
+      onSome: (host) => pipe(shadowHostChain(host), Array.prepend(host)),
+    }),
+  );
 
 /**
  * Does `ancestor` contain `node`, across an open shadow boundary?
@@ -887,16 +1212,17 @@ const shadowHostChain = (element: Element): readonly Element[] => {
  * open shadow root of the element* therefore looked like an unrelated element
  * that was painted on top, and every clickable custom element lost its hint.
  */
-const containsDeep = (ancestor: Element, node: Element): boolean => {
-  let current: Node | null = node;
-  for (;;) {
-    if (current === null) return false;
-    if (ancestor.contains(current)) return true;
-    const root = current.getRootNode();
-    if (!(root instanceof ShadowRoot)) return false;
-    current = root.host;
-  }
-};
+const containsDeep = (ancestor: Element, node: Element): boolean =>
+  ancestor.contains(node) ||
+  pipe(
+    hostOf(node),
+    Option.exists((host) => containsDeep(ancestor, host)),
+  );
+
+interface Point {
+  readonly x: number;
+  readonly y: number;
+}
 
 /**
  * Is `element` what the user would hit at this point?
@@ -917,50 +1243,65 @@ const containsDeep = (ancestor: Element, node: Element): boolean => {
  *   a `height: 0; overflow: hidden` box, because the hit test gave their
  *   containing block.
  */
-const hitsAtPoint = (
-  element: Element,
-  hosts: readonly Element[],
-  x: number,
-  y: number,
-  options: DetectOptions,
-): boolean => {
-  for (const candidate of options.document.elementsFromPoint(x, y)) {
-    if (Option.isSome(options.overlayHost) && candidate === options.overlayHost.value) continue;
-    if (candidate === element) return true;
-    if (containsDeep(element, candidate)) return true;
-    if (hosts.includes(candidate)) return true;
-    // An ancestor. The point is inside our box, and the thing that is painted
-    // on top of it is above us in the tree, which means that we do not paint at
-    // this point at all.
-    return false;
-  }
-  return false;
-};
+const hitsAtPoint =
+  (element: Element, hosts: ReadonlyArray<Element>, options: DetectOptions) =>
+  ({ x, y }: Point): boolean =>
+    pipe(
+      options.document.elementsFromPoint(x, y),
+      Array.findFirst(
+        (candidate) =>
+          !pipe(
+            options.overlayHost,
+            Option.exists((host) => host === candidate),
+          ),
+      ),
+      // Anything else, an ancestor too, decides against us. The point is
+      // inside our box, and the thing that is painted on top of it is above
+      // us in the tree, which means that we do not paint at this point at all.
+      Option.exists(
+        (candidate) =>
+          candidate === element ||
+          containsDeep(element, candidate) ||
+          pipe(
+            hosts,
+            Array.some((host) => host === candidate),
+          ),
+      ),
+    );
 
 /** A hair inside the edge: on the boundary itself the hit test is ambiguous. */
 const EDGE_NUDGE = 0.1;
 
-const isHintVisible = (hint: LocalHint, options: DetectOptions): boolean => {
-  const { left, top, width, height } = hint.rect;
+/**
+ * The points that the occlusion test samples, in order.
+ *
+ * The centre first: it is the point that succeeds most often, and every hit
+ * test forces a layout flush.
+ */
+const probePoints = ({ left, top, width, height }: HintRect): ReadonlyArray<Point> => {
   const near = { x: left + EDGE_NUDGE, y: top + EDGE_NUDGE };
   const far = { x: left + width - EDGE_NUDGE, y: top + height - EDGE_NUDGE };
-  const target = pipe(
-    hint.hitTarget,
-    Option.getOrElse(() => hint.element),
-  );
-  const hosts = shadowHostChain(target);
-  const hits = (x: number, y: number): boolean => hitsAtPoint(target, hosts, x, y, options);
-
-  // The centre first: it is the point that succeeds most often, and every hit
-  // test forces a layout flush.
-  return (
-    hits(left + width / 2, top + height / 2) ||
-    hits(near.x, near.y) ||
-    hits(far.x, near.y) ||
-    hits(near.x, far.y) ||
-    hits(far.x, far.y)
-  );
+  return [
+    { x: left + width / 2, y: top + height / 2 },
+    near,
+    { x: far.x, y: near.y },
+    { x: near.x, y: far.y },
+    far,
+  ];
 };
+
+const isHintVisible =
+  (options: DetectOptions) =>
+  (hint: LocalHint): boolean => {
+    const target = pipe(
+      hint.hitTarget,
+      Option.getOrElse(() => hint.element),
+    );
+    return pipe(
+      probePoints(hint.rect),
+      Array.some(hitsAtPoint(target, shadowHostChain(target), options)),
+    );
+  };
 
 // ---------------------------------------------------------------------------
 // False positives
@@ -971,6 +1312,26 @@ const FALSE_POSITIVE_WINDOW = 6;
 /** How many `parentElement` steps count as "near". The number of upstream. */
 const FALSE_POSITIVE_DEPTH = 3;
 
+/** Is `ancestor` at most `depth` parent steps above `element`? */
+const isNearAncestor = (ancestor: Element, element: Element, depth: number): boolean =>
+  depth > 0 &&
+  pipe(
+    element.parentElement,
+    Option.fromNullishOr,
+    Option.exists((parent) => parent === ancestor || isNearAncestor(ancestor, parent, depth - 1)),
+  );
+
+/** Does a hint in the window before `position` sit near below `hint`? */
+const wrapsNearbyHint = (
+  hints: ReadonlyArray<LocalHint>,
+  hint: LocalHint,
+  position: number,
+): boolean =>
+  pipe(
+    hints.slice(Math.max(0, position - FALSE_POSITIVE_WINDOW), position),
+    Array.some((near) => isNearAncestor(hint.element, near.element, FALSE_POSITIVE_DEPTH)),
+  );
+
 /**
  * Drop a weakly hinted element that only wraps something that is hinted.
  *
@@ -979,60 +1340,78 @@ const FALSE_POSITIVE_DEPTH = 3;
  * DOM, which is why a window of six elements is enough, and why a full walk of
  * the ancestors is not necessary.
  */
-export const dropFalsePositives = (hints: readonly LocalHint[]): readonly LocalHint[] =>
-  hints.filter((hint, position) => {
-    if (!hint.possibleFalsePositive) return true;
-
-    for (let index = Math.max(0, position - FALSE_POSITIVE_WINDOW); index < position; index++) {
-      let candidate: Element | null = hints[index]?.element ?? null;
-      for (let depth = 0; depth < FALSE_POSITIVE_DEPTH; depth++) {
-        candidate = candidate?.parentElement ?? null;
-        if (candidate === null) break;
-        if (candidate === hint.element) return false;
-      }
-    }
-    return true;
-  });
+export const dropFalsePositives = (hints: ReadonlyArray<LocalHint>): ReadonlyArray<LocalHint> =>
+  pipe(
+    hints,
+    Array.filter(
+      (hint, position) => !hint.possibleFalsePositive || !wrapsNearbyHint(hints, hint, position),
+    ),
+  );
 
 // ---------------------------------------------------------------------------
 // The pipeline
 // ---------------------------------------------------------------------------
 
-const buildHints = (
-  element: Element,
-  options: DetectOptions,
-): Option.Option<readonly LocalHint[]> => {
-  // Image maps first, exactly as upstream does: an `<img usemap>` gives hints
-  // for its areas, and never for itself.
-  const areas = imageMapHints(element, options);
-  if (Option.isSome(areas)) {
-    return areas.value.length > 0 ? areas : Option.none();
-  }
+/** The hint of an element that `classify` accepted. */
+const elementHint =
+  (element: Element, options: DetectOptions) =>
+  (classification: Classification): Option.Option<LocalHint> =>
+    Option.gen(function* () {
+      const href = yield* pipe(hrefOf(element), Option.liftPredicate(admitsHref(options)));
+      const rect = yield* visibleClientRect(element, options);
+      const { kind, reason, secondary } = traitsOf(classification);
+      const { text, show } = linkTextFor(element, reason);
+      const hint: LocalHint = {
+        element,
+        hitTarget: Option.none(),
+        rect,
+        kind,
+        secondary,
+        possibleFalsePositive: secondary,
+        linkText: text,
+        showLinkText: show,
+        href,
+      };
+      return hint;
+    });
 
-  const classification = classify(element, options.window);
-  if (Option.isNone(classification)) return Option.none();
+/** The hints that one element gives. */
+const buildHints =
+  (options: DetectOptions) =>
+  (element: Element): Option.Option<ReadonlyArray<LocalHint>> =>
+    pipe(
+      imageMapOf(element),
+      Option.match({
+        // Image maps first, exactly as upstream does: an `<img usemap>` gives
+        // hints for its areas, and never for itself.
+        onSome: (map) =>
+          pipe(areaHints(map, options), Option.liftPredicate(Array.isReadonlyArrayNonEmpty)),
+        onNone: () =>
+          pipe(
+            classify(element, options.window),
+            Option.flatMap(elementHint(element, options)),
+            Option.map(Array.of),
+          ),
+      }),
+    );
 
-  const href = hrefOf(element);
-  if (options.requireHref && Option.isNone(href)) return Option.none();
-
-  const rect = visibleClientRect(element, options.capabilities, options.window, options.viewport);
-  if (Option.isNone(rect)) return Option.none();
-
-  const { text, show } = linkTextFor(element, classification.value.reason);
-  return Option.some([
-    {
-      element,
-      hitTarget: Option.none(),
-      rect: rect.value,
-      kind: classification.value.kind,
-      secondary: classification.value.secondary,
-      possibleFalsePositive: classification.value.possibleFalsePositive,
-      linkText: text,
-      showLinkText: show,
-      href,
-    },
-  ]);
+/**
+ * A stable partition: the second-class citizens go last, so that they never
+ * take a short hint string away from a true link.
+ */
+const secondaryLast = (hints: ReadonlyArray<LocalHint>): ReadonlyArray<LocalHint> => {
+  const secondary = pipe(
+    hints,
+    Array.filter((hint) => hint.secondary),
+  );
+  return pipe(
+    hints,
+    Array.filter((hint) => !hint.secondary),
+    Array.appendAll(secondary),
+  );
 };
+
+const SLICES: ChunkedOptions = { budgetMs: CHUNK_BUDGET_MS };
 
 /**
  * Run the whole detection pipeline.
@@ -1043,41 +1422,21 @@ const buildHints = (
  * the middle of a loop that reads styles, which is the worst pattern for
  * layout thrash.
  */
-export const detectHints = (options: DetectOptions): Effect.Effect<DetectionResult, never, Dom> =>
-  Effect.gen(function* () {
-    const chunk = { budgetMs: CHUNK_BUDGET_MS };
-
-    const collected = yield* collectElements(options.document, chunk);
-
-    const groups = yield* mapChunked(
-      collected.elements,
-      (element) => buildHints(element, options),
-      chunk,
-    );
-
-    // Descendants before ancestors, so that a later element paints above an
-    // earlier one, and the false-positive window looks the correct way.
-    const reversed = groups.flat().reverse();
-    const filtered = dropFalsePositives(reversed);
-
-    const visible = yield* mapChunked(
-      filtered,
-      (hint) => (isHintVisible(hint, options) ? Option.some(hint) : Option.none()),
-      chunk,
-    );
-
-    const inOrder = [...visible].reverse();
-
-    // A stable partition: the second-class citizens go last, so that they never
-    // take a short hint string away from a true link.
-    const hints = [
-      ...inOrder.filter((hint) => !hint.secondary),
-      ...inOrder.filter((hint) => hint.secondary),
-    ];
-
-    return {
-      hints,
-      unreachableHosts: collected.unreachableHosts,
-      truncated: collected.truncated,
-    };
-  });
+export const detectHints = Effect.fnUntraced(function* (
+  options: DetectOptions,
+): Effect.fn.Return<DetectionResult, never, Dom> {
+  const collected = yield* collectElements(options.document, SLICES);
+  const groups = yield* pipe(collected.elements, mapChunked(buildHints(options), SLICES));
+  // Descendants before ancestors, so that a later element paints above an
+  // earlier one, and the false-positive window looks the correct way.
+  const candidates = pipe(groups, Array.flatten, Array.reverse, dropFalsePositives);
+  const visible = yield* pipe(
+    candidates,
+    mapChunked(Option.liftPredicate(isHintVisible(options)), SLICES),
+  );
+  return {
+    hints: pipe(visible, Array.reverse, secondaryLast),
+    unreachableHosts: collected.unreachableHosts,
+    truncated: collected.truncated,
+  };
+});
