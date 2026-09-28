@@ -12,7 +12,22 @@
  * every listener goes with it. No module keeps a list of things to remove.
  */
 
-import { Cause, Context, Effect, Exit, Layer, Schema, type Scope, Stream } from "effect";
+import {
+  Boolean,
+  Cause,
+  Context,
+  Effect,
+  Exit,
+  Layer,
+  Match,
+  Predicate,
+  Result,
+  Schema,
+  type Scope,
+  Stream,
+  pipe,
+} from "effect";
+import { constVoid } from "effect/Function";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -66,10 +81,14 @@ export interface ListenOptions {
  */
 export type Listener<Event, R> = (event: Event) => Effect.Effect<void, never, R>;
 
-const toAddOptions = (options: ListenOptions | undefined): AddEventListenerOptions => ({
-  capture: options?.capture ?? false,
-  ...(options?.passive === undefined ? {} : { passive: options.passive }),
-  ...(options?.once === undefined ? {} : { once: options.once }),
+/**
+ * The options that the browser reads. An `undefined` member of the dictionary
+ * counts as absent, so `passive` keeps the default of the browser.
+ */
+const toAddOptions = (options: ListenOptions = {}): AddEventListenerOptions => ({
+  capture: options.capture ?? false,
+  passive: options.passive,
+  once: options.once,
 });
 
 // ---------------------------------------------------------------------------
@@ -146,17 +165,20 @@ export class Dom extends Context.Service<
     Dom,
     Effect.gen(function* () {
       const services = yield* Effect.context<never>();
-      const win = globalThis as unknown as Window & typeof globalThis;
+      // `globalThis` is the `Window` of this frame. The DOM types declare the
+      // global `name` as `void`, so they cannot see the global scope as a
+      // `Window`, and no runtime check can prove it either. This one assertion
+      // says what the realm is.
+      const win = globalThis as Window & typeof globalThis;
       const doc = win.document;
 
       const probeOr = <A>(read: () => A, fallback: A): Effect.Effect<A> =>
-        Effect.sync(() => {
-          try {
-            return read();
-          } catch {
-            return fallback;
-          }
-        });
+        Effect.sync(() =>
+          pipe(
+            Result.try(read),
+            Result.getOrElse(() => fallback),
+          ),
+        );
 
       const probe = <A>(api: string, read: () => A): Effect.Effect<A, DomError> =>
         Effect.try({
@@ -171,7 +193,12 @@ export class Dom extends Context.Service<
         });
 
       const resolveTarget = (name: keyof TargetEventMap): EventTarget =>
-        name === "document" ? doc : win;
+        pipe(
+          Match.value(name),
+          Match.when("document", (): EventTarget => doc),
+          Match.whenOr("window", "element", (): EventTarget => win),
+          Match.exhaustive,
+        );
 
       /**
        * Attach one listener, and detach it when the scope closes.
@@ -181,30 +208,38 @@ export class Dom extends Context.Service<
        * never a throw into page code: a throw inside a listener is swallowed by
        * the browser, and silence is the worse outcome.
        */
-      const attach = <A extends Event, R>(
+      const attach = Effect.fnUntraced(function* <E, R>(
         target: EventTarget,
         type: string,
-        handler: Listener<A, R>,
+        handler: Listener<E, R>,
         options: ListenOptions | undefined,
-      ): Effect.Effect<void, never, R | Scope.Scope> =>
-        Effect.gen(function* () {
-          const handlerServices = yield* Effect.context<R>();
-          const run = Effect.runSyncExitWith(Context.merge(services, handlerServices));
-          const listen = (event: Event): void => {
-            const exit = run(handler(event as A));
-            if (Exit.isFailure(exit)) reportListenerFailure(type, exit.cause);
-          };
-          const addOptions = toAddOptions(options);
-          yield* Effect.acquireRelease(
-            Effect.sync(() => {
-              target.addEventListener(type, listen, addOptions);
+      ) {
+        const handlerServices = yield* Effect.context<R>();
+        const run = Effect.runSyncExitWith(Context.merge(services, handlerServices));
+        const listen = (event: Event): void =>
+          pipe(
+            // The browser gives a plain `Event`. Only the DOM types tie an
+            // event name to its event type, so the name that `listen` took is
+            // the evidence, and this assertion is where it becomes the type.
+            event as E,
+            handler,
+            run,
+            Exit.match({
+              onSuccess: constVoid,
+              onFailure: (cause) => reportListenerFailure(type, cause),
             }),
-            () =>
-              Effect.sync(() => {
-                target.removeEventListener(type, listen, addOptions);
-              }),
           );
-        });
+        const addOptions = toAddOptions(options);
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            target.addEventListener(type, listen, addOptions);
+          }),
+          () =>
+            Effect.sync(() => {
+              target.removeEventListener(type, listen, addOptions);
+            }),
+        );
+      });
 
       return Dom.of({
         window: win,
@@ -215,16 +250,20 @@ export class Dom extends Context.Service<
         attempt: probe,
 
         listen: (target, type, handler, options) =>
-          attach(resolveTarget(target), String(type), handler as Listener<Event, never>, options),
+          attach(resolveTarget(target), String(type), handler, options),
 
         listenOn: (target, type, handler, options) => attach(target, type, handler, options),
 
-        events: (target, type, options) =>
-          Stream.fromEventListener(
+        events: <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K]>(
+          target: K,
+          type: T,
+          options?: ListenOptions,
+        ) =>
+          Stream.fromEventListener<TargetEventMap[K][T]>(
             resolveTarget(target),
             String(type),
             toAddOptions(options),
-          ) as Stream.Stream<never>,
+          ),
 
         nextFrame: Effect.callback<number>((resume) => {
           const handle = win.requestAnimationFrame((time) => {
@@ -248,13 +287,23 @@ export class Dom extends Context.Service<
           });
         }),
 
-        now: Effect.sync(() =>
-          typeof performance === "undefined" ? Date.now() : performance.now(),
-        ),
+        now: Effect.sync(readClock),
       });
     }),
   );
 }
+
+/**
+ * A monotonic clock where the realm has one, and the wall clock otherwise.
+ *
+ * The question is asked at each read, because the page can replace
+ * `performance` at any time.
+ */
+const readClock = (): number =>
+  pipe(
+    typeof performance === "undefined",
+    Boolean.match({ onFalse: () => performance.now(), onTrue: () => Date.now() }),
+  );
 
 /**
  * A listener body must not fail. If it does, the fault is ours.
@@ -266,8 +315,10 @@ const reportListenerFailure = (type: string, cause: Cause.Cause<never>): void =>
   console.error(`[vimium-webkit] the ${type} listener failed`, Cause.pretty(cause));
 };
 
-const describe = (cause: unknown): string => {
-  if (cause instanceof Error) return cause.message;
-  if (typeof cause === "string") return cause;
-  return String(cause);
-};
+const describe = (cause: unknown): string =>
+  pipe(
+    Match.value(cause),
+    Match.when(Predicate.isError, (error) => error.message),
+    Match.when(Predicate.isString, (text) => text),
+    Match.orElse((other) => String(other)),
+  );
