@@ -14,7 +14,7 @@
 
 import {
   Boolean,
-  Cause,
+  type Cause,
   Context,
   Effect,
   Exit,
@@ -27,7 +27,7 @@ import {
   pipe,
 } from "effect";
 import { constVoid } from "effect/Function";
-import { describeThrown } from "~/domain/Failure.ts";
+import { describeCause, describeThrown } from "~/domain/Failure.ts";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -350,8 +350,10 @@ const readClock = (): number =>
  * A listener body must not fail. If it does, the fault is ours.
  *
  * `console.error` and not a logger, because this can run before the logger
- * exists, and because a userscript shares its console with the page.
+ * exists, and because a userscript shares its console with the page. The
+ * console therefore gets the text of the first failure, and not the whole
+ * cause.
  */
 const reportListenerFailure = (type: string, cause: Cause.Cause<never>): void => {
-  console.error(`[vimium-webkit] the ${type} listener failed`, Cause.pretty(cause));
+  console.error(`[vimium-webkit] the ${type} listener failed`, describeCause(cause));
 };
