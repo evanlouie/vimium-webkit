@@ -25,14 +25,22 @@
  */
 
 import {
+  Array,
+  Boolean,
+  type Cause,
   Context,
+  Data,
   Deferred,
   Duration,
   Effect,
   Exit,
   FiberHandle,
   Layer,
+  MutableRef,
   Option,
+  Order,
+  Ordering,
+  Predicate,
   Queue,
   Result,
   Schema,
@@ -41,7 +49,8 @@ import {
   SubscriptionRef,
   pipe,
 } from "effect";
-import type { GroupSpec } from "~/domain/Persisted.ts";
+import { constVoid, flow } from "effect/Function";
+import type { GroupSpec, Migration } from "~/domain/Persisted.ts";
 import {
   type FindHistory,
   findHistoryGroup,
@@ -54,8 +63,9 @@ import {
   type Settings,
   settingsGroup,
 } from "~/domain/Persisted.ts";
+import type { GmError } from "./Gm.ts";
 import { decodeUnknown, describeSchemaError } from "./SchemaIo.ts";
-import { KeyValueStore, STORAGE_PREFIX } from "./KeyValueStore.ts";
+import { type KeyValueKind, KeyValueStore, STORAGE_PREFIX } from "./KeyValueStore.ts";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -144,54 +154,153 @@ export interface ValueGroup<A> {
 // The commands that the group fiber runs
 // ---------------------------------------------------------------------------
 
-type Command<A> =
-  | { readonly _tag: "Hydrate"; readonly reply: Deferred.Deferred<A> }
-  | {
-      readonly _tag: "Write";
-      readonly value: A;
-      readonly reply: Deferred.Deferred<void, StorageError>;
-    }
-  | {
-      readonly _tag: "Update";
-      readonly change: (current: A) => A;
-      readonly reply: Deferred.Deferred<A, StorageError>;
-    }
-  | {
-      readonly _tag: "Reset";
-      readonly reply: Deferred.Deferred<A, StorageError>;
-    }
-  | {
-      readonly _tag: "Flush";
-      readonly reply: Option.Option<Deferred.Deferred<void, StorageError>>;
-    }
-  | { readonly _tag: "Remote"; readonly raw: Option.Option<string> };
+/** A caller that waits for a write to reach the backend. */
+type WriteReply = Deferred.Deferred<void, StorageError>;
 
-interface Envelope {
-  readonly schemaVersion: number;
-  readonly data: unknown;
+type Command<A> = Data.TaggedEnum<{
+  Hydrate: { readonly reply: Deferred.Deferred<A> };
+  Write: { readonly value: A; readonly reply: WriteReply };
+  Update: {
+    readonly change: (current: A) => A;
+    readonly reply: Deferred.Deferred<A, StorageError>;
+  };
+  Reset: { readonly reply: Deferred.Deferred<A, StorageError> };
+  Flush: { readonly reply: WriteReply };
+  /** The debounce window closed. */
+  Elapsed: Record<never, never>;
+  /** Another tab wrote the key. */
+  Remote: { readonly raw: Option.Option<string> };
+}>;
+
+interface CommandDefinition extends Data.TaggedEnum.WithGenerics<1> {
+  readonly taggedEnum: Command<this["A"]>;
 }
 
-/**
- * The stored wrapper, checked by shape and not by schema.
- *
- * `data` is the group's own payload, and it is decoded separately after
- * migration. A schema here would either do that work twice, or make `data`
- * `unknown` in a schema that then says nothing.
- */
-const isEnvelope = (value: unknown): value is Envelope =>
-  typeof value === "object" &&
-  value !== null &&
-  typeof (value as Record<string, unknown>)["schemaVersion"] === "number" &&
-  "data" in value;
+const Command = Data.taggedEnum<CommandDefinition>();
 
-const describeCause = (cause: unknown): string => {
-  if (typeof cause === "object" && cause !== null && "detail" in cause) {
-    const detail: unknown = (cause as { readonly detail: unknown }).detail;
-    if (typeof detail === "string" && detail.length > 0) return detail;
-  }
-  if (cause instanceof Error && cause.message.length > 0) return cause.message;
-  return String(cause);
-};
+/**
+ * The debounce window of a group.
+ *
+ * Each caller in the window waits for the write that reaches the backend. A
+ * state with callers therefore has at least one of them.
+ */
+type Held<A> = Data.TaggedEnum<{
+  /** Nothing is held, and nobody waits. */
+  Empty: Record<never, never>;
+  /** A value waits for the window to close. It is the last write of the window. */
+  Holding: { readonly value: A; readonly waiters: Array.NonEmptyReadonlyArray<WriteReply> };
+  /**
+   * The exit path wrote the held value. The callers still wait for the actor,
+   * which answers them on its next turn.
+   */
+  Written: { readonly waiters: Array.NonEmptyReadonlyArray<WriteReply> };
+}>;
+
+interface HeldDefinition extends Data.TaggedEnum.WithGenerics<1> {
+  readonly taggedEnum: Held<this["A"]>;
+}
+
+const Held = Data.taggedEnum<HeldDefinition>();
+
+type Holding<A> = Data.TaggedEnum.Value<Held<A>, "Holding">;
+
+const waitersOf = <A>(held: Held<A>): ReadonlyArray<WriteReply> =>
+  pipe(
+    held,
+    Held.$match({
+      Empty: () => [],
+      Holding: ({ waiters }) => waiters,
+      Written: ({ waiters }) => waiters,
+    }),
+  );
+
+/** The held value and its callers, when the window holds a value. */
+const holdingOf = <A>(held: Held<A>): Option.Option<Holding<A>> =>
+  pipe(
+    held,
+    Held.$match({
+      Empty: () => Option.none(),
+      Holding: (holding) => Option.some(holding),
+      Written: () => Option.none(),
+    }),
+  );
+
+/** Put a value in the window. It replaces the held value, and every caller keeps waiting. */
+const hold =
+  <A>(value: A, reply: WriteReply) =>
+  (held: Held<A>): Held<A> =>
+    Held.Holding({ value, waiters: pipe(waitersOf(held), Array.append(reply)) });
+
+/** How a group writes an accepted value. */
+type WritePolicy = Data.TaggedEnum<{
+  /** Each accepted value goes to the backend before the next command. */
+  Immediate: Record<never, never>;
+  /** Values wait in a window, and the last one of the window goes. */
+  Debounced: { readonly delay: Duration.Duration };
+}>;
+
+const WritePolicy = Data.taggedEnum<WritePolicy>();
+
+/**
+ * A promise is not a completed write, so a promise-backed manager never holds a
+ * value. Each accepted change goes through the actor while the page is alive,
+ * and that keeps one serial write order.
+ */
+const writePolicy = (kind: KeyValueKind, debounceMs: number): WritePolicy =>
+  pipe(
+    kind !== "gm-async" && debounceMs > 0,
+    Boolean.match({
+      onFalse: () => WritePolicy.Immediate(),
+      onTrue: () => WritePolicy.Debounced({ delay: Duration.millis(debounceMs) }),
+    }),
+  );
+
+/**
+ * The stored wrapper.
+ *
+ * `data` stays `unknown` here. It is the group's own payload, and it is decoded
+ * against the group schema after migration.
+ */
+const Envelope = Schema.Struct({ schemaVersion: Schema.Finite, data: Schema.Unknown });
+
+type Envelope = typeof Envelope.Type;
+
+/** Data from a 0.1 development build has no envelope. Treat it as v0. */
+const toEnvelope = (parsed: unknown): Envelope =>
+  pipe(
+    parsed,
+    Schema.decodeUnknownOption(Envelope),
+    Option.getOrElse(() => ({ schemaVersion: 0, data: parsed })),
+  );
+
+const byTarget: Order.Order<Migration> = pipe(
+  Order.Number,
+  Order.mapInput((step: Migration) => step.to),
+);
+
+const detailOf = (cause: unknown): Option.Option<string> =>
+  pipe(
+    cause,
+    Option.liftPredicate(Predicate.isObjectOrArray),
+    Option.map((object): unknown => Reflect.get(object, "detail")),
+    Option.filter(Predicate.isString),
+    Option.filter((detail) => detail.length > 0),
+  );
+
+const messageOf = (cause: unknown): Option.Option<string> =>
+  pipe(
+    cause,
+    Option.liftPredicate(Predicate.isError),
+    Option.map((error) => error.message),
+    Option.filter((message) => message.length > 0),
+  );
+
+const describeCause = (cause: unknown): string =>
+  pipe(
+    detailOf(cause),
+    Option.orElse(() => messageOf(cause)),
+    Option.getOrElse(() => String(cause)),
+  );
 
 /**
  * Build one value group over the value store.
@@ -201,444 +310,533 @@ const describeCause = (cause: unknown): string => {
  * so no feature can read that value through `Storage`. Every other group
  * belongs to `Storage` and is reached through the service.
  */
-export const makeGroup = <A>(
+export const makeGroup = Effect.fnUntraced(function* <A>(
   spec: GroupSpec<A>,
   kv: KeyValueStore["Service"],
   issues: Queue.Queue<StorageError>,
-): Effect.Effect<ValueGroup<A>, never, Scope.Scope> =>
-  Effect.gen(function* () {
-    const key = `${STORAGE_PREFIX}${spec.name}`;
-    const debounce = Duration.millis(spec.writeDebounceMs ?? 0);
-    // A promise is not a completed write. Send each accepted change through
-    // the actor while the page is alive. This keeps one serial write order.
-    const debounced = kv.kind !== "gm-async" && Duration.toMillis(debounce) > 0;
+): Effect.fn.Return<ValueGroup<A>, never, Scope.Scope> {
+  const key = `${STORAGE_PREFIX}${spec.name}`;
+  const policy = writePolicy(kv.kind, spec.writeDebounceMs);
 
-    const value = yield* SubscriptionRef.make(spec.defaults());
-    const mailbox = yield* Queue.unbounded<Command<A>>();
+  const memory = yield* SubscriptionRef.make(spec.defaults());
+  const mailbox = yield* Queue.unbounded<Command<A>>();
 
-    // Everything below this line is touched by the group fiber only. One fiber
-    // means that a plain variable is safe, and that nothing can interleave.
-    let pending = Option.none<A>();
-    let waiters: Array<Deferred.Deferred<void, StorageError>> = [];
-    let readFailure: StorageError | null = null;
+  // References and not `Ref`s, because the exit path reads and writes them with
+  // no effect. Apart from that path, only the group fiber touches them, so
+  // nothing can interleave.
+  const held = MutableRef.make<Held<A>>(Held.Empty());
+  /** Why the last read failed, until a later read or write succeeds. */
+  const readFailure = MutableRef.make(Option.none<StorageError>());
 
-    /**
-     * The fiber that closes the current debounce window.
-     *
-     * A handle, and not a plain fiber. Arming it again interrupts the fiber
-     * that is already there, and the scope interrupts whatever is left. A
-     * detached fiber would keep the page alive after the runtime closes, and a
-     * scoped fiber for each write would add a finaliser for each write.
-     */
-    const timer = yield* FiberHandle.make<void, never>();
+  /**
+   * The fiber that closes the current debounce window.
+   *
+   * A handle, and not a plain fiber. Arming it again interrupts the fiber
+   * that is already there, and the scope interrupts whatever is left. A
+   * detached fiber would keep the page alive after the runtime closes, and a
+   * scoped fiber for each write would add a finaliser for each write.
+   */
+  const timer = yield* FiberHandle.make<void, never>();
 
-    const raise = (
-      reason: StorageFailureReason,
-      direction: StorageDirection,
-      detail: string,
-      cause?: unknown,
-      report = true,
-    ): StorageError => {
-      const error = new StorageError({
+  const failure = (reason: StorageFailureReason, direction: StorageDirection, detail: string) =>
+    new StorageError({ reason, direction, group: spec.name, detail });
+
+  /** A failure that carries its cause. The detail names the cause too. */
+  const failureFrom =
+    (reason: StorageFailureReason, direction: StorageDirection, detail: string) =>
+    (cause: unknown): StorageError =>
+      new StorageError({
         reason,
         direction,
         group: spec.name,
-        detail: cause === undefined ? detail : `${detail}: ${describeCause(cause)}`,
-        ...(cause === undefined ? {} : { cause }),
-      });
-      if (report) Queue.offerUnsafe(issues, error);
-      return error;
-    };
-
-    // -- decoding ----------------------------------------------------------
-
-    const runMigrations = (data: unknown, from: number): Option.Option<unknown> => {
-      let current = data;
-      const steps = (spec.migrations ?? [])
-        .filter((step) => step.to > from)
-        .toSorted((left, right) => left.to - right.to);
-      for (const step of steps) {
-        try {
-          current = step.migrate(current);
-        } catch (cause) {
-          raise("migration", "read", `migration to v${step.to} (${step.describe}) failed`, cause);
-          return Option.none();
-        }
-      }
-      return Option.some(current);
-    };
-
-    const decode = (raw: Option.Option<string>): A => {
-      if (Option.isNone(raw)) return spec.defaults();
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw.value);
-      } catch (cause) {
-        raise("malformed", "read", "the stored value is not JSON", cause);
-        return spec.defaults();
-      }
-
-      // Data from a 0.1 development build has no envelope. Treat it as v0.
-      const envelope: Envelope = isEnvelope(parsed) ? parsed : { schemaVersion: 0, data: parsed };
-
-      let data = envelope.data;
-      if (envelope.schemaVersion < spec.schemaVersion) {
-        const migrated = runMigrations(data, envelope.schemaVersion);
-        if (Option.isNone(migrated)) return spec.defaults();
-        data = migrated.value;
-      } else if (envelope.schemaVersion > spec.schemaVersion) {
-        // A newer build in another tab wrote this. Do not try to go backwards.
-        // Use the defaults for this frame and leave the stored value alone.
-        raise(
-          "invalid",
-          "read",
-          `the stored schema version ${envelope.schemaVersion} is newer ` +
-            `than this build's ${spec.schemaVersion}`,
-        );
-        return spec.defaults();
-      }
-
-      const decoded = decodeUnknown(spec.schema)(data);
-      if (Result.isFailure(decoded)) {
-        raise(
-          "invalid",
-          "read",
-          "the stored value failed schema validation",
-          describeSchemaError(decoded.failure),
-        );
-        return spec.defaults();
-      }
-      return decoded.success;
-    };
-
-    // -- the backend -------------------------------------------------------
-
-    /**
-     * The bytes for one value, or the failure that stops the write.
-     *
-     * The value is validated on the way out as well as on the way in. A bad
-     * value is then caught where it was made, and not on the next page load. A
-     * bad value that reached the disk would reset the group on the next read,
-     * and it would take every other field with it.
-     *
-     * One function for the actor path and for the exit path. The two must give
-     * the same bytes, and one function is the only way to be sure of that.
-     * `report` is false on the exit path, so that one failure gives one
-     * message: the actor writes the same value again and reports it there.
-     */
-    const encode = (next: A, report: boolean): Result.Result<string, StorageError> => {
-      const validated = decodeUnknown(spec.schema)(next);
-      if (Result.isFailure(validated)) {
-        return Result.fail(
-          raise(
-            "invalid",
-            "write",
-            "refusing to persist a value that fails its own schema",
-            describeSchemaError(validated.failure),
-            report,
-          ),
-        );
-      }
-      try {
-        const envelope: Envelope = {
-          schemaVersion: spec.schemaVersion,
-          data: validated.success,
-        };
-        return Result.succeed(JSON.stringify(envelope));
-      } catch (cause) {
-        return Result.fail(
-          raise("malformed", "write", "the value cannot be serialised", cause, report),
-        );
-      }
-    };
-
-    /** Write one value to the backend. */
-    const commit = (next: A): Effect.Effect<void, StorageError> =>
-      Effect.gen(function* () {
-        const encoded = encode(next, true);
-        if (Result.isFailure(encoded)) {
-          return yield* encoded.failure;
-        }
-
-        // Not interruptible. A promise inside the backend keeps running after
-        // its fiber is interrupted, so an interrupted `set` could still land
-        // after a later `remove`.
-        yield* Effect.uninterruptible(
-          pipe(
-            kv.set(key, encoded.success),
-            Effect.mapError((cause) => raise("backend", "write", cause.detail, cause)),
-          ),
-        );
-        readFailure = null;
+        detail: `${detail}: ${describeCause(cause)}`,
+        cause,
       });
 
-    /**
-     * Write the held value to the backend now, with no suspension.
-     *
-     * This exit path is only for a synchronous backend. A promise-backed
-     * manager writes each accepted change through the actor with no debounce.
-     * The actor waits for each promise before it starts the next write.
-     *
-     * Four rules hold this path together:
-     *
-     * 1. **One value goes, and it is the newest one.** `pending` holds the
-     *    last write of the debounce window. The order of two writes to one key
-     *    is therefore the order that the backend sees.
-     * 2. **Nothing is written twice.** `pending` is cleared after the write, so
-     *    the flush that the actor runs later finds nothing to do.
-     * 3. **A value that the actor is writing is left alone.** The actor clears
-     *    `pending` before it commits, and it runs one command at a time. An
-     *    empty `pending` therefore means that nothing is owed.
-     * 4. **It never throws.** The `pagehide` handler must return, and a browser
-     *    swallows a throw from a listener. A failed write keeps `pending`, so
-     *    the actor writes it again if this page lives on.
-     *
-     * A command that is still in the mailbox is not covered. The exit path
-     * cannot take it without breaking the actor order. A final exit can lose a
-     * command that the actor did not accept before the exit.
-     */
-    const flushUnsafe = (): void => {
-      const setUnsafe = kv.setUnsafe;
-      if (setUnsafe === null) return;
-      const held = pending;
-      if (Option.isNone(held)) return;
-      try {
-        const encoded = encode(held.value, false);
-        // The value cannot be written at all. The actor reports it, and it
-        // fails the callers that wait for this write.
-        if (Result.isFailure(encoded)) return;
-        setUnsafe(key, encoded.success);
-        pending = Option.none();
-        readFailure = null;
-      } catch (cause) {
-        // The value stays pending, so the actor tries again. A second message
-        // therefore means a second failed attempt, and not one failure twice.
-        raise("backend", "write", "the direct write failed", cause);
-      }
-    };
+  const backendWriteFailure = (cause: GmError): StorageError =>
+    failureFrom("backend", "write", cause.detail)(cause);
 
-    const publish = (next: A): Effect.Effect<void> => SubscriptionRef.set(value, next);
+  const report = (error: StorageError): Effect.Effect<void> => pipe(issues, Queue.offer(error));
 
-    const cancelTimer = FiberHandle.clear(timer);
-
-    const settleWaiters = (outcome: Exit.Exit<void, StorageError>): Effect.Effect<void> =>
-      Effect.suspend(() => {
-        const waiting = waiters;
-        waiters = [];
-        return Effect.forEach(waiting, (reply) => Deferred.done(reply, outcome), { discard: true });
-      });
-
-    /** Write whatever is inside the debounce window, if anything is. */
-    const commitPending = Effect.gen(function* () {
-      yield* cancelTimer;
-      const held = pending;
-      pending = Option.none();
-      if (Option.isNone(held)) {
-        yield* settleWaiters(Exit.void);
-        return Exit.void as Exit.Exit<void, StorageError>;
-      }
-      const outcome = yield* Effect.exit(commit(held.value));
-      yield* settleWaiters(outcome);
-      return outcome;
+  const setReadFailure = (failed: Option.Option<StorageError>): Effect.Effect<void> =>
+    Effect.sync(() => {
+      pipe(readFailure, MutableRef.set(failed));
     });
 
-    // -- the command loop --------------------------------------------------
+  // -- decoding ------------------------------------------------------------
 
-    const armTimer = FiberHandle.run(
-      timer,
-      pipe(
-        Effect.sleep(debounce),
-        Effect.andThen(
-          Effect.sync(() => {
-            Queue.offerUnsafe(mailbox, { _tag: "Flush", reply: Option.none() });
-          }),
+  const migrate = (data: unknown, from: number): Result.Result<unknown, StorageError> => {
+    const start: Result.Result<unknown, StorageError> = Result.succeed(data);
+    return pipe(
+      spec.migrations,
+      Array.filter((step) => step.to > from),
+      Array.sort(byTarget),
+      Array.reduce(start, (migrated, step) =>
+        pipe(
+          migrated,
+          Result.flatMap((current) =>
+            Result.try({
+              try: () => step.migrate(current),
+              catch: failureFrom(
+                "migration",
+                "read",
+                `migration to v${step.to} (${step.describe}) failed`,
+              ),
+            }),
+          ),
+        ),
+      ),
+    );
+  };
+
+  /** The payload in this build's version, or why it cannot be brought there. */
+  const upgrade = ({ schemaVersion, data }: Envelope): Result.Result<unknown, StorageError> =>
+    pipe(
+      Order.Number(schemaVersion, spec.schemaVersion),
+      Ordering.match({
+        onLessThan: () => migrate(data, schemaVersion),
+        onEqual: () => Result.succeed(data),
+        // A newer build in another tab wrote this. Do not try to go backwards.
+        // Use the defaults for this frame and leave the stored value alone.
+        onGreaterThan: () =>
+          Result.fail(
+            failure(
+              "invalid",
+              "read",
+              `the stored schema version ${schemaVersion} is newer ` +
+                `than this build's ${spec.schemaVersion}`,
+            ),
+          ),
+      }),
+    );
+
+  const read = (raw: string): Result.Result<A, StorageError> =>
+    pipe(
+      Result.try({
+        try: (): unknown => JSON.parse(raw),
+        catch: failureFrom("malformed", "read", "the stored value is not JSON"),
+      }),
+      Result.map(toEnvelope),
+      Result.flatMap(upgrade),
+      Result.flatMap(
+        flow(
+          decodeUnknown(spec.schema),
+          Result.mapError(
+            flow(
+              describeSchemaError,
+              failureFrom("invalid", "read", "the stored value failed schema validation"),
+            ),
+          ),
         ),
       ),
     );
 
-    const applyWrite = (
-      next: A,
-      reply: Deferred.Deferred<void, StorageError>,
-    ): Effect.Effect<void> =>
-      Effect.gen(function* () {
-        // Validated before it is published, and the *decoded* value is what
-        // gets published. A schema repairs a field rather than rejecting it, so
-        // the two differ. Publishing the raw value would leave memory holding a
-        // value that storage does not have, and the setting would appear to
-        // revert on the next page load.
-        const validated = decodeUnknown(spec.schema)(next);
-        if (Result.isFailure(validated)) {
-          yield* Deferred.fail(
-            reply,
-            raise(
-              "invalid",
-              "write",
-              "refusing to persist a value that fails its own schema",
-              describeSchemaError(validated.failure),
-            ),
-          );
-          return;
-        }
-        const accepted = validated.success;
-        yield* publish(accepted);
+  const decode = (raw: Option.Option<string>): Result.Result<A, StorageError> =>
+    pipe(
+      raw,
+      Option.match({
+        onNone: () => Result.succeed(spec.defaults()),
+        onSome: read,
+      }),
+    );
 
-        if (!debounced) {
-          yield* Deferred.done(reply, yield* Effect.exit(commit(accepted)));
-          return;
-        }
-        pending = Option.some(accepted);
-        waiters.push(reply);
-        yield* armTimer;
-      });
+  /** The decoded value, or the defaults and one issue. */
+  const orDefaults = (decoded: Result.Result<A, StorageError>): Effect.Effect<A> =>
+    pipe(
+      decoded,
+      Result.match({
+        onFailure: (error) => pipe(report(error), Effect.as(spec.defaults())),
+        onSuccess: Effect.succeed,
+      }),
+    );
 
-    const handle = (command: Command<A>): Effect.Effect<void> =>
-      Effect.gen(function* () {
-        switch (command._tag) {
-          case "Hydrate": {
-            // A value still inside its debounce window is newer than the disk.
-            // Write it first, or the read brings back the value that it is
-            // about to replace.
-            yield* commitPending;
-            const raw = yield* Effect.exit(kv.get(key));
-            if (Exit.isFailure(raw)) {
-              // Do not publish the defaults after a transport failure. They are
-              // an answer for this caller, not the state of the world. An
-              // unrelated update must not write them over good data later.
-              readFailure = raise("backend", "read", "could not read the stored value", raw.cause);
-              yield* Deferred.succeed(command.reply, yield* SubscriptionRef.get(value));
-              return;
-            }
-            readFailure = null;
-            const decoded = decode(raw.value);
-            yield* publish(decoded);
-            yield* Deferred.succeed(command.reply, decoded);
-            return;
-          }
+  const decodeOrDefaults = flow(decode, orDefaults);
 
-          case "Write": {
-            yield* applyWrite(command.value, command.reply);
-            return;
-          }
+  // -- the backend ---------------------------------------------------------
 
-          case "Update": {
-            if (readFailure !== null) {
-              // The defaults are not a safe base for a read, change and write.
-              // Refuse until a later read succeeds, or until the caller
-              // replaces the whole value with `write`.
-              yield* Deferred.fail(command.reply, readFailure);
-              return;
-            }
-            const next = command.change(yield* SubscriptionRef.get(value));
-            const inner = yield* Deferred.make<void, StorageError>();
-            yield* applyWrite(next, inner);
-            yield* Effect.forkDetach(
-              pipe(
-                Deferred.await(inner),
-                Effect.matchEffect({
-                  onFailure: (error) => Deferred.fail(command.reply, error),
-                  onSuccess: () => Deferred.succeed(command.reply, next),
-                }),
-              ),
-            );
-            return;
-          }
+  /**
+   * Validated before it is published or written, and the *decoded* value is
+   * what goes on. A schema repairs a field rather than rejecting it, so the
+   * two differ.
+   */
+  const validate = flow(
+    decodeUnknown(spec.schema),
+    Result.mapError(
+      flow(
+        describeSchemaError,
+        failureFrom("invalid", "write", "refusing to persist a value that fails its own schema"),
+      ),
+    ),
+  );
 
-          case "Flush": {
-            const outcome = yield* commitPending;
-            if (Option.isSome(command.reply)) {
-              yield* Deferred.done(command.reply.value, outcome);
-            }
-            return;
-          }
+  /**
+   * The bytes for one value, or the failure that stops the write.
+   *
+   * The value is validated on the way out as well as on the way in. A bad
+   * value is then caught where it was made, and not on the next page load. A
+   * bad value that reached the disk would reset the group on the next read,
+   * and it would take every other field with it.
+   *
+   * One function for the actor path and for the exit path. The two must give
+   * the same bytes, and one function is the only way to be sure of that. Only
+   * the actor reports a failure, so that one failure gives one message: the
+   * actor writes the same value again and reports it there.
+   */
+  const encode = flow(
+    validate,
+    Result.flatMap((data) =>
+      Result.try({
+        try: () => JSON.stringify({ schemaVersion: spec.schemaVersion, data }),
+        catch: failureFrom("malformed", "write", "the value cannot be serialised"),
+      }),
+    ),
+  );
 
-          case "Reset": {
-            yield* cancelTimer;
-            pending = Option.none();
-            // The waiting writes were deliberately dropped, and they never
-            // reached storage. `write` promises to complete when they do, so
-            // they must be failed, not succeeded. The caller asked for this, so
-            // it is not reported beside the message that caused it.
-            yield* settleWaiters(
-              Exit.fail(
-                raise("cancelled", "write", "the write was replaced by a reset", undefined, false),
-              ),
-            );
-            const defaults = spec.defaults();
-            yield* publish(defaults);
-            const removed = yield* Effect.exit(
-              Effect.uninterruptible(
-                pipe(
-                  kv.remove(key),
-                  Effect.mapError((cause) => raise("backend", "write", cause.detail, cause)),
-                ),
-              ),
-            );
-            if (Exit.isFailure(removed)) {
-              yield* Deferred.failCause(command.reply, removed.cause);
-              return;
-            }
-            readFailure = null;
-            yield* Deferred.succeed(command.reply, defaults);
-            return;
-          }
+  /** Write one value to the backend. */
+  const commit = (next: A): Effect.Effect<void, StorageError> =>
+    pipe(
+      encode(next),
+      Effect.fromResult,
+      Effect.tapError(report),
+      Effect.flatMap((bytes) =>
+        pipe(
+          kv.set(key, bytes),
+          Effect.mapError(backendWriteFailure),
+          Effect.tapError(report),
+          // Not interruptible. A promise inside the backend keeps running after
+          // its fiber is interrupted, so an interrupted `set` could still land
+          // after a later `remove`.
+          Effect.uninterruptible,
+        ),
+      ),
+      Effect.andThen(setReadFailure(Option.none())),
+    );
 
-          case "Remote": {
-            // Local intent wins while it is waiting. Another tab did commit,
-            // but replacing the value that this user has just chosen would be
-            // the greater surprise. Our own commit becomes the last write.
-            if (Option.isSome(pending)) return;
-            yield* publish(decode(command.raw));
-            return;
-          }
-        }
-      });
+  type SetUnsafe = (key: string, value: string) => void;
 
-    yield* Effect.forkScoped(Effect.forever(pipe(Queue.take(mailbox), Effect.flatMap(handle))));
+  /** One direct write. A throw becomes a failure, so the exit path never throws. */
+  const writeDirect = (setUnsafe: SetUnsafe, bytes: string): Result.Result<void, StorageError> =>
+    Result.try({
+      try: () => setUnsafe(key, bytes),
+      catch: failureFrom("backend", "write", "the direct write failed"),
+    });
 
-    // Another tab's writes enter through the same queue, so they take their
-    // turn like everything else.
-    yield* Effect.forkScoped(
-      pipe(
-        kv.changes(key),
-        Stream.runForEach((raw) => Queue.offer(mailbox, { _tag: "Remote", raw })),
+  /** The exit path wrote the held value. The actor answers its callers later. */
+  const markWritten = (waiters: Array.NonEmptyReadonlyArray<WriteReply>): void => {
+    pipe(held, MutableRef.set<Held<A>>(Held.Written({ waiters })));
+    pipe(readFailure, MutableRef.set(Option.none()));
+  };
+
+  /** The held value, written with a direct call. It never throws. */
+  const writeHeld = (setUnsafe: SetUnsafe, { value, waiters }: Holding<A>): void =>
+    pipe(
+      encode(value),
+      Result.match({
+        // The value cannot be written at all. The actor reports it, and it
+        // fails the callers that wait for this write.
+        onFailure: constVoid,
+        onSuccess: (bytes) =>
+          pipe(
+            writeDirect(setUnsafe, bytes),
+            Result.match({
+              // The value stays held, so the actor tries again. A second
+              // message therefore means a second failed attempt, and not one
+              // failure twice.
+              onFailure: (error) => {
+                Queue.offerUnsafe(issues, error);
+              },
+              onSuccess: () => markWritten(waiters),
+            }),
+          ),
+      }),
+    );
+
+  /**
+   * Write the held value to the backend now, with no suspension.
+   *
+   * This exit path is only for a synchronous backend. A promise-backed
+   * manager writes each accepted change through the actor with no debounce.
+   * The actor waits for each promise before it starts the next write.
+   *
+   * Four rules hold this path together:
+   *
+   * 1. **One value goes, and it is the newest one.** `Holding` holds the last
+   *    write of the debounce window. The order of two writes to one key is
+   *    therefore the order that the backend sees.
+   * 2. **Nothing is written twice.** The window becomes `Written` after the
+   *    write, so the flush that the actor runs later finds nothing to write.
+   * 3. **A value that the actor is writing is left alone.** The actor empties
+   *    the window before it commits, and it runs one command at a time. A
+   *    window that holds no value therefore means that nothing is owed.
+   * 4. **It never throws.** The `pagehide` handler must return, and a browser
+   *    swallows a throw from a listener. A failed write keeps the value held,
+   *    so the actor writes it again if this page lives on.
+   *
+   * A command that is still in the mailbox is not covered. The exit path
+   * cannot take it without breaking the actor order. A final exit can lose a
+   * command that the actor did not accept before the exit.
+   */
+  const flushUnsafe = (): void =>
+    pipe(
+      Option.all({
+        setUnsafe: Option.fromNullishOr(kv.setUnsafe),
+        holding: holdingOf(MutableRef.get(held)),
+      }),
+      Option.match({
+        onNone: constVoid,
+        onSome: ({ setUnsafe, holding }) => writeHeld(setUnsafe, holding),
+      }),
+    );
+
+  const publish = (next: A): Effect.Effect<void> => pipe(memory, SubscriptionRef.set(next));
+
+  const cancelTimer = FiberHandle.clear(timer);
+
+  /** Take whatever the window holds, and leave it empty. */
+  const takeHeld = Effect.sync(() => pipe(held, MutableRef.getAndSet<Held<A>>(Held.Empty())));
+
+  const settle = (
+    waiters: ReadonlyArray<WriteReply>,
+    outcome: Exit.Exit<void, StorageError>,
+  ): Effect.Effect<void> =>
+    pipe(waiters, Effect.forEach(Deferred.done(outcome), { discard: true }));
+
+  /** Write whatever is inside the debounce window, if anything is. */
+  const commitHeld: Effect.Effect<Exit.Exit<void, StorageError>> = Effect.gen(function* () {
+    yield* cancelTimer;
+    const taken = yield* takeHeld;
+    const outcome = yield* pipe(
+      taken,
+      Held.$match({
+        Empty: () => Effect.succeed(Exit.void),
+        Holding: ({ value }) => Effect.exit(commit(value)),
+        Written: () => Effect.succeed(Exit.void),
+      }),
+    );
+    yield* settle(waitersOf(taken), outcome);
+    return outcome;
+  });
+
+  // -- the command loop ----------------------------------------------------
+
+  const elapsed = pipe(mailbox, Queue.offer(Command.Elapsed()));
+
+  const armTimer = (delay: Duration.Duration) =>
+    pipe(Effect.sleep(delay), Effect.andThen(elapsed), FiberHandle.run(timer));
+
+  /** Write an accepted value now, and give the caller the outcome. */
+  const commitNow = (accepted: A, reply: WriteReply): Effect.Effect<void> =>
+    pipe(
+      commit(accepted),
+      Effect.exit,
+      Effect.flatMap((outcome) => pipe(reply, Deferred.done(outcome))),
+    );
+
+  /** Hold an accepted value until the window closes. The caller waits for that write. */
+  const holdFor = (delay: Duration.Duration, accepted: A, reply: WriteReply): Effect.Effect<void> =>
+    pipe(
+      Effect.sync(() => {
+        pipe(held, MutableRef.update(hold(accepted, reply)));
+      }),
+      Effect.andThen(armTimer(delay)),
+    );
+
+  const persist = (accepted: A, reply: WriteReply): Effect.Effect<void> =>
+    pipe(
+      policy,
+      WritePolicy.$match({
+        Immediate: () => commitNow(accepted, reply),
+        Debounced: ({ delay }) => holdFor(delay, accepted, reply),
+      }),
+    );
+
+  /** Report a refused value, and give the caller the same failure. */
+  const refuse = (error: StorageError, reply: WriteReply): Effect.Effect<void> => {
+    const answer = pipe(reply, Deferred.fail(error));
+    return pipe(report(error), Effect.andThen(answer));
+  };
+
+  // Validated before it is published, and the *decoded* value is what gets
+  // published. Publishing the raw value would leave memory holding a value
+  // that storage does not have, and the setting would appear to revert on the
+  // next page load.
+  const applyWrite = (next: A, reply: WriteReply): Effect.Effect<void> =>
+    pipe(
+      validate(next),
+      Result.match({
+        onFailure: (error) => refuse(error, reply),
+        onSuccess: (accepted) => pipe(publish(accepted), Effect.andThen(persist(accepted, reply))),
+      }),
+    );
+
+  // Do not publish the defaults after a transport failure. They are an answer
+  // for this caller, not the state of the world. An unrelated update must not
+  // write them over good data later.
+  const readFailed = (cause: Cause.Cause<GmError>): Effect.Effect<A> => {
+    const error = failureFrom("backend", "read", "could not read the stored value")(cause);
+    return pipe(
+      report(error),
+      Effect.andThen(setReadFailure(Option.some(error))),
+      Effect.andThen(SubscriptionRef.get(memory)),
+    );
+  };
+
+  const readStored = (raw: Option.Option<string>): Effect.Effect<A> =>
+    pipe(setReadFailure(Option.none()), Effect.andThen(decodeOrDefaults(raw)), Effect.tap(publish));
+
+  const hydrate = Effect.fnUntraced(function* (reply: Deferred.Deferred<A>) {
+    // A value still inside its debounce window is newer than the disk. Write
+    // it first, or the read brings back the value that it is about to replace.
+    yield* commitHeld;
+    const stored = yield* Effect.exit(kv.get(key));
+    const value = yield* pipe(stored, Exit.match({ onFailure: readFailed, onSuccess: readStored }));
+    yield* pipe(reply, Deferred.succeed(value));
+  });
+
+  const changeAndWrite = Effect.fnUntraced(function* (
+    change: (current: A) => A,
+    reply: Deferred.Deferred<A, StorageError>,
+  ) {
+    const next = change(yield* SubscriptionRef.get(memory));
+    const written = yield* Deferred.make<void, StorageError>();
+    yield* applyWrite(next, written);
+    yield* pipe(
+      Deferred.await(written),
+      Effect.matchEffect({
+        onFailure: (error) => pipe(reply, Deferred.fail(error)),
+        onSuccess: () => pipe(reply, Deferred.succeed(next)),
+      }),
+      Effect.forkDetach,
+    );
+  });
+
+  // The defaults are not a safe base for a read, change and write. Refuse
+  // until a later read succeeds, or until the caller replaces the whole value
+  // with `write`.
+  const update = (
+    change: (current: A) => A,
+    reply: Deferred.Deferred<A, StorageError>,
+  ): Effect.Effect<void> =>
+    pipe(
+      Effect.sync(() => MutableRef.get(readFailure)),
+      Effect.flatMap(
+        Option.match({
+          onNone: () => changeAndWrite(change, reply),
+          onSome: (error) => pipe(reply, Deferred.fail(error)),
+        }),
       ),
     );
 
-    const ask = <Ok, Err>(
-      make: (reply: Deferred.Deferred<Ok, Err>) => Command<A>,
-    ): Effect.Effect<Ok, Err> =>
-      Effect.gen(function* () {
-        const reply = yield* Deferred.make<Ok, Err>();
-        yield* Queue.offer(mailbox, make(reply));
-        return yield* Deferred.await(reply);
-      });
-
-    return {
-      name: spec.name,
-      current: SubscriptionRef.get(value),
-      currentUnsafe: () => SubscriptionRef.getUnsafe(value),
-      changes: SubscriptionRef.changes(value),
-      hydrate: ask<A, never>((reply) => ({ _tag: "Hydrate", reply })),
-      write: (next) =>
-        ask<void, StorageError>((reply) => ({
-          _tag: "Write",
-          value: next,
-          reply,
-        })),
-      update: (change) => ask<A, StorageError>((reply) => ({ _tag: "Update", change, reply })),
-      reset: ask<A, StorageError>((reply) => ({ _tag: "Reset", reply })),
-      flush: ask<void, StorageError>((reply) => ({
-        _tag: "Flush",
-        reply: Option.some(reply),
-      })),
-      flushUnsafe,
-    };
+  const reset = Effect.fnUntraced(function* (reply: Deferred.Deferred<A, StorageError>) {
+    yield* cancelTimer;
+    const taken = yield* takeHeld;
+    // The waiting writes were deliberately dropped, and they never reached
+    // storage. `write` promises to complete when they do, so they must be
+    // failed, not succeeded. The caller asked for this, so it is not reported
+    // beside the message that caused it.
+    yield* settle(
+      waitersOf(taken),
+      Exit.fail(failure("cancelled", "write", "the write was replaced by a reset")),
+    );
+    const defaults = spec.defaults();
+    yield* publish(defaults);
+    const removed = yield* pipe(
+      kv.remove(key),
+      Effect.mapError(backendWriteFailure),
+      Effect.tapError(report),
+      Effect.uninterruptible,
+      Effect.exit,
+    );
+    yield* pipe(
+      removed,
+      Exit.match({
+        onFailure: () => Effect.void,
+        onSuccess: () => setReadFailure(Option.none()),
+      }),
+    );
+    const answer = pipe(
+      removed,
+      Exit.map(() => defaults),
+    );
+    yield* pipe(reply, Deferred.done(answer));
   });
+
+  const flush = (reply: WriteReply): Effect.Effect<void> =>
+    pipe(
+      commitHeld,
+      Effect.flatMap((outcome) => pipe(reply, Deferred.done(outcome))),
+    );
+
+  const acceptRemote = flow(decodeOrDefaults, Effect.flatMap(publish));
+
+  // Local intent wins while it is waiting. Another tab did commit, but
+  // replacing the value that this user has just chosen would be the greater
+  // surprise. Our own commit becomes the last write.
+  const remote = (raw: Option.Option<string>): Effect.Effect<void> =>
+    pipe(
+      Effect.sync(() => MutableRef.get(held)),
+      Effect.flatMap(
+        Held.$match({
+          Empty: () => acceptRemote(raw),
+          Holding: () => Effect.void,
+          Written: () => acceptRemote(raw),
+        }),
+      ),
+    );
+
+  const handle = (command: Command<A>): Effect.Effect<void> =>
+    pipe(
+      command,
+      Command.$match({
+        Hydrate: ({ reply }) => hydrate(reply),
+        Write: ({ value, reply }) => applyWrite(value, reply),
+        Update: ({ change, reply }) => update(change, reply),
+        Reset: ({ reply }) => reset(reply),
+        Flush: ({ reply }) => flush(reply),
+        Elapsed: () => commitHeld,
+        Remote: ({ raw }) => remote(raw),
+      }),
+    );
+
+  yield* pipe(Queue.take(mailbox), Effect.flatMap(handle), Effect.forever, Effect.forkScoped);
+
+  // Another tab's writes enter through the same queue, so they take their
+  // turn like everything else.
+  yield* pipe(
+    kv.changes(key),
+    Stream.runForEach((raw) => pipe(mailbox, Queue.offer(Command.Remote({ raw })))),
+    Effect.forkScoped,
+  );
+
+  const ask = <Ok, Err>(
+    make: (reply: Deferred.Deferred<Ok, Err>) => Command<A>,
+  ): Effect.Effect<Ok, Err> =>
+    pipe(
+      Deferred.make<Ok, Err>(),
+      Effect.tap((reply) => pipe(mailbox, Queue.offer(make(reply)))),
+      Effect.flatMap(Deferred.await),
+    );
+
+  return {
+    name: spec.name,
+    current: SubscriptionRef.get(memory),
+    currentUnsafe: () => SubscriptionRef.getUnsafe(memory),
+    changes: SubscriptionRef.changes(memory),
+    hydrate: ask<A, never>((reply) => Command.Hydrate({ reply })),
+    write: (next) => ask<void, StorageError>((reply) => Command.Write({ value: next, reply })),
+    update: (change) => ask<A, StorageError>((reply) => Command.Update({ change, reply })),
+    reset: ask<A, StorageError>((reply) => Command.Reset({ reply })),
+    flush: ask<void, StorageError>((reply) => Command.Flush({ reply })),
+    flushUnsafe,
+  };
+});
 
 // ---------------------------------------------------------------------------
 // The service
 // ---------------------------------------------------------------------------
+
+/** What `Storage` does with every group at once. None of it depends on the value type. */
+type GroupLifecycle = Pick<ValueGroup<unknown>, "hydrate" | "flush" | "flushUnsafe">;
 
 export class Storage extends Context.Service<
   Storage,
@@ -686,17 +884,17 @@ export class Storage extends Context.Service<
       const history = yield* makeGroup(historyGroup, kv, issues);
       const session = yield* makeGroup(sessionGroup, kv, issues);
 
-      const groups: ReadonlyArray<ValueGroup<unknown>> = [
+      // Every group, and never a subset. `update` works against the value in
+      // memory, so a group that was never read has only the defaults — and the
+      // first write to it would replace the user's whole stored value with the
+      // defaults plus one change.
+      const groups: ReadonlyArray<GroupLifecycle> = [
         settings,
         marks,
         findHistory,
         history,
         session,
-        // Every group, and never a subset. `update` works against the value
-        // in memory, so a group that was never read has only the defaults —
-        // and the first write to it would replace the user's whole stored
-        // value with the defaults plus one change.
-      ] as ReadonlyArray<ValueGroup<unknown>>;
+      ];
 
       return Storage.of({
         settings,
@@ -705,17 +903,25 @@ export class Storage extends Context.Service<
         history,
         session,
         issues: Stream.fromQueue(issues),
-        hydrateAll: Effect.forEach(groups, (group) => group.hydrate, {
-          concurrency: "unbounded",
-          discard: true,
-        }),
-        flushAll: Effect.forEach(groups, (group) => Effect.ignore(group.flush), {
-          concurrency: "unbounded",
-          discard: true,
-        }),
-        flushAllUnsafe: () => {
-          for (const group of groups) group.flushUnsafe();
-        },
+        hydrateAll: pipe(
+          groups,
+          Effect.forEach((group) => group.hydrate, {
+            concurrency: "unbounded",
+            discard: true,
+          }),
+        ),
+        flushAll: pipe(
+          groups,
+          Effect.forEach((group) => Effect.ignore(group.flush), {
+            concurrency: "unbounded",
+            discard: true,
+          }),
+        ),
+        flushAllUnsafe: () =>
+          pipe(
+            groups,
+            Array.forEach((group) => group.flushUnsafe()),
+          ),
       });
     }),
   );

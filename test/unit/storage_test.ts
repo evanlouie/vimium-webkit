@@ -12,17 +12,21 @@
 
 import { assert, describe, it } from "@effect/vitest";
 import {
+  Array,
+  Boolean,
   Deferred,
   Effect,
   Exit,
   Fiber,
   Layer,
+  MutableRef,
   Option,
   Queue,
+  Record,
   Result,
   Stream,
-  pipe,
   Struct,
+  pipe,
 } from "effect";
 import { TestClock } from "effect/testing";
 import { defaultSettings } from "~/domain/Persisted.ts";
@@ -58,30 +62,58 @@ interface Backend {
 }
 
 /**
- * The state is plain, and not a `Ref`.
+ * The state is in references, and not in `Ref`s.
  *
  * The exit path writes with a direct call, and a test must read what it wrote
  * without taking a turn of its own. A `Ref` would need an effect for that.
  */
 const makeBackendFor = (kind: KeyValueStore["Service"]["kind"]): Effect.Effect<Backend> =>
   Effect.gen(function* () {
-    const map = new Map<string, string>();
-    const writes: string[] = [];
+    const stored = MutableRef.make<Record.ReadonlyRecord<string, string>>({});
+    const writes = MutableRef.make<readonly string[]>([]);
+    const started = MutableRef.make(0);
     const gate = yield* Deferred.make<void>();
-    let broken = false;
-    let directBroken = false;
-    let actorBroken = false;
-    let held = false;
-    let started = 0;
+    const readsFail = MutableRef.make(false);
+    const writesHeld = MutableRef.make(false);
+    // One-shot faults. Taking one disarms it.
+    const directWriteFails = MutableRef.make(false);
+    const actorWriteFails = MutableRef.make(false);
 
     const put = (key: string, value: string): void => {
-      map.set(key, value);
+      pipe(stored, MutableRef.update(Record.set(key, value)));
     };
 
     const record = (key: string, value: string): void => {
       put(key, value);
-      writes.push(value);
+      pipe(writes, MutableRef.update(Array.append(value)));
     };
+
+    const current = (key: string): Option.Option<string> =>
+      pipe(MutableRef.get(stored), Record.get(key));
+
+    const awaitRelease = Effect.suspend(() =>
+      pipe(
+        MutableRef.get(writesHeld),
+        Boolean.match({
+          onFalse: () => Effect.void,
+          onTrue: () => Deferred.await(gate),
+        }),
+      ),
+    );
+
+    const directWrite = (key: string, value: string): void =>
+      pipe(
+        directWriteFails,
+        MutableRef.getAndSet(false),
+        Boolean.match({
+          onFalse: () => record(key, value),
+          // The double throws, as a backend with a full quota does. That throw
+          // is the behaviour under test, and a direct call has no other channel.
+          onTrue: () => {
+            throw new Error("the quota of the backend is full");
+          },
+        }),
+      );
 
     const service = KeyValueStore.of({
       kind,
@@ -90,111 +122,172 @@ const makeBackendFor = (kind: KeyValueStore["Service"]["kind"]): Effect.Effect<B
       managerPrivate: true,
       get: (key) =>
         Effect.suspend(() =>
-          broken
-            ? Effect.fail(
-                new GmError({
-                  reason: "failed",
-                  api: "test.get",
-                  detail: "the backend is unavailable",
-                }),
-              )
-            : Effect.succeed(Option.fromNullishOr(map.get(key) ?? null)),
+          pipe(
+            MutableRef.get(readsFail),
+            Boolean.match({
+              onFalse: () => Effect.succeed(current(key)),
+              onTrue: () =>
+                Effect.fail(
+                  new GmError({
+                    reason: "failed",
+                    api: "test.get",
+                    detail: "the backend is unavailable",
+                  }),
+                ),
+            }),
+          ),
         ),
       set: (key, value) =>
-        Effect.gen(function* () {
-          started += 1;
-          if (actorBroken) {
-            actorBroken = false;
-            return yield* Effect.fail(
-              new GmError({
-                reason: "failed",
-                api: "test.set",
-                detail: "the manager promise rejected",
-              }),
-            );
-          }
-          if (held) yield* Deferred.await(gate);
-          record(key, value);
-        }),
+        pipe(
+          Effect.sync(() => {
+            MutableRef.increment(started);
+            return pipe(actorWriteFails, MutableRef.getAndSet(false));
+          }),
+          Effect.flatMap(
+            Boolean.match({
+              onFalse: () =>
+                pipe(awaitRelease, Effect.andThen(Effect.sync(() => record(key, value)))),
+              onTrue: () =>
+                Effect.fail(
+                  new GmError({
+                    reason: "failed",
+                    api: "test.set",
+                    detail: "the manager promise rejected",
+                  }),
+                ),
+            }),
+          ),
+        ),
       remove: (key) =>
         Effect.sync(() => {
-          map.delete(key);
+          pipe(stored, MutableRef.update(Record.remove(key)));
         }),
-      setUnsafe:
-        kind === "gm-async"
-          ? null
-          : (key, value) => {
-              if (directBroken) {
-                directBroken = false;
-                throw new Error("the quota of the backend is full");
-              }
-              record(key, value);
-            },
+      setUnsafe: pipe(
+        kind === "gm-async",
+        Boolean.match({
+          onFalse: () => directWrite,
+          onTrue: () => null,
+        }),
+      ),
       changes: () => Stream.empty,
     });
+
+    const open = pipe(gate, Deferred.done(Exit.void));
+
+    const arm = (fault: MutableRef.MutableRef<boolean>): Effect.Effect<void> =>
+      Effect.sync(() => {
+        pipe(fault, MutableRef.set(true));
+      });
 
     return {
       layer: Layer.succeed(KeyValueStore, service),
       seed: (key, raw) => Effect.sync(() => put(key, raw)),
-      read: (key) => Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
-      writes: Effect.sync(() => [...writes]),
-      writesNow: () => [...writes],
-      startedNow: () => started,
-      breakReads: Effect.sync(() => {
-        broken = true;
-      }),
-      breakNextDirectWrite: Effect.sync(() => {
-        directBroken = true;
-      }),
-      holdWrites: Effect.sync(() => {
-        held = true;
-      }),
-      releaseWrites: Effect.gen(function* () {
-        held = false;
-        yield* Deferred.succeed(gate, undefined);
-      }),
-      breakNextActorWrite: Effect.sync(() => {
-        actorBroken = true;
-      }),
+      read: (key) => Effect.sync(() => current(key)),
+      writes: Effect.sync(() => MutableRef.get(writes)),
+      writesNow: () => MutableRef.get(writes),
+      startedNow: () => MutableRef.get(started),
+      breakReads: arm(readsFail),
+      breakNextDirectWrite: arm(directWriteFails),
+      holdWrites: arm(writesHeld),
+      releaseWrites: pipe(
+        Effect.sync(() => {
+          pipe(writesHeld, MutableRef.set(false));
+        }),
+        Effect.andThen(open),
+      ),
+      breakNextActorWrite: arm(actorWriteFails),
     };
   });
 
 const makeBackend = makeBackendFor("memory");
 
 /**
+ * Take `step` until `settled` gives a value.
+ *
+ * A fiber of the group needs turns of its own, so a test gives turns away
+ * until the state that it waits for holds. The loop has a limit, so a state
+ * that never arrives fails the test and does not hang it.
+ */
+const stepUntil = <A>(
+  settled: () => Option.Option<A>,
+  step: Effect.Effect<void>,
+  steps: number,
+  stuck: string,
+): Effect.Effect<A> => {
+  const next = pipe(
+    step,
+    Effect.andThen(Effect.suspend(() => stepUntil(settled, step, steps - 1, stuck))),
+  );
+  const again = pipe(
+    steps > 0,
+    Boolean.match({
+      onFalse: () => Effect.die(new Error(stuck)),
+      onTrue: () => next,
+    }),
+  );
+  return Effect.suspend(() =>
+    pipe(
+      settled(),
+      Option.match({
+        onSome: Effect.succeed,
+        onNone: () => again,
+      }),
+    ),
+  );
+};
+
+/**
  * Move the test clock forward until the fiber settles.
  *
  * A fiber of the group arms the debounce timer, so the arm can happen after
- * the first step of the clock. The loop has a limit, so a write that never
- * lands fails the test and does not hang it.
+ * the first step of the clock.
  */
-const advanceUntilDone = <A, E>(
-  fiber: Fiber.Fiber<A, E>,
-  steps = 20,
-): Effect.Effect<Exit.Exit<A, E>> =>
-  Effect.suspend(() => {
-    const settled = fiber.pollUnsafe();
-    if (settled !== undefined) return Effect.succeed(settled);
-    if (steps <= 0) return Effect.die(new Error("the fiber never settled"));
-    return pipe(TestClock.adjust("100 millis"), Effect.andThen(advanceUntilDone(fiber, steps - 1)));
-  });
+const advanceUntilDone = <A, E>(fiber: Fiber.Fiber<A, E>): Effect.Effect<Exit.Exit<A, E>> =>
+  stepUntil(
+    () => Option.fromNullishOr(fiber.pollUnsafe()),
+    TestClock.adjust("100 millis"),
+    20,
+    "the fiber never settled",
+  );
+
+/** Give the turn away until a condition holds. The group fiber needs a turn to take a command. */
+const yieldUntil = (ready: () => boolean): Effect.Effect<void> =>
+  stepUntil(
+    () =>
+      pipe(
+        ready(),
+        Option.liftPredicate((holds: boolean) => holds),
+      ),
+    Effect.yieldNow,
+    50,
+    "the condition never held",
+  );
+
+/** Give the turn away a fixed number of times. */
+const yieldTurns = (turns: number): Effect.Effect<void> =>
+  pipe(
+    Array.range(1, turns),
+    Effect.forEach(() => Effect.yieldNow, { discard: true }),
+  );
 
 /** The envelope that the store writes around a group value. */
 const envelope = (schemaVersion: number, data: unknown): string =>
   JSON.stringify({ schemaVersion, data });
 
-/**
- * Give the turn away until a condition holds.
- *
- * The group fiber needs a turn to take a command. The loop has a limit, so a
- * condition that never holds fails the test and does not hang it.
- */
-const yieldUntil = (ready: () => boolean, steps = 50): Effect.Effect<void> =>
-  Effect.suspend(() => {
-    if (ready()) return Effect.void;
-    if (steps <= 0) return Effect.die(new Error("the condition never held"));
-    return pipe(Effect.yieldNow, Effect.andThen(yieldUntil(ready, steps - 1)));
-  });
+/** The write at `index`, or nothing, which no assertion includes. */
+const nth = (writes: readonly string[], index: number): string =>
+  pipe(
+    writes,
+    Array.get(index),
+    Option.getOrElse(() => ""),
+  );
+
+/** The raw value, or nothing, which no assertion includes. */
+const orEmpty = (raw: Option.Option<string>): string =>
+  pipe(
+    raw,
+    Option.getOrElse(() => ""),
+  );
 
 /**
  * Leave a settings value inside its debounce window.
@@ -208,9 +301,11 @@ const leavePending = (
   scrollStepSize: number,
 ): Effect.Effect<Fiber.Fiber<void, StorageError>> =>
   Effect.gen(function* () {
-    const writing = yield* Effect.forkChild(
-      storage.settings.write(pipe(defaultSettings(), Struct.assign({ scrollStepSize }))),
-      { startImmediately: true },
+    const writing = yield* pipe(
+      defaultSettings(),
+      Struct.assign({ scrollStepSize }),
+      storage.settings.write,
+      Effect.forkChild({ startImmediately: true }),
     );
     yield* yieldUntil(() => storage.settings.currentUnsafe().scrollStepSize === scrollStepSize);
     return writing;
@@ -218,10 +313,19 @@ const leavePending = (
 
 /** The first issue that storage reports, without waiting for a second. */
 const firstIssue = (storage: Storage["Service"]): Effect.Effect<Option.Option<StorageError>> =>
-  pipe(
-    Stream.runCollect(pipe(storage.issues, Stream.take(1))),
-    Effect.map((issues) => Option.fromNullishOr(issues[0] ?? null)),
-  );
+  pipe(storage.issues, Stream.take(1), Stream.runCollect, Effect.map(Array.head));
+
+/** The fields of a failure that a test compares, when there is a failure. */
+const outline = <const Keys extends ReadonlyArray<keyof StorageError>>(
+  failure: Option.Option<StorageError>,
+  keys: Keys,
+) => pipe(failure, Option.map(Struct.pick(keys)));
+
+/** The failure of an effect, when it fails. */
+const failureOf = <A>(
+  effect: Effect.Effect<A, StorageError>,
+): Effect.Effect<Option.Option<StorageError>> =>
+  pipe(effect, Effect.result, Effect.map(Result.getFailure));
 
 describe("Storage", () => {
   it.effect("gives the defaults and one issue for a value that is not JSON", () =>
@@ -237,11 +341,10 @@ describe("Storage", () => {
           assert.deepEqual(value, defaultSettings());
 
           const issue = yield* firstIssue(storage);
-          assert.isTrue(Option.isSome(issue));
-          if (Option.isNone(issue)) return;
-          assert.strictEqual(issue.value.reason, "malformed");
-          assert.strictEqual(issue.value.direction, "read");
-          assert.strictEqual(issue.value.group, "settings");
+          assert.deepEqual(
+            outline(issue, ["reason", "direction", "group"]),
+            Option.some({ reason: "malformed", direction: "read", group: "settings" }),
+          );
         }),
         Effect.provide(Storage.layer),
         Effect.provide(backend.layer),
@@ -258,19 +361,20 @@ describe("Storage", () => {
           const storage = yield* Storage;
           // A newer build in another tab wrote this. Do not go backwards, and do
           // not overwrite it.
-          yield* backend.seed(
-            SETTINGS_KEY,
-            envelope(99, pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }))),
-          );
+          const newer = pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }));
+          yield* backend.seed(SETTINGS_KEY, envelope(99, newer));
 
           const value = yield* storage.settings.hydrate;
           assert.deepEqual(value, defaultSettings());
 
           const issue = yield* firstIssue(storage);
-          assert.isTrue(Option.isSome(issue));
-          if (Option.isNone(issue)) return;
-          assert.strictEqual(issue.value.reason, "invalid");
-          assert.include(issue.value.detail, "99");
+          assert.deepEqual(outline(issue, ["reason"]), Option.some({ reason: "invalid" }));
+          const detail = pipe(
+            issue,
+            Option.map((found) => found.detail),
+            orEmpty,
+          );
+          assert.include(detail, "99");
 
           // The stored value is left alone.
           const raw = yield* backend.read(SETTINGS_KEY);
@@ -299,9 +403,7 @@ describe("Storage", () => {
           assert.deepEqual(value, { local: {}, global: {} });
 
           const issue = yield* firstIssue(storage);
-          assert.isTrue(Option.isSome(issue));
-          if (Option.isNone(issue)) return;
-          assert.strictEqual(issue.value.reason, "invalid");
+          assert.deepEqual(outline(issue, ["reason"]), Option.some({ reason: "invalid" }));
         }),
         Effect.provide(Storage.layer),
         Effect.provide(backend.layer),
@@ -316,11 +418,12 @@ describe("Storage", () => {
       yield* pipe(
         Effect.gen(function* () {
           const storage = yield* Storage;
-          const next = pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }));
-
-          const writing = yield* Effect.forkChild(storage.settings.write(next), {
-            startImmediately: true,
-          });
+          const writing = yield* pipe(
+            defaultSettings(),
+            Struct.assign({ scrollStepSize: 120 }),
+            storage.settings.write,
+            Effect.forkChild({ startImmediately: true }),
+          );
 
           // The settings group joins writes for 250 ms, so nothing has reached
           // the backend and the caller is still waiting.
@@ -334,8 +437,7 @@ describe("Storage", () => {
 
           const raw = yield* backend.read(SETTINGS_KEY);
           assert.isTrue(Option.isSome(raw));
-          if (Option.isNone(raw)) return;
-          assert.include(raw.value, '"scrollStepSize":120');
+          assert.include(orEmpty(raw), '"scrollStepSize":120');
         }),
         Effect.provide(Storage.layer),
         Effect.provide(backend.layer),
@@ -350,9 +452,11 @@ describe("Storage", () => {
       yield* pipe(
         Effect.gen(function* () {
           const storage = yield* Storage;
-          const writing = yield* Effect.forkChild(
-            storage.settings.write(pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }))),
-            { startImmediately: true },
+          const writing = yield* pipe(
+            defaultSettings(),
+            Struct.assign({ scrollStepSize: 120 }),
+            storage.settings.write,
+            Effect.forkChild({ startImmediately: true }),
           );
 
           yield* yieldUntil(() => backend.startedNow() === 1);
@@ -375,17 +479,21 @@ describe("Storage", () => {
           const base = yield* storage.session.current;
           yield* backend.holdWrites;
 
-          const first = yield* Effect.forkChild(
-            storage.session.write(pipe(base, Struct.assign({ acknowledged: ["first"] }))),
-            { startImmediately: true },
+          const first = yield* pipe(
+            base,
+            Struct.assign({ acknowledged: ["first"] }),
+            storage.session.write,
+            Effect.forkChild({ startImmediately: true }),
           );
           yield* yieldUntil(() => backend.startedNow() === 1);
 
-          const second = yield* Effect.forkChild(
-            storage.session.write(pipe(base, Struct.assign({ acknowledged: ["second"] }))),
-            { startImmediately: true },
+          const second = yield* pipe(
+            base,
+            Struct.assign({ acknowledged: ["second"] }),
+            storage.session.write,
+            Effect.forkChild({ startImmediately: true }),
           );
-          for (let turn = 0; turn < 10; turn += 1) yield* Effect.yieldNow;
+          yield* yieldTurns(10);
 
           assert.strictEqual(backend.startedNow(), 1);
           yield* backend.releaseWrites;
@@ -394,8 +502,8 @@ describe("Storage", () => {
 
           const writes = backend.writesNow();
           assert.lengthOf(writes, 2);
-          assert.include(writes[0] ?? "", "first");
-          assert.include(writes[1] ?? "", "second");
+          assert.include(nth(writes, 0), "first");
+          assert.include(nth(writes, 1), "second");
         }),
         Effect.provide(Storage.layer),
         Effect.provide(backend.layer),
@@ -410,28 +518,30 @@ describe("Storage", () => {
       yield* pipe(
         Effect.gen(function* () {
           const storage = yield* Storage;
-          const reported = yield* Effect.forkChild(firstIssue(storage), {
-            startImmediately: true,
-          });
+          const reported = yield* pipe(
+            firstIssue(storage),
+            Effect.forkChild({ startImmediately: true }),
+          );
           yield* backend.breakNextActorWrite;
 
-          const outcome = yield* Effect.result(
-            storage.session.write(
-              pipe(storage.session.currentUnsafe(), Struct.assign({ acknowledged: ["rejected"] })),
-            ),
+          const failure = yield* pipe(
+            storage.session.currentUnsafe(),
+            Struct.assign({ acknowledged: ["rejected"] }),
+            storage.session.write,
+            failureOf,
           );
-          assert.isTrue(Result.isFailure(outcome));
-          if (Result.isSuccess(outcome)) return;
-          assert.strictEqual(outcome.failure.reason, "backend");
-          assert.strictEqual(outcome.failure.direction, "write");
+          assert.deepEqual(
+            outline(failure, ["reason", "direction"]),
+            Option.some({ reason: "backend", direction: "write" }),
+          );
 
           yield* yieldUntil(() => reported.pollUnsafe() !== undefined);
           const issue = yield* Fiber.join(reported);
-          assert.isTrue(Option.isSome(issue));
-          if (Option.isNone(issue)) return;
-          assert.strictEqual(issue.value.reason, outcome.failure.reason);
-          assert.strictEqual(issue.value.direction, outcome.failure.direction);
-          assert.strictEqual(issue.value.detail, outcome.failure.detail);
+          // The message and the failure describe the same write.
+          assert.deepEqual(
+            outline(issue, ["reason", "direction", "detail"]),
+            outline(failure, ["reason", "direction", "detail"]),
+          );
         }),
         Effect.provide(Storage.layer),
         Effect.provide(backend.layer),
@@ -446,9 +556,11 @@ describe("Storage", () => {
       yield* pipe(
         Effect.gen(function* () {
           const storage = yield* Storage;
-          const writing = yield* Effect.forkChild(
-            storage.settings.write(pipe(defaultSettings(), Struct.assign({ scrollStepSize: 90 }))),
-            { startImmediately: true },
+          const writing = yield* pipe(
+            defaultSettings(),
+            Struct.assign({ scrollStepSize: 90 }),
+            storage.settings.write,
+            Effect.forkChild({ startImmediately: true }),
           );
 
           yield* storage.settings.flush;
@@ -469,19 +581,22 @@ describe("Storage", () => {
         Effect.gen(function* () {
           const storage = yield* Storage;
 
-          const writing = yield* Effect.forkChild(
-            storage.settings.write(pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }))),
-            { startImmediately: true },
+          const writing = yield* pipe(
+            defaultSettings(),
+            Struct.assign({ scrollStepSize: 120 }),
+            storage.settings.write,
+            Effect.forkChild({ startImmediately: true }),
           );
           // The queue is first in, first out, so the reset runs after the write
           // command, and before the debounce ends.
           yield* storage.settings.reset;
 
           const outcome = yield* Fiber.await(writing);
-          const error = Option.getOrNull(Exit.findErrorOption(outcome));
-          assert.isNotNull(error, "the waiting write must fail");
-          assert.strictEqual(error?.reason, "cancelled");
-          assert.strictEqual(error?.direction, "write");
+          assert.deepEqual(
+            outline(Exit.findErrorOption(outcome), ["reason", "direction"]),
+            Option.some({ reason: "cancelled", direction: "write" }),
+            "the waiting write must fail",
+          );
 
           // The write never reached the backend, and the defaults are in memory.
           assert.deepEqual(yield* backend.writes, []);
@@ -506,15 +621,14 @@ describe("Storage", () => {
           // world. They must not be written over good data later.
           yield* storage.settings.hydrate;
 
-          const outcome = yield* Effect.result(
-            storage.settings.update((current) =>
-              pipe(current, Struct.assign({ scrollStepSize: 120 })),
-            ),
+          const failure = yield* pipe(
+            storage.settings.update(Struct.assign({ scrollStepSize: 120 })),
+            failureOf,
           );
-          assert.isTrue(Result.isFailure(outcome));
-          const error = Result.isFailure(outcome) ? outcome.failure : null;
-          assert.strictEqual(error?.reason, "backend");
-          assert.strictEqual(error?.direction, "read");
+          assert.deepEqual(
+            outline(failure, ["reason", "direction"]),
+            Option.some({ reason: "backend", direction: "read" }),
+          );
           assert.deepEqual(yield* backend.writes, []);
         }),
         Effect.provide(Storage.layer),
@@ -533,13 +647,17 @@ describe("Storage", () => {
           // The session group writes at once, so each write is its own commit.
           const base = yield* storage.session.current;
 
-          const first = yield* Effect.forkChild(
-            storage.session.write(pipe(base, Struct.assign({ acknowledged: ["first"] }))),
-            { startImmediately: true },
+          const first = yield* pipe(
+            base,
+            Struct.assign({ acknowledged: ["first"] }),
+            storage.session.write,
+            Effect.forkChild({ startImmediately: true }),
           );
-          const second = yield* Effect.forkChild(
-            storage.session.write(pipe(base, Struct.assign({ acknowledged: ["second"] }))),
-            { startImmediately: true },
+          const second = yield* pipe(
+            base,
+            Struct.assign({ acknowledged: ["second"] }),
+            storage.session.write,
+            Effect.forkChild({ startImmediately: true }),
           );
 
           yield* Fiber.join(first);
@@ -547,13 +665,12 @@ describe("Storage", () => {
 
           const writes = yield* backend.writes;
           assert.lengthOf(writes, 2);
-          assert.include(writes[0] ?? "", "first");
-          assert.include(writes[1] ?? "", "second");
+          assert.include(nth(writes, 0), "first");
+          assert.include(nth(writes, 1), "second");
 
           const raw = yield* backend.read(SESSION_KEY);
           assert.isTrue(Option.isSome(raw));
-          if (Option.isNone(raw)) return;
-          assert.include(raw.value, "second");
+          assert.include(orEmpty(raw), "second");
         }),
         Effect.provide(Storage.layer),
         Effect.provide(backend.layer),
@@ -598,8 +715,7 @@ describe("Storage", () => {
           });
           const stored = yield* backend.read(SESSION_KEY);
           assert.isTrue(Option.isSome(stored));
-          if (Option.isNone(stored)) return;
-          assert.include(stored.value, '"acknowledged":["one"]');
+          assert.include(orEmpty(stored), '"acknowledged":["one"]');
 
           const defaults = yield* storage.session.reset;
           assert.deepEqual(defaults, {
@@ -625,11 +741,9 @@ describe("Storage", () => {
           const storage = yield* Storage;
           // The schema removes duplicate characters, so the stored value differs
           // from the offered value. Memory must hold what storage holds.
-          const updating = yield* Effect.forkChild(
-            storage.settings.update((current) =>
-              pipe(current, Struct.assign({ linkHintCharacters: "aabb" })),
-            ),
-            { startImmediately: true },
+          const updating = yield* pipe(
+            storage.settings.update(Struct.assign({ linkHintCharacters: "aabb" })),
+            Effect.forkChild({ startImmediately: true }),
           );
           yield* storage.settings.flush;
           const stored = yield* Fiber.join(updating);
@@ -652,18 +766,19 @@ describe("Storage", () => {
         Effect.gen(function* () {
           const storage = yield* Storage;
           const seen = yield* Queue.unbounded<number>();
-          yield* Effect.forkScoped(
-            pipe(
-              storage.settings.changes,
-              Stream.runForEach((settings) => Queue.offer(seen, settings.scrollStepSize)),
-            ),
+          yield* pipe(
+            storage.settings.changes,
+            Stream.runForEach((settings) => pipe(seen, Queue.offer(settings.scrollStepSize))),
+            Effect.forkScoped,
           );
 
           assert.strictEqual(yield* Queue.take(seen), 60);
 
-          const writing = yield* Effect.forkChild(
-            storage.settings.write(pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }))),
-            { startImmediately: true },
+          const writing = yield* pipe(
+            defaultSettings(),
+            Struct.assign({ scrollStepSize: 120 }),
+            storage.settings.write,
+            Effect.forkChild({ startImmediately: true }),
           );
           yield* storage.settings.flush;
           yield* Fiber.join(writing);
@@ -682,10 +797,8 @@ describe("Storage", () => {
       yield* pipe(
         Effect.gen(function* () {
           const storage = yield* Storage;
-          yield* backend.seed(
-            SETTINGS_KEY,
-            envelope(1, pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }))),
-          );
+          const settings = pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }));
+          yield* backend.seed(SETTINGS_KEY, envelope(1, settings));
           yield* backend.seed(
             `${STORAGE_PREFIX}find-history`,
             envelope(1, { queries: ["needle"] }),
@@ -736,7 +849,7 @@ describe("the exit path of Storage", () => {
             1,
             "the backend call must start before the dispatch returns",
           );
-          assert.include(insideDispatch[0] ?? "", '"scrollStepSize":120');
+          assert.include(nth(insideDispatch, 0), '"scrollStepSize":120');
 
           // The actor takes its own turn afterwards, and it finds nothing to do.
           const outcome = yield* advanceUntilDone(writing);
@@ -769,8 +882,8 @@ describe("the exit path of Storage", () => {
 
           const writes = backend.writesNow();
           assert.lengthOf(writes, 2);
-          assert.include(writes[0] ?? "", '"scrollStepSize":90');
-          assert.include(writes[1] ?? "", '"scrollStepSize":150');
+          assert.include(nth(writes, 0), '"scrollStepSize":90');
+          assert.include(nth(writes, 1), '"scrollStepSize":150');
         }),
         Effect.provide(Storage.layer),
         Effect.provide(backend.layer),
@@ -790,9 +903,10 @@ describe("the exit path of Storage", () => {
 
           // The actor takes the value out of the window and stops inside the
           // backend call. Nothing is owed to the exit path any more.
-          const flushing = yield* Effect.forkChild(storage.settings.flush, {
-            startImmediately: true,
-          });
+          const flushing = yield* pipe(
+            storage.settings.flush,
+            Effect.forkChild({ startImmediately: true }),
+          );
           yield* yieldUntil(() => backend.startedNow() === 1);
 
           yield* Effect.sync(() => storage.flushAllUnsafe());
@@ -825,22 +939,15 @@ describe("the exit path of Storage", () => {
 
           // A throw here would be swallowed by the browser, and the rest of the
           // exit hook would never run.
-          const thrown = yield* Effect.sync(() => {
-            try {
-              storage.flushAllUnsafe();
-              return null;
-            } catch (cause) {
-              return String(cause);
-            }
-          });
-          assert.isNull(thrown, "the pagehide handler must return");
+          const returned = yield* Effect.sync(() => Result.try(() => storage.flushAllUnsafe()));
+          assert.isTrue(Result.isSuccess(returned), "the pagehide handler must return");
           assert.deepEqual(backend.writesNow(), []);
 
           const issue = yield* firstIssue(storage);
-          assert.isTrue(Option.isSome(issue));
-          if (Option.isNone(issue)) return;
-          assert.strictEqual(issue.value.reason, "backend");
-          assert.strictEqual(issue.value.direction, "write");
+          assert.deepEqual(
+            outline(issue, ["reason", "direction"]),
+            Option.some({ reason: "backend", direction: "write" }),
+          );
 
           // The value is still pending, so the actor writes it on its own turn.
           const outcome = yield* advanceUntilDone(writing);
@@ -861,7 +968,7 @@ describe("the exit path of Storage", () => {
         Effect.gen(function* () {
           const storage = yield* Storage;
           const settingsWrite = yield* leavePending(storage, 120);
-          const marksWrite = yield* Effect.forkChild(
+          const marksWrite = yield* pipe(
             storage.marks.write({
               local: {
                 "https://example.test/": {
@@ -870,10 +977,10 @@ describe("the exit path of Storage", () => {
               },
               global: {},
             }),
-            { startImmediately: true },
+            Effect.forkChild({ startImmediately: true }),
           );
-          yield* yieldUntil(
-            () => storage.marks.currentUnsafe().local["https://example.test/"] !== undefined,
+          yield* yieldUntil(() =>
+            pipe(storage.marks.currentUnsafe().local, Record.has("https://example.test/")),
           );
           yield* backend.breakNextDirectWrite;
 
@@ -881,7 +988,7 @@ describe("the exit path of Storage", () => {
 
           const writes = backend.writesNow();
           assert.lengthOf(writes, 1);
-          assert.include(writes[0] ?? "", '"a"');
+          assert.include(nth(writes, 0), '"a"');
 
           yield* advanceUntilDone(settingsWrite);
           yield* advanceUntilDone(marksWrite);
@@ -904,7 +1011,7 @@ describe("the exit path of Storage", () => {
 
           yield* leavePending(storage, 90);
           yield* Effect.sync(() => storage.flushAllUnsafe());
-          return directBackend.writesNow()[0] ?? "";
+          return nth(directBackend.writesNow(), 0);
         }),
         Effect.provide(Storage.layer),
         Effect.provide(directBackend.layer),
@@ -916,13 +1023,15 @@ describe("the exit path of Storage", () => {
           const storage = yield* Storage;
           yield* actorBackend.seed(SETTINGS_KEY, envelope(0, { scrollStepSize: 120 }));
           const migrated = yield* storage.settings.hydrate;
-          const writing = yield* Effect.forkChild(
-            storage.settings.write(pipe(migrated, Struct.assign({ scrollStepSize: 90 }))),
-            { startImmediately: true },
+          const writing = yield* pipe(
+            migrated,
+            Struct.assign({ scrollStepSize: 90 }),
+            storage.settings.write,
+            Effect.forkChild({ startImmediately: true }),
           );
           yield* storage.settings.flush;
           yield* Fiber.join(writing);
-          return actorBackend.writesNow()[0] ?? "";
+          return nth(actorBackend.writesNow(), 0);
         }),
         Effect.provide(Storage.layer),
         Effect.provide(actorBackend.layer),
