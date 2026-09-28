@@ -67,7 +67,7 @@ import { Dom } from "~/platform/Dom.ts";
 import { elementAt } from "~/platform/Elements.ts";
 import { Storage } from "~/platform/Storage.ts";
 import type { HudPromptOptions } from "~/ui/Hud.ts";
-import { Hud } from "~/ui/Hud.ts";
+import { Hud, KeyClaim } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
 import {
   collectTextRuns,
@@ -900,17 +900,17 @@ export class Find extends Context.Service<
             ),
           );
 
-        /** `true` takes the key. A history key is taken even with no history. */
+        /** A history key that is aimed at our own input is taken, even with no history. */
         const takeHistoryKey = (
           event: KeyboardEvent,
           delta: number,
           value: string,
-        ): Effect.Effect<boolean> =>
+        ): Effect.Effect<KeyClaim> =>
           pipe(
             event.target,
             Option.liftPredicate(isInput),
             Option.match({
-              onNone: () => Effect.succeed(false),
+              onNone: () => Effect.succeed(KeyClaim.Pass()),
               onSome: (input) =>
                 pipe(
                   history,
@@ -918,7 +918,7 @@ export class Find extends Context.Service<
                     onEmpty: () => Effect.void,
                     onNonEmpty: (entries) => applyHistory(input, entries, delta, value),
                   }),
-                  Effect.as(true),
+                  Effect.as(KeyClaim.Taken()),
                 ),
             }),
           );
@@ -932,7 +932,7 @@ export class Find extends Context.Service<
             pipe(
               historyStep(event),
               Option.match({
-                onNone: () => Effect.succeed(false),
+                onNone: () => Effect.succeed(KeyClaim.Pass()),
                 onSome: (delta) => takeHistoryKey(event, delta, value),
               }),
             ),

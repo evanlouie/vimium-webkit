@@ -61,6 +61,15 @@ export const ERROR_HUD_DURATION_MS = DEFAULT_HUD_DURATION_MS * 2;
 
 export type HudTone = "info" | "error";
 
+/** What the caller of a prompt says about one key press. */
+export type KeyClaim = Data.TaggedEnum<{
+  /** The caller took the key. The prompt calls `preventDefault` and does nothing more with it. */
+  Taken: Record<never, never>;
+  /** The prompt acts on the key: Enter submits, Escape cancels, and the field takes the rest. */
+  Pass: Record<never, never>;
+}>;
+export const KeyClaim = Data.taggedEnum<KeyClaim>();
+
 export interface HudPromptOptions<R = never> {
   /** The text in front of the field, for example `/`. */
   readonly label: string;
@@ -79,11 +88,11 @@ export interface HudPromptOptions<R = never> {
   /**
    * Run for every key press, before the prompt acts on it.
    *
-   * `true` means "I took this key". The prompt then calls `preventDefault` and
-   * does nothing more with it. This body must not suspend, because
-   * `preventDefault` works only inside the dispatch of the browser.
+   * The claim says whether the caller took the key. This body must not
+   * suspend, because `preventDefault` works only inside the dispatch of the
+   * browser.
    */
-  readonly onKeydown?: (event: KeyboardEvent, value: string) => Effect.Effect<boolean, never, R>;
+  readonly onKeydown?: (event: KeyboardEvent, value: string) => Effect.Effect<KeyClaim, never, R>;
 }
 
 export interface HudLine {
@@ -620,13 +629,13 @@ export class Hud extends Context.Service<
                 options.onKeydown,
                 Option.fromNullishOr,
                 Option.match({
-                  onNone: () => Effect.succeed(false),
+                  onNone: () => Effect.succeed(KeyClaim.Pass()),
                   onSome: (onKeydown) => onKeydown(key, parts.input.value),
                 }),
                 Effect.map(
-                  Boolean.match({
-                    onFalse: () => promptKey(key),
-                    onTrue: () => PromptKey.Taken(),
+                  KeyClaim.$match({
+                    Taken: () => PromptKey.Taken(),
+                    Pass: () => promptKey(key),
                   }),
                 ),
               );
