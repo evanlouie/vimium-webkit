@@ -740,13 +740,13 @@ export const canExtend = (branch: KeyBranch): boolean =>
 // ---------------------------------------------------------------------------
 
 /** Each command with the key sequences that are bound to it, in insertion order. */
-export const keysByCommand = (mappings: CompiledMappings): ReadonlyMap<string, readonly string[]> =>
+export const keysByCommand = (
+  mappings: CompiledMappings,
+): Record.ReadonlyRecord<string, Array.NonEmptyReadonlyArray<string>> =>
   pipe(
     mappings.bindings,
     Array.groupBy((binding) => binding.command),
     Record.map(Array.map((binding) => written(binding.keys))),
-    Record.toEntries,
-    (entries) => new Map(entries),
   );
 
 export const hasErrors = (mappings: CompiledMappings): boolean =>

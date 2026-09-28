@@ -41,6 +41,7 @@ import {
   Layer,
   Match,
   Option,
+  Record,
   Ref,
   Scope,
   pipe,
@@ -1028,6 +1029,9 @@ const refusedCommand: (command: CommandDef) => Option.Option<CommandDef> = Optio
   (command: CommandDef) => command.tier === "C",
 );
 
+/** The key sequences that are bound to each command, as `keysByCommand` gives them. */
+type BoundKeys = Record.ReadonlyRecord<string, Array.NonEmptyReadonlyArray<string>>;
+
 export class Dialog extends Context.Service<
   Dialog,
   {
@@ -1350,7 +1354,7 @@ export class Dialog extends Context.Service<
 
       /** The three cells of one command in the help table. */
       const commandRow =
-        (bound: ReadonlyMap<string, readonly string[]>) =>
+        (bound: BoundKeys) =>
         (command: CommandDef): ReadonlyArray<HTMLElement> => {
           const cell = (className: string, text: string): HTMLSpanElement => {
             const span = pipe(classEl("span", `${className} vw-cmd-row`), withText(text));
@@ -1359,9 +1363,8 @@ export class Dialog extends Context.Service<
           };
           const refused = refusedCommand(command);
           const keys = pipe(
-            bound.get(command.name),
-            Option.fromNullishOr,
-            Option.filter(Array.isReadonlyArrayNonEmpty),
+            bound,
+            Record.get(command.name),
             Option.map(Array.join("  ")),
             Option.getOrElse(() => "—"),
           );
@@ -1384,10 +1387,7 @@ export class Dialog extends Context.Service<
           return [cell("vw-cmd-keys", keys), description, cell("vw-cmd-native", native)];
         };
 
-      const commandTable = (
-        list: ReadonlyArray<CommandDef>,
-        bound: ReadonlyMap<string, readonly string[]>,
-      ): HTMLElement => {
+      const commandTable = (list: ReadonlyArray<CommandDef>, bound: BoundKeys): HTMLElement => {
         const table = classEl("div", "vw-cmd-table");
         const cells = pipe(
           list,
@@ -1398,21 +1398,30 @@ export class Dialog extends Context.Service<
         return table;
       };
 
+      /**
+       * The commands of each group, in the order of the catalogue. No group is
+       * empty. The key is a `string`, because a key of a literal union makes
+       * every group optional.
+       */
+      const commandsByGroup = pipe(
+        commands.all,
+        Array.groupBy((command): string => command.group),
+      );
+
+      /** The title and the commands of one group, when the group holds a command. */
+      const helpGroup = (group: CommandGroup) =>
+        pipe(
+          commandsByGroup,
+          Record.get(group),
+          Option.map((list) => ({ title: pipe(GROUP_TITLES, Struct.get(group)), list })),
+        );
+
       /** The heading and the table of every group that holds a command. */
-      const helpGroups = (
-        bound: ReadonlyMap<string, readonly string[]>,
-      ): ReadonlyArray<HTMLElement> =>
+      const helpGroups = (bound: BoundKeys): ReadonlyArray<HTMLElement> =>
         pipe(
           GROUP_ORDER,
-          Array.map((group) => ({
-            title: pipe(GROUP_TITLES, Struct.get(group)),
-            list: pipe(
-              commands.byGroup.get(group),
-              Option.fromNullishOr,
-              Option.getOrElse(() => Array.empty<CommandDef>()),
-            ),
-          })),
-          Array.filter(({ list }) => list.length > 0),
+          Array.map(helpGroup),
+          Array.getSomes,
           Array.flatMap(({ title, list }) => [textEl("h2", title), commandTable(list, bound)]),
         );
 
