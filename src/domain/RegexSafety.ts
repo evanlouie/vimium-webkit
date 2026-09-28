@@ -81,7 +81,23 @@
  * Everything here is a pure function of the pattern text. Nothing throws.
  */
 
-import { Option, pipe, Struct } from "effect";
+import {
+  Array,
+  Boolean,
+  Chunk,
+  Data,
+  HashSet,
+  Iterable,
+  Match,
+  Option,
+  flow,
+  pipe,
+  Predicate,
+  Record as Rec,
+  Result,
+  String as Str,
+  Struct,
+} from "effect";
 
 // ---------------------------------------------------------------------------
 // The reasons
@@ -108,53 +124,88 @@ const LONG_ESCAPE =
   "`\\u{…}` needs the `u` flag, which this field does not allow; write " +
   "`\\uFFFF` with four digits instead";
 
+/** A variant that carries no data. */
+type Mark = Record<never, never>;
+
 // ---------------------------------------------------------------------------
 // Character sets
 // ---------------------------------------------------------------------------
 
-/** The class escapes that this module can reason about. */
-type ClassName = "d" | "D" | "w" | "W" | "s" | "S";
+/** The most members that this module lists for one set. */
+const MEMBER_LIMIT = 256;
+
+/** The characters from `low` to `high`, both included. */
+interface Range {
+  readonly low: number;
+  readonly high: number;
+}
+
+/** A class escape: `\d`, `\D`, `\w`, `\W`, `\s` or `\S`. */
+interface ClassEscape {
+  readonly holds: (code: number) => boolean;
+  /** The members of the class. `\D`, `\W` and `\S` have too many to list. */
+  readonly members: Option.Option<HashSet.HashSet<number>>;
+}
+
+/** The pieces that describe a set that this module does not list. */
+interface Terms {
+  readonly chars: HashSet.HashSet<number>;
+  readonly ranges: ReadonlyArray<Range>;
+  readonly classes: ReadonlyArray<ClassEscape>;
+}
 
 /**
  * The characters that one atom can match.
  *
- * `negated` inverts the whole set, as `[^…]` does. A set that the module
- * cannot describe becomes `ANY_SET`, which intersects everything and therefore
- * refuses more.
+ * A set of at most `MEMBER_LIMIT` characters lists them. A larger set keeps the
+ * terms that describe it, and `Negated` inverts its terms, as `[^…]` does. A
+ * set that the module cannot describe becomes `ANY_SET`, which intersects
+ * everything and therefore refuses more.
  */
-interface CharSet {
-  readonly negated: boolean;
-  readonly chars: ReadonlySet<number>;
-  readonly ranges: ReadonlyArray<readonly [number, number]>;
-  readonly classes: ReadonlySet<ClassName>;
-}
+type CharSet = Data.TaggedEnum<{
+  Listed: { readonly members: HashSet.HashSet<number> };
+  Unlisted: Terms;
+  Negated: Terms;
+}>;
+const CharSet = Data.taggedEnum<CharSet>();
 
-const EMPTY_SET: CharSet = {
-  negated: false,
-  chars: new Set<number>(),
-  ranges: [],
-  classes: new Set<ClassName>(),
-};
+const NO_TERMS: Terms = { chars: HashSet.empty(), ranges: [], classes: [] };
 
-const ANY_SET: CharSet = pipe(EMPTY_SET, Struct.assign({ negated: true }));
+const EMPTY_SET: CharSet = CharSet.Listed({ members: HashSet.empty() });
+
+const ANY_SET: CharSet = CharSet.Negated(NO_TERMS);
 
 /** `.` matches everything except the line terminators, without the `s` flag. */
-const DOT_SET: CharSet = pipe(
-  EMPTY_SET,
-  Struct.assign({ negated: true, chars: new Set([0x0a, 0x0d, 0x2028, 0x2029]) }),
-);
+const DOT_SET: CharSet = CharSet.Negated({
+  chars: HashSet.make(0x0a, 0x0d, 0x2028, 0x2029),
+  ranges: [],
+  classes: [],
+});
 
-const oneChar = (code: number): CharSet =>
-  pipe(EMPTY_SET, Struct.assign({ chars: new Set([code]) }));
+const oneChar = (code: number): CharSet => CharSet.Listed({ members: HashSet.make(code) });
 
-const oneClass = (name: ClassName): CharSet =>
-  pipe(EMPTY_SET, Struct.assign({ classes: new Set([name]) }));
+/** The characters from `low` to `high`, and none when `low` is above `high`. */
+const codesFrom = ({ low, high }: Range): ReadonlyArray<number> =>
+  pipe(
+    high - low + 1,
+    Option.liftPredicate((count) => count > 0),
+    Option.map(Array.makeBy((offset) => low + offset)),
+    Option.getOrElse(() => Array.empty<number>()),
+  );
 
 /** The characters of `\s`, as the specification lists them. */
-const WHITESPACE: ReadonlySet<number> = new Set([
+const WHITESPACE: ReadonlyArray<number> = [
   0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005,
   0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
-]);
+];
+const WHITESPACE_SET = HashSet.fromIterable(WHITESPACE);
+
+const DIGITS = codesFrom({ low: 0x30, high: 0x39 });
+const WORD_CHARS = pipe(
+  [DIGITS, codesFrom({ low: 0x41, high: 0x5a }), codesFrom({ low: 0x61, high: 0x7a }), [0x5f]],
+  Array.flatten,
+  HashSet.fromIterable,
+);
 
 const isDigit = (code: number): boolean => code >= 0x30 && code <= 0x39;
 
@@ -164,528 +215,339 @@ const isWord = (code: number): boolean =>
   (code >= 0x61 && code <= 0x7a) ||
   code === 0x5f;
 
-const inClass = (name: ClassName, code: number): boolean => {
-  switch (name) {
-    case "d":
-      return isDigit(code);
-    case "D":
-      return !isDigit(code);
-    case "w":
-      return isWord(code);
-    case "W":
-      return !isWord(code);
-    case "s":
-      return WHITESPACE.has(code);
-    case "S":
-      return !WHITESPACE.has(code);
-  }
-};
+const isSpace = (code: number): boolean => pipe(WHITESPACE_SET, HashSet.has(code));
 
-/** Does `set` hold this character? The answer is exact. */
-const holdsExactly = (set: CharSet, code: number): boolean => {
-  let inside = set.chars.has(code) || set.ranges.some(([low, high]) => code >= low && code <= high);
-  if (!inside) {
-    for (const name of set.classes) {
-      if (inClass(name, code)) {
-        inside = true;
-        break;
-      }
-    }
-  }
-  return set.negated ? !inside : inside;
-};
+const DIGIT: ClassEscape = { holds: isDigit, members: Option.some(HashSet.fromIterable(DIGITS)) };
+const NOT_DIGIT: ClassEscape = { holds: Predicate.not(isDigit), members: Option.none() };
+const WORD: ClassEscape = { holds: isWord, members: Option.some(WORD_CHARS) };
+const NOT_WORD: ClassEscape = { holds: Predicate.not(isWord), members: Option.none() };
+const SPACE: ClassEscape = { holds: isSpace, members: Option.some(WHITESPACE_SET) };
+const NOT_SPACE: ClassEscape = { holds: Predicate.not(isSpace), members: Option.none() };
 
-/** The same question, with the case folding of the `i` flag. */
-const holds = (set: CharSet, code: number, ignoreCase: boolean): boolean => {
-  if (holdsExactly(set, code)) return true;
-  if (!ignoreCase) return false;
+/** The class that a letter names, as `d` names `\d`. */
+const classEscape = pipe(
+  Match.type<string>(),
+  Match.when("d", () => DIGIT),
+  Match.when("D", () => NOT_DIGIT),
+  Match.when("w", () => WORD),
+  Match.when("W", () => NOT_WORD),
+  Match.when("s", () => SPACE),
+  Match.when("S", () => NOT_SPACE),
+  Match.option,
+);
+
+/** The characters of a range that is narrow enough to list. */
+const rangeMembers: (range: Range) => Option.Option<ReadonlyArray<number>> = flow(
+  Option.liftPredicate(({ low, high }: Range) => high - low <= MEMBER_LIMIT),
+  Option.map(codesFrom),
+);
+
+/**
+ * List the members of `terms`, when there are few enough of them.
+ *
+ * A `None` means "too many, or an unlimited number". A range that is wider
+ * than the limit, and `\D`, `\W` and `\S`, are unlimited.
+ */
+const listTerms = ({ chars, ranges, classes }: Terms): Option.Option<HashSet.HashSet<number>> =>
+  pipe(
+    Option.all([
+      pipe(ranges, Array.map(rangeMembers), Option.all, Option.map(Array.flatten)),
+      pipe(
+        classes,
+        Array.map(({ members }) => members),
+        Option.all,
+        Option.map(Array.flatMap((members) => Array.fromIterable(members))),
+      ),
+    ]),
+    Option.map(([rangeCodes, classCodes]) =>
+      pipe(
+        chars,
+        HashSet.union(HashSet.fromIterable(rangeCodes)),
+        HashSet.union(HashSet.fromIterable(classCodes)),
+      ),
+    ),
+    Option.filter((members) => HashSet.size(members) <= MEMBER_LIMIT),
+  );
+
+/** The set that `terms` describe, listed when it is small enough. */
+const described = (terms: Terms): CharSet =>
+  pipe(
+    listTerms(terms),
+    Option.match({
+      onNone: () => CharSet.Unlisted(terms),
+      onSome: (members) => CharSet.Listed({ members }),
+    }),
+  );
+
+/** The set of one class escape, as `[\d]` has. */
+const escapeSet = (escape: ClassEscape): CharSet =>
+  pipe(
+    escape.members,
+    Option.match({
+      onNone: () => CharSet.Unlisted({ chars: HashSet.empty(), ranges: [], classes: [escape] }),
+      onSome: (members) => CharSet.Listed({ members }),
+    }),
+  );
+
+/** Every character of both code sets. The union walks the smaller one. */
+const mergeCodes = (
+  left: HashSet.HashSet<number>,
+  right: HashSet.HashSet<number>,
+): HashSet.HashSet<number> =>
+  pipe(
+    HashSet.size(left) >= HashSet.size(right),
+    Boolean.match({
+      onFalse: () => pipe(right, HashSet.union(left)),
+      onTrue: () => pipe(left, HashSet.union(right)),
+    }),
+  );
+
+const withChars = (terms: Terms, codes: HashSet.HashSet<number>): Terms =>
+  pipe(terms, Struct.assign({ chars: mergeCodes(terms.chars, codes) }));
+
+const mergeTerms = (left: Terms, right: Terms): Terms => ({
+  chars: mergeCodes(left.chars, right.chars),
+  ranges: pipe(left.ranges, Array.appendAll(right.ranges)),
+  classes: pipe(
+    left.classes,
+    Array.unionWith(right.classes, (one, other) => one === other),
+  ),
+});
+
+/** A listed set, or the same characters as terms when there are too many. */
+const listedOrTerms = (members: HashSet.HashSet<number>): CharSet =>
+  pipe(
+    HashSet.size(members) <= MEMBER_LIMIT,
+    Boolean.match({
+      onFalse: () => CharSet.Unlisted({ chars: members, ranges: [], classes: [] }),
+      onTrue: () => CharSet.Listed({ members }),
+    }),
+  );
+
+/**
+ * Every character of both sets.
+ *
+ * A negated set on either side gives `ANY_SET`. A set that one side cannot
+ * list stays unlisted, because the union holds at least as many characters.
+ */
+const unionSets = (left: CharSet, right: CharSet): CharSet =>
+  pipe(
+    left,
+    CharSet.$match({
+      Listed: ({ members }) =>
+        pipe(
+          right,
+          CharSet.$match({
+            Listed: (other) => listedOrTerms(mergeCodes(members, other.members)),
+            Unlisted: (terms) => CharSet.Unlisted(withChars(terms, members)),
+            Negated: () => ANY_SET,
+          }),
+        ),
+      Unlisted: (terms) =>
+        pipe(
+          right,
+          CharSet.$match({
+            Listed: ({ members }) => CharSet.Unlisted(withChars(terms, members)),
+            Unlisted: (other) => CharSet.Unlisted(mergeTerms(terms, other)),
+            Negated: () => ANY_SET,
+          }),
+        ),
+      Negated: () => ANY_SET,
+    }),
+  );
+
+const inTerms = (terms: Terms, code: number): boolean =>
+  pipe(terms.chars, HashSet.has(code)) ||
+  pipe(
+    terms.ranges,
+    Array.some(({ low, high }) => code >= low && code <= high),
+  ) ||
+  pipe(
+    terms.classes,
+    Array.some((escape) => escape.holds(code)),
+  );
+
+/** Does `set` hold this character? */
+type Holds = (set: CharSet, code: number) => boolean;
+
+/** The answer is exact. */
+const holdsExactly: Holds = (set, code) =>
+  pipe(
+    set,
+    CharSet.$match({
+      Listed: ({ members }) => pipe(members, HashSet.has(code)),
+      Unlisted: (terms) => inTerms(terms, code),
+      Negated: (terms) => !inTerms(terms, code),
+    }),
+  );
+
+/** The one-character upper and lower cases of `code`. */
+const caseVariants = (code: number): ReadonlyArray<number> => {
   const char = String.fromCharCode(code);
-  const upper = char.toUpperCase();
-  const lower = char.toLowerCase();
-  return (
-    (upper.length === 1 && holdsExactly(set, upper.charCodeAt(0))) ||
-    (lower.length === 1 && holdsExactly(set, lower.charCodeAt(0)))
+  return pipe(
+    [char.toUpperCase(), char.toLowerCase()],
+    Array.filter((variant) => variant.length === 1),
+    Array.map((variant) => variant.charCodeAt(0)),
   );
 };
 
-/** The most members that this module lists for one set. */
-const MEMBER_LIMIT = 256;
+/** The same question, with the case folding of the `i` flag. */
+const holdsFolded: Holds = (set, code) =>
+  holdsExactly(set, code) ||
+  pipe(
+    caseVariants(code),
+    Array.some((variant) => holdsExactly(set, variant)),
+  );
 
-/** The lists that `members` already made. One set never changes. */
-const memberCache = new WeakMap<CharSet, Option.Option<ReadonlyArray<number>>>();
-
-/**
- * List the members of `set`, when there are few enough of them.
- *
- * A `None` means "too many, or an unlimited number". A negated set and `\D`,
- * `\W` and `\S` are unlimited.
- */
-const members = (set: CharSet): Option.Option<ReadonlyArray<number>> => {
-  const found = memberCache.get(set);
-  if (found !== undefined) return found;
-  const made = listMembers(set);
-  memberCache.set(set, made);
-  return made;
-};
-
-const listMembers = (set: CharSet): Option.Option<ReadonlyArray<number>> => {
-  if (set.negated) return Option.none();
-  const found = new Set<number>(set.chars);
-  for (const [low, high] of set.ranges) {
-    if (high - low > MEMBER_LIMIT) return Option.none();
-    for (let code = low; code <= high; code++) found.add(code);
-  }
-  for (const name of set.classes) {
-    switch (name) {
-      case "d":
-        for (let code = 0x30; code <= 0x39; code++) found.add(code);
-        break;
-      case "w":
-        for (let code = 0x30; code <= 0x39; code++) found.add(code);
-        for (let code = 0x41; code <= 0x5a; code++) found.add(code);
-        for (let code = 0x61; code <= 0x7a; code++) found.add(code);
-        found.add(0x5f);
-        break;
-      case "s":
-        for (const code of WHITESPACE) found.add(code);
-        break;
-      default:
-        return Option.none();
-    }
-  }
-  return found.size > MEMBER_LIMIT ? Option.none() : Option.some([...found]);
-};
+/** Can one character belong to both sets? */
+type Intersect = (left: CharSet, right: CharSet) => boolean;
 
 /**
- * Can one character belong to both sets?
- *
  * The answer is exact when one of the two sets is small enough to list. Two
  * unlimited sets give `true`, which refuses the pattern.
  */
-const setsIntersect = (left: CharSet, right: CharSet, ignoreCase: boolean): boolean => {
-  const listed = members(left);
-  if (Option.isSome(listed)) {
-    return listed.value.some((code) => holds(right, code, ignoreCase));
-  }
-  const other = members(right);
-  if (Option.isSome(other)) {
-    return other.value.some((code) => holds(left, code, ignoreCase));
-  }
-  return true;
+const intersectWith = (holds: Holds): Intersect => {
+  /** Does a member of `listed` belong to `other`? A set that is not listed may meet anything. */
+  const meets = (listed: CharSet, other: CharSet): boolean =>
+    pipe(
+      listed,
+      CharSet.$match({
+        Listed: ({ members }) =>
+          pipe(
+            members,
+            HashSet.some((code) => holds(other, code)),
+          ),
+        Unlisted: () => true,
+        Negated: () => true,
+      }),
+    );
+  return (left, right) =>
+    pipe(
+      left,
+      CharSet.$match({
+        Listed: () => meets(left, right),
+        Unlisted: () => meets(right, left),
+        Negated: () => meets(right, left),
+      }),
+    );
 };
 
-const unionSets = (left: CharSet, right: CharSet): CharSet =>
-  left.negated || right.negated
-    ? ANY_SET
-    : {
-        negated: false,
-        chars: new Set([...left.chars, ...right.chars]),
-        ranges: [...left.ranges, ...right.ranges],
-        classes: new Set([...left.classes, ...right.classes]),
-      };
+// ---------------------------------------------------------------------------
+// The flags
+// ---------------------------------------------------------------------------
+
+/**
+ * How the engine reads the text of a pattern.
+ *
+ * With the `u` flag it reads code points, and `\u{…}` and `\p{…}` are
+ * escapes. Without the flag it reads code units, and they are literal text.
+ */
+type Reading = Data.TaggedEnum<{ CodePoints: Mark; CodeUnits: Mark }>;
+const Reading = Data.taggedEnum<Reading>();
+
+/** What the flags of a pattern change in this module. */
+interface Flags {
+  /** The characters that `.` matches: line terminators too with the `s` flag. */
+  readonly dot: CharSet;
+  readonly reading: Reading;
+  /** The set intersection, with the case folding of the `i` flag or without it. */
+  readonly intersect: Intersect;
+}
+
+const readFlags = (flags: string): Flags => ({
+  dot: pipe(flags.includes("s"), Boolean.match({ onFalse: () => DOT_SET, onTrue: () => ANY_SET })),
+  reading: pipe(
+    flags.includes("u"),
+    Boolean.match({ onFalse: () => Reading.CodeUnits(), onTrue: () => Reading.CodePoints() }),
+  ),
+  intersect: pipe(
+    flags.includes("i"),
+    Boolean.match({
+      onFalse: () => intersectWith(holdsExactly),
+      onTrue: () => intersectWith(holdsFolded),
+    }),
+  ),
+});
 
 // ---------------------------------------------------------------------------
 // The syntax tree
 // ---------------------------------------------------------------------------
 
-type Node =
+type Shape = Data.TaggedEnum<{
   /** Nothing at all, as between the two bars of `a||b`. */
-  | { readonly kind: "empty" }
+  Empty: Mark;
   /** One character, from a literal, a class escape or a `[…]` class. */
-  | { readonly kind: "char"; readonly set: CharSet }
+  Char: Mark;
   /** `^`, `$`, `\b` and `\B`. They match a position and no character. */
-  | { readonly kind: "anchor" }
-  | { readonly kind: "look"; readonly body: Node }
-  | { readonly kind: "concat"; readonly parts: ReadonlyArray<Node> }
-  | { readonly kind: "alt"; readonly branches: ReadonlyArray<Node> }
-  | {
-      readonly kind: "repeat";
-      readonly body: Node;
-      readonly min: number;
-      readonly max: number;
-    };
-
-const EMPTY_NODE: Node = { kind: "empty" };
-const ANCHOR_NODE: Node = { kind: "anchor" };
-
-// ---------------------------------------------------------------------------
-// The parser
-// ---------------------------------------------------------------------------
-
-/** One element inside a `[…]` class. `open` is an element we cannot list. */
-type ClassItem =
-  | { readonly kind: "char"; readonly code: number }
-  | { readonly kind: "class"; readonly name: ClassName }
-  | { readonly kind: "open" };
-
-const OPEN_ITEM: ClassItem = { kind: "open" };
-
-type ParseOutcome =
-  | { readonly ok: true; readonly node: Node }
-  | { readonly ok: false; readonly reason: string };
-
-/** `{2}`, `{2,}` and `{2,4}`. Anything else after a `{` is a literal `{`. */
-const COUNTED = /^\{(\d+)(?:,(\d*))?\}/;
-
-const HEX = /^[0-9a-fA-F]+$/;
-
-const readHex = (text: string): Option.Option<number> =>
-  HEX.test(text) ? Option.some(Number.parseInt(text, 16)) : Option.none();
-
-/**
- * Parse `source` into a tree.
- *
- * The caller compiled the same text with `new RegExp` first, so the text is
- * valid. Syntax that this parser does not know is therefore not a fault of the
- * user: it is a limit of the check, and the pattern is refused.
- */
-const parse = (source: string, dotAll: boolean, unicode: boolean): ParseOutcome => {
-  let index = 0;
-  let failure: string | null = null;
-  let assertions = 0;
-  let assertionDepth = 0;
-
-  const fail = (reason: string): Node => {
-    failure ??= reason;
-    return EMPTY_NODE;
-  };
-
-  /**
-   * The character at `index`, and the step over it.
-   *
-   * With the `u` flag the engine reads one code point, so `😀+` repeats one
-   * character. Without the flag it reads two code units, and `😀+` repeats the
-   * second one. The model must say what the engine does.
-   */
-  const readCodePoint = (): number => {
-    const point = unicode ? (source.codePointAt(index) ?? 0) : source.charCodeAt(index);
-    index += point > 0xffff ? 2 : 1;
-    return point;
-  };
-
-  const parseEscapeItem = (): ClassItem => {
-    const char = source[index];
-    if (char === undefined) {
-      fail(UNSUPPORTED_SYNTAX);
-      return OPEN_ITEM;
-    }
-    index++;
-    switch (char) {
-      case "d":
-      case "D":
-      case "w":
-      case "W":
-      case "s":
-      case "S":
-        return { kind: "class", name: char };
-      case "n":
-        return { kind: "char", code: 0x0a };
-      case "r":
-        return { kind: "char", code: 0x0d };
-      case "t":
-        return { kind: "char", code: 0x09 };
-      case "f":
-        return { kind: "char", code: 0x0c };
-      case "v":
-        return { kind: "char", code: 0x0b };
-      case "x": {
-        const code = readHex(source.slice(index, index + 2));
-        if (Option.isNone(code)) {
-          fail(UNSUPPORTED_SYNTAX);
-          return OPEN_ITEM;
-        }
-        index += 2;
-        return { kind: "char", code: code.value };
-      }
-      case "u": {
-        if (source[index] === "{") {
-          // `\u{41}` is one character with the `u` flag, and the five literal
-          // characters `u{41}` without it. Refuse the second reading: a model
-          // that does not match the engine is not a safe model.
-          if (!unicode) {
-            fail(LONG_ESCAPE);
-            return OPEN_ITEM;
-          }
-          const close = source.indexOf("}", index);
-          if (close === -1) {
-            fail(UNSUPPORTED_SYNTAX);
-            return OPEN_ITEM;
-          }
-          const code = readHex(source.slice(index + 1, close));
-          index = close + 1;
-          return Option.isNone(code) ? OPEN_ITEM : { kind: "char", code: code.value };
-        }
-        const code = readHex(source.slice(index, index + 4));
-        if (Option.isNone(code)) {
-          fail(UNSUPPORTED_SYNTAX);
-          return OPEN_ITEM;
-        }
-        index += 4;
-        return { kind: "char", code: code.value };
-      }
-      case "c": {
-        const letter = source[index];
-        if (letter === undefined || !/[A-Za-z]/.test(letter)) return OPEN_ITEM;
-        index++;
-        return { kind: "char", code: letter.charCodeAt(0) % 32 };
-      }
-      case "p":
-      case "P": {
-        // A property escape such as `\p{L}`. It is one character with the `u`
-        // flag, and the four literal characters `p{L}` without it. Refuse the
-        // second reading, so that the model always says what the engine does.
-        if (!unicode) {
-          fail(PROPERTY_ESCAPE);
-          return OPEN_ITEM;
-        }
-        // We cannot list the members of the property.
-        if (source[index] === "{") {
-          const close = source.indexOf("}", index);
-          index = close === -1 ? source.length : close + 1;
-        }
-        return OPEN_ITEM;
-      }
-      default:
-        return { kind: "char", code: char.charCodeAt(0) };
-    }
-  };
-
-  /** One element of a `[…]` class: an escape, or one plain character. */
-  const readClassItem = (): ClassItem => {
-    if (source[index] === "\\") {
-      index++;
-      return parseEscapeItem();
-    }
-    return { kind: "char", code: readCodePoint() };
-  };
-
-  const parseClass = (): Node => {
-    index++;
-    let negated = false;
-    if (source[index] === "^") {
-      negated = true;
-      index++;
-    }
-
-    const chars = new Set<number>();
-    const ranges: Array<readonly [number, number]> = [];
-    const classes = new Set<ClassName>();
-    let open = false;
-
-    while (index < source.length && source[index] !== "]") {
-      const item = readClassItem();
-      if (failure !== null) return EMPTY_NODE;
-
-      if (item.kind !== "char") {
-        if (item.kind === "class") classes.add(item.name);
-        else open = true;
-        continue;
-      }
-
-      const dash =
-        source[index] === "-" && source[index + 1] !== undefined && source[index + 1] !== "]";
-      if (!dash) {
-        chars.add(item.code);
-        continue;
-      }
-
-      index++;
-      const upper = readClassItem();
-      if (failure !== null) return EMPTY_NODE;
-
-      if (upper.kind === "char") {
-        ranges.push([item.code, upper.code]);
-        continue;
-      }
-      // `[a-\d]` is a literal dash between two elements.
-      chars.add(item.code);
-      chars.add(0x2d);
-      if (upper.kind === "class") classes.add(upper.name);
-      else open = true;
-    }
-
-    if (source[index] !== "]") return fail(UNSUPPORTED_SYNTAX);
-    index++;
-    const set: CharSet = open ? ANY_SET : { negated, chars, ranges, classes };
-    return { kind: "char", set };
-  };
-
-  const parseEscape = (): Node => {
-    index++;
-    const char = source[index];
-    if (char === undefined) return fail(UNSUPPORTED_SYNTAX);
-    if (char === "b" || char === "B") {
-      index++;
-      return ANCHOR_NODE;
-    }
-    // A backreference repeats an earlier group, so the engine can revisit the
-    // same position with a different group content.
-    if (char === "k" || (char >= "1" && char <= "9")) {
-      return fail(BACKREFERENCE);
-    }
-    const item = parseEscapeItem();
-    switch (item.kind) {
-      case "char":
-        return { kind: "char", set: oneChar(item.code) };
-      case "class":
-        return { kind: "char", set: oneClass(item.name) };
-      case "open":
-        return { kind: "char", set: ANY_SET };
-    }
-  };
-
-  const parseGroup = (): Node => {
-    index++;
-    let look = false;
-    if (source[index] === "?") {
-      const next = source[index + 1];
-      if (next === ":") {
-        index += 2;
-      } else if (next === "=" || next === "!") {
-        index += 2;
-        look = true;
-      } else if (next === "<") {
-        const third = source[index + 2];
-        if (third === "=" || third === "!") {
-          index += 3;
-          look = true;
-        } else {
-          const close = source.indexOf(">", index + 2);
-          if (close === -1) return fail(UNSUPPORTED_SYNTAX);
-          index = close + 1;
-        }
-      } else {
-        return fail(UNSUPPORTED_SYNTAX);
-      }
-    }
-
-    if (look) {
-      assertions++;
-      if (assertions > ASSERTION_LIMIT) return fail(MANY_ASSERTIONS);
-      assertionDepth++;
-      if (assertionDepth > ASSERTION_DEPTH_LIMIT) {
-        return fail(NESTED_ASSERTIONS);
-      }
-    }
-
-    const body = parseAlternation();
-    if (look) assertionDepth--;
-    if (failure !== null) return EMPTY_NODE;
-    if (source[index] !== ")") return fail(UNSUPPORTED_SYNTAX);
-    index++;
-    return look ? { kind: "look", body } : body;
-  };
-
-  const parseAtom = (): Node => {
-    const char = source[index];
-    if (char === undefined) return fail(UNSUPPORTED_SYNTAX);
-    switch (char) {
-      case "(":
-        return parseGroup();
-      case "[":
-        return parseClass();
-      case "\\":
-        return parseEscape();
-      case ".":
-        index++;
-        return { kind: "char", set: dotAll ? ANY_SET : DOT_SET };
-      case "^":
-      case "$":
-        index++;
-        return ANCHOR_NODE;
-      case "*":
-      case "+":
-      case "?":
-        return fail(UNSUPPORTED_SYNTAX);
-      default:
-        return { kind: "char", set: oneChar(readCodePoint()) };
-    }
-  };
-
-  const parseQuantifier = (atom: Node): Node => {
-    const char = source[index];
-    let min: number;
-    let max: number;
-
-    if (char === "*") {
-      min = 0;
-      max = Number.POSITIVE_INFINITY;
-      index++;
-    } else if (char === "+") {
-      min = 1;
-      max = Number.POSITIVE_INFINITY;
-      index++;
-    } else if (char === "?") {
-      min = 0;
-      max = 1;
-      index++;
-    } else if (char === "{") {
-      const counted = COUNTED.exec(source.slice(index));
-      if (counted === null) return atom;
-      min = Number.parseInt(counted[1] ?? "0", 10);
-      const high = counted[2];
-      max =
-        high === undefined
-          ? min
-          : high.length === 0
-            ? Number.POSITIVE_INFINITY
-            : Number.parseInt(high, 10);
-      index += counted[0].length;
-    } else {
-      return atom;
-    }
-
-    // A lazy quantifier backtracks in the other order, and just as long.
-    if (source[index] === "?") index++;
-    return { kind: "repeat", body: atom, min, max };
-  };
-
-  const parseConcat = (): Node => {
-    const parts: Node[] = [];
-    while (index < source.length) {
-      const char = source[index];
-      if (char === "|" || char === ")") break;
-      parts.push(parseQuantifier(parseAtom()));
-      if (failure !== null) return EMPTY_NODE;
-    }
-    if (parts.length === 0) return EMPTY_NODE;
-    return parts.length === 1
-      ? (parts[0] ?? EMPTY_NODE)
-      : {
-          kind: "concat",
-          parts,
-        };
-  };
-
-  function parseAlternation(): Node {
-    const branches: Node[] = [parseConcat()];
-    while (failure === null && source[index] === "|") {
-      index++;
-      branches.push(parseConcat());
-    }
-    if (failure !== null) return EMPTY_NODE;
-    return branches.length === 1
-      ? (branches[0] ?? EMPTY_NODE)
-      : {
-          kind: "alt",
-          branches,
-        };
-  }
-
-  const node = parseAlternation();
-  if (failure !== null) return { ok: false, reason: failure };
-  if (index < source.length) return { ok: false, reason: UNSUPPORTED_SYNTAX };
-  return { ok: true, node };
-};
-
-// ---------------------------------------------------------------------------
-// The attributes of a tree
-// ---------------------------------------------------------------------------
+  Anchor: Mark;
+  Look: { readonly body: Node };
+  Concat: { readonly parts: ReadonlyArray<Node> };
+  Alt: { readonly branches: ReadonlyArray<Node> };
+  Repeat: { readonly body: Node; readonly max: number };
+}>;
+const Shape = Data.taggedEnum<Shape>();
 
 interface Span {
   readonly min: number;
   readonly max: number;
 }
+
+/**
+ * One node of the tree, with every answer that the rules ask about it.
+ *
+ * The parser builds the tree from the leaves up, so each node computes its
+ * answers once, from the answers of its children. Nothing walks the tree to
+ * find them again. The answers that compare two sets depend on the `i` flag,
+ * so one tree belongs to one call.
+ */
+interface Node {
+  readonly shape: Shape;
+  /** Can this expression match an empty string? */
+  readonly nullable: boolean;
+  /** The shortest and the longest string that this expression matches. */
+  readonly span: Span;
+  /** The characters that a match can start with. */
+  readonly first: CharSet;
+  /** The characters that a match can end with. */
+  readonly last: CharSet;
+  /** Every character that a match can hold, at any position. */
+  readonly anywhere: CharSet;
+  /**
+   * The characters that can make a match longer.
+   *
+   * A member `c` means: this expression matches some text `u`, and it also
+   * matches `u` followed by `c` and more. `a+` gives `a`, because `a` matches
+   * and `aa` matches. `\w+\.` gives nothing, because every match ends at the
+   * one dot that it holds.
+   */
+  readonly extend: CharSet;
+  /** The fixed shape of this expression, when it has one. */
+  readonly sequence: Option.Option<ReadonlyArray<CharSet>>;
+  /**
+   * How many ways this expression can try to match one piece of text.
+   *
+   * The number counts the choices that the text can make, and not the
+   * characters that the expression reads. A value of `1` means that one text
+   * gives one path. `WINDOW_WIDTH` means that one unbounded quantifier can
+   * stop at every position of a window.
+   */
+  readonly cost: number;
+}
+
+/** Can this expression match two strings of different lengths? */
+const isFlexible = (node: Node): boolean => node.span.min !== node.span.max;
+
+const isNullable = (node: Node): boolean => node.nullable;
+
+/** How many times a quantifier lets its atom run. */
+interface Count {
+  readonly min: number;
+  readonly max: number;
+}
+
+// ---------------------------------------------------------------------------
+// The answers of each node
+// ---------------------------------------------------------------------------
 
 /** The most character sets that one fixed shape holds. */
 const SEQUENCE_LIMIT = 64;
@@ -723,483 +585,1316 @@ const WINDOW_WIDTH = 1024;
 const PATH_BUDGET = WINDOW_WIDTH * ASSERTION_LIMIT;
 const OVER_PATH_BUDGET = PATH_BUDGET + 1;
 
+/** Multiply two costs, and stop at the first value above the limit. */
+const multiplyCosts = (left: number, right: number): number =>
+  pipe(
+    left > PATH_BUDGET || right > PATH_BUDGET || left > Math.floor(PATH_BUDGET / right),
+    Boolean.match({ onFalse: () => left * right, onTrue: () => OVER_PATH_BUDGET }),
+  );
+
 /**
- * Every answer that the rules ask about one tree.
+ * How many end positions an expression of this span can try.
  *
- * The answers depend on the `i` flag, so one analysis belongs to one call. Each
- * answer is kept in a map, because a rule asks the same question about the same
- * node many times.
+ * A part whose length cannot vary has one end. `a{0,3}` has four, and `a*`
+ * has one for every position of a window.
  */
-interface Analysis {
-  /** Can this expression match an empty string? */
-  readonly nullable: (node: Node) => boolean;
-  /** The shortest and the longest string that this expression matches. */
-  readonly span: (node: Node) => Span;
-  /** Can this expression match two strings of different lengths? */
-  readonly flexible: (node: Node) => boolean;
-  /** The characters that a match can start with. */
-  readonly first: (node: Node) => CharSet;
-  /** The characters that a match can end with. */
-  readonly last: (node: Node) => CharSet;
-  /** Every character that a match can hold, at any position. */
-  readonly anywhere: (node: Node) => CharSet;
-  /**
-   * How many ways this expression can try to match one piece of text.
-   *
-   * The number counts the choices that the text can make, and not the
-   * characters that the expression reads. A value of `1` means that one text
-   * gives one path. `WINDOW_WIDTH` means that one unbounded quantifier can
-   * stop at every position of a window.
-   */
-  readonly cost: (node: Node) => number;
-  /**
-   * The characters that can make a match longer.
-   *
-   * A member `c` means: this expression matches some text `u`, and it also
-   * matches `u` followed by `c` and more. `a+` gives `a`, because `a` matches
-   * and `aa` matches. `\w+\.` gives nothing, because every match ends at the
-   * one dot that it holds.
-   */
-  readonly extend: (node: Node) => CharSet;
-  /** The fixed shape of this expression, when it has one. */
-  readonly sequence: (node: Node) => Option.Option<ReadonlyArray<CharSet>>;
-  /** Can the boundary between `left` and the parts from `from` move? */
-  readonly slidesInto: (left: Node, parts: ReadonlyArray<Node>, from: number) => boolean;
-  /** Can one character belong to both sets? */
-  readonly intersect: (left: CharSet, right: CharSet) => boolean;
+const width = ({ min, max }: Span): number => Math.min(WINDOW_WIDTH, Math.max(1, max - min + 1));
+
+const EMPTY_NODE: Node = {
+  shape: Shape.Empty(),
+  nullable: true,
+  span: { min: 0, max: 0 },
+  first: EMPTY_SET,
+  last: EMPTY_SET,
+  anywhere: EMPTY_SET,
+  extend: EMPTY_SET,
+  sequence: Option.some([]),
+  cost: 1,
+};
+
+const ANCHOR_NODE: Node = pipe(EMPTY_NODE, Struct.assign({ shape: Shape.Anchor() }));
+
+const charNode = (set: CharSet): Node => ({
+  shape: Shape.Char(),
+  nullable: false,
+  span: { min: 1, max: 1 },
+  first: set,
+  last: set,
+  anywhere: set,
+  extend: EMPTY_SET,
+  sequence: Option.some([set]),
+  cost: 1,
+});
+
+/**
+ * A lookahead or a lookbehind.
+ *
+ * An assertion reads the text that follows it, or the text before it. Its
+ * body therefore competes with the neighbours of the assertion, and its
+ * characters take part in every neighbour test. A list of sets cannot hold
+ * the condition that it adds, so it has no fixed shape.
+ *
+ * An assertion runs its body at one position. The body pays its own cost, and
+ * a concatenation multiplies that cost by the ways that the text before the
+ * assertion can match.
+ */
+const lookNode = (body: Node): Node => ({
+  shape: Shape.Look({ body }),
+  nullable: true,
+  span: { min: 0, max: 0 },
+  first: body.first,
+  last: body.last,
+  anywhere: body.anywhere,
+  extend: EMPTY_SET,
+  sequence: Option.none(),
+  cost: body.cost,
+});
+
+/** The longest text that `max` runs of a body of this length match. */
+const longestRepeat = (longest: number, max: number): number =>
+  pipe(
+    Match.value({ longest, max }),
+    Match.when({ longest: 0 }, () => 0),
+    Match.when({ max: Number.POSITIVE_INFINITY }, () => Number.POSITIVE_INFINITY),
+    Match.orElse(() => longest * max),
+  );
+
+/** `shape`, `count` times over. */
+const repeatShape = (shape: ReadonlyArray<CharSet>, count: number): ReadonlyArray<CharSet> =>
+  pipe(
+    count,
+    Option.liftPredicate((rounds) => rounds > 0),
+    Option.map(Array.makeBy(() => shape)),
+    Option.getOrElse(() => Array.empty<ReadonlyArray<CharSet>>()),
+    Array.flatten,
+  );
+
+/**
+ * The cost of a loop whose body costs `inner`, when the loop can stop in
+ * `choices` ways.
+ *
+ * The choices count the possible end positions, or the iterations when there
+ * are more of them. A fixed count has one end position, but its body still
+ * runs once for each iteration.
+ */
+const loopCost = (inner: number, choices: number): number =>
+  pipe(
+    inner <= 1,
+    Boolean.match({ onFalse: () => multiplyCosts(inner, choices), onTrue: () => 1 }),
+  );
+
+const repeatNode = (body: Node, { min, max }: Count): Node => {
+  const span = { min: body.span.min * min, max: longestRepeat(body.span.max, max) };
+  // `a{0}` never runs its body, so no character of the body can appear.
+  const reach = pipe(max === 0, Boolean.match({ onFalse: () => body, onTrue: () => EMPTY_NODE }));
+  return {
+    shape: Shape.Repeat({ body, max }),
+    nullable: min === 0 || body.nullable,
+    span,
+    first: reach.first,
+    last: reach.last,
+    anywhere: reach.anywhere,
+    // One more iteration can follow a complete match, unless the count is
+    // fixed.
+    extend: pipe(
+      max > min,
+      Boolean.match({
+        onFalse: () => reach.extend,
+        onTrue: () => unionSets(reach.extend, reach.first),
+      }),
+    ),
+    sequence: pipe(
+      body.sequence,
+      Option.filter((sets) => min === max && sets.length * min <= SEQUENCE_LIMIT),
+      // An empty shape stays empty however many times it runs.
+      Option.map(
+        Array.match({
+          onEmpty: () => Array.empty<CharSet>(),
+          onNonEmpty: (shape) => repeatShape(shape, min),
+        }),
+      ),
+    ),
+    cost: pipe(
+      max <= 1,
+      Boolean.match({
+        onFalse: () => loopCost(body.cost, Math.max(width(span), Math.min(max, WINDOW_WIDTH))),
+        onTrue: () => body.cost,
+      }),
+    ),
+  };
+};
+
+/** The first and the anywhere sets of the parts from one position to the end. */
+interface Suffix {
+  readonly first: CharSet;
+  readonly anywhere: CharSet;
 }
 
-const makeAnalysis = (ignoreCase: boolean): Analysis => {
-  const nullableCache = new Map<Node, boolean>();
-  const spanCache = new Map<Node, Span>();
-  const firstCache = new Map<Node, CharSet>();
-  const lastCache = new Map<Node, CharSet>();
-  const anywhereCache = new Map<Node, CharSet>();
-  const extendCache = new Map<Node, CharSet>();
-  const costCache = new Map<Node, number>();
-  const sequenceCache = new Map<Node, Option.Option<ReadonlyArray<CharSet>>>();
+const NO_SUFFIX: Suffix = { first: EMPTY_SET, anywhere: EMPTY_SET };
 
-  const memo = <T>(cache: Map<Node, T>, node: Node, make: (node: Node) => T): T => {
-    const found = cache.get(node);
-    if (found !== undefined) return found;
-    const value = make(node);
-    cache.set(node, value);
-    return value;
-  };
-
-  const intersect = (left: CharSet, right: CharSet): boolean =>
-    setsIntersect(left, right, ignoreCase);
-
-  const nullable = (node: Node): boolean =>
-    memo(nullableCache, node, (target) => {
-      switch (target.kind) {
-        case "empty":
-        case "anchor":
-        case "look":
-          return true;
-        case "char":
-          return false;
-        case "concat":
-          return target.parts.every(nullable);
-        case "alt":
-          return target.branches.some(nullable);
-        case "repeat":
-          return target.min === 0 || nullable(target.body);
-      }
-    });
-
-  const span = (node: Node): Span =>
-    memo(spanCache, node, (target) => {
-      switch (target.kind) {
-        case "empty":
-        case "anchor":
-        case "look":
-          return { min: 0, max: 0 };
-        case "char":
-          return { min: 1, max: 1 };
-        case "concat":
-          return spanOfParts(target.parts, 0);
-        case "alt": {
-          if (target.branches.length === 0) return { min: 0, max: 0 };
-          let min = Number.POSITIVE_INFINITY;
-          let max = 0;
-          for (const branch of target.branches) {
-            const reach = span(branch);
-            min = Math.min(min, reach.min);
-            max = Math.max(max, reach.max);
-          }
-          return { min, max };
-        }
-        case "repeat": {
-          const reach = span(target.body);
-          const max =
-            reach.max === 0
-              ? 0
-              : target.max === Number.POSITIVE_INFINITY
-                ? Number.POSITIVE_INFINITY
-                : reach.max * target.max;
-          return { min: reach.min * target.min, max };
-        }
-      }
-    });
-
-  const spanOfParts = (parts: ReadonlyArray<Node>, from: number): Span => {
-    let min = 0;
-    let max = 0;
-    for (let index = from; index < parts.length; index++) {
-      const part = parts[index];
-      if (part === undefined) continue;
-      const reach = span(part);
-      min += reach.min;
-      max += reach.max;
-    }
-    return { min, max };
-  };
-
-  const flexible = (node: Node): boolean => {
-    const reach = span(node);
-    return reach.min !== reach.max;
-  };
-
-  const first = (node: Node): CharSet =>
-    memo(firstCache, node, (target) => {
-      switch (target.kind) {
-        case "empty":
-        case "anchor":
-          return EMPTY_SET;
-        // An assertion reads the text that follows it, or the text before it.
-        // Its body therefore competes with the neighbours of the assertion,
-        // and its characters must take part in every neighbour test.
-        case "look":
-          return first(target.body);
-        case "char":
-          return target.set;
-        case "concat":
-          return firstOfParts(target.parts, 0);
-        case "alt":
-          return target.branches.reduce((set, branch) => unionSets(set, first(branch)), EMPTY_SET);
-        case "repeat":
-          return target.max === 0 ? EMPTY_SET : first(target.body);
-      }
-    });
-
-  const firstOfParts = (parts: ReadonlyArray<Node>, from: number): CharSet => {
-    let set = EMPTY_SET;
-    for (let index = from; index < parts.length; index++) {
-      const part = parts[index];
-      if (part === undefined) continue;
-      set = unionSets(set, first(part));
-      if (!nullable(part)) break;
-    }
-    return set;
-  };
-
-  const last = (node: Node): CharSet =>
-    memo(lastCache, node, (target) => {
-      switch (target.kind) {
-        case "empty":
-        case "anchor":
-          return EMPTY_SET;
-        case "look":
-          return last(target.body);
-        case "char":
-          return target.set;
-        case "concat": {
-          let set = EMPTY_SET;
-          for (let index = target.parts.length - 1; index >= 0; index--) {
-            const part = target.parts[index];
-            if (part === undefined) continue;
-            set = unionSets(set, last(part));
-            if (!nullable(part)) break;
-          }
-          return set;
-        }
-        case "alt":
-          return target.branches.reduce((set, branch) => unionSets(set, last(branch)), EMPTY_SET);
-        case "repeat":
-          return target.max === 0 ? EMPTY_SET : last(target.body);
-      }
-    });
-
-  const anywhere = (node: Node): CharSet =>
-    memo(anywhereCache, node, (target) => {
-      switch (target.kind) {
-        case "empty":
-        case "anchor":
-          return EMPTY_SET;
-        case "look":
-          return anywhere(target.body);
-        case "char":
-          return target.set;
-        case "concat":
-          return anywhereOfParts(target.parts, 0);
-        case "alt":
-          return target.branches.reduce(
-            (set, branch) => unionSets(set, anywhere(branch)),
-            EMPTY_SET,
-          );
-        case "repeat":
-          return target.max === 0 ? EMPTY_SET : anywhere(target.body);
-      }
-    });
-
-  const anywhereOfParts = (parts: ReadonlyArray<Node>, from: number): CharSet => {
-    let set = EMPTY_SET;
-    for (let index = from; index < parts.length; index++) {
-      const part = parts[index];
-      if (part === undefined) continue;
-      set = unionSets(set, anywhere(part));
-    }
-    return set;
-  };
-
-  const sequence = (node: Node): Option.Option<ReadonlyArray<CharSet>> =>
-    memo(sequenceCache, node, (target) => {
-      switch (target.kind) {
-        case "empty":
-        case "anchor":
-          return Option.some([]);
-        // A lookaround adds a condition that a list of sets cannot hold.
-        case "look":
-          return Option.none();
-        case "char":
-          return Option.some([target.set]);
-        case "concat": {
-          const sets: CharSet[] = [];
-          for (const part of target.parts) {
-            const shape = sequence(part);
-            if (Option.isNone(shape)) return Option.none();
-            if (sets.length + shape.value.length > SEQUENCE_LIMIT) {
-              return Option.none();
-            }
-            sets.push(...shape.value);
-          }
-          return Option.some(sets);
-        }
-        case "alt": {
-          const shapes: ReadonlyArray<CharSet>[] = [];
-          for (const branch of target.branches) {
-            const shape = sequence(branch);
-            if (Option.isNone(shape)) return Option.none();
-            shapes.push([...shape.value]);
-          }
-          const head = shapes[0];
-          if (head === undefined) return Option.none();
-          if (shapes.some((shape) => shape.length !== head.length)) {
-            return Option.none();
-          }
-          // The union loses which branch gave which set, so the shape holds
-          // more strings than the alternation does. That direction refuses
-          // more, and never fewer.
-          return Option.some(
-            head.map((_, position) =>
-              shapes.reduce(
-                (set, shape) => unionSets(set, shape[position] ?? EMPTY_SET),
-                EMPTY_SET,
-              ),
-            ),
-          );
-        }
-        case "repeat": {
-          if (target.min !== target.max) return Option.none();
-          const shape = sequence(target.body);
-          if (Option.isNone(shape)) return Option.none();
-          if (shape.value.length * target.min > SEQUENCE_LIMIT) {
-            return Option.none();
-          }
-          const sets: CharSet[] = [];
-          for (let round = 0; round < target.min; round++) {
-            sets.push(...shape.value);
-          }
-          return Option.some(sets);
-        }
-      }
-    });
-
+/** One part of a concatenation, and what follows it. */
+interface Link {
+  readonly part: Node;
+  /** The parts after this one. */
+  readonly after: Suffix;
   /**
-   * The characters that branch `left` can be followed by inside branch
-   * `right`.
+   * Can the boundary between this part and the parts after it move?
    *
-   * `a|aa` gives `a`: the first branch matches `a`, and the second matches
-   * `aa`, so a match of the alternation can grow. `a|ab` gives `b`, and
-   * `cat|car` gives nothing, because neither shape starts the other one.
-   */
-  const crossExtend = (left: Node, right: Node): CharSet => {
-    let set = EMPTY_SET;
-    if (nullable(left) && span(right).max > 0) {
-      set = unionSets(set, first(right));
-    }
-    const shapeLeft = sequence(left);
-    const shapeRight = sequence(right);
-    if (Option.isSome(shapeLeft) && Option.isSome(shapeRight)) {
-      const short = shapeLeft.value;
-      const long = shapeRight.value;
-      if (short.length >= long.length) return set;
-      for (let position = 0; position < short.length; position++) {
-        const one = short[position];
-        const other = long[position];
-        if (one === undefined || other === undefined) return set;
-        if (!intersect(one, other)) return set;
-      }
-      return unionSets(set, long[short.length] ?? EMPTY_SET);
-    }
-    // One of the two shapes is unknown. Say that any character can follow,
-    // unless the two branches cannot even start with one character.
-    return intersect(first(left), first(right)) ? ANY_SET : set;
-  };
-
-  const extend = (node: Node): CharSet =>
-    memo(extendCache, node, (target) => {
-      switch (target.kind) {
-        case "empty":
-        case "anchor":
-        case "look":
-        case "char":
-          return EMPTY_SET;
-        case "concat": {
-          let set = EMPTY_SET;
-          // A match ends inside the last part that is not empty. That part can
-          // grow, and every part after it can stop being empty.
-          for (let index = target.parts.length - 1; index >= 0; index--) {
-            const part = target.parts[index];
-            if (part === undefined) continue;
-            set = unionSets(set, extend(part));
-            set = unionSets(set, firstOfParts(target.parts, index + 1));
-            if (!nullable(part)) break;
-          }
-          // A part in the middle can also grow, when the parts after it can
-          // start one character later. The match then ends one character
-          // later, and this module cannot say with which character.
-          for (let index = 0; index < target.parts.length - 1; index++) {
-            const part = target.parts[index];
-            if (part === undefined) continue;
-            if (slidesInto(part, target.parts, index + 1)) return ANY_SET;
-          }
-          return set;
-        }
-        case "alt": {
-          let set = EMPTY_SET;
-          for (const branch of target.branches) {
-            set = unionSets(set, extend(branch));
-          }
-          for (const left of target.branches) {
-            for (const right of target.branches) {
-              if (left === right) continue;
-              set = unionSets(set, crossExtend(left, right));
-            }
-          }
-          return set;
-        }
-        case "repeat": {
-          if (target.max === 0) return EMPTY_SET;
-          const set = extend(target.body);
-          // One more iteration can follow a complete match, unless the count
-          // is fixed.
-          return target.max > target.min ? unionSets(set, first(target.body)) : set;
-        }
-      }
-    });
-
-  /**
-   * Can the boundary between `left` and the parts from `from` move?
-   *
-   * Two conditions must hold. `left` must be able to take the character that
-   * the parts after it would start with. Those parts must also be able to hold
-   * the character that `left` ends with, because the text that `left` takes is
-   * text that they gave back.
+   * Two conditions must hold. The part must be able to take the character
+   * that the parts after it would start with. Those parts must also be able
+   * to hold the character that the part ends with, because the text that the
+   * part takes is text that they gave back.
    *
    * `\w+\.` and `\w+` do not slide: the first ends at a dot, and the second
    * holds no dot. `[a-z]*` and `x` do slide.
    */
-  const slidesInto = (left: Node, parts: ReadonlyArray<Node>, from: number): boolean =>
-    intersect(extend(left), firstOfParts(parts, from)) &&
-    intersect(last(left), anywhereOfParts(parts, from));
+  readonly slides: boolean;
+}
 
-  /** Multiply two costs, and stop at the first value above the limit. */
-  const multiplyCosts = (left: number, right: number): number => {
-    if (left > PATH_BUDGET || right > PATH_BUDGET) return OVER_PATH_BUDGET;
-    if (left > Math.floor(PATH_BUDGET / right)) return OVER_PATH_BUDGET;
-    return left * right;
+/** The items up to the first one that must match a character, and that one too. */
+const throughFirstSolid =
+  <A>(nodeOf: (item: A) => Node) =>
+  (items: ReadonlyArray<A>): ReadonlyArray<A> => {
+    const [open, rest] = pipe(
+      items,
+      Array.span((item) => nodeOf(item).nullable),
+    );
+    const solid = pipe(rest, Array.take(1));
+    return pipe(open, Array.appendAll(solid));
   };
 
-  /**
-   * How many end positions this expression can try.
-   *
-   * A part whose length cannot vary has one end. `a{0,3}` has four, and `a*`
-   * has one for every position of a window.
-   */
-  const width = (node: Node): number => {
-    const reach = span(node);
-    const range = reach.max - reach.min;
-    return range >= WINDOW_WIDTH ? WINDOW_WIDTH : Math.max(1, range + 1);
+/** The choices that the parts so far give the text, and the most paths that one part runs. */
+interface Paths {
+  readonly before: number;
+  readonly worst: number;
+}
+
+/** The paths after one more part of a concatenation. */
+const addLink = (paths: Paths, { part, slides }: Link): Paths => ({
+  before: pipe(
+    slides,
+    Boolean.match({
+      onFalse: () => paths.before,
+      onTrue: () => multiplyCosts(paths.before, width(part.span)),
+    }),
+  ),
+  worst: Math.max(paths.worst, multiplyCosts(paths.before, part.cost)),
+});
+
+/**
+ * The cost of a concatenation.
+ *
+ * Each part that can slide gives the text a choice, and every part after it
+ * runs again for each of those choices. The cost of the whole is therefore
+ * the product of the choices, and the worst part is the one that runs after
+ * the most of them.
+ */
+const costOfLinks: (links: ReadonlyArray<Link>) => number = flow(
+  Array.reduce({ before: 1, worst: 1 }, addLink),
+  ({ before, worst }) => Math.max(worst, before),
+);
+
+/**
+ * What can start the parts from `part` to the end: the start of `part`, and
+ * the start of the parts after it when `part` can be empty.
+ */
+const startFrom = (after: Suffix, part: Node): Suffix => ({
+  first: pipe(
+    part.nullable,
+    Boolean.match({ onFalse: () => EMPTY_SET, onTrue: () => after.first }),
+    (rest) => unionSets(part.first, rest),
+  ),
+  anywhere: unionSets(part.anywhere, after.anywhere),
+});
+
+const concatNode =
+  (intersect: Intersect) =>
+  (parts: ReadonlyArray<Node>): Node => {
+    const suffixes = pipe(parts, Array.scanRight(NO_SUFFIX, startFrom));
+    const links = pipe(
+      parts,
+      Array.zip(Array.tailNonEmpty(suffixes)),
+      Array.map(([part, after]): Link => ({
+        part,
+        after,
+        slides: intersect(part.extend, after.first) && intersect(part.last, after.anywhere),
+      })),
+    );
+    // A match ends inside the last part that is not empty. That part can
+    // grow, and every part after it can stop being empty.
+    const ending = pipe(
+      links,
+      Array.reverse,
+      throughFirstSolid(({ part }) => part),
+    );
+    return {
+      shape: Shape.Concat({ parts }),
+      nullable: pipe(parts, Array.every(isNullable)),
+      span: pipe(
+        parts,
+        Array.reduce({ min: 0, max: 0 }, (sum, { span }) => ({
+          min: sum.min + span.min,
+          max: sum.max + span.max,
+        })),
+      ),
+      first: Array.headNonEmpty(suffixes).first,
+      last: pipe(
+        ending,
+        Array.map(({ part }) => part.last),
+        Array.reduce(EMPTY_SET, unionSets),
+      ),
+      anywhere: Array.headNonEmpty(suffixes).anywhere,
+      // A part in the middle can also grow, when the parts after it can start
+      // one character later. The match then ends one character later, and
+      // this module cannot say with which character.
+      extend: pipe(
+        links,
+        Array.some(({ slides }) => slides),
+        Boolean.match({
+          onFalse: () =>
+            pipe(
+              ending,
+              Array.map(({ part, after }) => unionSets(part.extend, after.first)),
+              Array.reduce(EMPTY_SET, unionSets),
+            ),
+          onTrue: () => ANY_SET,
+        }),
+      ),
+      sequence: pipe(
+        parts,
+        Array.map(({ sequence }) => sequence),
+        Option.all,
+        Option.map(Array.flatten),
+        Option.filter((sets) => sets.length <= SEQUENCE_LIMIT),
+      ),
+      cost: costOfLinks(links),
+    };
   };
 
-  const cost = (node: Node): number =>
-    memo(costCache, node, (target) => {
-      switch (target.kind) {
-        case "empty":
-        case "anchor":
-        case "char":
-          return 1;
-        // An assertion runs its body at one position. The body pays its own
-        // cost, and the concatenation below multiplies that cost by the ways
-        // that the text before the assertion can match.
-        case "look":
-          return cost(target.body);
-        case "alt":
-          return target.branches.reduce((most, branch) => Math.max(most, cost(branch)), 1);
-        case "concat":
-          return costOfParts(target.parts);
-        case "repeat": {
-          if (target.max <= 1) return cost(target.body);
-          const inner = cost(target.body);
-          if (inner <= 1) return 1;
-          // The width counts possible end positions. The iteration count is
-          // separate. A fixed count has one end position, but its body still
-          // runs once for each iteration.
-          const iterations = Number.isFinite(target.max)
-            ? Math.min(target.max, WINDOW_WIDTH)
-            : WINDOW_WIDTH;
-          return multiplyCosts(inner, Math.max(width(target), iterations));
-        }
-      }
-    });
+/** Does every set of `short` meet the set at its position in `long`? */
+const overlaps = (
+  intersect: Intersect,
+  short: ReadonlyArray<CharSet>,
+  long: ReadonlyArray<CharSet>,
+): boolean =>
+  pipe(
+    short,
+    Array.zip(long),
+    Array.every(([one, other]) => intersect(one, other)),
+  );
 
-  /**
-   * The cost of a concatenation.
-   *
-   * Each part that can slide gives the text a choice, and every part after it
-   * runs again for each of those choices. The cost of the whole is therefore
-   * the product of the choices, and the worst part is the one that runs after
-   * the most of them.
-   */
-  const costOfParts = (parts: ReadonlyArray<Node>): number => {
-    let before = 1;
-    let worst = 1;
-    for (let index = 0; index < parts.length; index++) {
-      const part = parts[index];
-      if (part === undefined) continue;
-      worst = Math.max(worst, multiplyCosts(before, cost(part)));
-      if (slidesInto(part, parts, index + 1)) {
-        before = multiplyCosts(before, width(part));
-      }
-    }
-    return Math.max(worst, before);
-  };
+/** The union of two shapes of one length, position by position. */
+const unionAt = (sets: ReadonlyArray<CharSet>, shape: ReadonlyArray<CharSet>) =>
+  pipe(sets, Array.zipWith(shape, unionSets));
 
+/**
+ * The union of shapes of one length, position by position, or `None` when two
+ * lengths differ.
+ *
+ * The union loses which branch gave which set, so the shape holds more
+ * strings than the alternation does. That direction refuses more, and never
+ * fewer.
+ */
+const unionShapes: (
+  shapes: ReadonlyArray<ReadonlyArray<CharSet>>,
+) => Option.Option<ReadonlyArray<CharSet>> = Array.matchLeft({
+  onEmpty: () => Option.none(),
+  onNonEmpty: (head, rest) =>
+    pipe(
+      rest,
+      Array.every((shape) => shape.length === head.length),
+      Boolean.match({
+        onFalse: () => Option.none(),
+        onTrue: () => pipe(rest, Array.reduce(head, unionAt), Option.some),
+      }),
+    ),
+});
+
+/** The known shapes of the branches, by their length. */
+type ShapesByLength = Rec.ReadonlyRecord<string, ReadonlyArray<ReadonlyArray<CharSet>>>;
+
+/**
+ * The sets of `long` that can follow a shorter shape.
+ *
+ * The set at position `k` follows when a shape of length `k` can start
+ * `long`. Each position counts once, however many shapes start `long` there.
+ */
+const followersIn =
+  (intersect: Intersect, byLength: ShapesByLength) =>
+  (long: ReadonlyArray<CharSet>): ReadonlyArray<CharSet> =>
+    pipe(
+      long,
+      Array.filter((_, length) =>
+        pipe(
+          byLength,
+          Rec.get(String(length)),
+          Option.exists(Array.some((short) => overlaps(intersect, short, long))),
+        ),
+      ),
+    );
+
+/** Can the two branches start with one character, when one of their shapes is unknown? */
+const meetsUnknown =
+  (intersect: Intersect, branches: ReadonlyArray<Node>) =>
+  (one: Node): boolean =>
+    Option.isNone(one.sequence) &&
+    pipe(
+      branches,
+      Array.some(
+        (other) =>
+          other !== one && (intersect(one.first, other.first) || intersect(other.first, one.first)),
+      ),
+    );
+
+/**
+ * The characters that one branch can be followed by inside another branch,
+ * for every pair of branches in both orders.
+ *
+ * `a|aa` gives `a`: the first branch matches `a`, and the second matches
+ * `aa`, so a match of the alternation can grow. `a|ab` gives `b`, and
+ * `cat|car` gives nothing, because neither shape starts the other one.
+ *
+ * A branch that can be empty is followed by the start of every other branch.
+ * A shape that starts a longer shape is followed by the next set of the
+ * longer one. When the shape of one of the two branches is unknown, any
+ * character can follow, unless the two branches cannot even start with one
+ * character.
+ */
+const crossExtend = (intersect: Intersect, branches: ReadonlyArray<Node>): CharSet => {
+  const shapes = pipe(
+    branches,
+    Array.map(({ sequence }) => sequence),
+    Array.getSomes,
+  );
+  const byLength: ShapesByLength = pipe(
+    shapes,
+    Array.groupBy((shape) => String(shape.length)),
+  );
+  const followers = pipe(shapes, Array.flatMap(followersIn(intersect, byLength)));
+  // A branch that can be empty lets every other branch start the match again.
+  const empties = pipe(branches, Array.filter(isNullable));
+  const starts = pipe(
+    branches,
+    Array.filter(
+      (other) =>
+        other.span.max > 0 &&
+        pipe(
+          empties,
+          Array.some((empty) => empty !== other),
+        ),
+    ),
+    Array.map(({ first }) => first),
+  );
+  return pipe(
+    branches,
+    Array.some(meetsUnknown(intersect, branches)),
+    Boolean.match({
+      onFalse: () => pipe(followers, Array.appendAll(starts), Array.reduce(EMPTY_SET, unionSets)),
+      onTrue: () => ANY_SET,
+    }),
+  );
+};
+
+const altNode =
+  (intersect: Intersect) =>
+  (branches: ReadonlyArray<Node>): Node => ({
+    shape: Shape.Alt({ branches }),
+    nullable: pipe(branches, Array.some(isNullable)),
+    span: pipe(
+      branches,
+      Array.reduce({ min: Number.POSITIVE_INFINITY, max: 0 }, (reach, { span }) => ({
+        min: Math.min(reach.min, span.min),
+        max: Math.max(reach.max, span.max),
+      })),
+    ),
+    first: pipe(
+      branches,
+      Array.map(({ first }) => first),
+      Array.reduce(EMPTY_SET, unionSets),
+    ),
+    last: pipe(
+      branches,
+      Array.map(({ last }) => last),
+      Array.reduce(EMPTY_SET, unionSets),
+    ),
+    anywhere: pipe(
+      branches,
+      Array.map(({ anywhere }) => anywhere),
+      Array.reduce(EMPTY_SET, unionSets),
+    ),
+    extend: pipe(
+      branches,
+      Array.map(({ extend }) => extend),
+      Array.append(crossExtend(intersect, branches)),
+      Array.reduce(EMPTY_SET, unionSets),
+    ),
+    sequence: pipe(
+      branches,
+      Array.map(({ sequence }) => sequence),
+      Option.all,
+      Option.flatMap(unionShapes),
+    ),
+    cost: pipe(
+      branches,
+      Array.reduce(1, (most, { cost }) => Math.max(most, cost)),
+    ),
+  });
+
+// ---------------------------------------------------------------------------
+// The lexer
+// ---------------------------------------------------------------------------
+
+/** The text of a pattern, and what its flags change. */
+interface Text {
+  readonly source: string;
+  readonly flags: Flags;
+}
+
+/** A value that the lexer read, and the index after it. */
+interface Read<A> {
+  readonly value: A;
+  readonly next: number;
+}
+
+/** Read one value from an index, or give the reason that the text cannot be read. */
+type Reader<A> = (text: Text, index: number) => Result.Result<Read<A>, string>;
+
+/** What a `(` opens. */
+type Opener = Data.TaggedEnum<{ Group: Mark; Look: Mark }>;
+const Opener = Data.taggedEnum<Opener>();
+
+/**
+ * One piece of the pattern text.
+ *
+ * An atom carries the quantifier that follows it. A `)` ends a group, and the
+ * group is an atom too, so the `)` carries the quantifier of the group.
+ */
+type Token = Data.TaggedEnum<{
+  Atom: { readonly node: Node; readonly count: Option.Option<Count> };
+  Open: { readonly opener: Opener };
+  Close: { readonly count: Option.Option<Count> };
+  Bar: Mark;
+}>;
+const Token = Data.taggedEnum<Token>();
+
+/** One element inside a `[…]` class. `Open` is an element that we cannot list. */
+type ClassItem = Data.TaggedEnum<{
+  Code: { readonly code: number };
+  Range: Range;
+  Class: { readonly escape: ClassEscape };
+  Open: Mark;
+}>;
+const ClassItem = Data.taggedEnum<ClassItem>();
+
+/** The control escapes that name one character. */
+const controlEscape = pipe(
+  Match.type<string>(),
+  Match.when("n", () => 0x0a),
+  Match.when("r", () => 0x0d),
+  Match.when("t", () => 0x09),
+  Match.when("f", () => 0x0c),
+  Match.when("v", () => 0x0b),
+  Match.option,
+);
+
+/** The terms of a class with `item` added, or `None` when we cannot list it. */
+const addItem =
+  (item: ClassItem) =>
+  (terms: Terms): Option.Option<Terms> =>
+    pipe(
+      item,
+      ClassItem.$match({
+        Code: ({ code }) =>
+          Option.some({
+            chars: pipe(terms.chars, HashSet.add(code)),
+            ranges: terms.ranges,
+            classes: terms.classes,
+          }),
+        Range: ({ low, high }) =>
+          Option.some({
+            chars: terms.chars,
+            ranges: pipe(terms.ranges, Array.append({ low, high })),
+            classes: terms.classes,
+          }),
+        Class: ({ escape }) =>
+          Option.some({
+            chars: terms.chars,
+            ranges: terms.ranges,
+            classes: pipe(terms.classes, Array.append(escape)),
+          }),
+        Open: () => Option.none(),
+      }),
+    );
+
+/**
+ * The set of a class.
+ *
+ * `wrap` makes the set from the terms, and inverts it for `[^…]`. An element
+ * that we cannot list gives `ANY_SET`, with or without the `^`.
+ */
+const classSet = (items: ReadonlyArray<ClassItem>, wrap: (terms: Terms) => CharSet): CharSet =>
+  pipe(
+    items,
+    Array.reduce(Option.some(NO_TERMS), (terms, item) =>
+      pipe(terms, Option.flatMap(addItem(item))),
+    ),
+    Option.match({ onNone: () => ANY_SET, onSome: wrap }),
+  );
+
+/** The set of one escape outside a class, as `\d` or `\n`. */
+const itemSet: (item: ClassItem) => CharSet = ClassItem.$match({
+  Code: ({ code }) => oneChar(code),
+  Range: (range) => described({ chars: HashSet.empty(), ranges: [range], classes: [] }),
+  Class: ({ escape }) => escapeSet(escape),
+  Open: () => ANY_SET,
+});
+
+/** `{2}`, `{2,}` and `{2,4}`. Anything else after a `{` is a literal `{`. */
+const COUNTED = /^\{(\d+)(,?)(\d*)\}/;
+
+const HEX = /^[0-9a-fA-F]+$/;
+
+const LETTER = /[A-Za-z]/;
+
+const readHex: (text: string) => Option.Option<number> = flow(
+  Option.liftPredicate((digits: string) => HEX.test(digits)),
+  Option.map((digits) => Number.parseInt(digits, 16)),
+);
+
+/** The text of one group of a match, or `""` when it matched nothing. */
+const groupText = (match: RegExpMatchArray, group: number): string =>
+  pipe(
+    match,
+    Array.get(group),
+    Option.flatMap(Option.fromNullishOr),
+    Option.getOrElse(() => ""),
+  );
+
+/** The count of a `{…}` quantifier that `COUNTED` matched. */
+const countOf = (counted: RegExpMatchArray): Count => {
+  const min = Number.parseInt(groupText(counted, 1), 10);
+  const high = groupText(counted, 3);
   return {
-    nullable,
-    span,
-    flexible,
-    first,
-    last,
-    anywhere,
-    cost,
-    extend,
-    sequence,
-    slidesInto,
-    intersect,
+    min,
+    max: pipe(
+      Match.value({ comma: groupText(counted, 2), high }),
+      Match.when({ comma: "" }, () => min),
+      Match.when({ high: "" }, () => Number.POSITIVE_INFINITY),
+      Match.orElse(() => Number.parseInt(high, 10)),
+    ),
   };
+};
+
+/** A backreference repeats an earlier group, as `\1` and `\k<name>` do. */
+const isBackreference = (char: string): boolean => char === "k" || (char >= "1" && char <= "9");
+
+const charAt = ({ source }: Text, index: number): Option.Option<string> =>
+  pipe(source, Str.charAt(index));
+
+const isAt = ({ source }: Text, index: number, char: string): boolean =>
+  source.startsWith(char, index);
+
+const indexFrom = ({ source }: Text, index: number, char: string): Option.Option<number> =>
+  pipe(
+    source.indexOf(char, index),
+    Option.liftPredicate((found) => found >= 0),
+  );
+
+const succeed = <A>(value: A, next: number): Result.Result<Read<A>, string> =>
+  Result.succeed({ value, next });
+
+/**
+ * The character at `index`.
+ *
+ * With the `u` flag the engine reads one code point, so `😀+` repeats one
+ * character. Without the flag it reads two code units, and `😀+` repeats the
+ * second one. The model must say what the engine does.
+ */
+const readCodePoint = ({ source, flags }: Text, index: number): Read<number> => {
+  const value = pipe(
+    flags.reading,
+    Reading.$match({
+      CodePoints: () =>
+        pipe(
+          source,
+          Str.codePointAt(index),
+          Option.getOrElse(() => 0),
+        ),
+      CodeUnits: () => source.charCodeAt(index),
+    }),
+  );
+  return {
+    value,
+    next: index + pipe(value > 0xffff, Boolean.match({ onFalse: () => 1, onTrue: () => 2 })),
+  };
+};
+
+/** `\x41` and `\u0041`: a fixed number of hex digits from `index`. */
+const readHexItem =
+  (digits: number): Reader<ClassItem> =>
+  ({ source }, index) =>
+    pipe(
+      source.slice(index, index + digits),
+      readHex,
+      Result.fromOption(() => UNSUPPORTED_SYNTAX),
+      Result.map((code) => ({ value: ClassItem.Code({ code }), next: index + digits })),
+    );
+
+/** The item of the digits of `\u{…}`: a character, or an element that we cannot list. */
+const longUnicodeItem: (digits: string) => ClassItem = flow(
+  readHex,
+  Option.match({ onNone: () => ClassItem.Open(), onSome: (code) => ClassItem.Code({ code }) }),
+);
+
+/** `\u{41}`, from the index of its `{`. */
+const readLongUnicodeItem: Reader<ClassItem> = (text, index) =>
+  pipe(
+    text.flags.reading,
+    Reading.$match({
+      CodePoints: () =>
+        pipe(
+          indexFrom(text, index, "}"),
+          Result.fromOption(() => UNSUPPORTED_SYNTAX),
+          Result.map((close) => ({
+            value: longUnicodeItem(text.source.slice(index + 1, close)),
+            next: close + 1,
+          })),
+        ),
+      // `\u{41}` is one character with the `u` flag, and the five literal
+      // characters `u{41}` without it. Refuse the second reading: a model
+      // that does not match the engine is not a safe model.
+      CodeUnits: () => Result.fail(LONG_ESCAPE),
+    }),
+  );
+
+/** `\u0041` and `\u{41}`, from the index after the `u`. */
+const readUnicodeItem: Reader<ClassItem> = (text, index) =>
+  pipe(
+    isAt(text, index, "{"),
+    Boolean.match({
+      onFalse: () => readHexItem(4)(text, index),
+      onTrue: () => readLongUnicodeItem(text, index),
+    }),
+  );
+
+/** `\cA`, from the index after the `c`. */
+const readControlItem: Reader<ClassItem> = (text, index) =>
+  pipe(
+    charAt(text, index),
+    Option.filter((letter) => LETTER.test(letter)),
+    Option.match({
+      onNone: () => succeed(ClassItem.Open(), index),
+      onSome: (letter) => succeed(ClassItem.Code({ code: letter.charCodeAt(0) % 32 }), index + 1),
+    }),
+  );
+
+/** The index after the `{…}` of a property escape, or `index` when it has none. */
+const afterBraces = (text: Text, index: number): number =>
+  pipe(
+    isAt(text, index, "{"),
+    Boolean.match({
+      onFalse: () => index,
+      onTrue: () =>
+        pipe(
+          indexFrom(text, index, "}"),
+          Option.match({ onNone: () => text.source.length, onSome: (close) => close + 1 }),
+        ),
+    }),
+  );
+
+/** `\p{L}` and `\P{L}`, from the index after the `p`. */
+const readPropertyItem: Reader<ClassItem> = (text, index) =>
+  pipe(
+    text.flags.reading,
+    Reading.$match({
+      // We cannot list the members of the property.
+      CodePoints: () => succeed(ClassItem.Open(), afterBraces(text, index)),
+      // A property escape such as `\p{L}` is one character with the `u`
+      // flag, and the four literal characters `p{L}` without it. Refuse the
+      // second reading, so that the model always says what the engine does.
+      CodeUnits: () => Result.fail(PROPERTY_ESCAPE),
+    }),
+  );
+
+/** `\d`, `\n` and `\.`: one letter that names a class, a control character or itself. */
+const letterItem = (letter: string): ClassItem =>
+  pipe(
+    classEscape(letter),
+    Option.map((escape) => ClassItem.Class({ escape })),
+    Option.orElse(() =>
+      pipe(
+        controlEscape(letter),
+        Option.map((code) => ClassItem.Code({ code })),
+      ),
+    ),
+    Option.getOrElse(() => ClassItem.Code({ code: letter.charCodeAt(0) })),
+  );
+
+/** The reader for the rest of an escape, from the letter after its backslash. */
+const escapeReader = pipe(
+  Match.type<string>(),
+  Match.when("x", (): Reader<ClassItem> => readHexItem(2)),
+  Match.when("u", (): Reader<ClassItem> => readUnicodeItem),
+  Match.when("c", (): Reader<ClassItem> => readControlItem),
+  Match.whenOr("p", "P", (): Reader<ClassItem> => readPropertyItem),
+  Match.orElse(
+    (letter): Reader<ClassItem> =>
+      (_text, index) =>
+        succeed(letterItem(letter), index),
+  ),
+);
+
+/** One escape, from the index after its backslash. */
+const readEscapeItem: Reader<ClassItem> = (text, index) =>
+  pipe(
+    charAt(text, index),
+    Result.fromOption(() => UNSUPPORTED_SYNTAX),
+    Result.flatMap((letter) => escapeReader(letter)(text, index + 1)),
+  );
+
+/** One element of a `[…]` class: an escape, or one plain character. */
+const readClassItem: Reader<ClassItem> = (text, index) =>
+  pipe(
+    isAt(text, index, "\\"),
+    Boolean.match({
+      onFalse: () => {
+        const { value, next } = readCodePoint(text, index);
+        return succeed(ClassItem.Code({ code: value }), next);
+      },
+      onTrue: () => readEscapeItem(text, index + 1),
+    }),
+  );
+
+/** A `-` between two elements, and not the last character of the class. */
+const isRangeDash = (text: Text, index: number): boolean =>
+  isAt(text, index, "-") &&
+  pipe(
+    charAt(text, index + 1),
+    Option.exists((char) => char !== "]"),
+  );
+
+/** The elements that a range from `low` to `upper` gives. */
+const rangeItems = (low: number, upper: ClassItem): ReadonlyArray<ClassItem> =>
+  pipe(
+    upper,
+    Option.liftPredicate(ClassItem.$is("Code")),
+    Option.match({
+      onSome: ({ code }) => [ClassItem.Range({ low, high: code })],
+      // `[a-\d]` is a literal dash between two elements.
+      onNone: () => [ClassItem.Code({ code: low }), ClassItem.Code({ code: 0x2d }), upper],
+    }),
+  );
+
+/** A range from `low`, with its upper end read from the index after the `-`. */
+const readRange = (
+  text: Text,
+  low: number,
+  index: number,
+): Result.Result<Read<ReadonlyArray<ClassItem>>, string> =>
+  pipe(
+    readClassItem(text, index),
+    Result.map(({ value, next }) => ({ value: rangeItems(low, value), next })),
+  );
+
+/** One element of a class, or a range of two of them. */
+const readClassPiece: Reader<ReadonlyArray<ClassItem>> = (text, index) =>
+  pipe(
+    readClassItem(text, index),
+    Result.flatMap(({ value, next }) =>
+      pipe(
+        value,
+        Option.liftPredicate(ClassItem.$is("Code")),
+        Option.filter(() => isRangeDash(text, next)),
+        Option.match({
+          onNone: () => succeed([value], next),
+          onSome: ({ code }) => readRange(text, code, next + 1),
+        }),
+      ),
+    ),
+  );
+
+/**
+ * The values that `read` finds one after another from `start`.
+ *
+ * `read` gives nothing where the values end. A value that cannot be read ends
+ * them too, as their last element.
+ */
+const readEach = <A>(
+  start: number,
+  read: (index: number) => Option.Option<Result.Result<Read<A>, string>>,
+): Iterable<Result.Result<Read<A>, string>> =>
+  Iterable.unfold(
+    Option.some(start),
+    flow(
+      Option.flatMap(read),
+      Option.map(
+        (step) =>
+          [
+            step,
+            pipe(
+              step,
+              Result.getSuccess,
+              Option.map(({ next }) => next),
+            ),
+          ] as const,
+      ),
+    ),
+  );
+
+/**
+ * The elements of a class from `start` up to its `]`.
+ *
+ * The reading stops at the `]`, at the end of the text, or at a piece that
+ * cannot be read.
+ */
+const readClassItems: Reader<ReadonlyArray<ClassItem>> = (text, start) =>
+  pipe(
+    readEach(start, (index) =>
+      pipe(
+        charAt(text, index),
+        Option.filter((char) => char !== "]"),
+        Option.map(() => readClassPiece(text, index)),
+      ),
+    ),
+    Result.all,
+    Result.map((pieces) => ({
+      value: pipe(
+        pieces,
+        Array.flatMap(({ value }) => value),
+      ),
+      next: pipe(
+        pieces,
+        Array.last,
+        Option.match({ onNone: () => start, onSome: ({ next }) => next }),
+      ),
+    })),
+  );
+
+/** The rest of a class from `start`, with the `wrap` that its `^` chose. */
+const readClassBody = (
+  text: Text,
+  start: number,
+  wrap: (terms: Terms) => CharSet,
+): Result.Result<Read<CharSet>, string> =>
+  pipe(
+    readClassItems(text, start),
+    Result.filterOrFail(
+      ({ next }) => isAt(text, next, "]"),
+      () => UNSUPPORTED_SYNTAX,
+    ),
+    Result.map(({ value, next }) => ({ value: classSet(value, wrap), next: next + 1 })),
+  );
+
+/** A `[…]` class, from the index after its `[`. */
+const readClass: Reader<CharSet> = (text, index) =>
+  pipe(
+    isAt(text, index, "^"),
+    Boolean.match({
+      onFalse: () => readClassBody(text, index, described),
+      onTrue: () => readClassBody(text, index + 1, (terms) => CharSet.Negated(terms)),
+    }),
+  );
+
+/** The reader for an escape outside a class, from the letter after its backslash. */
+const atomEscapeReader = pipe(
+  Match.type<string>(),
+  Match.whenOr("b", "B", (): Reader<Node> => (_text, index) => succeed(ANCHOR_NODE, index + 1)),
+  // A backreference repeats an earlier group, so the engine can revisit the
+  // same position with a different group content.
+  Match.when(isBackreference, (): Reader<Node> => () => Result.fail(BACKREFERENCE)),
+  Match.orElse(
+    (): Reader<Node> => (text, index) =>
+      pipe(
+        readEscapeItem(text, index),
+        Result.map(({ value, next }) => ({ value: charNode(itemSet(value)), next })),
+      ),
+  ),
+);
+
+/** An escape outside a class, from the index after its backslash. */
+const readAtomEscape: Reader<Node> = (text, index) =>
+  pipe(
+    charAt(text, index),
+    Result.fromOption(() => UNSUPPORTED_SYNTAX),
+    Result.flatMap((letter) => atomEscapeReader(letter)(text, index)),
+  );
+
+const opened = (opener: Opener, next: number): Result.Result<Read<Token>, string> =>
+  succeed(Token.Open({ opener }), next);
+
+/** `(?<=`, `(?<!` and `(?<name>`, from the index after the `<`. */
+const readAngleGroup: Reader<Token> = (text, index) =>
+  pipe(
+    isAt(text, index, "=") || isAt(text, index, "!"),
+    Boolean.match({
+      onFalse: () =>
+        pipe(
+          indexFrom(text, index, ">"),
+          Result.fromOption(() => UNSUPPORTED_SYNTAX),
+          Result.flatMap((close) => opened(Opener.Group(), close + 1)),
+        ),
+      onTrue: () => opened(Opener.Look(), index + 1),
+    }),
+  );
+
+/** The reader for a group, from the character after its `(?`. */
+const groupReader = pipe(
+  Match.type<string>(),
+  Match.when(":", (): Reader<Token> => (_text, index) => opened(Opener.Group(), index + 1)),
+  Match.whenOr("=", "!", (): Reader<Token> => (_text, index) => opened(Opener.Look(), index + 1)),
+  Match.when("<", (): Reader<Token> => (text, index) => readAngleGroup(text, index + 1)),
+  Match.orElse((): Reader<Token> => () => Result.fail(UNSUPPORTED_SYNTAX)),
+);
+
+/** `(`, `(?:`, `(?=`, `(?!`, `(?<=`, `(?<!` and `(?<name>`, from the index after the `(`. */
+const readGroup: Reader<Token> = (text, index) =>
+  pipe(
+    isAt(text, index, "?"),
+    Boolean.match({
+      onFalse: () => opened(Opener.Group(), index),
+      onTrue: () =>
+        pipe(
+          charAt(text, index + 1),
+          Result.fromOption(() => UNSUPPORTED_SYNTAX),
+          Result.flatMap((kind) => groupReader(kind)(text, index + 1)),
+        ),
+    }),
+  );
+
+const unbounded = (min: number, next: number): Option.Option<Read<Count>> =>
+  Option.some({ value: { min, max: Number.POSITIVE_INFINITY }, next });
+
+/** The reader for a quantifier, from its first character. */
+const countReader = pipe(
+  Match.type<string>(),
+  Match.when("*", () => (_text: Text, index: number) => unbounded(0, index + 1)),
+  Match.when("+", () => (_text: Text, index: number) => unbounded(1, index + 1)),
+  Match.when(
+    "?",
+    () => (_text: Text, index: number) =>
+      Option.some({ value: { min: 0, max: 1 }, next: index + 1 }),
+  ),
+  Match.when(
+    "{",
+    () =>
+      ({ source }: Text, index: number) =>
+        pipe(
+          source.slice(index),
+          Str.match(COUNTED),
+          Option.map((counted) => ({
+            value: countOf(counted),
+            next: index + groupText(counted, 0).length,
+          })),
+        ),
+  ),
+  Match.orElse(
+    () =>
+      (_text: Text, _index: number): Option.Option<Read<Count>> =>
+        Option.none(),
+  ),
+);
+
+/** The quantifier after an atom, if any, and the index after it. */
+const readQuantifier = (text: Text, index: number): Read<Option.Option<Count>> =>
+  pipe(
+    charAt(text, index),
+    Option.flatMap((char) => countReader(char)(text, index)),
+    Option.match({
+      onNone: () => ({ value: Option.none(), next: index }),
+      // A lazy quantifier backtracks in the other order, and just as long.
+      onSome: ({ value, next }) => ({
+        value: Option.some(value),
+        next:
+          next + pipe(isAt(text, next, "?"), Boolean.match({ onFalse: () => 0, onTrue: () => 1 })),
+      }),
+    }),
+  );
+
+/** An atom that ends before `next`, with the quantifier after it. */
+const atom = (text: Text, { value, next }: Read<Node>): Read<Token> => {
+  const quantifier = readQuantifier(text, next);
+  return { value: Token.Atom({ node: value, count: quantifier.value }), next: quantifier.next };
+};
+
+/** The reader for the token that starts with one character. */
+const tokenReader = pipe(
+  Match.type<string>(),
+  Match.when("|", (): Reader<Token> => (_text, index) => succeed(Token.Bar(), index + 1)),
+  Match.when(")", (): Reader<Token> => (text, index) => {
+    const quantifier = readQuantifier(text, index + 1);
+    return succeed(Token.Close({ count: quantifier.value }), quantifier.next);
+  }),
+  Match.when("(", (): Reader<Token> => (text, index) => readGroup(text, index + 1)),
+  Match.when(
+    "[",
+    (): Reader<Token> => (text, index) =>
+      pipe(
+        readClass(text, index + 1),
+        Result.map(({ value, next }) => atom(text, { value: charNode(value), next })),
+      ),
+  ),
+  Match.when(
+    "\\",
+    (): Reader<Token> => (text, index) =>
+      pipe(
+        readAtomEscape(text, index + 1),
+        Result.map((read) => atom(text, read)),
+      ),
+  ),
+  Match.when(
+    ".",
+    (): Reader<Token> => (text, index) =>
+      Result.succeed(atom(text, { value: charNode(text.flags.dot), next: index + 1 })),
+  ),
+  Match.whenOr(
+    "^",
+    "$",
+    (): Reader<Token> => (text, index) =>
+      Result.succeed(atom(text, { value: ANCHOR_NODE, next: index + 1 })),
+  ),
+  Match.whenOr("*", "+", "?", (): Reader<Token> => () => Result.fail(UNSUPPORTED_SYNTAX)),
+  Match.orElse((): Reader<Token> => (text, index) => {
+    const { value, next } = readCodePoint(text, index);
+    return Result.succeed(atom(text, { value: charNode(oneChar(value)), next }));
+  }),
+);
+
+/**
+ * Read `source` into tokens.
+ *
+ * The lexer stops after the first piece that it cannot read. That piece is a
+ * failure with the reason, and the tokens before it are read as usual, so the
+ * parser meets every fault in the order of the text.
+ */
+const lex = (source: string, flags: Flags): Iterable<Result.Result<Token, string>> => {
+  const text: Text = { source, flags };
+  return pipe(
+    readEach(0, (index) =>
+      pipe(
+        charAt(text, index),
+        Option.map((char) => tokenReader(char)(text, index)),
+      ),
+    ),
+    Iterable.map(Result.map(({ value }) => value)),
+  );
+};
+
+// ---------------------------------------------------------------------------
+// The parser
+// ---------------------------------------------------------------------------
+
+/**
+ * The branches of one group, while the parser reads it.
+ *
+ * A chunk appends in logarithmic time, so a long branch does not copy its
+ * parts once for every part that it adds.
+ */
+interface Branches {
+  /** The branches that a `|` already ended. */
+  readonly done: Chunk.Chunk<Node>;
+  /** The parts of the branch that the parser reads now. */
+  readonly parts: Chunk.Chunk<Node>;
+}
+
+const NO_BRANCHES: Branches = { done: Chunk.empty(), parts: Chunk.empty() };
+
+/** A group that a `(` opened, and that no `)` closed yet. */
+interface Frame {
+  readonly opener: Opener;
+  readonly branches: Branches;
+}
+
+/** The open groups: the innermost one, and the groups that hold it. */
+interface OpenGroups {
+  readonly innermost: Frame;
+  readonly outer: Option.Option<OpenGroups>;
+}
+
+interface Parser {
+  readonly open: Option.Option<OpenGroups>;
+  /** The branches of the whole pattern. */
+  readonly root: Branches;
+  /** The lookaheads and lookbehinds that the parser has opened so far. */
+  readonly assertions: number;
+}
+
+const START: Parser = { open: Option.none(), root: NO_BRANCHES, assertions: 0 };
+
+/** The open groups, the innermost first. */
+const framesOf = (open: Option.Option<OpenGroups>): Iterable<Frame> =>
+  Iterable.unfold(
+    open,
+    Option.map(({ innermost, outer }) => [innermost, outer] as const),
+  );
+
+/** The constructors of the inner nodes, which compare sets under the flags. */
+interface Tree {
+  /** No part is the empty node, and one part is that part. */
+  readonly concat: (parts: Chunk.Chunk<Node>) => Node;
+  /** One branch is that branch. */
+  readonly alternation: (branches: Branches) => Node;
+}
+
+const makeTree = (intersect: Intersect): Tree => {
+  const concat = (chunk: Chunk.Chunk<Node>): Node => {
+    const parts = Chunk.toReadonlyArray(chunk);
+    return pipe(
+      parts,
+      Array.matchLeft({
+        onEmpty: () => EMPTY_NODE,
+        onNonEmpty: (head, rest) =>
+          pipe(
+            rest,
+            Array.match({ onEmpty: () => head, onNonEmpty: () => concatNode(intersect)(parts) }),
+          ),
+      }),
+    );
+  };
+  const alternation = ({ done, parts }: Branches): Node => {
+    const branches = pipe(done, Chunk.append(concat(parts)), Chunk.toReadonlyArray);
+    return pipe(
+      Array.tailNonEmpty(branches),
+      Array.match({
+        onEmpty: () => Array.headNonEmpty(branches),
+        onNonEmpty: () => altNode(intersect)(branches),
+      }),
+    );
+  };
+  return { concat, alternation };
+};
+
+const quantified = (node: Node, count: Option.Option<Count>): Node =>
+  pipe(count, Option.match({ onNone: () => node, onSome: (bounds) => repeatNode(node, bounds) }));
+
+/** Change the branches of the innermost open group, or of the pattern. */
+const modifyCurrent = (parser: Parser, change: (branches: Branches) => Branches): Parser =>
+  pipe(
+    parser.open,
+    Option.match({
+      onNone: () => pipe(parser, Struct.assign({ root: change(parser.root) })),
+      onSome: ({ innermost: { opener, branches }, outer }) =>
+        pipe(
+          parser,
+          Struct.assign({
+            open: Option.some({ innermost: { opener, branches: change(branches) }, outer }),
+          }),
+        ),
+    }),
+  );
+
+const addPart =
+  (node: Node) =>
+  ({ done, parts }: Branches): Branches => ({ done, parts: pipe(parts, Chunk.append(node)) });
+
+const endBranch =
+  (tree: Tree) =>
+  ({ done, parts }: Branches): Branches => ({
+    done: pipe(done, Chunk.append(tree.concat(parts))),
+    parts: Chunk.empty(),
+  });
+
+const push = (parser: Parser, opener: Opener): Parser =>
+  pipe(
+    parser,
+    Struct.assign({
+      open: Option.some({ innermost: { opener, branches: NO_BRANCHES }, outer: parser.open }),
+    }),
+  );
+
+const lookDepth = (parser: Parser): number =>
+  pipe(
+    framesOf(parser.open),
+    Iterable.filter(({ opener }) => Opener.$is("Look")(opener)),
+    Iterable.size,
+  );
+
+/** Open a lookahead or a lookbehind, within the two limits on assertions. */
+const openLook: (parser: Parser) => Result.Result<Parser, string> = flow(
+  Result.liftPredicate(
+    ({ assertions }: Parser) => assertions + 1 <= ASSERTION_LIMIT,
+    () => MANY_ASSERTIONS,
+  ),
+  Result.filterOrFail(
+    (parser) => lookDepth(parser) + 1 <= ASSERTION_DEPTH_LIMIT,
+    () => NESTED_ASSERTIONS,
+  ),
+  Result.map((parser) =>
+    pipe(push(parser, Opener.Look()), Struct.assign({ assertions: parser.assertions + 1 })),
+  ),
+);
+
+const closeGroup = (
+  tree: Tree,
+  parser: Parser,
+  count: Option.Option<Count>,
+): Result.Result<Parser, string> =>
+  pipe(
+    parser.open,
+    Option.match({
+      // A `)` that no `(` opened.
+      onNone: () => Result.fail(UNSUPPORTED_SYNTAX),
+      onSome: ({ innermost: { opener, branches }, outer }) => {
+        const group = pipe(
+          opener,
+          Opener.$match({
+            Group: () => tree.alternation(branches),
+            Look: () => lookNode(tree.alternation(branches)),
+          }),
+        );
+        const closed = pipe(parser, Struct.assign({ open: outer }));
+        return Result.succeed(modifyCurrent(closed, addPart(quantified(group, count))));
+      },
+    }),
+  );
+
+const step = (tree: Tree, parser: Parser, token: Token): Result.Result<Parser, string> =>
+  pipe(
+    token,
+    Token.$match({
+      Atom: ({ node, count }) =>
+        Result.succeed(modifyCurrent(parser, addPart(quantified(node, count)))),
+      Bar: () => Result.succeed(modifyCurrent(parser, endBranch(tree))),
+      Open: ({ opener }) =>
+        pipe(
+          opener,
+          Opener.$match({
+            Group: () => Result.succeed(push(parser, opener)),
+            Look: () => openLook(parser),
+          }),
+        ),
+      Close: ({ count }) => closeGroup(tree, parser, count),
+    }),
+  );
+
+/** The tree of the whole pattern. A group that no `)` closed is a fault. */
+const finish = (tree: Tree, parser: Parser): Result.Result<Node, string> =>
+  pipe(
+    parser.open,
+    Option.match({
+      onNone: () => Result.succeed(tree.alternation(parser.root)),
+      onSome: () => Result.fail(UNSUPPORTED_SYNTAX),
+    }),
+  );
+
+/**
+ * Parse `source` into a tree.
+ *
+ * The caller compiled the same text with `new RegExp` first, so the text is
+ * valid. Syntax that this parser does not know is therefore not a fault of the
+ * user: it is a limit of the check, and the pattern is refused.
+ */
+const parse = (source: string, flags: Flags): Result.Result<Node, string> => {
+  const tree = makeTree(flags.intersect);
+  return pipe(
+    lex(source, flags),
+    Array.reduce(Result.succeed(START), (parsed: Result.Result<Parser, string>, token) =>
+      pipe(
+        Result.all([parsed, token]),
+        Result.flatMap(([parser, next]) => step(tree, parser, next)),
+      ),
+    ),
+    Result.flatMap((parser) => finish(tree, parser)),
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -1215,25 +1910,25 @@ const makeAnalysis = (ignoreCase: boolean): Analysis => {
  * neighbour that must match a character, because that neighbour separates the
  * pair.
  */
-const hasCompetingNeighbours = (parts: ReadonlyArray<Node>, analysis: Analysis): boolean => {
-  for (let left = 0; left < parts.length; left++) {
-    const one = parts[left];
-    if (one === undefined || !analysis.flexible(one)) continue;
-    for (let right = left + 1; right < parts.length; right++) {
-      const other = parts[right];
-      if (other === undefined) continue;
-      if (
-        analysis.flexible(other) &&
-        analysis.intersect(analysis.extend(one), analysis.first(other)) &&
-        analysis.intersect(analysis.last(one), analysis.anywhere(other))
-      ) {
-        return true;
-      }
-      if (!analysis.nullable(other)) break;
-    }
-  }
-  return false;
-};
+const hasCompetingNeighbours = (parts: ReadonlyArray<Node>, intersect: Intersect): boolean =>
+  pipe(
+    parts,
+    Array.some(
+      (one, left) =>
+        isFlexible(one) &&
+        pipe(
+          parts,
+          Array.drop(left + 1),
+          throughFirstSolid((other) => other),
+          Array.some(
+            (other) =>
+              isFlexible(other) &&
+              intersect(one.extend, other.first) &&
+              intersect(one.last, other.anywhere),
+          ),
+        ),
+    ),
+  );
 
 /**
  * Two alternatives that can match one text.
@@ -1249,81 +1944,147 @@ const hasCompetingNeighbours = (parts: ReadonlyArray<Node>, analysis: Analysis):
 const hasAmbiguousBranches = (
   branches: ReadonlyArray<Node>,
   inLoop: boolean,
-  analysis: Analysis,
+  intersect: Intersect,
 ): boolean => {
-  const share = (left: Node, right: Node): boolean => {
-    const shapeLeft = analysis.sequence(left);
-    const shapeRight = analysis.sequence(right);
-    if (Option.isSome(shapeLeft) && Option.isSome(shapeRight)) {
-      if (shapeLeft.value.length !== shapeRight.value.length) return false;
-      return shapeLeft.value.every((set, position) => {
-        const other = shapeRight.value[position];
-        return other !== undefined && analysis.intersect(set, other);
-      });
-    }
-    return inLoop && analysis.intersect(analysis.first(left), analysis.first(right));
+  const share = (left: Node, right: Node): boolean =>
+    pipe(
+      Option.all([left.sequence, right.sequence]),
+      Option.match({
+        onSome: ([one, other]) => one.length === other.length && overlaps(intersect, one, other),
+        onNone: () => inLoop && intersect(left.first, right.first),
+      }),
+    );
+  return pipe(
+    branches,
+    Array.some((one, left) =>
+      pipe(
+        branches,
+        Array.drop(left + 1),
+        Array.some((other) => share(one, other)),
+      ),
+    ),
+  );
+};
+
+/** A body that a loop may run many times, or the reason why it may not. */
+const loopBody = (body: Node, intersect: Intersect): Result.Result<Node, string> =>
+  pipe(
+    body,
+    // A body that matches nothing can iterate for ever at one position.
+    Result.liftPredicate(Predicate.not(isNullable), () => EMPTY_LOOP),
+    // A body that can grow past its own end divides one text into iterations
+    // in more than one way. `(a+)+` is the known shape.
+    Result.filterOrFail(
+      ({ extend, first }) => !intersect(extend, first),
+      () => AMBIGUOUS_LOOP,
+    ),
+  );
+
+/** A node that the walk still has to check, and whether a loop encloses it. */
+interface Visit {
+  readonly node: Node;
+  readonly inLoop: boolean;
+}
+
+/** The rules that one node breaks, and the nodes inside it that the walk checks next. */
+interface Inspection {
+  readonly checked: Result.Result<unknown, string>;
+  readonly next: ReadonlyArray<Visit>;
+}
+
+/** The visits that the walk has still to make, the next one on top. */
+interface Pending {
+  readonly top: Visit;
+  readonly rest: Option.Option<Pending>;
+}
+
+const inspect =
+  (intersect: Intersect) =>
+  ({ node, inLoop }: Visit): Inspection => {
+    const inside = (nodes: ReadonlyArray<Node>, loop: boolean): ReadonlyArray<Visit> =>
+      pipe(
+        nodes,
+        Array.map((child) => ({ node: child, inLoop: loop })),
+      );
+    return pipe(
+      node.shape,
+      Shape.$match({
+        Empty: (): Inspection => ({ checked: Result.void, next: [] }),
+        Anchor: (): Inspection => ({ checked: Result.void, next: [] }),
+        Char: (): Inspection => ({ checked: Result.void, next: [] }),
+        // A lookaround runs at a position and gives back no text, so its cost
+        // adds to the cost of the walk. It does not multiply it. The body is
+        // therefore held to the same rules as any other expression.
+        Look: ({ body }): Inspection => ({ checked: Result.void, next: inside([body], inLoop) }),
+        Concat: ({ parts }): Inspection => ({
+          checked: pipe(
+            parts,
+            Result.liftPredicate(
+              (list) => !hasCompetingNeighbours(list, intersect),
+              () => COMPETING_LOOPS,
+            ),
+          ),
+          next: inside(parts, inLoop),
+        }),
+        Alt: ({ branches }): Inspection => ({
+          checked: pipe(
+            branches,
+            Result.liftPredicate(
+              (list) => !hasAmbiguousBranches(list, inLoop, intersect),
+              () => AMBIGUOUS_BRANCHES,
+            ),
+          ),
+          next: inside(branches, inLoop),
+        }),
+        Repeat: ({ body, max }) =>
+          pipe(
+            max <= 1,
+            Boolean.match({
+              onFalse: (): Inspection => ({
+                checked: loopBody(body, intersect),
+                next: inside([body], true),
+              }),
+              onTrue: (): Inspection => ({ checked: Result.void, next: inside([body], inLoop) }),
+            }),
+          ),
+      }),
+    );
   };
 
-  for (let left = 0; left < branches.length; left++) {
-    const one = branches[left];
-    if (one === undefined) continue;
-    for (let right = left + 1; right < branches.length; right++) {
-      const other = branches[right];
-      if (other === undefined) continue;
-      if (share(one, other)) return true;
-    }
-  }
-  return false;
-};
+/** Check the visit on top, and put the nodes inside it above the visits that remain. */
+const advance =
+  (intersect: Intersect) =>
+  ({ top, rest }: Pending): readonly [Result.Result<unknown, string>, Option.Option<Pending>] => {
+    const { checked, next } = inspect(intersect)(top);
+    const pending = pipe(
+      next,
+      Array.reduceRight(rest, (below, visit) => Option.some<Pending>({ top: visit, rest: below })),
+    );
+    return [checked, pending];
+  };
 
-const check = (node: Node, inLoop: boolean, analysis: Analysis): Option.Option<string> => {
-  switch (node.kind) {
-    case "empty":
-    case "anchor":
-    case "char":
-      return Option.none();
+/**
+ * The tree, or the first rule that it breaks.
+ *
+ * The walk checks a node before the nodes inside it, and the nodes inside it
+ * in order. It keeps the visits that it still has to make in a list of its
+ * own, so a deep tree cannot exhaust the call stack, and it stops at the first
+ * fault.
+ */
+const check =
+  (intersect: Intersect) =>
+  (root: Node): Result.Result<Node, string> =>
+    pipe(
+      Iterable.unfold(
+        Option.some<Pending>({ top: { node: root, inLoop: false }, rest: Option.none() }),
+        Option.map(advance(intersect)),
+      ),
+      Result.all,
+      Result.map(() => root),
+    );
 
-    case "look":
-      // A lookaround runs at a position and gives back no text, so its cost
-      // adds to the cost of the walk. It does not multiply it. The body is
-      // therefore held to the same rules as any other expression.
-      return check(node.body, inLoop, analysis);
-
-    case "concat": {
-      if (hasCompetingNeighbours(node.parts, analysis)) {
-        return Option.some(COMPETING_LOOPS);
-      }
-      for (const part of node.parts) {
-        const problem = check(part, inLoop, analysis);
-        if (Option.isSome(problem)) return problem;
-      }
-      return Option.none();
-    }
-
-    case "alt": {
-      if (hasAmbiguousBranches(node.branches, inLoop, analysis)) {
-        return Option.some(AMBIGUOUS_BRANCHES);
-      }
-      for (const branch of node.branches) {
-        const problem = check(branch, inLoop, analysis);
-        if (Option.isSome(problem)) return problem;
-      }
-      return Option.none();
-    }
-
-    case "repeat": {
-      if (node.max <= 1) return check(node.body, inLoop, analysis);
-      // A body that matches nothing can iterate for ever at one position.
-      if (analysis.nullable(node.body)) return Option.some(EMPTY_LOOP);
-      // A body that can grow past its own end divides one text into
-      // iterations in more than one way. `(a+)+` is the known shape.
-      if (analysis.intersect(analysis.extend(node.body), analysis.first(node.body))) {
-        return Option.some(AMBIGUOUS_LOOP);
-      }
-      return check(node.body, true, analysis);
-    }
-  }
-};
+/** Does this tree try more ways to match one text than the budget allows? */
+const isOverBudget = (node: Node): boolean => node.cost > PATH_BUDGET;
 
 // ---------------------------------------------------------------------------
 // The check
@@ -1350,19 +2111,23 @@ export const MAX_PATTERN_LENGTH = 2048;
  * says nothing about the true fault.
  */
 export const regexSafetyError = (source: string, flags: string): Option.Option<string> => {
-  if (source.length > MAX_PATTERN_LENGTH) return Option.some(TOO_LONG);
-  const outcome = parse(source, flags.includes("s"), flags.includes("u"));
-  if (!outcome.ok) return Option.some(outcome.reason);
-
-  const analysis = makeAnalysis(flags.includes("i"));
-  const problem = check(outcome.node, false, analysis);
-  if (Option.isSome(problem)) return problem;
-  // The last rule counts the ways that one piece of text can be divided
-  // between the parts of the pattern. It reads inside an assertion as well,
-  // so `.*(?=.*x)` costs as much as `a.*b.*c` and is refused with it.
-  return analysis.cost(outcome.node) > PATH_BUDGET ? Option.some(MANY_LOOPS) : Option.none();
+  const read = readFlags(flags);
+  return pipe(
+    source,
+    Result.liftPredicate(
+      (text) => text.length <= MAX_PATTERN_LENGTH,
+      () => TOO_LONG,
+    ),
+    Result.flatMap((text) => parse(text, read)),
+    Result.flatMap(check(read.intersect)),
+    // The last rule counts the ways that one piece of text can be divided
+    // between the parts of the pattern. It reads inside an assertion as well,
+    // so `.*(?=.*x)` costs as much as `a.*b.*c` and is refused with it.
+    Result.filterOrFail(Predicate.not(isOverBudget), () => MANY_LOOPS),
+    Result.getFailure,
+  );
 };
 
 /** Is this expression free of the ambiguity that this module can prove? */
 export const isLinearRegex = (source: string, flags: string): boolean =>
-  Option.isNone(regexSafetyError(source, flags));
+  pipe(regexSafetyError(source, flags), Option.isNone);
