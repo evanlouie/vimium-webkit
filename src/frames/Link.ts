@@ -27,9 +27,20 @@
  * `FrameBus.serve`. This file must not import anything from `src/features/`.
  */
 
-import { Context, Effect, Layer, Option, Ref, Stream, SubscriptionRef, pipe } from "effect";
+import {
+  Array,
+  Boolean,
+  Context,
+  Effect,
+  Layer,
+  Option,
+  Ref,
+  Stream,
+  SubscriptionRef,
+  pipe,
+} from "effect";
 import type { EffectiveRule } from "~/domain/Exclusion.ts";
-import { DEFAULT_EXCLUSION } from "~/domain/FrameMessage.ts";
+import { DEFAULT_EXCLUSION, type EffectiveExclusion, isKind } from "~/domain/FrameMessage.ts";
 import { Exclusions } from "~/core/Exclusions.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
@@ -38,6 +49,7 @@ import type { FrameId } from "~/platform/Realm.ts";
 import {
   FrameBus,
   type FrameError,
+  FrameRole,
   type InboundMessage,
   REQUEST_DEADLINE,
   toFrame,
@@ -46,7 +58,51 @@ import {
 
 /** Read the verdict out of the reply to an exclusion request. */
 const readExclusion = (reply: InboundMessage): Option.Option<EffectiveRule> =>
-  reply.message.kind === "EXCLUSION_RESULT" ? Option.some(reply.message.exclusion) : Option.none();
+  pipe(
+    reply.message,
+    Option.liftPredicate(isKind("EXCLUSION_RESULT")),
+    Option.map(({ exclusion }) => exclusion),
+  );
+
+/** The verdict as the wire carries it: the two fields, and nothing else. */
+const wireVerdict = ({ enabled, passKeys }: EffectiveRule): EffectiveExclusion => ({
+  enabled,
+  passKeys,
+});
+
+/** Where the cursor stands in `frames`. A cursor on no known frame stands on the first. */
+const cursorIndex = (frames: ReadonlyArray<FrameId>, cursor: Option.Option<FrameId>): number =>
+  pipe(
+    cursor,
+    Option.flatMap((focused) =>
+      pipe(
+        frames,
+        Array.findFirstIndex((frame) => frame === focused),
+      ),
+    ),
+    Option.getOrElse(() => 0),
+  );
+
+/**
+ * The frame that takes the focus next, in document order and around the end.
+ *
+ * One frame alone has nowhere to send the focus.
+ */
+const nextFrame = (
+  frames: ReadonlyArray<FrameId>,
+  cursor: Option.Option<FrameId>,
+  direction: 1 | -1,
+): Option.Option<FrameId> =>
+  pipe(
+    frames,
+    Option.liftPredicate((known) => known.length >= 2),
+    Option.flatMap((known) =>
+      pipe(
+        known,
+        Array.get((cursorIndex(known, cursor) + direction + known.length) % known.length),
+      ),
+    ),
+  );
 
 export class FrameLink extends Context.Service<
   FrameLink,
@@ -100,26 +156,40 @@ export class FrameLink extends Context.Service<
         Effect.flatMap(exclusions.match),
       );
 
-      const pushSettings: Effect.Effect<void> = bus.isTop
-        ? Effect.gen(function* () {
-            const rule = yield* topVerdict;
-            yield* Effect.ignore(
-              bus.broadcast({
-                kind: "SETTINGS",
-                exclusion: { enabled: rule.enabled, passKeys: rule.passKeys },
-              }),
-            );
-          })
-        : Effect.void;
+      const broadcastVerdict = Effect.gen(function* () {
+        const rule = yield* topVerdict;
+        yield* pipe(
+          bus.broadcast({ kind: "SETTINGS", exclusion: wireVerdict(rule) }),
+          Effect.ignore,
+        );
+      });
+
+      const pushSettings: Effect.Effect<void> = pipe(
+        bus.role,
+        FrameRole.$match({
+          Coordinator: () => broadcastVerdict,
+          Member: () => Effect.void,
+        }),
+      );
 
       const askTop: Effect.Effect<EffectiveRule, FrameError> = pipe(
         bus.request(toTop, { kind: "EXCLUSION_REQUEST" }, readExclusion, REQUEST_DEADLINE),
         Effect.tap((rule) => exclusions.adopt(rule)),
       );
 
-      const effectiveExclusion: Effect.Effect<EffectiveRule, FrameError> = bus.isTop
-        ? topVerdict
-        : askTop;
+      const effectiveExclusion: Effect.Effect<EffectiveRule, FrameError> = pipe(
+        bus.role,
+        FrameRole.$match({
+          Coordinator: () => topVerdict,
+          Member: () => askTop,
+        }),
+      );
+
+      /** Point the cursor at one frame, and give that frame the focus. */
+      const focus = Effect.fnUntraced(function* (frameId: FrameId) {
+        yield* pipe(focusedRef, Ref.set(Option.some(frameId)));
+        yield* pipe(bus.send(toFrame(frameId), { kind: "TAKE_FOCUS" }), Effect.ignore);
+      });
 
       /**
        * Give the focus to the next frame in document order.
@@ -129,28 +199,85 @@ export class FrameLink extends Context.Service<
        */
       const elect = Effect.fn("FrameLink.elect")(function* (direction: 1 | -1) {
         const frames = yield* bus.peers;
-        if (frames.length < 2) return;
-
         const cursor = yield* Ref.get(focusedRef);
-        const current = Option.isNone(cursor) ? -1 : frames.indexOf(cursor.value);
-        const base = current < 0 ? 0 : current;
-        const next = frames[(base + direction + frames.length) % frames.length];
-        if (next === undefined) return;
-
-        yield* Ref.set(focusedRef, Option.some(next));
-        yield* Effect.ignore(bus.send(toFrame(next), { kind: "TAKE_FOCUS" }));
+        yield* pipe(
+          nextFrame(frames, cursor, direction),
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: focus,
+          }),
+        );
       });
 
       /** Take the focus, and tell the user which frame now has it. */
       const takeFocus = Effect.fn("FrameLink.takeFocus")(function* () {
         // `window.focus()` does nothing, or it throws, in a frame that the user
         // has not interacted with. The message below is what the user sees.
-        yield* Effect.ignore(
+        yield* pipe(
           dom.attempt("Window.focus", () => {
             dom.window.focus();
           }),
+          Effect.ignore,
         );
         yield* report.info("Frame focused");
+      });
+
+      /** The messages that the coordinator answers, and the verdict that it pushes. */
+      const serveAsCoordinator = Effect.gen(function* () {
+        // The URL of the top frame is the URL that decides the verdict, and a
+        // child frame cannot read it across origins.
+        yield* bus.serve("EXCLUSION_REQUEST", () =>
+          pipe(
+            topVerdict,
+            Effect.map((rule) =>
+              Option.some({ kind: "EXCLUSION_RESULT" as const, exclusion: wireVerdict(rule) }),
+            ),
+          ),
+        );
+
+        yield* bus.serve("FOCUS_FRAME", ({ message }) =>
+          pipe(elect(message.direction), Effect.as(Option.none())),
+        );
+
+        yield* bus.serve("FOCUSED", ({ from }) =>
+          pipe(focusedRef, Ref.set(Option.some(from)), Effect.as(Option.none())),
+        );
+
+        // The top frame owns the verdict, so every change of it goes out to the
+        // frames. `Exclusions` recomputes the verdict when the settings change.
+        yield* pipe(
+          SubscriptionRef.changes(exclusions.effective),
+          Stream.runForEach(() => pushSettings),
+          Effect.forkScoped,
+        );
+      });
+
+      /** The messages that a member answers, and the verdict that it asks for. */
+      const serveAsMember = Effect.gen(function* () {
+        yield* bus.serve("SETTINGS", ({ message }) =>
+          pipe(
+            settings.reload,
+            Effect.ignore,
+            // A prompt to read our own storage again, and never a value to
+            // take. Only the verdict travels.
+            Effect.andThen(exclusions.adopt(message.exclusion)),
+            Effect.as(Option.none()),
+          ),
+        );
+
+        // Until this frame is welcomed it has no verdict. A frame that started
+        // before its welcome would otherwise stay fully enabled, for the life
+        // of the document, on a page that the user excluded.
+        yield* pipe(
+          bus.ready,
+          Effect.flatMap(
+            Boolean.match({
+              onTrue: () => pipe(askTop, Effect.ignore),
+              onFalse: () => exclusions.adopt(DEFAULT_EXCLUSION),
+            }),
+          ),
+          Effect.forkScoped,
+        );
       });
 
       // ---------------------------------------------------------------------
@@ -159,71 +286,18 @@ export class FrameLink extends Context.Service<
 
       yield* bus.serve("TAKE_FOCUS", () => pipe(takeFocus(), Effect.as(Option.none())));
 
-      if (bus.isTop) {
-        // The URL of the top frame is the URL that decides the verdict, and a
-        // child frame cannot read it across origins.
-        yield* bus.serve("EXCLUSION_REQUEST", () =>
-          pipe(
-            topVerdict,
-            Effect.map((rule) =>
-              Option.some({
-                kind: "EXCLUSION_RESULT" as const,
-                exclusion: { enabled: rule.enabled, passKeys: rule.passKeys },
-              }),
-            ),
-          ),
-        );
-
-        yield* bus.serve("FOCUS_FRAME", (message) =>
-          message.message.kind === "FOCUS_FRAME"
-            ? pipe(elect(message.message.direction), Effect.as(Option.none()))
-            : Effect.succeedNone,
-        );
-
-        yield* bus.serve("FOCUSED", (message) =>
-          pipe(Ref.set(focusedRef, Option.some(message.from)), Effect.as(Option.none())),
-        );
-
-        // The top frame owns the verdict, so every change of it goes out to the
-        // frames. `Exclusions` recomputes the verdict when the settings change.
-        yield* Effect.forkScoped(
-          pipe(
-            SubscriptionRef.changes(exclusions.effective),
-            Stream.runForEach(() => pushSettings),
-          ),
-        );
-      } else {
-        yield* bus.serve("SETTINGS", (message) =>
-          message.message.kind === "SETTINGS"
-            ? pipe(
-                Effect.ignore(settings.reload),
-                Effect.andThen(
-                  // A prompt to read our own storage again, and never a value to
-                  // take. Only the verdict travels.
-                  exclusions.adopt(message.message.exclusion),
-                ),
-                Effect.as(Option.none()),
-              )
-            : Effect.succeedNone,
-        );
-
-        // Until this frame is welcomed it has no verdict. A frame that started
-        // before its welcome would otherwise stay fully enabled, for the life
-        // of the document, on a page that the user excluded.
-        yield* Effect.forkScoped(
-          pipe(
-            bus.ready,
-            Effect.flatMap((admitted) =>
-              admitted ? Effect.ignore(askTop) : exclusions.adopt(DEFAULT_EXCLUSION),
-            ),
-          ),
-        );
-      }
+      yield* pipe(
+        bus.role,
+        FrameRole.$match({
+          Coordinator: () => serveAsCoordinator,
+          Member: () => serveAsMember,
+        }),
+      );
 
       // The cursor of the top frame must follow the user. A click into a frame
       // moves it, so `gf` continues from there.
       yield* dom.listen("window", "focus", () =>
-        Effect.ignore(bus.send(toTop, { kind: "FOCUSED" })),
+        pipe(bus.send(toTop, { kind: "FOCUSED" }), Effect.ignore),
       );
 
       return FrameLink.of({
