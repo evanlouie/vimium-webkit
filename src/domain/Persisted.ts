@@ -74,7 +74,7 @@ export type ExclusionRule = typeof exclusionRuleSchema.Type;
  * A field that degrades to `fallback` instead of taking the group with it.
  *
  * Named rather than inlined so the intent reads at every use: one bad field
- * costs the user that field. `#decode` returns the defaults for the *whole*
+ * costs the user that field. `Storage` returns the defaults for the *whole*
  * group on a validation failure, which without this would mean a single
  * hand-edited character in the manager's storage viewer erasing every setting.
  *
