@@ -19,7 +19,6 @@ import {
   patternProblem,
   patternToRegExp,
 } from "~/domain/Exclusion.ts";
-import { parseExclusionText } from "~/ui/Dialog.ts";
 
 /** Test a compiled pattern. `null` means that the pattern did not compile. */
 const matches = (pattern: string, url: string): boolean | null =>
@@ -239,29 +238,31 @@ describe("Exclusion", () => {
     }),
   );
 
-  it.effect("reads the settings text as the settings dialog reads it", () =>
+  it.effect("reads each rule of the settings text with the line that holds it", () =>
     Effect.sync(() => {
-      // Two readers of one text can drift apart, and a marked line would then
-      // not be the dropped rule. This test holds the two together.
-      const texts = [
-        "https://example.com/*",
-        "# a comment\n\nhttps://a.test/*  jk\n  /(a+)+$/   x y  \n",
-        "  \n#\nhttps://b.test/*\n\t/x*/\tjk\n",
-      ];
-      pipe(
-        texts,
-        Array.forEach((text) => {
-          const numbered = pipe(
-            parseExclusionLines(text),
-            Array.map((entry) => entry.rule),
-          );
-          assert.deepEqual(
-            numbered,
-            parseExclusionText(text),
-            `the two readers disagree about ${JSON.stringify(text)}`,
-          );
-        }),
+      // The settings dialog marks the line of a dropped rule, so a rule keeps
+      // the number of its line. A blank line and a comment give no rule. The
+      // first space or tab ends the pattern, and the pass keys are trimmed.
+      const text = pipe(
+        [
+          "# a comment",
+          "",
+          "  ",
+          "#",
+          "https://a.test/*  jk",
+          "  /(a+)+$/   x y  ",
+          "\t/x*/\tjk",
+          "https://b.test/*",
+          "",
+        ],
+        Array.join("\n"),
       );
+      assert.deepEqual(parseExclusionLines(text), [
+        { line: 5, rule: { pattern: "https://a.test/*", passKeys: "jk" } },
+        { line: 6, rule: { pattern: "/(a+)+$/", passKeys: "x y" } },
+        { line: 7, rule: { pattern: "/x*/", passKeys: "jk" } },
+        { line: 8, rule: { pattern: "https://b.test/*", passKeys: "" } },
+      ]);
     }),
   );
 
