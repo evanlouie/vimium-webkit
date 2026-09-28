@@ -873,6 +873,19 @@ const readKey = (notation: string): SessionKey =>
     Match.orElse(() => SessionKey.Ignore()),
   );
 
+/**
+ * What filter mode does with the one candidate that the query names without
+ * doubt. `waitForEnterForFilteredHints` asks for `Confirm`.
+ */
+type SoleMatch = Data.TaggedEnum<{
+  /** Activate it at once. */
+  Activate: NoFields;
+  /** Activate it on Enter, or after a pause in the typing. */
+  Confirm: NoFields;
+}>;
+
+const SoleMatch = Data.taggedEnum<SoleMatch>();
+
 /** Where a session stands, and the rules of its mode. */
 type SessionState = Data.TaggedEnum<{
   /** Alphabet mode. `typed` is the queue of keystrokes, matched by prefix. */
@@ -889,7 +902,7 @@ type SessionState = Data.TaggedEnum<{
   Filter: {
     readonly numbers: string;
     readonly candidates: readonly FilterCandidate[];
-    readonly waitForEnter: boolean;
+    readonly soleMatch: SoleMatch;
     readonly text: string;
     readonly digits: string;
     readonly activeIndex: number;
@@ -951,7 +964,10 @@ const filterSession = (settings: SettingsData, entries: readonly HintEntry[]): S
   return SessionState.Filter({
     numbers,
     candidates,
-    waitForEnter: settings.waitForEnterForFilteredHints,
+    soleMatch: pipe(
+      settings.waitForEnterForFilteredHints,
+      Boolean.match({ onFalse: () => SoleMatch.Activate(), onTrue: () => SoleMatch.Confirm() }),
+    ),
     text: "",
     digits: "",
     activeIndex: 0,
@@ -1058,16 +1074,16 @@ const filterQuery = ({ text, digits }: FilterState): string => `${text}${digits}
  * The pause matters, because filter mode narrows to one match long before the
  * user has finished the word.
  */
-const exactActivation = ({ outcome, waitForEnter }: FilterState): Option.Option<SessionCommand> =>
+const exactActivation = ({ outcome, soleMatch }: FilterState): Option.Option<SessionCommand> =>
   pipe(
     outcome.exact,
     Option.filter(() => outcome.candidates.length === 1),
     Option.map(({ index }) =>
       pipe(
-        waitForEnter,
-        Boolean.match({
-          onFalse: () => SessionCommand.Activate({ index }),
-          onTrue: () => SessionCommand.Confirm({ index }),
+        soleMatch,
+        SoleMatch.$match({
+          Activate: () => SessionCommand.Activate({ index }),
+          Confirm: () => SessionCommand.Confirm({ index }),
         }),
       ),
     ),
