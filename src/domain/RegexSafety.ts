@@ -2127,7 +2127,3 @@ export const regexSafetyError = (source: string, flags: string): Option.Option<s
     Result.getFailure,
   );
 };
-
-/** Is this expression free of the ambiguity that this module can prove? */
-export const isLinearRegex = (source: string, flags: string): boolean =>
-  pipe(regexSafetyError(source, flags), Option.isNone);
