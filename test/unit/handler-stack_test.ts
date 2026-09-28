@@ -252,7 +252,7 @@ describe("HandlerStack", () => {
         const failing = yield* stack.push({
           name: "owned",
           scroll: () => Effect.die(new Error("boom")),
-          onDefect: () => pipe(cleaned, Ref.update(Array.append("owned"))),
+          onDefect: pipe(cleaned, Ref.update(Array.append("owned"))),
         });
 
         assert.isTrue(yield* stack.bubble("scroll", event()));
@@ -273,7 +273,7 @@ describe("HandlerStack", () => {
         yield* stack.push({
           name: "owned",
           scroll: () => Effect.die(new Error("boom")),
-          onDefect: () => Effect.die(new Error("cleanup boom")),
+          onDefect: Effect.die(new Error("cleanup boom")),
         });
 
         assert.isTrue(yield* stack.bubble("scroll", event()));

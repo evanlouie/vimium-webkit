@@ -73,6 +73,7 @@ import {
   Struct,
 } from "effect";
 import { Settings } from "~/core/Settings.ts";
+import { describeCause } from "~/domain/Failure.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { BASE_CSS, type ColorScheme, detectPageScheme, schemeOf } from "~/ui/Styles.ts";
@@ -1794,5 +1795,5 @@ const FALLBACK_VIEWPORT: ViewportRect = {
  * throw would go nowhere and silence is the worse outcome.
  */
 const reportGuardFailure = (cause: Cause.Cause<never>): void => {
-  console.error("[vimium-webkit] the overlay removal guard failed", Cause.pretty(cause));
+  console.error("[vimium-webkit] the overlay removal guard failed", describeCause(cause));
 };

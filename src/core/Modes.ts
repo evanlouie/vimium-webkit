@@ -36,6 +36,7 @@ import {
   HandlerStack,
   SUPPRESS_EVENT,
 } from "./HandlerStack.ts";
+import { recoverEvenIfInterrupted } from "./Recovery.ts";
 
 /** The text that the HUD shows for the live modes. `None` shows nothing. */
 export type ModeIndicator = Option.Option<string>;
@@ -274,13 +275,17 @@ export class Modes extends Context.Service<
           ) {
             yield* pipe(handler, Option.match({ onNone: () => Effect.void, onSome: stack.remove }));
             yield* pipe(state, Ref.update(left(handle, group)));
+            // One body that fails must not keep the others from running.
             yield* pipe(
               bodies,
               Effect.forEach(
                 (body) =>
                   pipe(
                     body(reason),
-                    Effect.catchCause((cause) => Effect.logError("a mode exit body failed", cause)),
+                    recoverEvenIfInterrupted(
+                      `an exit body of the "${options.name}" mode`,
+                      Effect.void,
+                    ),
                   ),
                 { discard: true },
               ),
@@ -380,7 +385,7 @@ export class Modes extends Context.Service<
             // The stack drops a frame whose body failed. Only the mode can
             // release the rest: the singleton group, the indicator and the
             // exit bodies that hold the overlay of a feature.
-            onDefect: () => exit("defect"),
+            onDefect: exit("defect"),
             keydown: (event) =>
               pipe(
                 escapeExits && isEscape(event),

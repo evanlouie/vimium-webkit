@@ -44,6 +44,7 @@ import {
   pipe,
 } from "effect";
 import { Commands } from "~/core/Commands.ts";
+import { recoverUnlessInterrupted } from "~/core/Recovery.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -801,11 +802,9 @@ export class Scroller extends Context.Service<
         const animate = (axis: ScrollAxis): Effect.Effect<void> =>
           pipe(
             loop(axis),
-            Effect.catchDefect((defect) =>
-              Effect.gen(function* () {
-                yield* Effect.logError("the scroll animation failed", defect);
-                yield* report.error("Scrolling stopped after an internal failure");
-              }),
+            recoverUnlessInterrupted(
+              "the scroll animation",
+              report.error("Scrolling stopped after an internal failure"),
             ),
           );
 
