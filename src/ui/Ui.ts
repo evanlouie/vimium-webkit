@@ -48,23 +48,34 @@
  */
 
 import {
+  Array,
+  Boolean,
   Cause,
   Context,
+  Data,
   Effect,
+  Equal,
   Exit,
   FiberHandle,
+  flow,
+  Function,
+  Iterable,
   Layer,
+  Match,
   Option,
+  Predicate,
+  Record,
   Ref,
   Schema,
   Scope,
   Stream,
   pipe,
+  Struct,
 } from "effect";
 import { Settings } from "~/core/Settings.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { BASE_CSS, type ColorScheme, detectPageScheme } from "~/ui/Styles.ts";
+import { BASE_CSS, type ColorScheme, detectPageScheme, schemeOf } from "~/ui/Styles.ts";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -81,11 +92,37 @@ export class UiError extends Schema.TaggedError<UiError>()("UiError", {
 
 export type UiLayerName = "hud" | "hints" | "find" | "dialog" | "omnibar";
 
-/** The stacking order, lowest first. */
-const LAYER_ORDER: readonly UiLayerName[] = ["hints", "find", "hud", "omnibar", "dialog"];
+/**
+ * How a layer starts with respect to the pointer.
+ *
+ * An `interactive` layer holds a true control, and it can take pointer events
+ * while it holds content. A `passive` layer holds decorations, or a control
+ * that asks for the pointer only while it is open.
+ */
+type LayerPointer = "interactive" | "passive";
 
-/** The layers that can take pointer events while they hold content. */
-const INTERACTIVE_LAYERS: ReadonlySet<UiLayerName> = new Set<UiLayerName>(["omnibar", "dialog"]);
+/**
+ * The `data-interactive` attribute that a layer starts with.
+ *
+ * An interactive layer starts with `false`, so the page keeps every click
+ * until a modal takes them. A passive layer starts with no attribute.
+ */
+const pointerAttribute = (pointer: LayerPointer): Option.Option<string> =>
+  pipe(
+    Match.value(pointer),
+    Match.when("interactive", () => Option.some("false")),
+    Match.when("passive", () => Option.none()),
+    Match.exhaustive,
+  );
+
+/** Every layer, in stacking order, lowest first. */
+const LAYERS: Record.ReadonlyRecord<UiLayerName, LayerPointer> = {
+  hints: "passive",
+  find: "passive",
+  hud: "passive",
+  omnibar: "interactive",
+  dialog: "interactive",
+};
 
 /** The visible part of the page, in CSS pixels. */
 export interface ViewportRect {
@@ -103,16 +140,14 @@ export interface ViewportRect {
  * page. Nothing has to remember to turn it off.
  */
 export const acceptPointerEvents = (layer: HTMLElement): Effect.Effect<void, never, Scope.Scope> =>
-  Effect.asVoid(
-    Effect.acquireRelease(
+  Effect.acquireRelease(
+    Effect.sync(() => {
+      layer.dataset["interactive"] = "true";
+    }),
+    () =>
       Effect.sync(() => {
-        layer.dataset["interactive"] = "true";
+        layer.dataset["interactive"] = "false";
       }),
-      () =>
-        Effect.sync(() => {
-          layer.dataset["interactive"] = "false";
-        }),
-    ),
   );
 
 // ---------------------------------------------------------------------------
@@ -183,6 +218,13 @@ export const HOST_STYLE: ReadonlyArray<readonly [string, string]> = [
   ["border", "0"],
 ];
 
+/** One property of the host as the engine gives it back. */
+type HostRead = (property: string) => readonly [value: string, priority: string];
+
+/** Does one declaration read back as we wrote it, with the important priority? */
+const readsBack = ([current, priority]: readonly [string, string], value: string): boolean =>
+  current === value && priority === "important";
+
 /**
  * What the host style must hold now.
  *
@@ -191,9 +233,22 @@ export const HOST_STYLE: ReadonlyArray<readonly [string, string]> = [
  * these values, so a repair cannot undo the last sync.
  */
 export const hostDeclarations = (
-  owned: ReadonlyMap<string, string>,
+  owned: Record.ReadonlyRecord<string, string>,
 ): ReadonlyArray<readonly [string, string]> =>
-  HOST_STYLE.map(([property, value]) => [property, owned.get(property) ?? value] as const);
+  pipe(
+    HOST_STYLE,
+    Array.map(
+      ([property, value]) =>
+        [
+          property,
+          pipe(
+            owned,
+            Record.get(property),
+            Option.getOrElse(() => value),
+          ),
+        ] as const,
+    ),
+  );
 
 /**
  * The properties that the engine gave back exactly as we wrote them.
@@ -211,14 +266,12 @@ export const hostDeclarations = (
  * answer is therefore derived from `HOST_STYLE` itself. A second list written
  * by hand is what let `transform`, `clip-path` and `filter` go unwatched.
  */
-export const comparableHostProperties = (
-  read: (property: string) => readonly [value: string, priority: string],
-): ReadonlySet<string> =>
-  new Set(
-    HOST_STYLE.filter(([property, value]) => {
-      const [current, priority] = read(property);
-      return current === value && priority === "important";
-    }).map(([property]) => property),
+export const comparableHostProperties = (read: HostRead): ReadonlySet<string> =>
+  pipe(
+    HOST_STYLE,
+    Array.filter(([property, value]) => readsBack(read(property), value)),
+    Array.map(([property]) => property),
+    (properties) => new Set(properties),
   );
 
 /**
@@ -231,10 +284,14 @@ export const comparableHostProperties = (
  * for each check, and that is the safe direction.
  */
 export const allHostProperties = (): ReadonlySet<string> =>
-  new Set(HOST_STYLE.map(([property]) => property));
+  pipe(
+    HOST_STYLE,
+    Array.map(([property]) => property),
+    (properties) => new Set(properties),
+  );
 
 /**
- * Must the guard put the host back?
+ * The element that must take the host back, if the host is not in it.
  *
  * A connection test is not enough. Page script can move the host into a
  * container of its own, and give that container `opacity: 0`. The host stays
@@ -243,11 +300,14 @@ export const allHostProperties = (): ReadonlySet<string> =>
  * keeps its own visibility, because it chose the container.
  *
  * Test the parent instead. `parent` is the element that must hold the host, and
- * `current` is the node that holds it now. A `parent` of `null` means that the
+ * `current` is the node that holds it now. A `parent` of `None` means that the
  * document has no element yet, and then there is nothing to do.
  */
-export const hostNeedsAttachment = (parent: Node | null, current: Node | null): boolean =>
-  parent !== null && current !== parent;
+export const reattachTo = <N>(parent: Option.Option<N>, current: unknown): Option.Option<N> =>
+  pipe(
+    parent,
+    Option.filter((element) => element !== current),
+  );
 
 /**
  * The host properties that no longer hold the value that we wrote.
@@ -292,20 +352,19 @@ export const hostNeedsAttachment = (parent: Node | null, current: Node | null): 
  *
  * `read` gives the current value and the current priority of one property, and
  * `guarded` names the properties that this engine can compare. Both are
- * parameters, so this function stays pure and a test needs no DOM.
+ * parameters, so this function stays pure and a test needs no DOM. A property
+ * outside `guarded` is never read.
  */
 export const outOfDateHostProperties = (
   guarded: ReadonlySet<string>,
-  read: (property: string) => readonly [value: string, priority: string],
-  owned: ReadonlyMap<string, string>,
-): readonly string[] =>
-  hostDeclarations(owned)
-    .filter(([property, value]) => {
-      if (!guarded.has(property)) return false;
-      const [current, priority] = read(property);
-      return current !== value || priority !== "important";
-    })
-    .map(([property]) => property);
+  read: HostRead,
+  owned: Record.ReadonlyRecord<string, string>,
+): ReadonlyArray<string> =>
+  pipe(
+    hostDeclarations(owned),
+    Array.filter(([property, value]) => guarded.has(property) && !readsBack(read(property), value)),
+    Array.map(([property]) => property),
+  );
 
 /**
  * How many times the guard puts the host back for each quiet second.
@@ -313,7 +372,7 @@ export const outOfDateHostProperties = (
  * A page that removes the host inside its own mutation observer would fight us
  * in a loop of microtasks, and that loop would starve the page. The loop needs
  * *our* write, so the guard stops writing after the cap. It keeps observing,
- * and it says that it stopped: see `guardYielded`.
+ * and it says that it stopped: see `GuardState`.
  */
 const REATTACH_LIMIT = 32;
 
@@ -327,6 +386,42 @@ const REATTACH_LIMIT = 32;
  * the host again.
  */
 const REATTACH_RESET_MS = 1000;
+
+/** The removal guard, between two quiet seconds. */
+type GuardState = Data.TaggedEnum<{
+  /** The guard puts the host back. `repairs` counts the repairs of this second. */
+  Repairing: { readonly repairs: number };
+  /**
+   * The guard spent its repair budget for this second, so the page holds the
+   * host and the overlay is not visible.
+   */
+  Yielded: Record.ReadonlyRecord<never, never>;
+}>;
+const GuardState = Data.taggedEnum<GuardState>();
+
+/** The guard at the start, and after each quiet second. */
+const FRESH_GUARD: GuardState = GuardState.Repairing({ repairs: 0 });
+
+/**
+ * The page took the host away once more.
+ *
+ * The budget for this second can run out here. The guard then stops writing,
+ * because the loop needs our write, but it **keeps observing** and it says
+ * what happened. A guard that disconnected here stayed silent for the rest of
+ * the session, and the page then held an invisible interface that still took
+ * every key.
+ */
+const afterRemoval: (guard: GuardState) => GuardState = GuardState.$match({
+  Repairing: ({ repairs }) =>
+    pipe(
+      repairs + 1 > REATTACH_LIMIT,
+      Boolean.match({
+        onFalse: () => GuardState.Repairing({ repairs: repairs + 1 }),
+        onTrue: () => GuardState.Yielded(),
+      }),
+    ),
+  Yielded: () => GuardState.Yielded(),
+});
 
 // ---------------------------------------------------------------------------
 // What the user can see
@@ -376,7 +471,13 @@ export const NO_SHIFT: HostShift = { dx: 0, dy: 0 };
  * rule as the only declaration for `transform`.
  */
 export const hostTranslate = (x: number, y: number): string =>
-  x === 0 && y === 0 ? "none" : `translate(${x}px, ${y}px)`;
+  pipe(
+    x === 0 && y === 0,
+    Boolean.match({
+      onFalse: () => `translate(${x}px, ${y}px)`,
+      onTrue: () => "none",
+    }),
+  );
 
 /**
  * The declarations that the viewport sync owns.
@@ -387,13 +488,16 @@ export const hostTranslate = (x: number, y: number): string =>
 export const ownedDeclarations = (
   view: ViewportRect,
   shift: HostShift,
-): ReadonlyMap<string, string> =>
-  new Map<string, string>([
-    ["--vw-scale", String(view.scale)],
-    ["transform", hostTranslate(view.offsetLeft + shift.dx, view.offsetTop + shift.dy)],
-    ["width", `${view.width}px`],
-    ["height", `${view.height}px`],
-  ]);
+): Record.ReadonlyRecord<string, string> => ({
+  "--vw-scale": String(view.scale),
+  transform: hostTranslate(view.offsetLeft + shift.dx, view.offsetTop + shift.dy),
+  width: `${view.width}px`,
+  height: `${view.height}px`,
+});
+
+/** Is a correction too small to write? A rounding of the engine is not an attack. */
+const withinTolerance = ({ dx, dy }: HostShift): boolean =>
+  Math.abs(dx) < SHIFT_TOLERANCE && Math.abs(dy) < SHIFT_TOLERANCE;
 
 /**
  * How far the host is from the place that it must hold.
@@ -403,13 +507,11 @@ export const ownedDeclarations = (
  * document instead of the viewport. The error is then the scroll offset, and
  * it is a pure translation, so one correction answers it.
  */
-export const alignError = (box: HostBox, view: ViewportRect): Option.Option<HostShift> => {
-  const dx = view.offsetLeft - box.left;
-  const dy = view.offsetTop - box.top;
-  return Math.abs(dx) < SHIFT_TOLERANCE && Math.abs(dy) < SHIFT_TOLERANCE
-    ? Option.none()
-    : Option.some({ dx, dy });
-};
+export const alignError = (box: HostBox, view: ViewportRect): Option.Option<HostShift> =>
+  pipe(
+    { dx: view.offsetLeft - box.left, dy: view.offsetTop - box.top },
+    Option.liftPredicate(Predicate.not(withinTolerance)),
+  );
 
 /**
  * Does the host box disagree with the visible viewport?
@@ -436,52 +538,102 @@ export interface PaintStyle {
   readonly clipPath: string;
 }
 
+const INSET_CLIP = /^inset\(\s*([^)]*?)(?:\s+round\s+[^)]*)?\s*\)$/i;
+const PERCENT = /^(\d+(?:\.\d+)?)%$/;
+const FILTER_OPACITY = /opacity\(\s*(\d+(?:\.\d+)?)\s*(%)?\s*\)/gi;
+
+/** A percentage, or `None` for any other length. */
+const percentOf = (value: string): Option.Option<number> =>
+  pipe(PERCENT.exec(value), Option.fromNullishOr, Option.flatMap(Array.get(1)), Option.map(Number));
+
+/**
+ * The one to four percentages of an `inset()` clip.
+ *
+ * `None` for any other clip, and for an inset that holds a length other than
+ * a percentage.
+ */
+const insetPercents = (clipPath: string): Option.Option<Array.NonEmptyReadonlyArray<number>> =>
+  pipe(
+    INSET_CLIP.exec(clipPath),
+    Option.fromNullishOr,
+    Option.flatMap(Array.get(1)),
+    Option.map((body) => pipe(body.trim().split(/\s+/), Array.map(percentOf))),
+    Option.flatMap(Option.all),
+    Option.filter(Array.isReadonlyArrayNonEmpty<number>),
+    Option.filter((values) => values.length <= 4),
+  );
+
+/**
+ * Do the insets of a clip collapse one axis of its box?
+ *
+ * The values follow the order of CSS: top, right, bottom and left. A missing
+ * bottom takes the top, a missing right takes the top, and a missing left
+ * takes the right.
+ */
+const insetsCollapse = (values: Array.NonEmptyReadonlyArray<number>): boolean => {
+  const top = Array.headNonEmpty(values);
+  const right = pipe(
+    values,
+    Array.get(1),
+    Option.getOrElse(() => top),
+  );
+  const bottom = pipe(
+    values,
+    Array.get(2),
+    Option.getOrElse(() => top),
+  );
+  const left = pipe(
+    values,
+    Array.get(3),
+    Option.getOrElse(() => right),
+  );
+  return top + bottom >= 100 || right + left >= 100;
+};
+
 /** Does an `inset()` clip collapse one axis of its box? */
-const insetClipsAll = (clipPath: string): boolean => {
-  const match = /^inset\(\s*([^)]*?)(?:\s+round\s+[^)]*)?\s*\)$/i.exec(clipPath);
-  if (match === null) return false;
-  const values = (match[1] ?? "")
-    .trim()
-    .split(/\s+/)
-    .map((value) => {
-      const percent = /^(\d+(?:\.\d+)?)%$/.exec(value);
-      return percent === null ? null : Number(percent[1]);
-    });
-  if (values.length < 1 || values.length > 4 || values.includes(null)) {
-    return false;
-  }
-  const [first = 0, second = first, third = first, fourth = second] = values as number[];
-  const bottom = values.length < 3 ? first : third;
-  const left = values.length < 2 ? first : values.length < 4 ? second : fourth;
-  return first + bottom >= 100 || second + left >= 100;
+const insetClipsAll = (clipPath: string): boolean =>
+  pipe(insetPercents(clipPath), Option.exists(insetsCollapse));
+
+/** Does one `opacity()` of a filter hold zero? */
+const zeroFilterMatch: (match: RegExpExecArray) => boolean = flow(
+  Array.get(1),
+  Option.map(Number),
+  Option.exists((value) => Number.isFinite(value) && value <= 0),
+);
+
+/** Does a filter hold an `opacity()` of zero? */
+const zeroFilterOpacity = (filter: string): boolean =>
+  pipe(filter.matchAll(FILTER_OPACITY), Iterable.some(zeroFilterMatch));
+
+/** Is an opacity of zero or less? Text that is not a number says nothing. */
+const zeroOpacity = (opacity: string): boolean => {
+  const value = Number.parseFloat(opacity);
+  return Number.isFinite(value) && value <= 0;
 };
 
 /** Does one computed style prevent the overlay from painting? */
-export const preventsOverlayPaint = (style: PaintStyle): boolean => {
-  const opacity = Number.parseFloat(style.opacity);
-  const zeroFilterOpacity = [
-    ...style.filter.matchAll(/opacity\(\s*(\d+(?:\.\d+)?)\s*(%)?\s*\)/gi),
-  ].some((match) => {
-    const value = Number(match[1]);
-    return Number.isFinite(value) && value <= 0;
-  });
-  return (
-    style.display === "none" ||
-    style.visibility === "hidden" ||
-    style.visibility === "collapse" ||
-    style.contentVisibility === "hidden" ||
-    (Number.isFinite(opacity) && opacity <= 0) ||
-    zeroFilterOpacity ||
-    insetClipsAll(style.clipPath)
-  );
-};
+export const preventsOverlayPaint = (style: PaintStyle): boolean =>
+  style.display === "none" ||
+  style.visibility === "hidden" ||
+  style.visibility === "collapse" ||
+  style.contentVisibility === "hidden" ||
+  zeroOpacity(style.opacity) ||
+  zeroFilterOpacity(style.filter) ||
+  insetClipsAll(style.clipPath);
 
 /** What each fault says to the user, in the console. */
-const FAULT_REASON: Readonly<Record<OverlayFault, string>> = {
+const FAULT_REASON: Record.ReadonlyRecord<OverlayFault, string> = {
   misplaced: "the page holds the overlay outside the document element",
   displaced: "a rule of the page takes the overlay out of the viewport",
   hidden: "a rule of the page prevents the overlay from painting",
 };
+
+/** The console line for a change of the answer. */
+const faultMessage: (fault: Option.Option<OverlayFault>) => string = Option.match({
+  onNone: () => "the overlay is visible again, and it takes its keys again",
+  onSome: (fault: OverlayFault) =>
+    `the overlay is not visible, so it gives the keyboard back: ${pipe(FAULT_REASON, Struct.get(fault))}`,
+});
 
 /**
  * May the guard give the focus back to the node that held it?
@@ -492,10 +644,10 @@ const FAULT_REASON: Readonly<Record<OverlayFault, string>> = {
  * the focus to the page keeps it, because the page then owns a node that is
  * neither `null` nor the body.
  */
-export const focusIsFree = (
-  shadowActive: Node | null,
-  documentActive: Node | null,
-  body: Node | null,
+export const focusIsFree = <N>(
+  shadowActive: N | null,
+  documentActive: N | null,
+  body: N | null,
 ): boolean => shadowActive === null && (documentActive === null || documentActive === body);
 
 // ---------------------------------------------------------------------------
@@ -508,24 +660,28 @@ export const focusIsFree = (
  * A hold is one open modal. Two nested holds on the same layer are normal: the
  * settings dialog opens over the help dialog, and the help dialog closes
  * afterwards. The layer stays exposed until the last hold goes.
+ *
+ * The map is keyed by the layer element itself, which no record can key.
  */
 export const shiftHold = <K>(
   holds: ReadonlyMap<K, number>,
   key: K,
   delta: number,
 ): ReadonlyMap<K, number> => {
-  const next = new Map(holds);
-  next.set(key, Math.max(0, (holds.get(key) ?? 0) + delta));
-  return next;
+  const count = pipe(
+    holds.get(key),
+    Option.fromNullishOr,
+    Option.getOrElse(() => 0),
+  );
+  return new Map(holds).set(key, Math.max(0, count + delta));
 };
 
 /** Does any layer hold the accessibility tree open? */
-export const anyHeld = <K>(holds: ReadonlyMap<K, number>): boolean => {
-  for (const count of holds.values()) {
-    if (count > 0) return true;
-  }
-  return false;
-};
+export const anyHeld = <K>(holds: ReadonlyMap<K, number>): boolean =>
+  pipe(
+    holds.values(),
+    Iterable.some((count: number) => count > 0),
+  );
 
 // ---------------------------------------------------------------------------
 // Stylesheets
@@ -539,9 +695,19 @@ export const anyHeld = <K>(holds: ReadonlyMap<K, number>): boolean => {
  * subject to the `style-src` of the page, so the fallback breaks under a strict
  * policy. `Capabilities` warns the user when we reach it.
  */
-type StyleTarget =
-  | { readonly _tag: "sheet"; readonly sheet: CSSStyleSheet }
-  | { readonly _tag: "element"; readonly element: HTMLStyleElement };
+type StyleTarget = Data.TaggedEnum<{
+  Sheet: { readonly sheet: CSSStyleSheet };
+  StyleElement: { readonly element: HTMLStyleElement };
+}>;
+const StyleTarget = Data.taggedEnum<StyleTarget>();
+
+/** Write declarations on an element, each one with the important priority. */
+const writeImportant = (
+  element: HTMLElement,
+): ((declarations: Iterable<readonly [string, string]>) => void) =>
+  Iterable.forEach(([property, value]: readonly [string, string]) =>
+    element.style.setProperty(property, value, "important"),
+  );
 
 // ---------------------------------------------------------------------------
 // The service
@@ -606,8 +772,6 @@ export class Ui extends Context.Service<
       // still owned by this layer. `addStyle` and `setStyle` have no scope of
       // their own, and a stylesheet must live as long as the overlay.
       const layerScope = yield* Scope.Scope;
-      const scoped = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>): Effect.Effect<A, E> =>
-        Effect.provideService(effect, Scope.Scope, layerScope);
 
       // ---------------------------------------------------------------
       // The host and the shadow root
@@ -616,13 +780,11 @@ export class Ui extends Context.Service<
       const host = yield* Effect.acquireRelease(
         Effect.sync(() => {
           const element = doc.createElement("vimium-webkit-overlay");
-          for (const [property, value] of HOST_STYLE) {
-            // `setProperty`, and not the camel-case accessors: `all` is a
-            // shorthand that some engines do not give as an IDL attribute,
-            // and only `setProperty` can give a declaration the important
-            // priority. The priority is what stops page CSS from hiding us.
-            element.style.setProperty(property, value, "important");
-          }
+          // `setProperty`, and not the camel-case accessors: `all` is a
+          // shorthand that some engines do not give as an IDL attribute, and
+          // only `setProperty` can give a declaration the important priority.
+          // The priority is what stops page CSS from hiding us.
+          writeImportant(element)(HOST_STYLE);
           // The HUD layer opens the host with `expose` as soon as it is
           // built. Until then the overlay is an empty positioning box, and
           // assistive technology must not see it.
@@ -636,7 +798,7 @@ export class Ui extends Context.Service<
       );
 
       /** How the guard reads one property of the host. */
-      const readHostProperty = (property: string): readonly [value: string, priority: string] => [
+      const readHostProperty: HostRead = (property) => [
         host.style.getPropertyValue(property),
         host.style.getPropertyPriority(property),
       ];
@@ -652,17 +814,25 @@ export class Ui extends Context.Service<
       // "nothing is stale" for every property, so one refused read would
       // turn the whole protection off in silence. Compare everything
       // instead, and say so.
-      if (Option.isNone(derivedProperties)) {
-        yield* Effect.logWarning(
-          "the overlay guard could not read the host style; " + "it now compares every property",
-        );
-      }
-      const guardedProperties = pipe(derivedProperties, Option.getOrElse(allHostProperties));
+      const guardedProperties = yield* pipe(
+        derivedProperties,
+        Option.match({
+          onSome: (properties) => Effect.succeed(properties),
+          onNone: () =>
+            pipe(
+              Effect.logWarning(
+                "the overlay guard could not read the host style; " +
+                  "it now compares every property",
+              ),
+              Effect.as(allHostProperties()),
+            ),
+        }),
+      );
 
       // The values that the visual-viewport sync last wrote. The guard
       // compares against these, and the repair writes them again, so a
       // repair cannot put the overlay out of line with the visual viewport.
-      const viewportOwned = yield* Ref.make<ReadonlyMap<string, string>>(new Map());
+      const viewportOwned = yield* Ref.make<Record.ReadonlyRecord<string, string>>(Record.empty());
 
       // The node inside the overlay that last had the focus. A removal and a
       // move both take the focus away before the guard runs, so the guard
@@ -674,9 +844,9 @@ export class Ui extends Context.Service<
       // place in the document, and `alignHost` measures the error.
       const alignment = yield* Ref.make<HostShift>(NO_SHIFT);
 
-      // Has the removal guard spent its repair budget for this second? While
-      // this is true the page holds the host, so the overlay is not visible.
-      const guardYielded = yield* Ref.make(false);
+      // The removal guard. While it has yielded, the page holds the host, so
+      // the overlay is not visible.
+      const guard = yield* Ref.make<GuardState>(FRESH_GUARD);
 
       // The fault that we reported last. One line for each change, and not
       // one line for each check.
@@ -685,11 +855,10 @@ export class Ui extends Context.Service<
       // A realm that refuses a shadow root cannot hold the overlay at all.
       // There is no smaller unit to lose, so this is a defect and not a
       // failure that a caller could handle.
-      const shadow = yield* Effect.orDie(
-        pipe(
-          dom.attempt("Element.attachShadow", () => host.attachShadow({ mode: "closed" })),
-          Effect.mapError((error) => new UiError({ reason: "unavailable", detail: error.detail })),
-        ),
+      const shadow = yield* pipe(
+        dom.attempt("Element.attachShadow", () => host.attachShadow({ mode: "closed" })),
+        Effect.mapError((error) => new UiError({ reason: "unavailable", detail: error.detail })),
+        Effect.orDie,
       );
 
       // ---------------------------------------------------------------
@@ -697,7 +866,7 @@ export class Ui extends Context.Service<
       // ---------------------------------------------------------------
 
       const adopted = yield* Ref.make<ReadonlyArray<CSSStyleSheet>>([]);
-      const keyed = yield* Ref.make<ReadonlyMap<string, StyleTarget>>(new Map());
+      const keyed = yield* Ref.make<Record.ReadonlyRecord<string, StyleTarget>>(Record.empty());
 
       const applyAdopted = Effect.gen(function* () {
         const sheets = yield* Ref.get(adopted);
@@ -712,39 +881,48 @@ export class Ui extends Context.Service<
 
       /** Build a constructed sheet, or `None` where the engine has none. */
       const makeSheet = (css: string): Effect.Effect<Option.Option<CSSStyleSheet>> =>
-        capabilities.adoptedStyleSheets
-          ? dom.probeOr(() => {
-              const sheet = new CSSStyleSheet();
-              sheet.replaceSync(css);
-              return Option.some(sheet);
-            }, Option.none<CSSStyleSheet>())
-          : Effect.succeedNone;
+        pipe(
+          capabilities.adoptedStyleSheets,
+          Boolean.match({
+            onFalse: () => Effect.succeedNone,
+            onTrue: () =>
+              dom.probeOr(() => {
+                const sheet = new CSSStyleSheet();
+                sheet.replaceSync(css);
+                return Option.some(sheet);
+              }, Option.none<CSSStyleSheet>()),
+          }),
+        );
 
-      const installStyle = Effect.fn("Ui.installStyle")(function* (css: string) {
-        const made = yield* makeSheet(css);
-        if (Option.isSome(made)) {
-          const sheet = made.value;
-          yield* scoped(
-            Effect.acquireRelease(
-              pipe(
-                Ref.update(adopted, (current) => [...current, sheet]),
-                Effect.andThen(applyAdopted),
-              ),
-              () =>
-                pipe(
-                  Ref.update(adopted, (current) => current.filter((one) => one !== sheet)),
-                  Effect.andThen(applyAdopted),
-                ),
-            ),
-          );
-          return { _tag: "sheet", sheet } as const satisfies StyleTarget;
-        }
+      /** Adopt a constructed sheet for as long as the overlay lives. */
+      const adoptSheet = (sheet: CSSStyleSheet): Effect.Effect<StyleTarget> => {
+        const adopt = pipe(
+          adopted,
+          Ref.update<ReadonlyArray<CSSStyleSheet>>(Array.append(sheet)),
+          Effect.andThen(applyAdopted),
+        );
+        const release = pipe(
+          adopted,
+          Ref.update<ReadonlyArray<CSSStyleSheet>>(Array.filter((one) => one !== sheet)),
+          Effect.andThen(applyAdopted),
+        );
+        return pipe(
+          Effect.acquireRelease(adopt, () => release),
+          Effect.as(StyleTarget.Sheet({ sheet })),
+          Scope.provide(layerScope),
+        );
+      };
 
-        // One element for each stylesheet, and not one shared element. The
-        // shared element could only grow: a keyed sheet that alternates
-        // between two values appended both of them again for every change,
-        // and both stayed in effect.
-        const element = yield* scoped(
+      /**
+       * Append a `<style>` element for as long as the overlay lives.
+       *
+       * One element for each stylesheet, and not one shared element. The
+       * shared element could only grow: a keyed sheet that alternates between
+       * two values appended both of them again for every change, and both
+       * stayed in effect.
+       */
+      const appendStyleElement = (css: string): Effect.Effect<StyleTarget> =>
+        pipe(
           Effect.acquireRelease(
             Effect.sync(() => {
               const style = doc.createElement("style");
@@ -757,28 +935,56 @@ export class Ui extends Context.Service<
                 style.remove();
               }),
           ),
+          Effect.map((element) => StyleTarget.StyleElement({ element })),
+          Scope.provide(layerScope),
         );
-        return { _tag: "element", element } as const satisfies StyleTarget;
+
+      const installStyle = Effect.fn("Ui.installStyle")(function* (css: string) {
+        const made = yield* makeSheet(css);
+        return yield* pipe(
+          made,
+          Option.match({
+            onSome: adoptSheet,
+            onNone: () => appendStyleElement(css),
+          }),
+        );
       });
 
-      /** Give an installed stylesheet a new body. */
+      /** Give an installed stylesheet a new body. `false` when the engine refused it. */
       const replaceStyle = Effect.fn("Ui.replaceStyle")(function* (
         target: StyleTarget,
         css: string,
       ) {
-        if (target._tag === "element") {
-          yield* Effect.sync(() => {
-            target.element.textContent = css;
-          });
-          return true;
-        }
-        return yield* dom.probeOr(() => {
-          target.sheet.replaceSync(css);
-          return true;
-        }, false);
+        return yield* pipe(
+          target,
+          StyleTarget.$match({
+            StyleElement: ({ element }) =>
+              Effect.sync(() => {
+                element.textContent = css;
+                return true;
+              }),
+            Sheet: ({ sheet }) =>
+              dom.probeOr(() => {
+                sheet.replaceSync(css);
+                return true;
+              }, false),
+          }),
+        );
       });
 
       const addStyle = (css: string): Effect.Effect<void> => Effect.asVoid(installStyle(css));
+
+      /** Install a stylesheet, and keep it under its key. */
+      const installKeyed = (key: string, css: string): Effect.Effect<void> =>
+        pipe(
+          installStyle(css),
+          Effect.flatMap((target) =>
+            pipe(
+              keyed,
+              Ref.update<Record.ReadonlyRecord<string, StyleTarget>>(Record.set(key, target)),
+            ),
+          ),
+        );
 
       /**
        * Install or replace a stylesheet under a key.
@@ -787,16 +993,21 @@ export class Ui extends Context.Service<
        * once at start, and wrong for anything derived from a setting.
        */
       const setStyle = Effect.fn("Ui.setStyle")(function* (key: string, css: string) {
-        const existing = (yield* Ref.get(keyed)).get(key);
-        if (existing !== undefined && (yield* replaceStyle(existing, css))) {
-          return;
-        }
-        const target = yield* installStyle(css);
-        yield* Ref.update(keyed, (current) => {
-          const next = new Map(current);
-          next.set(key, target);
-          return next;
-        });
+        const existing = pipe(yield* Ref.get(keyed), Record.get(key));
+        const replaced = yield* pipe(
+          existing,
+          Option.match({
+            onNone: () => Effect.succeed(false),
+            onSome: (target) => replaceStyle(target, css),
+          }),
+        );
+        yield* pipe(
+          replaced,
+          Boolean.match({
+            onFalse: () => installKeyed(key, css),
+            onTrue: () => Effect.void,
+          }),
+        );
       });
 
       yield* addStyle(BASE_CSS);
@@ -805,16 +1016,24 @@ export class Ui extends Context.Service<
       // The layers
       // ---------------------------------------------------------------
 
-      const layers = new Map<UiLayerName, HTMLElement>();
-      for (const name of LAYER_ORDER) {
-        const element = yield* Effect.acquireRelease(
+      const makeLayer = (
+        name: UiLayerName,
+        pointer: LayerPointer,
+      ): Effect.Effect<HTMLElement, never, Scope.Scope> =>
+        Effect.acquireRelease(
           Effect.sync(() => {
             const div = doc.createElement("div");
             div.className = "vw-layer";
             div.dataset["layer"] = name;
-            if (INTERACTIVE_LAYERS.has(name)) {
-              div.dataset["interactive"] = "false";
-            }
+            pipe(
+              pointerAttribute(pointer),
+              Option.match({
+                onNone: Function.constVoid,
+                onSome: (value) => {
+                  div.dataset["interactive"] = value;
+                },
+              }),
+            );
             // Every layer starts outside the accessibility tree. A hint
             // marker and a find highlight are decorations of something that
             // the page already shows, and a screen reader must not read them
@@ -828,8 +1047,14 @@ export class Ui extends Context.Service<
               div.remove();
             }),
         );
-        layers.set(name, element);
-      }
+
+      // One element for each name, appended in the stacking order of
+      // `LAYERS`. `Effect.all` runs a record in the order of its keys.
+      const layers = yield* pipe(
+        LAYERS,
+        Record.map((pointer, name) => makeLayer(name, pointer)),
+        Effect.all,
+      );
 
       /**
        * Write the host style again, but only where the page changed it.
@@ -838,13 +1063,21 @@ export class Ui extends Context.Service<
        * a page that watches the `style` attribute from fighting us in a
        * loop: an intact style produces no write at all.
        */
-      const restoreHostStyle = (owned: ReadonlyMap<string, string>): void => {
-        const stale = outOfDateHostProperties(guardedProperties, readHostProperty, owned);
-        if (stale.length === 0) return;
-        for (const [property, value] of hostDeclarations(owned)) {
-          host.style.setProperty(property, value, "important");
-        }
-      };
+      const restoreHostStyle = (owned: Record.ReadonlyRecord<string, string>): void =>
+        pipe(
+          outOfDateHostProperties(guardedProperties, readHostProperty, owned),
+          Array.match({
+            onEmpty: Function.constVoid,
+            onNonEmpty: () => writeImportant(host)(hostDeclarations(owned)),
+          }),
+        );
+
+      const isHtmlElement = (target: EventTarget | null): target is HTMLElement =>
+        target instanceof HTMLElement;
+
+      /** Remember the node inside the overlay that has the focus, or that none has it. */
+      const rememberFocus = (focused: Option.Option<HTMLElement>): Effect.Effect<void> =>
+        pipe(lastFocused, Ref.set(focused));
 
       /**
        * Remember the node inside the overlay that has the focus.
@@ -854,10 +1087,7 @@ export class Ui extends Context.Service<
        * it bubbles, so one listener on the root sees every control.
        */
       yield* dom.listenOn(shadow, "focusin", (event) =>
-        Ref.set(
-          lastFocused,
-          event.target instanceof HTMLElement ? Option.some(event.target) : Option.none(),
-        ),
+        pipe(event.target, Option.liftPredicate(isHtmlElement), rememberFocus),
       );
 
       /**
@@ -867,20 +1097,28 @@ export class Ui extends Context.Service<
        * rule, and it holds the promise of this comment: a user who moved the
        * focus to the page in the meantime keeps it.
        */
-      const restoreFocus = (previous: Option.Option<HTMLElement>): void => {
-        if (Option.isNone(previous)) return;
-        const element = previous.value;
-        if (!element.isConnected) return;
-        if (!focusIsFree(shadow.activeElement, doc.activeElement, doc.body)) {
-          return;
-        }
-        // `preventScroll`, because this is a repair and not an action of the
-        // user. Nothing on the page may move.
-        element.focus({ preventScroll: true });
-      };
+      const restoreFocus: (previous: Option.Option<HTMLElement>) => void = flow(
+        Option.filter(
+          (element: HTMLElement) =>
+            element.isConnected && focusIsFree(shadow.activeElement, doc.activeElement, doc.body),
+        ),
+        Option.match({
+          onNone: Function.constVoid,
+          // `preventScroll`, because this is a repair and not an action of
+          // the user. Nothing on the page may move.
+          onSome: (element) => element.focus({ preventScroll: true }),
+        }),
+      );
 
-      /** The element that must hold the host, or `null` before it exists. */
-      const hostParent = (): Element | null => doc.documentElement ?? doc.body ?? null;
+      /** The element that must hold the host, or `None` before it exists. */
+      const hostParent = (): Option.Option<Element> =>
+        pipe(
+          Option.fromNullishOr<Element | null>(doc.documentElement),
+          Option.orElse(() => Option.fromNullishOr<Element | null>(doc.body)),
+        );
+
+      /** Forget the node that had the focus. */
+      const forgetFocus = rememberFocus(Option.none());
 
       /**
        * Put the host back in the document, with the style that we gave it.
@@ -897,27 +1135,37 @@ export class Ui extends Context.Service<
       const repairHost: Effect.Effect<void> = Effect.gen(function* () {
         const owned = yield* Ref.get(viewportOwned);
         const focused = yield* Ref.get(lastFocused);
-        const keep = yield* dom.probeOr(() => {
+        const departed = yield* dom.probeOr(() => {
           restoreHostStyle(owned);
           // At `document-start` there may be no `documentElement` yet. Doing
           // nothing is correct, because the next `layer` call tries again.
-          const parent = hostParent();
-          if (parent !== null && hostNeedsAttachment(parent, host.parentNode)) {
-            parent.appendChild(host);
-            // A move takes the focus off every node inside the host. An open
-            // dialog would otherwise keep the keyboard while the focus sits
-            // on the body of the page.
-            restoreFocus(focused);
-          }
-          // A control that left the document holds its whole dialog, with
-          // every other control in it. Release it as soon as we see it.
-          return Option.isSome(focused) && !focused.value.isConnected
-            ? Option.none<HTMLElement>()
-            : focused;
-        }, focused);
-        if (Option.isNone(keep) && Option.isSome(focused)) {
-          yield* Ref.set(lastFocused, Option.none());
-        }
+          pipe(
+            reattachTo(hostParent(), host.parentNode),
+            Option.match({
+              onNone: Function.constVoid,
+              onSome: (parent) => {
+                parent.appendChild(host);
+                // A move takes the focus off every node inside the host. An
+                // open dialog would otherwise keep the keyboard while the
+                // focus sits on the body of the page.
+                restoreFocus(focused);
+              },
+            }),
+          );
+          return pipe(
+            focused,
+            Option.filter((element) => !element.isConnected),
+          );
+        }, Option.none<HTMLElement>());
+        // A control that left the document holds its whole dialog, with
+        // every other control in it. Release it as soon as we see it.
+        yield* pipe(
+          departed,
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: () => forgetFocus,
+          }),
+        );
       });
 
       // A visible action must measure again. This drops an old correction
@@ -944,25 +1192,23 @@ export class Ui extends Context.Service<
       const publishFault = (
         next: Option.Option<OverlayFault>,
       ): Effect.Effect<Option.Option<OverlayFault>> =>
-        Effect.gen(function* () {
-          const previous = yield* Ref.getAndSet(lastFault, next);
-          const same = Option.isNone(next)
-            ? Option.isNone(previous)
-            : Option.isSome(previous) && previous.value === next.value;
-          if (same) return next;
-          yield* Effect.logWarning(
-            Option.isSome(next)
-              ? `the overlay is not visible, so it gives the keyboard back: ${
-                  FAULT_REASON[next.value]
-                }`
-              : "the overlay is visible again, and it takes its keys again",
-          );
-          return next;
-        });
+        pipe(
+          lastFault,
+          Ref.getAndSet(next),
+          Effect.flatMap((previous) =>
+            pipe(
+              Equal.equals(previous, next),
+              Boolean.match({
+                onFalse: () => Effect.logWarning(faultMessage(next)),
+                onTrue: () => Effect.void,
+              }),
+            ),
+          ),
+          Effect.as(next),
+        );
 
-      const reattachments = yield* Ref.make(0);
-      // One quiet second puts the count back to zero. A new reattachment
-      // interrupts the fiber that the one before it started.
+      // One quiet second resets the guard. A new reattachment interrupts the
+      // fiber that the one before it started.
       const reattachReset = yield* FiberHandle.make<void, never>();
 
       /**
@@ -973,19 +1219,37 @@ export class Ui extends Context.Service<
        * for the rest of the session.
        */
       const resumeGuard = Effect.gen(function* () {
-        yield* Ref.set(reattachments, 0);
-        const yielded = yield* Ref.getAndSet(guardYielded, false);
+        const previous = yield* pipe(guard, Ref.getAndSet(FRESH_GUARD));
         yield* repairHost;
-        if (yielded) yield* publishFault(Option.none());
+        yield* pipe(
+          previous,
+          GuardState.$match({
+            Repairing: () => Effect.void,
+            Yielded: () => publishFault(Option.none()),
+          }),
+        );
       });
 
       /** Start the quiet second again. A newer report replaces an older one. */
-      const armReset = Effect.asVoid(
-        FiberHandle.run(
-          reattachReset,
-          pipe(Effect.sleep(REATTACH_RESET_MS), Effect.andThen(resumeGuard)),
-        ),
+      const armReset = pipe(
+        Effect.sleep(REATTACH_RESET_MS),
+        Effect.andThen(resumeGuard),
+        FiberHandle.run(reattachReset),
+        Effect.asVoid,
       );
+
+      /** Answer one report that the page holds the host somewhere else. */
+      const answerRemoval = Effect.gen(function* () {
+        const state = yield* pipe(guard, Ref.updateAndGet(afterRemoval));
+        yield* pipe(
+          state,
+          GuardState.$match({
+            Repairing: () => repairHost,
+            Yielded: () => publishFault(Option.some("misplaced")),
+          }),
+        );
+        yield* armReset;
+      });
 
       // The services of this layer, for the observer callback. The callback
       // is an imperative caller, and `runSyncExitWith` is the bridge that
@@ -1005,9 +1269,36 @@ export class Ui extends Context.Service<
        */
       const watch = (observer: MutationObserver): void => {
         observer.observe(doc, { childList: true });
-        const root: Element | null = doc.documentElement;
-        if (root !== null) observer.observe(root, { childList: true });
+        pipe(
+          Option.fromNullishOr<Element | null>(doc.documentElement),
+          Option.match({
+            onNone: Function.constVoid,
+            onSome: (root) => observer.observe(root, { childList: true }),
+          }),
+        );
       };
+
+      /** One report of the observer. */
+      const guardReport = (observer: MutationObserver): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          // A new `documentElement` is a different node, so the
+          // registration is renewed on each report.
+          yield* dom.probeOr(() => watch(observer), undefined);
+          // The parent, and not the connection. A host that the page moved
+          // into a container of its own is still connected, and the page
+          // then owns the visibility of the overlay.
+          const misplaced = yield* dom.probeOr(
+            () => reattachTo(hostParent(), host.parentNode),
+            Option.none<Element>(),
+          );
+          yield* pipe(
+            misplaced,
+            Option.match({
+              onNone: () => Effect.void,
+              onSome: () => answerRemoval,
+            }),
+          );
+        });
 
       /**
        * Put the host back as soon as the page takes it away or moves it.
@@ -1018,52 +1309,31 @@ export class Ui extends Context.Service<
        */
       yield* Effect.acquireRelease(
         dom.probeOr(() => {
-          const observer = new MutationObserver(() => {
-            const exit = runGuard(
-              Effect.gen(function* () {
-                // A new `documentElement` is a different node, so the
-                // registration is renewed on each report.
-                yield* dom.probeOr(() => {
-                  watch(observer);
-                  return true;
-                }, false);
-                // The parent, and not the connection. A host that the page
-                // moved into a container of its own is still connected, and
-                // the page then owns the visibility of the overlay.
-                const misplaced = yield* dom.probeOr(
-                  () => hostNeedsAttachment(hostParent(), host.parentNode),
-                  false,
-                );
-                if (!misplaced) return;
-                const count = yield* Ref.updateAndGet(reattachments, (current) => current + 1);
-                if (count > REATTACH_LIMIT) {
-                  // The budget for this second is gone. Stop writing, because
-                  // the loop needs our write, but **keep observing** and say
-                  // what happened. A guard that disconnected here stayed
-                  // silent for the rest of the session, and the page then held
-                  // an invisible interface that still took every key.
-                  yield* Ref.set(guardYielded, true);
-                  yield* publishFault(Option.some("misplaced"));
-                  yield* armReset;
-                  return;
-                }
-                yield* Ref.set(guardYielded, false);
-                yield* repairHost;
-                yield* armReset;
+          const observer = new MutationObserver(() =>
+            pipe(
+              runGuard(guardReport(observer)),
+              // A defect inside the guard must not disappear. The overlay is
+              // gone at this moment, so a silent failure looks like a page
+              // that won.
+              Exit.match({
+                onFailure: reportGuardFailure,
+                onSuccess: Function.constVoid,
               }),
-            );
-            // A defect inside the guard must not disappear. The overlay is
-            // gone at this moment, so a silent failure looks like a page
-            // that won.
-            if (Exit.isFailure(exit)) reportGuardFailure(exit.cause);
-          });
+            ),
+          );
           watch(observer);
           return Option.some(observer);
         }, Option.none<MutationObserver>()),
         (observer) =>
-          Effect.sync(() => {
-            if (Option.isSome(observer)) observer.value.disconnect();
-          }),
+          Effect.sync(() =>
+            pipe(
+              observer,
+              Option.match({
+                onNone: Function.constVoid,
+                onSome: (one) => one.disconnect(),
+              }),
+            ),
+          ),
       );
 
       // ---------------------------------------------------------------
@@ -1072,10 +1342,14 @@ export class Ui extends Context.Service<
 
       const holds = yield* Ref.make<ReadonlyMap<HTMLElement, number>>(new Map());
 
-      const setHidden = (element: HTMLElement, hidden: boolean): void => {
-        if (hidden) element.setAttribute("aria-hidden", "true");
-        else element.removeAttribute("aria-hidden");
-      };
+      const setHidden = (element: HTMLElement, hidden: boolean): void =>
+        pipe(
+          hidden,
+          Boolean.match({
+            onFalse: () => element.removeAttribute("aria-hidden"),
+            onTrue: () => element.setAttribute("aria-hidden", "true"),
+          }),
+        );
 
       /**
        * Publish the exposure state on the host and on every held layer.
@@ -1089,24 +1363,32 @@ export class Ui extends Context.Service<
       const applyHolds = Effect.gen(function* () {
         const current = yield* Ref.get(holds);
         yield* dom.probeOr(() => {
-          for (const [element, count] of current) {
-            setHidden(element, count === 0);
-          }
+          pipe(
+            current,
+            Iterable.forEach(([element, count]: readonly [HTMLElement, number]) =>
+              setHidden(element, count === 0),
+            ),
+          );
           setHidden(host, !anyHeld(current));
-          return true;
-        }, false);
+        }, undefined);
       });
 
       const expose = Effect.fn("Ui.expose")(function* (layer: HTMLElement) {
         yield* Effect.acquireRelease(
           Effect.gen(function* () {
-            yield* Ref.update(holds, (current) => shiftHold(current, layer, 1));
+            yield* pipe(
+              holds,
+              Ref.update((current) => shiftHold(current, layer, 1)),
+            );
             yield* applyHolds;
             yield* ensureAttached;
           }),
           () =>
             Effect.gen(function* () {
-              yield* Ref.update(holds, (current) => shiftHold(current, layer, -1));
+              yield* pipe(
+                holds,
+                Ref.update((current) => shiftHold(current, layer, -1)),
+              );
               yield* applyHolds;
             }),
         );
@@ -1114,15 +1396,7 @@ export class Ui extends Context.Service<
 
       const layerOf = Effect.fn("Ui.layer")(function* (name: UiLayerName) {
         yield* ensureAttached;
-        const element = layers.get(name);
-        if (element !== undefined) return element;
-        // `LAYER_ORDER` covers every name, so this cannot happen. A detached
-        // element is still better than a failure inside a key handler.
-        return yield* Effect.sync(() => {
-          const orphan = doc.createElement("div");
-          orphan.className = "vw-layer";
-          return orphan;
-        });
+        return pipe(layers, Struct.get(name));
       });
 
       // ---------------------------------------------------------------
@@ -1131,25 +1405,51 @@ export class Ui extends Context.Service<
 
       const schemeQuery = yield* dom.probeOr(
         () =>
-          typeof win.matchMedia === "function"
-            ? Option.fromNullishOr(win.matchMedia("(prefers-color-scheme: dark)"))
-            : Option.none<MediaQueryList>(),
+          pipe(
+            win,
+            Option.liftPredicate((view) => typeof view.matchMedia === "function"),
+            Option.flatMap((view) =>
+              Option.fromNullishOr(view.matchMedia("(prefers-color-scheme: dark)")),
+            ),
+          ),
         Option.none<MediaQueryList>(),
+      );
+
+      /**
+       * The scheme of the page, when the setting asks for it.
+       *
+       * `None` also means that the page has no opinion that we can read. That
+       * is not a reason to ignore the opinion of the user agent.
+       */
+      const pageScheme: (follow: boolean) => Effect.Effect<Option.Option<ColorScheme>> =
+        Boolean.match({
+          onFalse: () => Effect.succeedNone,
+          onTrue: () => dom.probeOr(() => detectPageScheme(doc), Option.none<ColorScheme>()),
+        });
+
+      /** The scheme of the user agent. */
+      const agentScheme: Effect.Effect<ColorScheme> = pipe(
+        dom.probeOr(
+          () =>
+            pipe(
+              schemeQuery,
+              Option.exists((query) => query.matches),
+            ),
+          false,
+        ),
+        Effect.map(schemeOf),
       );
 
       const resolveScheme = Effect.fn("Ui.resolveScheme")(function* () {
         const current = yield* settings.current;
-        if (current.followPageColorScheme) {
-          const page = yield* dom.probeOr(() => detectPageScheme(doc), Option.none<ColorScheme>());
-          // `None` means that the page has no opinion that we can read. That
-          // is not a reason to ignore the opinion of the user agent.
-          if (Option.isSome(page)) return page.value;
-        }
-        const prefersDark = yield* dom.probeOr(
-          () => Option.isSome(schemeQuery) && schemeQuery.value.matches,
-          false,
+        const page = yield* pageScheme(current.followPageColorScheme);
+        return yield* pipe(
+          page,
+          Option.match({
+            onNone: () => agentScheme,
+            onSome: (scheme) => Effect.succeed(scheme),
+          }),
         );
-        return prefersDark ? "dark" : "light";
       });
 
       /**
@@ -1168,29 +1468,30 @@ export class Ui extends Context.Service<
 
       const schemeFiber = yield* FiberHandle.make<void, never>();
 
-      if (Option.isSome(schemeQuery)) {
-        yield* dom.listenOn(
-          schemeQuery.value,
-          "change",
-          // Forked, because the scheme calculation reads a service and this
-          // listener is not on the key path. A newer change interrupts the
-          // one before it.
-          () => Effect.asVoid(FiberHandle.run(schemeFiber, syncColorScheme)),
-        );
-      }
+      yield* pipe(
+        schemeQuery,
+        Option.match({
+          onNone: () => Effect.void,
+          onSome: (query) =>
+            dom.listenOn(
+              query,
+              "change",
+              // Forked, because the scheme calculation reads a service and this
+              // listener is not on the key path. A newer change interrupts the
+              // one before it.
+              () => pipe(syncColorScheme, FiberHandle.run(schemeFiber), Effect.asVoid),
+            ),
+        }),
+      );
 
       // The setting is live. Rebuilding the overlay to read it again would
       // cost far more than one fiber that watches for the change.
-      yield* Effect.forkScoped(
-        pipe(
-          Stream.changes(
-            pipe(
-              settings.changes,
-              Stream.map((current) => current.followPageColorScheme),
-            ),
-          ),
-          Stream.runForEach(() => syncColorScheme),
-        ),
+      yield* pipe(
+        settings.changes,
+        Stream.map((current) => current.followPageColorScheme),
+        Stream.changes,
+        Stream.runForEach(() => syncColorScheme),
+        Effect.forkScoped,
       );
 
       yield* syncColorScheme;
@@ -1204,31 +1505,33 @@ export class Ui extends Context.Service<
         Option.none<VisualViewport>(),
       );
 
-      const viewport: Effect.Effect<ViewportRect> = Effect.gen(function* () {
-        if (Option.isSome(visualViewport)) {
-          const visual = visualViewport.value;
-          return yield* dom.probeOr(
-            () => ({
-              offsetLeft: visual.offsetLeft,
-              offsetTop: visual.offsetTop,
-              width: visual.width,
-              height: visual.height,
-              scale: visual.scale,
-            }),
-            FALLBACK_VIEWPORT,
-          );
-        }
-        return yield* dom.probeOr(
-          () => ({
-            offsetLeft: 0,
-            offsetTop: 0,
-            width: win.innerWidth,
-            height: win.innerHeight,
-            scale: 1,
-          }),
-          FALLBACK_VIEWPORT,
-        );
-      });
+      const viewport: Effect.Effect<ViewportRect> = pipe(
+        visualViewport,
+        Option.match({
+          onSome: (visual) =>
+            dom.probeOr(
+              () => ({
+                offsetLeft: visual.offsetLeft,
+                offsetTop: visual.offsetTop,
+                width: visual.width,
+                height: visual.height,
+                scale: visual.scale,
+              }),
+              FALLBACK_VIEWPORT,
+            ),
+          onNone: () =>
+            dom.probeOr(
+              () => ({
+                offsetLeft: 0,
+                offsetTop: 0,
+                width: win.innerWidth,
+                height: win.innerHeight,
+                scale: 1,
+              }),
+              FALLBACK_VIEWPORT,
+            ),
+        }),
+      );
 
       /** Where the host lies now, or `None` when the read is refused. */
       const measureHost: Effect.Effect<Option.Option<HostBox>> = dom.probeOr(() => {
@@ -1240,6 +1543,10 @@ export class Ui extends Context.Service<
           height: rect.height,
         });
       }, Option.none<HostBox>());
+
+      /** How far the host is from the viewport now. `None` when it lines up or the read is refused. */
+      const hostError = (view: ViewportRect): Effect.Effect<Option.Option<HostShift>> =>
+        pipe(measureHost, Effect.map(Option.flatMap((box) => alignError(box, view))));
 
       /**
        * Write the declarations that the sync owns.
@@ -1257,18 +1564,36 @@ export class Ui extends Context.Service<
         // The guard reads this, so it must agree with the style before the
         // next check. A repair then writes the viewport values again
         // instead of the constant `none` of `HOST_STYLE`.
-        yield* Ref.set(viewportOwned, owned);
-        yield* dom.probeOr(() => {
-          // The important priority again, and for two reasons. Page CSS
-          // must not move the overlay, and `all: initial !important` above
-          // wins over a normal declaration in the same block whatever the
-          // order.
-          for (const [property, value] of owned) {
-            host.style.setProperty(property, value, "important");
-          }
-          return true;
-        }, false);
+        yield* pipe(viewportOwned, Ref.set(owned));
+        // The important priority again, and for two reasons. Page CSS must
+        // not move the overlay, and `all: initial !important` above wins
+        // over a normal declaration in the same block whatever the order.
+        yield* dom.probeOr(() => writeImportant(host)(Record.toEntries(owned)), undefined);
       });
+
+      /**
+       * The correction did not hold, so the ancestor does something that we
+       * cannot undo. Give the correction up.
+       */
+      const dropAlignment = pipe(alignment, Ref.set(NO_SHIFT), Effect.andThen(applyOwned));
+
+      /** Move the host by the measured error, and measure again. */
+      const correctBy = (error: HostShift, view: ViewportRect): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          yield* pipe(
+            alignment,
+            Ref.update((current) => ({ dx: current.dx + error.dx, dy: current.dy + error.dy })),
+          );
+          yield* applyOwned;
+          const residual = yield* hostError(view);
+          yield* pipe(
+            residual,
+            Option.match({
+              onNone: () => Effect.void,
+              onSome: () => dropAlignment,
+            }),
+          );
+        });
 
       /**
        * Put the host back on the viewport when an ancestor moved it.
@@ -1291,46 +1616,51 @@ export class Ui extends Context.Service<
        */
       const alignHost: Effect.Effect<void> = Effect.gen(function* () {
         const view = yield* viewport;
-        const before = yield* measureHost;
-        if (Option.isNone(before)) return;
-        const error = alignError(before.value, view);
-        if (Option.isNone(error)) return;
-        yield* Ref.update(alignment, (current) => ({
-          dx: current.dx + error.value.dx,
-          dy: current.dy + error.value.dy,
-        }));
-        yield* applyOwned;
-        const after = yield* measureHost;
-        if (Option.isNone(after)) return;
-        if (Option.isNone(alignError(after.value, view))) return;
-        yield* Ref.set(alignment, NO_SHIFT);
-        yield* applyOwned;
+        const error = yield* hostError(view);
+        yield* pipe(
+          error,
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (shift) => correctBy(shift, view),
+          }),
+        );
       });
+
+      /** One pass of the sync. The owned declarations need a visual viewport. */
+      const syncPass: Effect.Effect<void> = pipe(
+        visualViewport,
+        Option.match({
+          onNone: () => alignHost,
+          onSome: () => pipe(applyOwned, Effect.andThen(alignHost)),
+        }),
+      );
 
       const viewportFiber = yield* FiberHandle.make<void, never>();
       // One pass for each animation frame. A resize and a scroll arrive many
       // times inside one frame, and a newer one interrupts the fiber that
       // the one before it started.
-      const scheduleSync = Effect.asVoid(
-        FiberHandle.run(
-          viewportFiber,
-          pipe(
-            dom.nextFrame,
-            Effect.andThen(
-              Option.isSome(visualViewport)
-                ? pipe(applyOwned, Effect.andThen(alignHost))
-                : alignHost,
-            ),
-          ),
-        ),
+      const scheduleSync = pipe(
+        dom.nextFrame,
+        Effect.andThen(syncPass),
+        FiberHandle.run(viewportFiber),
+        Effect.asVoid,
       );
 
-      if (Option.isSome(visualViewport)) {
-        const visual = visualViewport.value;
-        yield* dom.listenOn(visual, "resize", () => scheduleSync);
-        yield* dom.listenOn(visual, "scroll", () => scheduleSync);
-        yield* applyOwned;
-      }
+      /** Follow the visual viewport, where the engine has one. */
+      const followVisualViewport = (visual: VisualViewport) =>
+        Effect.gen(function* () {
+          yield* dom.listenOn(visual, "resize", () => scheduleSync);
+          yield* dom.listenOn(visual, "scroll", () => scheduleSync);
+          yield* applyOwned;
+        });
+
+      yield* pipe(
+        visualViewport,
+        Option.match({
+          onNone: () => Effect.void,
+          onSome: followVisualViewport,
+        }),
+      );
 
       // The page scroll, because a host under a containing block of class 1
       // moves with the document. A page that does not have such an ancestor
@@ -1340,42 +1670,75 @@ export class Ui extends Context.Service<
       });
       yield* alignHost;
 
-      /** Does the host and its ancestor chain still paint? */
-      const hostPaints: Effect.Effect<boolean> = dom.probeOr(() => {
-        for (
-          let element: Element | null = host;
-          element !== null;
-          element = element.parentElement
-        ) {
-          const style = win.getComputedStyle(element);
-          if (preventsOverlayPaint(style)) return false;
-        }
-        return true;
-      }, true);
+      /** The host and every element above it, nearest first. */
+      const ancestry = (element: Element): Iterable<Element> =>
+        Iterable.unfold(
+          Option.some(element),
+          Option.map((one: Element) => [one, Option.fromNullishOr(one.parentElement)] as const),
+        );
 
       /**
-       * Why the user cannot see the overlay, measured now.
+       * The first element of the ancestor chain that does not paint.
+       *
+       * The chain is walked lazily, so a page pays one computed style for
+       * each element up to the first that hides the host.
+       */
+      const hidingAncestor: Effect.Effect<Option.Option<Element>> = dom.probeOr(
+        () =>
+          pipe(
+            ancestry(host),
+            Iterable.findFirst((element: Element) =>
+              preventsOverlayPaint(win.getComputedStyle(element)),
+            ),
+          ),
+        Option.none<Element>(),
+      );
+
+      /** The fault of a host box that the engine gave us. */
+      const faultOfBox = (box: HostBox): Effect.Effect<Option.Option<OverlayFault>> =>
+        Effect.gen(function* () {
+          const view = yield* viewport;
+          return yield* pipe(
+            hostIsDisplaced(box, view),
+            Boolean.match({
+              onFalse: () => pipe(hidingAncestor, Effect.map(Option.as<OverlayFault>("hidden"))),
+              onTrue: () => Effect.succeedSome<OverlayFault>("displaced"),
+            }),
+          );
+        });
+
+      /**
+       * Measure the fault while the guard holds the host.
        *
        * The order is repair first, and judge afterwards. Repair the style,
        * the parent and the position. Then measure the box and ask whether
        * the ancestor chain can paint. The caller gives the keyboard back for
        * either fault.
        */
-      const visibilityFault: Effect.Effect<Option.Option<OverlayFault>> = Effect.gen(function* () {
-        if (yield* Ref.get(guardYielded)) {
-          return yield* publishFault(Option.some("misplaced"));
-        }
-        yield* ensureAttached;
-        const box = yield* measureHost;
-        // A realm that refuses the read tells us nothing. Claiming a fault
-        // there would take the keyboard away for no measured reason.
-        if (Option.isNone(box)) return yield* publishFault(Option.none());
-        const view = yield* viewport;
-        if (hostIsDisplaced(box.value, view)) {
-          return yield* publishFault(Option.some("displaced"));
-        }
-        return yield* publishFault((yield* hostPaints) ? Option.none() : Option.some("hidden"));
-      });
+      const measureFault: Effect.Effect<Option.Option<OverlayFault>> = pipe(
+        ensureAttached,
+        Effect.andThen(measureHost),
+        Effect.flatMap(
+          Option.match({
+            // A realm that refuses the read tells us nothing. Claiming a fault
+            // there would take the keyboard away for no measured reason.
+            onNone: () => Effect.succeedNone,
+            onSome: faultOfBox,
+          }),
+        ),
+      );
+
+      /** Why the user cannot see the overlay, measured now. */
+      const visibilityFault: Effect.Effect<Option.Option<OverlayFault>> = pipe(
+        Ref.get(guard),
+        Effect.flatMap(
+          GuardState.$match({
+            Repairing: () => measureFault,
+            Yielded: () => Effect.succeedSome<OverlayFault>("misplaced"),
+          }),
+        ),
+        Effect.flatMap(publishFault),
+      );
 
       // ---------------------------------------------------------------
       // Ownership
@@ -1392,11 +1755,8 @@ export class Ui extends Context.Service<
        * forms are accepted: the host, and the true node as a listener inside
        * the shadow tree sees it.
        */
-      const owns = (target: EventTarget | null): boolean => {
-        if (target === null) return false;
-        if (target === host) return true;
-        return target instanceof Node && shadow.contains(target);
-      };
+      const owns = (target: EventTarget | null): boolean =>
+        target === host || (target instanceof Node && shadow.contains(target));
 
       return Ui.of({
         shadow,

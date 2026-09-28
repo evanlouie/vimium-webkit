@@ -37,12 +37,12 @@ describe("exposure to assistive technology", () => {
     Effect.sync(() => {
       // The settings dialog opens over the help dialog, so the same layer
       // carries two holds for a moment.
-      let holds = shiftHold(new Map<string, number>(), "dialog", 1);
-      holds = shiftHold(holds, "dialog", 1);
-      holds = shiftHold(holds, "dialog", -1);
-      assert.isTrue(anyHeld(holds));
-      holds = shiftHold(holds, "dialog", -1);
-      assert.isFalse(anyHeld(holds));
+      const help = shiftHold(new Map<string, number>(), "dialog", 1);
+      const both = shiftHold(help, "dialog", 1);
+      const helpAgain = shiftHold(both, "dialog", -1);
+      assert.isTrue(anyHeld(helpAgain));
+      const closed = shiftHold(helpAgain, "dialog", -1);
+      assert.isFalse(anyHeld(closed));
     }),
   );
 
@@ -101,30 +101,20 @@ describe("the HUD line", () => {
         pending: Option.some("g"),
         prompt: Option.none(),
       };
+      const keys = pipe(full, Struct.assign({ transient: Option.none() }));
+      const mode = pipe(keys, Struct.assign({ pending: Option.none() }));
       assert.deepEqual(visibleLine(full), Option.some({ text: "Saved", tone: "info" }));
-      assert.deepEqual(
-        visibleLine(pipe(full, Struct.assign({ transient: Option.none() }))),
-        Option.some({ text: "g", tone: "info" }),
-      );
-      assert.deepEqual(
-        visibleLine(
-          pipe(full, Struct.assign({ transient: Option.none(), pending: Option.none() })),
-        ),
-        Option.some({ text: "Insert mode", tone: "info" }),
-      );
+      assert.deepEqual(visibleLine(keys), Option.some({ text: "g", tone: "info" }));
+      assert.deepEqual(visibleLine(mode), Option.some({ text: "Insert mode", tone: "info" }));
     }),
   );
 
   it.effect("puts the keys and the mode beside an open prompt", () =>
     Effect.sync(() => {
-      assert.strictEqual(
-        statusText(pipe(EMPTY_STATE, Struct.assign({ pending: Option.some("2g") }))),
-        "2g",
-      );
-      assert.strictEqual(
-        statusText(pipe(EMPTY_STATE, Struct.assign({ indicator: Option.some("3/17") }))),
-        "3/17",
-      );
+      const keys = pipe(EMPTY_STATE, Struct.assign({ pending: Option.some("2g") }));
+      const mode = pipe(EMPTY_STATE, Struct.assign({ indicator: Option.some("3/17") }));
+      assert.strictEqual(statusText(keys), "2g");
+      assert.strictEqual(statusText(mode), "3/17");
     }),
   );
 });

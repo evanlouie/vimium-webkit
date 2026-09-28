@@ -10,7 +10,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option } from "effect";
+import { Array, Boolean, Effect, Match, Option, pipe, Record, Struct } from "effect";
 import {
   alignError,
   allHostProperties,
@@ -19,23 +19,32 @@ import {
   HOST_STYLE,
   hostDeclarations,
   hostIsDisplaced,
-  hostNeedsAttachment,
   hostTranslate,
   NO_SHIFT,
   outOfDateHostProperties,
   ownedDeclarations,
+  type PaintStyle,
   preventsOverlayPaint,
+  reattachTo,
   type ViewportRect,
 } from "~/ui/Ui.ts";
 
+/** How a test reads one property of the host. */
+type Read = (property: string) => readonly [string, string];
+
 /** A style that holds exactly what the overlay wrote. */
-const intact = (property: string): readonly [string, string] => [
-  HOST_STYLE.find(([name]) => name === property)?.[1] ?? "",
+const intact: Read = (property) => [
+  pipe(
+    HOST_STYLE,
+    Array.findFirst(([name]) => name === property),
+    Option.map(([, value]) => value),
+    Option.getOrElse(() => ""),
+  ),
   "important",
 ];
 
 /** Nothing is owned by the viewport sync until that sync runs. */
-const NO_OWNED: ReadonlyMap<string, string> = new Map();
+const NO_OWNED: Record.ReadonlyRecord<string, string> = Record.empty();
 
 /**
  * A style whose shorthands serialise back in another form, as a browser does.
@@ -43,14 +52,29 @@ const NO_OWNED: ReadonlyMap<string, string> = new Map();
  * `all` reads back empty as soon as a later declaration changes one of its
  * longhands, and `margin: 0` reads back as `0px`.
  */
-const asBrowser = (property: string): readonly [string, string] => {
-  if (property === "all") return ["", ""];
-  if (property === "margin" || property === "padding") {
-    return ["0px", "important"];
-  }
-  if (property === "border") return ["0px none currentcolor", "important"];
-  return intact(property);
-};
+const asBrowser: Read = (property) =>
+  pipe(
+    Match.value(property),
+    Match.when("all", (): readonly [string, string] => ["", ""]),
+    Match.when(Match.is("margin", "padding"), (): readonly [string, string] => [
+      "0px",
+      "important",
+    ]),
+    Match.when("border", (): readonly [string, string] => ["0px none currentcolor", "important"]),
+    Match.orElse(intact),
+  );
+
+/** A style that reads one property as `read`, and every other one as `rest`. */
+const reading =
+  (name: string, read: readonly [string, string], rest: Read = asBrowser): Read =>
+  (property) =>
+    pipe(
+      property === name,
+      Boolean.match({
+        onFalse: () => rest(property),
+        onTrue: () => read,
+      }),
+    );
 
 /** The properties that this engine can compare, read from the style itself. */
 const guardedIntact = (): ReadonlySet<string> => comparableHostProperties(asBrowser);
@@ -59,9 +83,12 @@ describe("the guarded set", () => {
   it.effect("drops a shorthand that the engine gives back in another form", () =>
     Effect.sync(() => {
       const guarded = comparableHostProperties(asBrowser);
-      for (const shorthand of ["all", "margin", "padding", "border"]) {
-        assert.isFalse(guarded.has(shorthand), `${shorthand} cannot be compared`);
-      }
+      pipe(
+        ["all", "margin", "padding", "border"],
+        Array.forEach((shorthand) =>
+          assert.isFalse(guarded.has(shorthand), `${shorthand} cannot be compared`),
+        ),
+      );
     }),
   );
 
@@ -69,9 +96,7 @@ describe("the guarded set", () => {
     Effect.sync(() => {
       // An engine that refuses `clip-path` keeps nothing, so the property
       // reads back empty. Guarding it would make the guard write for ever.
-      const guarded = comparableHostProperties((property) =>
-        property === "clip-path" ? ["", ""] : asBrowser(property),
-      );
+      const guarded = comparableHostProperties(reading("clip-path", ["", ""]));
       assert.isFalse(guarded.has("clip-path"));
       assert.isTrue(guarded.has("filter"));
     }),
@@ -80,27 +105,30 @@ describe("the guarded set", () => {
   it.effect("guards every property that hides the overlay on its own", () =>
     Effect.sync(() => {
       const guarded = comparableHostProperties(asBrowser);
-      for (const property of [
-        "--vw-scale",
-        "position",
-        "top",
-        "right",
-        "bottom",
-        "left",
-        "width",
-        "height",
-        "pointer-events",
-        "z-index",
-        "display",
-        "contain",
-        "transform",
-        "visibility",
-        "opacity",
-        "clip-path",
-        "filter",
-      ]) {
-        assert.isTrue(guarded.has(property), `${property} is not guarded`);
-      }
+      pipe(
+        [
+          "--vw-scale",
+          "position",
+          "top",
+          "right",
+          "bottom",
+          "left",
+          "width",
+          "height",
+          "pointer-events",
+          "z-index",
+          "display",
+          "contain",
+          "transform",
+          "visibility",
+          "opacity",
+          "clip-path",
+          "filter",
+        ],
+        Array.forEach((property) =>
+          assert.isTrue(guarded.has(property), `${property} is not guarded`),
+        ),
+      );
     }),
   );
 
@@ -109,7 +137,10 @@ describe("the guarded set", () => {
       // `inset` is a shorthand. An engine gives back an empty string for a
       // shorthand whose longhands disagree, and a later `position` declaration
       // makes them disagree, so the guard would rewrite the style for ever.
-      const written = HOST_STYLE.map(([property]) => property);
+      const written = pipe(
+        HOST_STYLE,
+        Array.map(([property]) => property),
+      );
       assert.notInclude(written, "inset");
     }),
   );
@@ -126,7 +157,7 @@ describe("the overlay host style", () => {
     Effect.sync(() => {
       const stale = outOfDateHostProperties(
         guardedIntact(),
-        (property) => (property === "display" ? ["none", "important"] : asBrowser(property)),
+        reading("display", ["none", "important"]),
         NO_OWNED,
       );
       assert.deepEqual(stale, ["display"]);
@@ -139,7 +170,7 @@ describe("the overlay host style", () => {
       // position: static !important }` in the stylesheet of the page.
       const stale = outOfDateHostProperties(
         guardedIntact(),
-        (property) => (property === "position" ? ["fixed", ""] : asBrowser(property)),
+        reading("position", ["fixed", ""]),
         NO_OWNED,
       );
       assert.deepEqual(stale, ["position"]);
@@ -151,14 +182,15 @@ describe("the overlay host style", () => {
       // One line of page script is enough:
       // `host.style.removeProperty("clip-path")`. The page rule then wins for
       // ever, and a guard that watched ten properties only reported nothing.
-      for (const property of ["clip-path", "filter", "transform", "width", "height"]) {
-        const stale = outOfDateHostProperties(
-          guardedIntact(),
-          (name) => (name === property ? ["", ""] : asBrowser(name)),
-          NO_OWNED,
-        );
-        assert.deepEqual(stale, [property]);
-      }
+      pipe(
+        ["clip-path", "filter", "transform", "width", "height"],
+        Array.forEach((property) =>
+          assert.deepEqual(
+            outOfDateHostProperties(guardedIntact(), reading(property, ["", ""]), NO_OWNED),
+            [property],
+          ),
+        ),
+      );
     }),
   );
 
@@ -171,18 +203,23 @@ describe("the overlay host style", () => {
 });
 
 describe("the properties that the viewport sync owns", () => {
-  const OWNED: ReadonlyMap<string, string> = new Map([
-    ["--vw-scale", "0.8"],
-    ["transform", "translate(0px, 84px)"],
-    ["width", "390px"],
-    ["height", "580px"],
-  ]);
+  const OWNED: Record.ReadonlyRecord<string, string> = {
+    "--vw-scale": "0.8",
+    transform: "translate(0px, 84px)",
+    width: "390px",
+    height: "580px",
+  };
 
   /** The style that the viewport sync left behind. */
-  const synced = (property: string): readonly [string, string] => {
-    const owned = OWNED.get(property);
-    return owned === undefined ? asBrowser(property) : [owned, "important"];
-  };
+  const synced: Read = (property) =>
+    pipe(
+      OWNED,
+      Record.get(property),
+      Option.match({
+        onNone: () => asBrowser(property),
+        onSome: (value): readonly [string, string] => [value, "important"],
+      }),
+    );
 
   it.effect("accepts the value that the sync wrote", () =>
     Effect.sync(() => {
@@ -195,12 +232,13 @@ describe("the properties that the viewport sync owns", () => {
       // A repair that wrote `transform: none` would put the overlay out of
       // line with the visual viewport under the toolbar of iOS, and during a
       // pinch zoom, until the next resize or scroll event.
-      const written = new Map(hostDeclarations(OWNED));
-      assert.strictEqual(written.get("--vw-scale"), "0.8");
-      assert.strictEqual(written.get("transform"), "translate(0px, 84px)");
-      assert.strictEqual(written.get("width"), "390px");
-      assert.strictEqual(written.get("height"), "580px");
-      assert.strictEqual(written.get("display"), "block");
+      const written = Record.fromEntries(hostDeclarations(OWNED));
+      const valueOf = (property: string) => pipe(written, Record.get(property));
+      assert.deepEqual(valueOf("--vw-scale"), Option.some("0.8"));
+      assert.deepEqual(valueOf("transform"), Option.some("translate(0px, 84px)"));
+      assert.deepEqual(valueOf("width"), Option.some("390px"));
+      assert.deepEqual(valueOf("height"), Option.some("580px"));
+      assert.deepEqual(valueOf("display"), Option.some("block"));
     }),
   );
 
@@ -208,7 +246,7 @@ describe("the properties that the viewport sync owns", () => {
     Effect.sync(() => {
       const stale = outOfDateHostProperties(
         guardedIntact(),
-        (property) => (property === "transform" ? ["", ""] : synced(property)),
+        reading("transform", ["", ""], synced),
         OWNED,
       );
       assert.deepEqual(stale, ["transform"]);
@@ -219,8 +257,7 @@ describe("the properties that the viewport sync owns", () => {
 describe("the fallback of the guarded set", () => {
   it.effect("still finds a property that the page removed", () =>
     Effect.sync(() => {
-      const removed = (name: string): readonly [string, string] =>
-        name === "display" ? ["", ""] : asBrowser(name);
+      const removed = reading("display", ["", ""]);
       assert.include(outOfDateHostProperties(allHostProperties(), removed, NO_OWNED), "display");
       // The old fallback, for the comparison: it reports nothing at all.
       assert.deepEqual(outOfDateHostProperties(new Set<string>(), removed, NO_OWNED), []);
@@ -230,7 +267,7 @@ describe("the fallback of the guarded set", () => {
 
 describe("the host that the page moved", () => {
   /** A node that stands for an element in these pure tests. */
-  const node = (name: string): Node => ({ nodeName: name }) as unknown as Node;
+  const node = (name: string) => ({ nodeName: name });
 
   it.effect("puts the host back when the page holds it", () =>
     Effect.sync(() => {
@@ -239,20 +276,21 @@ describe("the host that the page moved", () => {
       // asked `isConnected` reported nothing and the page owned the overlay.
       const root = node("HTML");
       const cage = node("DIV");
-      assert.isTrue(hostNeedsAttachment(root, cage));
+      assert.deepEqual(reattachTo(Option.some(root), cage), Option.some(root));
     }),
   );
 
   it.effect("puts the host back after a removal", () =>
     Effect.sync(() => {
-      assert.isTrue(hostNeedsAttachment(node("HTML"), null));
+      const root = node("HTML");
+      assert.deepEqual(reattachTo(Option.some(root), null), Option.some(root));
     }),
   );
 
   it.effect("does nothing while the host is in its place", () =>
     Effect.sync(() => {
       const root = node("HTML");
-      assert.isFalse(hostNeedsAttachment(root, root));
+      assert.deepEqual(reattachTo(Option.some(root), root), Option.none());
     }),
   );
 
@@ -260,8 +298,8 @@ describe("the host that the page moved", () => {
     Effect.sync(() => {
       // At `document-start` there is no `documentElement`. The next `layer`
       // call tries again.
-      assert.isFalse(hostNeedsAttachment(null, null));
-      assert.isFalse(hostNeedsAttachment(null, node("DIV")));
+      assert.deepEqual(reattachTo(Option.none(), null), Option.none());
+      assert.deepEqual(reattachTo(Option.none(), node("DIV")), Option.none());
     }),
   );
 });
@@ -292,10 +330,8 @@ describe("the place of the host in the viewport", () => {
       // `html` the containing block of our fixed host. The host then holds a
       // place in the document, so the error is the scroll offset. I measured
       // -2759 in WebKit with the page at 2759 px.
-      const scrolled = { ...ON_VIEWPORT, top: -2759 };
-      const error = alignError(scrolled, VIEW);
-      assert.isTrue(Option.isSome(error));
-      assert.deepEqual(Option.getOrThrow(error), { dx: 0, dy: 2759 });
+      const scrolled = pipe(ON_VIEWPORT, Struct.assign({ top: -2759 }));
+      assert.deepEqual(alignError(scrolled, VIEW), Option.some({ dx: 0, dy: 2759 }));
       assert.isTrue(hostIsDisplaced(scrolled, VIEW));
     }),
   );
@@ -304,9 +340,10 @@ describe("the place of the host in the viewport", () => {
     Effect.sync(() => {
       // Under the dynamic toolbar of iOS the host must sit at the offset of
       // the visual viewport, and not at the origin of the layout viewport.
-      const shifted: ViewportRect = { ...VIEW, offsetTop: 84 };
-      assert.isTrue(Option.isNone(alignError({ ...ON_VIEWPORT, top: 84 }, shifted)));
-      assert.isFalse(hostIsDisplaced({ ...ON_VIEWPORT, top: 84 }, shifted));
+      const shifted: ViewportRect = pipe(VIEW, Struct.assign({ offsetTop: 84 }));
+      const lowered = pipe(ON_VIEWPORT, Struct.assign({ top: 84 }));
+      assert.isTrue(Option.isNone(alignError(lowered, shifted)));
+      assert.isFalse(hostIsDisplaced(lowered, shifted));
       assert.isTrue(hostIsDisplaced(ON_VIEWPORT, shifted));
     }),
   );
@@ -316,7 +353,7 @@ describe("the place of the host in the viewport", () => {
       // A rounding of the engine is not an attack. WebKit quantises the
       // visual viewport to 1/64 px, so a small difference must not make the
       // guard write on every frame.
-      const rounded = { ...ON_VIEWPORT, left: 0.5, top: -0.5 };
+      const rounded = pipe(ON_VIEWPORT, Struct.assign({ left: 0.5, top: -0.5 }));
       assert.isTrue(Option.isNone(alignError(rounded, VIEW)));
       assert.isFalse(hostIsDisplaced(rounded, VIEW));
     }),
@@ -327,8 +364,10 @@ describe("the place of the host in the viewport", () => {
       // `vimium-webkit-overlay { width: 0 !important }`, and a `scale(0)` on
       // an ancestor, both end here. A measurement answers every cause, which
       // a list of CSS properties written by hand cannot.
-      assert.isTrue(hostIsDisplaced({ ...ON_VIEWPORT, width: 0 }, VIEW));
-      assert.isTrue(hostIsDisplaced({ ...ON_VIEWPORT, height: 0 }, VIEW));
+      const narrow = pipe(ON_VIEWPORT, Struct.assign({ width: 0 }));
+      const flat = pipe(ON_VIEWPORT, Struct.assign({ height: 0 }));
+      assert.isTrue(hostIsDisplaced(narrow, VIEW));
+      assert.isTrue(hostIsDisplaced(flat, VIEW));
       assert.isTrue(hostIsDisplaced({ left: 0, top: 0, width: 1280, height: 399 }, VIEW));
     }),
   );
@@ -355,23 +394,26 @@ describe("the declarations that the viewport sync writes", () => {
       // A removal would leave the page rule as the only declaration for
       // `transform`, and `transform: scale(0) !important` would then win.
       assert.strictEqual(hostTranslate(0, 0), "none");
-      assert.strictEqual(ownedDeclarations(VIEW, NO_SHIFT).get("transform"), "none");
+      const transform = pipe(ownedDeclarations(VIEW, NO_SHIFT), Record.get("transform"));
+      assert.deepEqual(transform, Option.some("none"));
     }),
   );
 
   it.effect("adds the correction to the offset of the viewport", () =>
     Effect.sync(() => {
-      const owned = ownedDeclarations({ ...VIEW, offsetTop: 84 }, { dx: 0, dy: 2759 });
-      assert.strictEqual(owned.get("--vw-scale"), "1");
-      assert.strictEqual(owned.get("transform"), "translate(0px, 2843px)");
-      assert.strictEqual(owned.get("width"), "1280px");
-      assert.strictEqual(owned.get("height"), "800px");
+      const shifted = pipe(VIEW, Struct.assign({ offsetTop: 84 }));
+      const owned = ownedDeclarations(shifted, { dx: 0, dy: 2759 });
+      const valueOf = (property: string) => pipe(owned, Record.get(property));
+      assert.deepEqual(valueOf("--vw-scale"), Option.some("1"));
+      assert.deepEqual(valueOf("transform"), Option.some("translate(0px, 2843px)"));
+      assert.deepEqual(valueOf("width"), Option.some("1280px"));
+      assert.deepEqual(valueOf("height"), Option.some("800px"));
     }),
   );
 });
 
 describe("the paint of the host ancestor chain", () => {
-  const visible = {
+  const visible: PaintStyle = {
     display: "block",
     visibility: "visible",
     opacity: "1",
@@ -380,42 +422,36 @@ describe("the paint of the host ancestor chain", () => {
     clipPath: "none",
   };
 
-  for (const [property, value] of [
-    ["opacity", "0"],
-    ["visibility", "hidden"],
-    ["filter", "opacity(0)"],
-    ["contentVisibility", "hidden"],
-    ["clipPath", "inset(100%)"],
-  ] as const) {
-    it.effect(`finds ${property}: ${value}`, () =>
-      Effect.sync(() => {
-        assert.isTrue(
-          preventsOverlayPaint({
-            ...visible,
-            [property]: value,
-          }),
-        );
-      }),
-    );
-  }
+  /** Each declaration that hides the overlay on its own, by its name. */
+  const hiding: ReadonlyArray<readonly [string, PaintStyle]> = [
+    ["opacity: 0", pipe(visible, Struct.assign({ opacity: "0" }))],
+    ["visibility: hidden", pipe(visible, Struct.assign({ visibility: "hidden" }))],
+    ["filter: opacity(0)", pipe(visible, Struct.assign({ filter: "opacity(0)" }))],
+    ["contentVisibility: hidden", pipe(visible, Struct.assign({ contentVisibility: "hidden" }))],
+    ["clipPath: inset(100%)", pipe(visible, Struct.assign({ clipPath: "inset(100%)" }))],
+  ];
+
+  it.effect.each(hiding)("finds %s", ([, style]) =>
+    Effect.sync(() => {
+      assert.isTrue(preventsOverlayPaint(style));
+    }),
+  );
 
   it.effect("keeps a visible style", () =>
     Effect.sync(() => {
-      assert.isFalse(preventsOverlayPaint(visible));
-      assert.isFalse(
-        preventsOverlayPaint({
-          ...visible,
-          filter: "brightness(1)",
-          clipPath: "inset(0)",
-        }),
+      const untouched = pipe(
+        visible,
+        Struct.assign({ filter: "brightness(1)", clipPath: "inset(0)" }),
       );
+      assert.isFalse(preventsOverlayPaint(visible));
+      assert.isFalse(preventsOverlayPaint(untouched));
     }),
   );
 });
 
 describe("the focus after a repair", () => {
   /** A node that stands for an element in these pure tests. */
-  const node = (name: string): Node => ({ nodeName: name }) as unknown as Node;
+  const node = (name: string) => ({ nodeName: name });
   const body = node("BODY");
 
   it.effect("takes the focus back while nothing holds it", () =>
