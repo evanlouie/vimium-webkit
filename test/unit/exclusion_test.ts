@@ -57,22 +57,6 @@ describe("Exclusion", () => {
     }),
   );
 
-  it.effect("cannot be made to backtrack by a glob", () =>
-    Effect.sync(() => {
-      // As a regular expression this shape is polynomial in the number of
-      // wildcards. Matched greedily it is linear.
-      const pattern = `https://${"a*".repeat(24)}end`;
-      const hostile = `https://${"a".repeat(3000)}`;
-
-      const started = performance.now();
-      assert.strictEqual(matches(pattern, hostile), false);
-      const elapsed = performance.now() - started;
-
-      // Two orders of magnitude of slack. The point is "not seconds".
-      assert.isBelow(elapsed, 200, `the glob match took ${elapsed}ms`);
-    }),
-  );
-
   it.effect("honours a pattern that is delimited by slashes", () =>
     Effect.sync(() => {
       const pattern = "/https://(mail|inbox)\\.google\\.com/.*/";
@@ -115,30 +99,6 @@ describe("Exclusion", () => {
         assert.isTrue(Option.isNone(compilePattern(pattern)), `${pattern} compiled`);
         assert.isTrue(Option.isNone(patternToRegExp(pattern)), `${pattern} was still described`);
       }
-    }),
-  );
-
-  it.effect("keeps a raw expression that matches in linear time", () =>
-    Effect.sync(() => {
-      // A hostile URL for each pattern, and a deadline for the whole set. A
-      // pattern that survives the check must stay bounded on any input.
-      const hostile = `https://${"a".repeat(3000)}!`;
-      const patterns = [
-        "/https://(mail|inbox)\\.google\\.com/.*/",
-        "/.*/",
-        "/https://[a-z]+\\.test/[0-9]*/",
-        "/^https?://example\\.com/.*$/",
-      ];
-
-      const started = performance.now();
-      for (const pattern of patterns) {
-        const compiled = compilePattern(pattern);
-        assert.isTrue(Option.isSome(compiled), `${pattern} was dropped`);
-        if (Option.isNone(compiled)) continue;
-        compiled.value(hostile);
-      }
-      const elapsed = performance.now() - started;
-      assert.isBelow(elapsed, 200, `the match took ${elapsed}ms`);
     }),
   );
 

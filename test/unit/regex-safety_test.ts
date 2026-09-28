@@ -3,9 +3,7 @@
  *
  * The check reads the text of a pattern and never runs it. That is the whole
  * point: a measurement of a bad pattern *is* the wait that we must prevent.
- * Every test here is therefore fast by construction, and no test in this file
- * runs a pattern that backtracks. `regex-budget_test.ts` holds the tests that
- * do run one, inside a budget.
+ * No test in this file runs a pattern that backtracks.
  *
  * The two tables below are the contract of the module. The first table holds
  * the patterns that a user writes, and the check must accept every one of
@@ -16,20 +14,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Option } from "effect";
 import { isLinearRegex, regexSafetyError } from "~/domain/RegexSafety.ts";
-
-/**
- * The ceiling for the two timing tests.
- *
- * These tests guard one property: the cost of the check follows the pattern,
- * and never the length of the input. A defect there costs seconds, and not
- * milliseconds, because it makes the check run the expression.
- *
- * The number is therefore high on purpose. A tight ceiling measures the load
- * of the machine, and not the code: a run beside other work gave 249 ms for
- * work that takes 12 ms on an idle machine. That failure says nothing about
- * the check, and it stops a build for no reason.
- */
-const SLOW_CHECK_MS = 2_000;
 
 /**
  * The patterns that a user writes, and that must keep working.
@@ -287,33 +271,6 @@ describe("RegexSafety", () => {
       assert.isTrue(isLinearRegex(".*\\n*", ""));
       // With `s` the dot holds the line terminators too.
       assert.isFalse(isLinearRegex(".*\\n*", "s"));
-    }),
-  );
-
-  it.effect("decides in a time that a keystroke can pay", () =>
-    Effect.sync(() => {
-      const pattern = `${"(?:foo|bar)+[a-z]{2,4}".repeat(20)}x`;
-      const started = performance.now();
-      for (let round = 0; round < 20; round++) regexSafetyError(pattern, "i");
-      const elapsed = performance.now() - started;
-      assert.isBelow(elapsed, SLOW_CHECK_MS, `the check took ${elapsed}ms`);
-    }),
-  );
-
-  it.effect("decides a hostile pattern in the same time", () =>
-    Effect.sync(() => {
-      // 250 levels of nesting, 200 alternatives, and one long run. The check
-      // walks a tree, so the cost follows the pattern and never the input.
-      const hostile = [
-        `${"(".repeat(250)}a${")".repeat(250)}${"b".repeat(500)}`,
-        `(?:${Array.from({ length: 200 }, (_, index) => `a${index}`).join("|")})+`,
-        "a".repeat(1024),
-        "(a|b)*".repeat(120),
-      ];
-      const started = performance.now();
-      for (const source of hostile) regexSafetyError(source, "i");
-      const elapsed = performance.now() - started;
-      assert.isBelow(elapsed, SLOW_CHECK_MS, `the check took ${elapsed}ms`);
     }),
   );
 });

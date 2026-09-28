@@ -28,6 +28,9 @@ import { decodeUnknown } from "~/platform/SchemaIo.ts";
 /** Decode untrusted input and keep the detail of a failure. It never throws. */
 const decodeSettings = decodeUnknown(settingsSchema);
 
+/** A fixed instant, so no test reads the clock. */
+const NOW = 1_800_000_000_000;
+
 const GROUPS: readonly GroupSpec<unknown>[] = [
   settingsGroup,
   marksGroup,
@@ -304,7 +307,7 @@ describe("Persisted", () => {
 
   it.effect("caps the number of URLs and keeps the newest", () =>
     Effect.sync(() => {
-      const now = Date.now();
+      const now = NOW;
       const marks = markTable(LOCAL_MARK_URL_LIMIT + 50, (index) => now - index);
       const pruned = pruneMarks(marks, now);
 
@@ -319,7 +322,7 @@ describe("Persisted", () => {
 
   it.effect("expires a stale local mark and keeps every global mark", () =>
     Effect.sync(() => {
-      const now = Date.now();
+      const now = NOW;
       const marks: Marks = {
         local: {
           "https://fresh.test/": {

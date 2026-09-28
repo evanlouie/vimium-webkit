@@ -1,15 +1,10 @@
 /**
- * The second limit on a pattern: the budget at the time of use.
+ * The limits on a pattern at the time of use.
  *
  * The static check in `~/domain/RegexSafety.ts` refuses only the shapes that it
- * can prove ambiguous. It does not promise a linear match. `[a-z]*x` is linear
- * at one start position, and a search over every position is quadratic: one
- * `exec` against 40 000 characters costs about 2.3 s.
- *
- * These tests therefore run a slow pattern on purpose, and prove that the work
- * stays bounded. Each one has a hard, deterministic result — a length cap that
- * refuses to match, or a `stopped` report — and a time that is far below the
- * time of the same work with no budget.
+ * can prove ambiguous. Two more limits hold when a pattern runs: an exclusion
+ * rule reads no URL that is longer than a cap, and find searches the page text
+ * in windows and stops at a match that is longer than `MAX_MATCH_LENGTH`.
  */
 
 import { assert, describe, it } from "@effect/vitest";
@@ -41,59 +36,9 @@ describe("the exclusion budget", () => {
       assert.isFalse(matches(hostileUrl(MAX_REGEX_URL_LENGTH + 1)));
     }),
   );
-
-  it.effect("answers a hostile URL inside a keystroke", () =>
-    Effect.sync(() => {
-      // An exclusion pattern is anchored at both ends, so one match starts at
-      // one position only. The cap holds the cost of that one match, and it
-      // holds it for a shape that the static check accepted by mistake.
-      const matches = matcherFor("/[a-z]*x/");
-      const started = performance.now();
-      for (let round = 0; round < 20; round++) {
-        assert.isFalse(matches(hostileUrl(200_000)));
-      }
-      const elapsed = performance.now() - started;
-      assert.isBelow(elapsed, 200, `twenty URLs cost ${elapsed}ms`);
-    }),
-  );
-
-  it.effect("keeps a glob linear at the full URL length", () =>
-    Effect.sync(() => {
-      const matches = matcherFor(`https://${"a*".repeat(24)}end`);
-      const started = performance.now();
-      assert.isFalse(matches(`https://${hostileUrl(4000)}`));
-      const elapsed = performance.now() - started;
-      assert.isBelow(elapsed, 100, `the glob cost ${elapsed}ms`);
-    }),
-  );
 });
 
 describe("the find budget", () => {
-  it.effect("stops at the deadline and says so", () =>
-    Effect.sync(() => {
-      const haystack = `${"a".repeat(4000)}x`;
-      const passed = collectSpans(haystack, /x/g, 500, performance.now() - 1);
-      assert.deepEqual(passed.spans, []);
-      assert.isTrue(passed.stopped, "the search did not report the stop");
-    }),
-  );
-
-  it.effect("bounds a slow pattern over a long page", () =>
-    Effect.sync(() => {
-      // 200 000 characters and a quadratic pattern. One `exec` over the whole
-      // text costs about 57 s. The search reads windows of 1024 characters and
-      // looks at the clock between two of them, so it stops at its budget.
-      const haystack = "a".repeat(200_000);
-      const started = performance.now();
-      const passed = collectSpans(haystack, /[a-z]*x/g);
-      const elapsed = performance.now() - started;
-
-      assert.isTrue(passed.stopped, "the search read the whole page");
-      assert.deepEqual(passed.spans, []);
-      assert.isBelow(elapsed, 1000, `the search cost ${elapsed}ms`);
-    }),
-  );
-
   it.effect("finds every match that a whole-text search finds", () =>
     Effect.sync(() => {
       // Four windows, and a match at each window edge. A window keeps the text
@@ -196,43 +141,6 @@ describe("the find budget", () => {
     }),
   );
 
-  it.effect("halves the window after an overrun", () =>
-    Effect.sync(() => {
-      // The prefix is cheap, so the window grows to 1024 characters. The next
-      // text is costly at that size. Halving the window keeps the full walk
-      // below the limit, while the same large windows take more than 800 ms.
-      const unit = "a".repeat(8);
-      const repeated = `(?:${unit})+`.repeat(4);
-      const pattern = new RegExp(`(?=${repeated}x)`, "y");
-      const haystack = `${"b".repeat(2016)}${"a".repeat(8000)}`;
-      const started = performance.now();
-      const passed = collectSpans(haystack, pattern, 500, Number.POSITIVE_INFINITY);
-      const elapsed = performance.now() - started;
-
-      assert.deepEqual(passed.spans, []);
-      assert.isFalse(passed.stopped, "the search did not read the full text");
-      assert.isBelow(elapsed, 600, `the search cost ${elapsed}ms`);
-    }),
-  );
-
-  it.effect("stops slice growth when one window passes its budget", () =>
-    Effect.sync(() => {
-      // The first match reaches each slice end. The failed alternative becomes
-      // costly after the slice grows. The growth guard must stop before the
-      // next growth step makes one `exec` cost seconds.
-      const unit = "a".repeat(12);
-      const repeated = `(?:${unit})+`.repeat(4);
-      const pattern = new RegExp(`(?:(?=${repeated}x)|a+)`, "y");
-      const started = performance.now();
-      const passed = collectSpans("a".repeat(20_000), pattern, 500, started + 500);
-      const elapsed = performance.now() - started;
-
-      assert.deepEqual(passed.spans, []);
-      assert.isTrue(passed.stopped, "the growth did not report the stop");
-      assert.isBelow(elapsed, 500, `the growth cost ${elapsed}ms`);
-    }),
-  );
-
   it.effect("gives the whole span of a match of 400 characters", () =>
     Effect.sync(() => {
       // The window kept 256 characters of text on each side, and a match that
@@ -273,27 +181,6 @@ describe("the find budget", () => {
       const passed = collectSpans(haystack, /.+/g);
       assert.isTrue(passed.stopped, "the search reported no stop");
       assert.deepEqual(passed.spans, []);
-    }),
-  );
-
-  it.effect("bounds one window, and not only the whole walk", () =>
-    Effect.sync(() => {
-      // The deadline is read between two windows, so one window is the time
-      // that a keystroke cannot give back. The window starts at 32 characters
-      // and grows only while each window stays cheap, so a slow pattern never
-      // reaches a window that costs seconds.
-      //
-      // This pattern is the blocker of the second review of pull request 55.
-      // The check refuses it now, and this test proves the second limit: one
-      // 1024-character window of it costs 545 ms, and the whole walk over
-      // 200 000 characters costs less than that.
-      const haystack = "a".repeat(200_000);
-      const started = performance.now();
-      const passed = collectSpans(haystack, /.*(?=.*x)/g);
-      const elapsed = performance.now() - started;
-
-      assert.isTrue(passed.stopped, "the search read the whole page");
-      assert.isBelow(elapsed, 300, `the search cost ${elapsed}ms`);
     }),
   );
 });

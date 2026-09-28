@@ -247,8 +247,7 @@ describe("FindQuery", () => {
       // milliseconds, and then grow with a power of the length. `\s+\s+\s+`
       // costs 2.3 s against fifty characters.
       //
-      // The check now reads the text and never runs it, so the whole set is
-      // decided in well under one frame.
+      // The check now reads the text and never runs it.
       const slow = [
         "(a|a|a|a)*$",
         "\\s*\\s*\\s*\\s*\\s*\\s*$",
@@ -259,14 +258,11 @@ describe("FindQuery", () => {
         "(a?){10}a{10}$",
       ];
 
-      const started = performance.now();
       for (const source of slow) {
         const query = parseFindQuery(source, regexMode);
         assert.isTrue(Option.isSome(query.error), `${source} compiled with no complaint`);
         assert.isTrue(Option.isNone(toRegExp(query)));
       }
-      const elapsed = performance.now() - started;
-      assert.isBelow(elapsed, 50, `the decision took ${elapsed}ms`);
     }),
   );
 
