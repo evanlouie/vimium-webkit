@@ -549,7 +549,7 @@ export class Omnibar extends Context.Service<
           Command: ({ name }) =>
             pipe(
               close,
-              Effect.andThen(commands.run(name, { count: 1, options: {}, event: null })),
+              Effect.andThen(commands.run(name, { count: 1, options: {}, event: Option.none() })),
               Effect.catch((error) => report.error(error.detail)),
             ),
           Navigate: ({ url }) => pipe(close, Effect.andThen(goTo(url, newTab))),

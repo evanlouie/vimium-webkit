@@ -22,7 +22,7 @@
  */
 
 import { Array, Boolean, Data, Equal, Match, Number, Option, Order, pipe, String } from "effect";
-import { CommandAvailability, type CommandDef } from "~/domain/Command.ts";
+import { CommandAvailability, type CommandDef, type CommandName } from "~/domain/Command.ts";
 import type { SessionState, Visit } from "~/domain/Persisted.ts";
 import {
   buildSearchUrl,
@@ -49,7 +49,7 @@ export type CompletionKind =
 
 export type CompletionAction = Data.TaggedEnum<{
   Navigate: { readonly url: string };
-  Command: { readonly name: string };
+  Command: { readonly name: CommandName };
   /** Rewrite the input instead of acting. It adopts an engine keyword. */
   Fill: { readonly text: string };
   /** Nothing to do. To choose the row closes the omnibar. */

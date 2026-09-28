@@ -67,8 +67,8 @@ export interface CommandInvocation {
   readonly count: number;
   /** Options from the `map` line, for example `LinkHints.activate swap=true`. */
   readonly options: Record.ReadonlyRecord<string, string | boolean>;
-  /** The event that started this, when there is one. The clipboard needs it. */
-  readonly event: KeyboardEvent | null;
+  /** The key event that started this, when there is one. The scroller reads it. */
+  readonly event: Option.Option<KeyboardEvent>;
 }
 
 /** A command body. It must not fail; it reports to the user instead. */

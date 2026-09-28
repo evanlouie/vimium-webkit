@@ -1863,7 +1863,7 @@ export class Hints extends Context.Service<
           commands.run("Vomnibar.activate", {
             count: 1,
             options: {},
-            event: null,
+            event: Option.none(),
           }),
           Effect.catch((error) => report.error(error.detail)),
         );

@@ -1054,22 +1054,14 @@ export class Scroller extends Context.Service<
         const configuredStep = (): number => settings.currentUnsafe().scrollStepSize;
 
         yield* commands.registerAll({
-          scrollDown: ({ count, event }) =>
-            service.scrollBy("y", configuredStep() * count, Option.fromNullOr(event)),
-          scrollUp: ({ count, event }) =>
-            service.scrollBy("y", -configuredStep() * count, Option.fromNullOr(event)),
-          scrollLeft: ({ count, event }) =>
-            service.scrollBy("x", -configuredStep() * count, Option.fromNullOr(event)),
-          scrollRight: ({ count, event }) =>
-            service.scrollBy("x", configuredStep() * count, Option.fromNullOr(event)),
-          scrollPageDown: ({ count, event }) =>
-            service.scrollByViewport("y", 0.5 * count, Option.fromNullOr(event)),
-          scrollPageUp: ({ count, event }) =>
-            service.scrollByViewport("y", -0.5 * count, Option.fromNullOr(event)),
-          scrollFullPageDown: ({ count, event }) =>
-            service.scrollByViewport("y", 1 * count, Option.fromNullOr(event)),
-          scrollFullPageUp: ({ count, event }) =>
-            service.scrollByViewport("y", -1 * count, Option.fromNullOr(event)),
+          scrollDown: ({ count, event }) => service.scrollBy("y", configuredStep() * count, event),
+          scrollUp: ({ count, event }) => service.scrollBy("y", -configuredStep() * count, event),
+          scrollLeft: ({ count, event }) => service.scrollBy("x", -configuredStep() * count, event),
+          scrollRight: ({ count, event }) => service.scrollBy("x", configuredStep() * count, event),
+          scrollPageDown: ({ count, event }) => service.scrollByViewport("y", 0.5 * count, event),
+          scrollPageUp: ({ count, event }) => service.scrollByViewport("y", -0.5 * count, event),
+          scrollFullPageDown: ({ count, event }) => service.scrollByViewport("y", 1 * count, event),
+          scrollFullPageUp: ({ count, event }) => service.scrollByViewport("y", -1 * count, event),
           scrollToTop: () => service.scrollTo("y", "start"),
           scrollToBottom: () => service.scrollTo("y", "end"),
           scrollToLeft: () => service.scrollTo("x", "start"),

@@ -540,7 +540,7 @@ export class Keyboard extends Context.Service<
           }),
         );
         yield* pipe(
-          commands.run(command, { count, options, event }),
+          commands.run(command, { count, options, event: Option.some(event) }),
           Effect.catch((error) => report.error(error.detail)),
           Effect.forkDetach({ startImmediately: true }),
         );
