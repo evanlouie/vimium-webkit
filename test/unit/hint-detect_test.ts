@@ -16,9 +16,25 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Deferred, Effect, Exit, Fiber, Layer, Option, Ref, Stream } from "effect";
+import {
+  Array,
+  Boolean,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  MutableRef,
+  Option,
+  Record,
+  Ref,
+  Struct,
+  pipe,
+} from "effect";
+import { constVoid } from "effect/Function";
 import { Dom } from "~/platform/Dom.ts";
 import {
+  type ElementWalk,
   collectElements,
   findImageMap,
   mapNameOf,
@@ -31,32 +47,53 @@ import {
 // ---------------------------------------------------------------------------
 
 /** A `<map>` that answers the two attributes used by the standard. */
-const mapElement = (name: string | null, id: string | null = null): Element =>
-  ({
-    getAttribute: (attribute: string): string | null =>
-      attribute === "name" ? name : attribute === "id" ? id : null,
-  }) as unknown as Element;
+interface FakeMap {
+  readonly getAttribute: (attribute: string) => string | null;
+}
 
-/** A document or shadow root that accepts only the fixed `map` selector. */
-const rootWith = (maps: readonly Element[]): Document | ShadowRoot =>
-  ({
-    querySelectorAll: (selector: string): readonly Element[] => {
-      if (selector !== "map") {
-        throw new SyntaxError(`the lookup built a selector: ${selector}`);
-      }
-      return maps;
-    },
-  }) as unknown as Document | ShadowRoot;
+/** A document or shadow root, as the lookup reads it. */
+interface FakeMapRoot {
+  readonly querySelectorAll: (selector: string) => ReadonlyArray<FakeMap>;
+}
+
+const mapElement = (name: string | null, id: string | null = null): FakeMap => {
+  const attributes: Record.ReadonlyRecord<string, string | null> = { name, id };
+  return {
+    getAttribute: (attribute) =>
+      pipe(
+        attributes,
+        Record.get(attribute),
+        Option.flatMap(Option.fromNullishOr),
+        Option.getOrNull,
+      ),
+  };
+};
+
+/**
+ * A document or shadow root that accepts only the fixed `map` selector.
+ *
+ * Any other selector throws a `SyntaxError`, as the DOM does for a selector
+ * that page text breaks.
+ */
+const rootWith = (maps: ReadonlyArray<FakeMap>): FakeMapRoot => ({
+  querySelectorAll: (selector) =>
+    pipe(
+      selector,
+      Option.liftPredicate((built) => built === "map"),
+      Option.as(maps),
+      Option.getOrThrowWith(() => new SyntaxError(`the lookup built a selector: ${selector}`)),
+    ),
+});
 
 /** An image context inside `root`, with its owning document. */
-const contextIn = (
-  root: Document | ShadowRoot,
-  ownerDocument: Document = root as Document,
-): Element =>
-  ({
-    ownerDocument,
-    getRootNode: (): Document | ShadowRoot => root,
-  }) as unknown as Element;
+const contextIn = (root: FakeMapRoot, ownerDocument: FakeMapRoot = root) => ({
+  ownerDocument,
+  getRootNode: (): FakeMapRoot => root,
+});
+
+/** The map that the lookup found, or `null`. */
+const found = (context: ReturnType<typeof contextIn>, usemap: string): unknown =>
+  pipe(findImageMap(context, usemap), Option.getOrNull);
 
 /** Names that a page may use, and that a joined selector cannot carry. */
 const AWKWARD_NAMES: ReadonlyArray<readonly [string, string]> = [
@@ -74,19 +111,17 @@ const AWKWARD_NAMES: ReadonlyArray<readonly [string, string]> = [
 ];
 
 describe("the image-map lookup", () => {
-  for (const [label, name] of AWKWARD_NAMES) {
-    it.effect(`finds the map whose name holds ${label}`, () =>
-      Effect.sync(() => {
-        const target = mapElement(name);
-        const context = contextIn(rootWith([mapElement("other"), target]));
+  it.effect.each(AWKWARD_NAMES)("finds the map whose name holds %s", ([, name]) =>
+    Effect.sync(() => {
+      const target = mapElement(name);
+      const context = contextIn(rootWith([mapElement("other"), target]));
 
-        const found = findImageMap(context, `#${name}`);
+      const map = findImageMap(context, `#${name}`);
 
-        assert.isTrue(Option.isSome(found), `no map for ${JSON.stringify(name)}`);
-        assert.strictEqual(Option.getOrNull(found), target);
-      }),
-    );
-  }
+      assert.isTrue(Option.isSome(map), `no map for ${JSON.stringify(name)}`);
+      assert.strictEqual(Option.getOrNull(map), target);
+    }),
+  );
 
   it.effect("gives no map for an empty name", () =>
     Effect.sync(() => {
@@ -106,7 +141,7 @@ describe("the image-map lookup", () => {
       const second = mapElement("nav");
       const context = contextIn(rootWith([first, second]));
 
-      assert.strictEqual(Option.getOrNull(findImageMap(context, "#nav")), first);
+      assert.strictEqual(found(context, "#nav"), first);
     }),
   );
 
@@ -132,7 +167,7 @@ describe("the image-map lookup", () => {
       const target = mapElement("#nav");
       const context = contextIn(rootWith([mapElement("nav"), target]));
       // Only the first `#` is the separator, as `usemap` defines it.
-      assert.strictEqual(Option.getOrNull(findImageMap(context, "##nav")), target);
+      assert.strictEqual(found(context, "##nav"), target);
     }),
   );
 
@@ -140,7 +175,7 @@ describe("the image-map lookup", () => {
     Effect.sync(() => {
       const target = mapElement("nav");
       const context = contextIn(rootWith([target]));
-      assert.strictEqual(Option.getOrNull(findImageMap(context, "prefix#nav")), target);
+      assert.strictEqual(found(context, "prefix#nav"), target);
     }),
   );
 
@@ -148,7 +183,7 @@ describe("the image-map lookup", () => {
     Effect.sync(() => {
       const target = mapElement(null, "nav");
       const context = contextIn(rootWith([target]));
-      assert.strictEqual(Option.getOrNull(findImageMap(context, "#nav")), target);
+      assert.strictEqual(found(context, "#nav"), target);
     }),
   );
 
@@ -156,13 +191,13 @@ describe("the image-map lookup", () => {
     Effect.sync(() => {
       const documentMap = mapElement("nav");
       const shadowMap = mapElement("nav");
-      const documentRoot = rootWith([documentMap]) as Document;
+      const documentRoot = rootWith([documentMap]);
       const documentContext = contextIn(documentRoot);
       const shadowContext = contextIn(rootWith([shadowMap]), documentRoot);
       const emptyShadowContext = contextIn(rootWith([]), documentRoot);
 
-      assert.strictEqual(Option.getOrNull(findImageMap(shadowContext, "#nav")), shadowMap);
-      assert.strictEqual(Option.getOrNull(findImageMap(documentContext, "#nav")), documentMap);
+      assert.strictEqual(found(shadowContext, "#nav"), shadowMap);
+      assert.strictEqual(found(documentContext, "#nav"), documentMap);
       assert.isTrue(Option.isNone(findImageMap(emptyShadowContext, "#nav")));
     }),
   );
@@ -179,7 +214,7 @@ describe("the image-map lookup", () => {
 interface FakeNode {
   readonly localName: string;
   readonly children: FakeNode[];
-  readonly childNodes: readonly unknown[];
+  readonly childNodes: ReadonlyArray<unknown>;
   shadowRoot: FakeRoot | null;
   parent: FakeParent | null;
   index: number;
@@ -198,12 +233,29 @@ interface FakeRoot {
 
 type FakeParent = FakeNode | FakeRoot;
 
-let nextId = 0;
-let siblingReads = 0;
+/** The fake DOM counts from a synchronous getter, so it keeps plain mutable counters. */
+const nextId = MutableRef.make(0);
+const siblingReads = MutableRef.make(0);
+
+const firstOf = (parent: FakeParent): FakeNode | null =>
+  pipe(parent.children, Array.head, Option.getOrNull);
+
+const lastOf = (parent: FakeParent): FakeNode | null =>
+  pipe(parent.children, Array.last, Option.getOrNull);
+
+/** The sibling at `offset` from `self`, and one sibling read more. */
+const siblingOf = (self: FakeNode, offset: number): FakeNode | null => {
+  MutableRef.increment(siblingReads);
+  return pipe(
+    self.parent,
+    Option.fromNullishOr,
+    Option.flatMap((parent) => pipe(parent.children, Array.get(self.index + offset))),
+    Option.getOrNull,
+  );
+};
 
 const node = (localName = "div"): FakeNode => {
-  nextId += 1;
-  const id = nextId;
+  const id = MutableRef.incrementAndGet(nextId);
   const self: FakeNode = {
     localName,
     children: [],
@@ -212,18 +264,16 @@ const node = (localName = "div"): FakeNode => {
     parent: null,
     index: 0,
     get firstElementChild(): FakeNode | null {
-      return self.children[0] ?? null;
+      return firstOf(self);
     },
     get lastElementChild(): FakeNode | null {
-      return self.children[self.children.length - 1] ?? null;
+      return lastOf(self);
     },
     get nextElementSibling(): FakeNode | null {
-      siblingReads += 1;
-      return self.parent?.children[self.index + 1] ?? null;
+      return siblingOf(self, 1);
     },
     get previousElementSibling(): FakeNode | null {
-      siblingReads += 1;
-      return self.parent?.children[self.index - 1] ?? null;
+      return siblingOf(self, -1);
     },
     // A box, so that a childless custom element counts as a closed host.
     getBoundingClientRect: () => ({ width: 10 + (id % 3), height: 10 }),
@@ -235,10 +285,10 @@ const root = (): FakeRoot => {
   const self: FakeRoot = {
     children: [],
     get firstElementChild(): FakeNode | null {
-      return self.children[0] ?? null;
+      return firstOf(self);
     },
     get lastElementChild(): FakeNode | null {
-      return self.children[self.children.length - 1] ?? null;
+      return lastOf(self);
     },
   };
   return self;
@@ -252,16 +302,25 @@ const append = (parent: FakeParent, child: FakeNode): void => {
 };
 
 /** Remove `child` and repair the sibling indexes. */
-const remove = (child: FakeNode): void => {
-  const parent = child.parent;
-  if (parent === null) return;
-  parent.children.splice(child.index, 1);
-  for (const [index, sibling] of parent.children.entries()) {
-    sibling.index = index;
-  }
-  child.parent = null;
-  child.index = 0;
-};
+const remove = (child: FakeNode): void =>
+  pipe(
+    child.parent,
+    Option.fromNullishOr,
+    Option.match({
+      onNone: constVoid,
+      onSome: (parent) => {
+        parent.children.splice(child.index, 1);
+        pipe(
+          parent.children,
+          Array.forEach((sibling, index) => {
+            sibling.index = index;
+          }),
+        );
+        child.parent = null;
+        child.index = 0;
+      },
+    }),
+  );
 
 /** Move `child` to the end of `parent`. */
 const move = (child: FakeNode, parent: FakeParent): void => {
@@ -270,35 +329,16 @@ const move = (child: FakeNode, parent: FakeParent): void => {
 };
 
 /** Every descendant of `where`, in document order, as `querySelectorAll` gives. */
-const descendants = (where: FakeParent): readonly FakeNode[] => {
-  const out: FakeNode[] = [];
-  const visit = (parent: FakeParent): void => {
-    for (const child of parent.children) {
-      out.push(child);
-      visit(child);
-    }
-  };
-  visit(where);
-  return out;
-};
+const descendants = (where: FakeParent): ReadonlyArray<FakeNode> =>
+  pipe(
+    where.children,
+    Array.flatMap((child) => pipe(descendants(child), Array.prepend(child))),
+  );
 
-/**
- * The walk that this change replaces, copied from the file before the change.
- *
- * It is the reference for the order. The chunked walk must agree with it, node
- * for node, and it must count the same unreachable hosts.
- */
-const referenceWalk = (
-  where: FakeParent,
-  into: { elements: FakeNode[]; unreachableHosts: number },
-): void => {
-  for (const element of descendants(where)) {
-    into.elements.push(element);
-    const shadow = element.shadowRoot;
-    if (shadow !== null) referenceWalk(shadow, into);
-    else if (looksClosed(element)) into.unreachableHosts += 1;
-  }
-};
+interface Walked {
+  readonly elements: ReadonlyArray<FakeNode>;
+  readonly unreachableHosts: number;
+}
 
 /** The heuristic of `looksLikeClosedShadowHost`, over the fake node. */
 const looksClosed = (element: FakeNode): boolean =>
@@ -309,6 +349,53 @@ const looksClosed = (element: FakeNode): boolean =>
   element.getBoundingClientRect().height >= 3;
 
 /**
+ * The walk that this change replaces, copied from the file before the change.
+ *
+ * It is the reference for the order. The chunked walk must agree with it, node
+ * for node, and it must count the same unreachable hosts.
+ */
+const referenceWalk = (where: FakeParent): Walked => {
+  const visits = pipe(descendants(where), Array.map(referenceVisit));
+  return {
+    elements: pipe(
+      visits,
+      Array.flatMap((visit) => visit.elements),
+    ),
+    unreachableHosts: pipe(
+      visits,
+      Array.reduce(0, (sum, visit) => sum + visit.unreachableHosts),
+    ),
+  };
+};
+
+/** One element of the reference walk, followed by its shadow tree. */
+const referenceVisit = (element: FakeNode): Walked =>
+  pipe(
+    element.shadowRoot,
+    Option.fromNullishOr,
+    Option.match({
+      onNone: () => ({
+        elements: [element],
+        unreachableHosts: pipe(
+          looksClosed(element),
+          Boolean.match({ onFalse: () => 0, onTrue: () => 1 }),
+        ),
+      }),
+      onSome: (shadow) => {
+        const inner = referenceWalk(shadow);
+        return {
+          elements: pipe(inner.elements, Array.prepend(element)),
+          unreachableHosts: inner.unreachableHosts,
+        };
+      },
+    }),
+  );
+
+/** Every fifth element of a level is a web component. */
+const nameAt = (index: number): string =>
+  pipe(index % 5 === 0, Boolean.match({ onFalse: () => "div", onTrue: () => "x-widget" }));
+
+/**
  * A tree with `breadth` branches, `depth` levels, shadow roots and web
  * components.
  *
@@ -316,36 +403,49 @@ const looksClosed = (element: FakeNode): boolean =>
  * one.
  */
 const buildTree = (breadth: number, depth: number): FakeRoot => {
-  const tree = root();
-  const grow = (parent: FakeParent, level: number): void => {
-    if (level === 0) return;
-    for (let index = 0; index < breadth; index += 1) {
-      const child = node(index % 5 === 0 ? "x-widget" : "div");
+  /** `parent`, after it grew `level` levels below it. */
+  const grown = <P extends FakeParent>(parent: P, level: number): P => {
+    pipe(
+      level > 0,
+      Boolean.match({
+        onFalse: constVoid,
+        onTrue: () =>
+          pipe(
+            breadth,
+            Array.makeBy((index) => index),
+            Array.forEach(branch(parent, level)),
+          ),
+      }),
+    );
+    return parent;
+  };
+  /** The child at `index` of `parent`, grown one level less. */
+  const branch =
+    (parent: FakeParent, level: number) =>
+    (index: number): void => {
+      const child = node(nameAt(index));
       append(parent, child);
       // Every third element carries an open shadow root with content of its
       // own, so the two walks must agree about where a shadow tree belongs.
-      if (index % 3 === 0 && level > 1) {
-        const shadow = root();
-        grow(shadow, level - 1);
-        child.shadowRoot = shadow;
-      }
-      grow(child, level - 1);
-    }
-  };
-  grow(tree, depth);
-  return tree;
+      child.shadowRoot = pipe(
+        index % 3 === 0 && level > 1,
+        Boolean.match({ onFalse: () => null, onTrue: () => grown(root(), level - 1) }),
+      );
+      grown(child, level - 1);
+    };
+  return grown(root(), depth);
 };
 
-const walkAll = (
-  tree: FakeRoot,
-  slice: number,
-): { elements: readonly FakeNode[]; unreachableHosts: number } => {
-  const walk = startWalk(tree as unknown as ParentNode);
-  while (stepWalk(walk, slice));
-  return {
-    elements: walk.collected.elements as unknown as readonly FakeNode[],
-    unreachableHosts: walk.collected.unreachableHosts,
-  };
+/** Step `walk` by `slice` until no work is left. */
+const drain = (walk: ElementWalk<FakeNode>, slice: number): Effect.Effect<void> =>
+  pipe(
+    Effect.sync(() => stepWalk(walk, slice)),
+    Effect.flatMap(Boolean.match({ onFalse: () => Effect.void, onTrue: () => drain(walk, slice) })),
+  );
+
+const walkAll = (tree: FakeRoot, slice: number): Effect.Effect<Walked> => {
+  const walk = startWalk(tree);
+  return pipe(drain(walk, slice), Effect.as(walk));
 };
 
 // ---------------------------------------------------------------------------
@@ -354,42 +454,45 @@ const walkAll = (
 
 describe("the walk of the tree", () => {
   it.effect("finds the same elements, in the same order, as the walk before", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const tree = buildTree(6, 5);
-      const reference = { elements: [] as FakeNode[], unreachableHosts: 0 };
-      referenceWalk(tree, reference);
+      const reference = referenceWalk(tree);
 
-      const chunked = walkAll(tree, 7);
+      const chunked = yield* walkAll(tree, 7);
 
       assert.isAbove(reference.elements.length, 4_000);
       assert.strictEqual(chunked.elements.length, reference.elements.length);
-      for (const [index, element] of reference.elements.entries()) {
-        assert.strictEqual(
-          chunked.elements[index],
-          element,
-          `element ${index} is not the element of the walk before`,
-        );
-      }
+      pipe(
+        reference.elements,
+        Array.forEach((element, index) => {
+          const walked = pipe(chunked.elements, Array.get(index), Option.getOrNull);
+          assert.strictEqual(
+            walked,
+            element,
+            `element ${index} is not the element of the walk before`,
+          );
+        }),
+      );
       assert.strictEqual(chunked.unreachableHosts, reference.unreachableHosts);
       assert.isAbove(reference.unreachableHosts, 0);
     }),
   );
 
   it.effect("gives the same order for every slice size", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const tree = buildTree(5, 5);
-      const one = walkAll(tree, 1);
-      const seven = walkAll(tree, 7);
-      const whole = walkAll(tree, 5_000);
+      const one = yield* walkAll(tree, 1);
+      const seven = yield* walkAll(tree, 7);
+      const whole = yield* walkAll(tree, 5_000);
 
-      assert.deepStrictEqual([...one.elements], [...seven.elements]);
-      assert.deepStrictEqual([...one.elements], [...whole.elements]);
+      assert.deepStrictEqual(one.elements, seven.elements);
+      assert.deepStrictEqual(one.elements, whole.elements);
       assert.strictEqual(one.unreachableHosts, whole.unreachableHosts);
     }),
   );
 
   it.effect("visits the host, then its shadow tree, then its light tree", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const host = node("x-host");
       const light = node("div");
       const shadowChild = node("span");
@@ -400,9 +503,9 @@ describe("the walk of the tree", () => {
       const tree = root();
       append(tree, host);
 
-      const walked = walkAll(tree, 1);
+      const walked = yield* walkAll(tree, 1);
 
-      assert.deepStrictEqual([...walked.elements], [host, shadowChild, light]);
+      assert.deepStrictEqual(walked.elements, [host, shadowChild, light]);
     }),
   );
 
@@ -411,33 +514,36 @@ describe("the walk of the tree", () => {
       const tree = root();
       append(tree, node());
       append(tree, node());
-      const walk = startWalk(tree as unknown as ParentNode);
+      const walk = startWalk(tree);
       assert.isTrue(stepWalk(walk, 1));
       assert.isFalse(stepWalk(walk, 1));
       assert.isFalse(stepWalk(walk, 1));
-      assert.strictEqual(walk.collected.elements.length, 2);
+      assert.strictEqual(walk.elements.length, 2);
     }),
   );
 
   it.effect("walks an empty root", () =>
     Effect.sync(() => {
-      const walk = startWalk(root() as unknown as ParentNode);
+      const walk = startWalk(root());
       assert.isFalse(stepWalk(walk, 32));
-      assert.strictEqual(walk.collected.elements.length, 0);
+      assert.strictEqual(walk.elements.length, 0);
     }),
   );
 
   it.effect("bounds sibling reads in one step", () =>
     Effect.sync(() => {
       const tree = root();
-      for (let index = 0; index < 10_000; index += 1) append(tree, node());
-      siblingReads = 0;
+      pipe(
+        Array.makeBy(10_000, () => node()),
+        Array.forEach((child) => append(tree, child)),
+      );
+      MutableRef.set(siblingReads, 0);
 
-      const walk = startWalk(tree as unknown as ParentNode);
+      const walk = startWalk(tree);
       assert.isTrue(stepWalk(walk, 7));
 
-      assert.strictEqual(walk.collected.elements.length, 7);
-      assert.isAtMost(siblingReads, 7);
+      assert.strictEqual(walk.elements.length, 7);
+      assert.isAtMost(MutableRef.get(siblingReads), 7);
     }),
   );
 
@@ -446,91 +552,96 @@ describe("the walk of the tree", () => {
       const parent = node();
       const tree = root();
       append(tree, parent);
-      const walk = startWalk(tree as unknown as ParentNode);
+      const walk = startWalk(tree);
       assert.isFalse(stepWalk(walk, 1));
 
       const added = node();
       append(parent, added);
 
       assert.isFalse(stepWalk(walk, 10));
-      assert.deepStrictEqual(walk.collected.elements as unknown as FakeNode[], [parent]);
+      assert.deepStrictEqual(walk.elements, [parent]);
     }),
   );
 
   it.effect("includes a child added before its parent is visited", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const parent = node();
       const future = node();
       append(parent, future);
       const tree = root();
       append(tree, parent);
-      const walk = startWalk(tree as unknown as ParentNode);
+      const walk = startWalk(tree);
       assert.isTrue(stepWalk(walk, 1));
 
       const added = node();
       append(future, added);
-      while (stepWalk(walk, 1));
+      yield* drain(walk, 1);
 
-      assert.deepStrictEqual(walk.collected.elements as unknown as FakeNode[], [
-        parent,
-        future,
-        added,
-      ]);
+      assert.deepStrictEqual(walk.elements, [parent, future, added]);
     }),
   );
 
   it.effect("keeps a pending element that the page removes", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const first = node();
       const removed = node();
       const tree = root();
       append(tree, first);
       append(tree, removed);
-      const walk = startWalk(tree as unknown as ParentNode);
+      const walk = startWalk(tree);
       assert.isTrue(stepWalk(walk, 1));
 
       remove(removed);
-      while (stepWalk(walk, 1));
+      yield* drain(walk, 1);
 
-      assert.deepStrictEqual(walk.collected.elements as unknown as FakeNode[], [first, removed]);
+      assert.deepStrictEqual(walk.elements, [first, removed]);
     }),
   );
 
   it.effect("does not produce a moved element two times", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const first = node();
       const second = node();
       const tree = root();
       append(tree, first);
       append(tree, second);
-      const walk = startWalk(tree as unknown as ParentNode);
+      const walk = startWalk(tree);
       assert.isTrue(stepWalk(walk, 1));
 
       move(first, second);
-      while (stepWalk(walk, 1));
+      yield* drain(walk, 1);
 
-      assert.deepStrictEqual(walk.collected.elements as unknown as FakeNode[], [first, second]);
+      assert.deepStrictEqual(walk.elements, [first, second]);
     }),
   );
 
   it.effect("stops continuous growth at the element limit", () =>
     Effect.sync(() => {
       const first = node();
-      let future = node();
+      const future = node();
       append(first, future);
       const tree = root();
       append(tree, first);
-      const walk = startWalk(tree as unknown as ParentNode, 12);
+      const walk = startWalk(tree, 12);
       assert.isTrue(stepWalk(walk, 1));
 
-      while (!walk.collected.truncated) {
-        const added = node();
-        append(future, added);
-        future = added;
-        stepWalk(walk, 1);
-      }
+      // The page appends one more child below the last one after every step.
+      const grow = (below: FakeNode): void =>
+        pipe(
+          walk.truncated,
+          Boolean.match({
+            onFalse: () => {
+              const added = node();
+              append(below, added);
+              stepWalk(walk, 1);
+              grow(added);
+            },
+            onTrue: constVoid,
+          }),
+        );
+      grow(future);
 
-      assert.strictEqual(walk.collected.elements.length, 12);
+      assert.strictEqual(walk.elements.length, 12);
       assert.strictEqual(walk.examined, 12);
       assert.isFalse(stepWalk(walk, 1));
     }),
@@ -555,31 +666,36 @@ interface Turns {
  * of turns does not depend on the speed of the machine.
  */
 const countingDom = (turns: Turns): Layer.Layer<Dom> =>
-  Layer.effect(
-    Dom,
-    Effect.gen(function* () {
-      const clock = yield* Ref.make(0);
-      return Dom.of({
-        window: undefined as unknown as Window & typeof globalThis,
-        document: undefined as unknown as Document,
-        href: Effect.succeed("https://example.test/"),
-        probe: <A>(_api: string, read: () => A) => Effect.sync(read),
-        probeOr: <A>(read: () => A, _fallback: A) => Effect.sync(read),
-        attempt: <A>(_api: string, run: () => A) => Effect.sync(run),
-        listen: () => Effect.void,
-        listenOn: () => Effect.void,
-        events: () => Stream.empty,
-        nextFrame: Effect.succeed(0),
-        yieldToBrowser: Effect.gen(function* () {
-          yield* Ref.update(turns.count, (value) => value + 1);
-          yield* Deferred.succeed(turns.first, undefined);
-          // A real turn: `Dom.yieldToBrowser` posts through a `MessageChannel`,
-          // so the fiber suspends, and an interruption takes effect here.
-          yield* Effect.yieldNow;
-        }),
-        now: Ref.getAndUpdate(clock, (value) => value + 1),
-      } as unknown as Dom["Service"]);
-    }),
+  pipe(
+    Layer.effect(
+      Dom,
+      Effect.gen(function* () {
+        const dom = yield* Dom;
+        const clock = yield* Ref.make(0);
+        return pipe(
+          dom,
+          Struct.assign({
+            yieldToBrowser: Effect.gen(function* () {
+              yield* pipe(
+                turns.count,
+                Ref.update((value) => value + 1),
+              );
+              yield* pipe(turns.first, Deferred.succeed<void>(undefined));
+              // A real turn: `Dom.yieldToBrowser` posts through a
+              // `MessageChannel`, so the fiber suspends, and an interruption
+              // takes effect here.
+              yield* Effect.yieldNow;
+            }),
+            now: pipe(
+              clock,
+              Ref.getAndUpdate((value) => value + 1),
+            ),
+          }),
+          (service) => Dom.of(service),
+        );
+      }),
+    ),
+    Layer.provide(Dom.layer),
   );
 
 const makeTurns = Effect.gen(function* () {
@@ -592,11 +708,11 @@ describe("discovery in slices", () => {
   it.effect("gives the thread back before it has walked the whole tree", () =>
     Effect.gen(function* () {
       const turns = yield* makeTurns;
-      const tree = buildTree(6, 5) as unknown as ParentNode;
+      const tree = buildTree(6, 5);
 
-      const collected = yield* Effect.provide(
+      const collected = yield* pipe(
         collectElements(tree, { checkEvery: 64 }),
-        countingDom(turns),
+        Effect.provide(countingDom(turns)),
       );
 
       const count = yield* Ref.get(turns.count);
@@ -610,10 +726,12 @@ describe("discovery in slices", () => {
   it.effect("stops at the first turn when the fiber is interrupted", () =>
     Effect.gen(function* () {
       const turns = yield* makeTurns;
-      const tree = buildTree(6, 5) as unknown as ParentNode;
+      const tree = buildTree(6, 5);
 
-      const fiber = yield* Effect.forkChild(
-        Effect.provide(collectElements(tree, { budgetMs: 8, checkEvery: 64 }), countingDom(turns)),
+      const fiber = yield* pipe(
+        collectElements(tree, { budgetMs: 8, checkEvery: 64 }),
+        Effect.provide(countingDom(turns)),
+        Effect.forkChild,
       );
 
       // A signal, and not a sleep: the walk itself says when it gave the
@@ -633,9 +751,9 @@ describe("discovery in slices", () => {
     Effect.gen(function* () {
       const turns = yield* makeTurns;
 
-      const collected = yield* Effect.provide(
-        collectElements(root() as unknown as ParentNode, {}),
-        countingDom(turns),
+      const collected = yield* pipe(
+        collectElements(root(), {}),
+        Effect.provide(countingDom(turns)),
       );
 
       assert.strictEqual(collected.elements.length, 0);

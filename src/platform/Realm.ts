@@ -11,7 +11,19 @@
  * Absence cannot satisfy that test.
  */
 
-import { Context, Effect, Layer, Schema, pipe } from "effect";
+import {
+  Array,
+  Boolean,
+  Context,
+  Effect,
+  Layer,
+  Option,
+  Predicate,
+  Result,
+  Schema,
+  flow,
+  pipe,
+} from "effect";
 import { Dom } from "./Dom.ts";
 
 /** A frame identity. Random, per frame, and never reused. */
@@ -53,11 +65,79 @@ export const ANNOUNCE_MESSAGE = {
   kind: "ANNOUNCE",
 } as const;
 
-const randomId = (): string => {
-  const bytes = new Uint8Array(8);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-};
+const hexByte = (byte: number): string => byte.toString(16).padStart(2, "0");
+
+const randomId = (): string =>
+  pipe(
+    crypto.getRandomValues(new Uint8Array(8)),
+    Array.fromIterable,
+    Array.map(hexByte),
+    Array.join(""),
+  );
+
+/** The indexes from `0` to `count - 1`. */
+const indexesBelow = (count: number): ReadonlyArray<number> =>
+  Array.unfold(
+    0,
+    flow(
+      Option.liftPredicate((index: number) => index < count),
+      Option.map((index) => [index, index + 1] as const),
+    ),
+  );
+
+/**
+ * One frame directly inside `view`.
+ *
+ * A `WindowProxy` exposes its child frames only as indexed properties. There is
+ * no method to call instead, so this is the one indexed read of the module. A
+ * realm that refuses the read, or a frame that went away, gives no frame.
+ */
+const childFrame = (view: Window, index: number): Option.Option<Window> =>
+  pipe(
+    Result.try(() => view.frames[index]),
+    Result.getSuccess,
+    Option.flatMap(Option.fromNullishOr),
+  );
+
+/** The frames directly inside `view`. A realm that refuses the count has none. */
+const childFrames = (view: Window): ReadonlyArray<Window> =>
+  pipe(
+    Result.try(() => view.frames.length),
+    Result.map(indexesBelow),
+    Result.getOrElse(() => Array.empty<number>()),
+    Array.map((index) => childFrame(view, index)),
+    Array.getSomes,
+  );
+
+/** `frame`, then every frame below it, when `frame` sits at `depth`. */
+const withDescendants =
+  (depth: number) =>
+  (frame: Window): ReadonlyArray<Window> =>
+    pipe(descendantFrames(frame, depth), Array.prepend(frame));
+
+/** Every frame below `view`, each before its own frames, down to `MAX_WAKE_DEPTH`. */
+const descendantFrames = (view: Window, depth: number): ReadonlyArray<Window> =>
+  pipe(
+    depth > MAX_WAKE_DEPTH,
+    Boolean.match({
+      onFalse: () => pipe(childFrames(view), Array.flatMap(withDescendants(depth + 1))),
+      onTrue: () => Array.empty<Window>(),
+    }),
+  );
+
+/**
+ * Post to one frame.
+ *
+ * A cross-origin frame can refuse, and there is no other route, so the refusal
+ * is dropped.
+ */
+const postTo =
+  (message: unknown) =>
+  (frame: Window): void => {
+    Result.try(() => {
+      frame.postMessage(message, "*");
+    });
+  };
 
 export class Realm extends Context.Service<
   Realm,
@@ -89,50 +169,32 @@ export class Realm extends Context.Service<
         false,
       );
 
-      const isTop = yield* dom.probeOr(() => {
-        const scope = dom.window as { top?: unknown; self?: unknown };
-        const top = scope.top;
-        return typeof top === "object" && top !== null && top === scope.self;
-      }, false);
+      const isTop = yield* dom.probeOr(
+        () =>
+          pipe(
+            dom.window.top,
+            Option.liftPredicate(Predicate.isObjectKeyword),
+            Option.exists((top) => top === dom.window.self),
+          ),
+        false,
+      );
 
       const postToDescendants = (message: unknown): Effect.Effect<void> =>
-        Effect.sync(() => {
-          const visit = (view: Window, depth: number): void => {
-            if (depth > MAX_WAKE_DEPTH) return;
-            let count = 0;
-            try {
-              count = view.frames.length;
-            } catch {
-              return;
-            }
-            for (let index = 0; index < count; index++) {
-              let child: Window | undefined;
-              try {
-                child = view.frames[index];
-              } catch {
-                continue;
-              }
-              if (child === undefined) continue;
-              try {
-                child.postMessage(message, "*");
-              } catch {
-                // A cross-origin frame can refuse. There is no other route.
-              }
-              visit(child, depth + 1);
-            }
-          };
-          visit(dom.window, 0);
-        });
+        Effect.sync(() => pipe(descendantFrames(dom.window, 0), Array.forEach(postTo(message))));
 
       const isAncestor = (source: unknown): Effect.Effect<boolean> =>
-        dom.probeOr(() => {
-          if (source === null || source === undefined) return false;
-          const scope = dom.window as { parent?: unknown; top?: unknown };
-          return source === scope.parent || source === scope.top;
-        }, false);
+        dom.probeOr(
+          () =>
+            pipe(
+              source,
+              Option.fromNullishOr,
+              Option.exists((frame) => frame === dom.window.parent || frame === dom.window.top),
+            ),
+          false,
+        );
 
       return Realm.of({
-        frameId: randomId() as FrameId,
+        frameId: FrameId.make(randomId()),
         isTop,
         isLive,
         wakeDescendants: postToDescendants(WAKE_MESSAGE),

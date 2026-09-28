@@ -19,7 +19,7 @@
  *   the fiber, so there is no `cancel` method for a caller to remember.
  */
 
-import { Effect, Option, Predicate } from "effect";
+import { Array, Boolean, Effect, Option, Predicate, Ref, flow, pipe } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 
 /** The length of one slice. Chosen to stay inside one 60 Hz frame. */
@@ -27,10 +27,6 @@ export const CHUNK_BUDGET_MS = 8;
 
 /** How many items are mapped before the clock is read again. */
 const DEFAULT_CHECK_EVERY = 32;
-
-interface IdleWindow {
-  readonly requestIdleCallback?: unknown;
-}
 
 /**
  * True when this realm has a native `requestIdleCallback`.
@@ -42,7 +38,7 @@ interface IdleWindow {
  * inside `Dom.probeOr`.
  */
 export const hasNativeIdleCallback = (window: Window & typeof globalThis): boolean =>
-  Predicate.isFunction((window as IdleWindow).requestIdleCallback);
+  Predicate.isFunction(window.requestIdleCallback);
 
 export interface ChunkedOptions {
   /** The time budget for one slice, in milliseconds. */
@@ -50,6 +46,73 @@ export interface ChunkedOptions {
   /** How many items to map before the clock is read again. */
   readonly checkEvery?: number;
 }
+
+/** The slices of one piece of work, from the moment that the first one started. */
+interface Slices {
+  /**
+   * Read the clock, and end the slice when it has spent its budget.
+   *
+   * The end of a slice gives control back to the browser, and the next slice
+   * starts when control comes back. That turn is also where interruption takes
+   * effect. Run the check only between two batches, so that the last batch
+   * never gives a turn that nothing uses.
+   */
+  readonly check: Effect.Effect<void>;
+}
+
+/** Start the first slice of work that may spend `budgetMs` in each slice. */
+const startSlices = Effect.fnUntraced(function* (budgetMs: number) {
+  const dom = yield* Dom;
+  const sliceStart = yield* pipe(dom.now, Effect.flatMap(Ref.make));
+  // Sequential by design. The browser gets a turn between two slices.
+  const nextSlice = pipe(
+    dom.yieldToBrowser,
+    Effect.andThen(dom.now),
+    Effect.flatMap((now) => pipe(sliceStart, Ref.set(now))),
+  );
+  const slices: Slices = {
+    check: pipe(
+      dom.now,
+      Effect.zipWith(Ref.get(sliceStart), (now, start) => now - start >= budgetMs),
+      Effect.flatMap(Boolean.match({ onFalse: () => Effect.void, onTrue: () => nextSlice })),
+    ),
+  };
+  return slices;
+});
+
+/**
+ * Run `batch` again and again in time-boxed slices, until it gives `false`.
+ *
+ * `batch` does a bounded amount of synchronous work, and it gives `true` while
+ * work is left. The clock is read after each batch that leaves work, so a
+ * batch must be small enough that its cost stays well under the budget.
+ */
+export const repeatInSlices = Effect.fnUntraced(function* (
+  batch: Effect.Effect<boolean>,
+  budgetMs: number,
+) {
+  const slices = yield* startSlices(budgetMs);
+  const run: Effect.Effect<void> = pipe(
+    batch,
+    Effect.flatMap(
+      Boolean.match({
+        onFalse: () => Effect.void,
+        onTrue: () => pipe(slices.check, Effect.andThen(run)),
+      }),
+    ),
+  );
+  yield* run;
+});
+
+/** `items` cut into consecutive batches of `size`, without a copy of the rest at each cut. */
+const batchesOf = <A>(items: ReadonlyArray<A>, size: number): ReadonlyArray<ReadonlyArray<A>> =>
+  Array.unfold(
+    0,
+    flow(
+      Option.liftPredicate((offset: number) => offset < items.length),
+      Option.map((offset) => [items.slice(offset, offset + size), offset + size] as const),
+    ),
+  );
 
 /**
  * Map over `items` in time-boxed slices.
@@ -64,44 +127,22 @@ export interface ChunkedOptions {
  * `checkEvery` exists because `performance.now()` is itself measurable when it
  * is read once for each of many thousands of elements.
  */
-export const mapChunked = <A, B, R = never>(
-  items: readonly A[],
-  transform: (item: A, index: number) => Option.Option<B>,
-  options?: ChunkedOptions,
-): Effect.Effect<ReadonlyArray<B>, never, R | Dom> =>
-  Effect.gen(function* () {
-    const dom = yield* Dom;
-    const budget = options?.budgetMs ?? CHUNK_BUDGET_MS;
-    const checkEvery = options?.checkEvery ?? DEFAULT_CHECK_EVERY;
-
-    const out: Array<B> = [];
-    let index = 0;
-
-    while (index < items.length) {
-      const sliceStart = yield* dom.now;
-      let sinceCheck = 0;
-
-      while (index < items.length) {
-        // `noUncheckedIndexedAccess` makes this read optional. A hole in the
-        // array is skipped, exactly as the old loop skipped it.
-        const item = items[index];
-        if (item !== undefined) {
-          const mapped = transform(item, index);
-          if (Option.isSome(mapped)) out.push(mapped.value);
-        }
-        index += 1;
-        sinceCheck += 1;
-        if (sinceCheck >= checkEvery) {
-          sinceCheck = 0;
-          const elapsed = (yield* dom.now) - sliceStart;
-          if (elapsed >= budget) break;
-        }
-      }
-
-      // Sequential by design. The purpose of the loop is to give the browser a
-      // turn between two slices.
-      if (index < items.length) yield* dom.yieldToBrowser;
-    }
-
-    return out;
+export const mapChunked = <A, B>(
+  transform: (item: A) => Option.Option<B>,
+  options: ChunkedOptions = {},
+): ((items: ReadonlyArray<A>) => Effect.Effect<ReadonlyArray<B>, never, Dom>) =>
+  Effect.fnUntraced(function* (items: ReadonlyArray<A>) {
+    const slices = yield* startSlices(options.budgetMs ?? CHUNK_BUDGET_MS);
+    const mapBatch = (batch: ReadonlyArray<A>, index: number): Effect.Effect<ReadonlyArray<B>> =>
+      pipe(
+        // The slice check runs between two batches, and never after the last.
+        index > 0,
+        Boolean.match({ onFalse: () => Effect.void, onTrue: () => slices.check }),
+        Effect.andThen(Effect.sync(() => pipe(batch, Array.map(transform), Array.getSomes))),
+      );
+    const mapped = yield* pipe(
+      batchesOf(items, options.checkEvery ?? DEFAULT_CHECK_EVERY),
+      Effect.forEach(mapBatch),
+    );
+    return Array.flatten(mapped);
   });
