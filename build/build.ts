@@ -30,6 +30,7 @@ import {
 import { watch } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { build as viteBuild, type Rolldown } from "vite";
+import { describeThrown } from "~/domain/Failure.ts";
 import { BANNER_NOTICE, buildMetadata } from "./metadata.ts";
 import { BuildMode, bundleConfig, type BundleOptions, ROOT } from "./vite-config.ts";
 
@@ -212,6 +213,24 @@ const sourceChanges: Stream.Stream<void> = Stream.callback<void>((queue) =>
 );
 
 /**
+ * What a failed build says: the step that failed and, when there is one, the
+ * error underneath it, which names the file and the line.
+ */
+const describeBuildFailure = (failure: unknown): string =>
+  pipe(
+    failure,
+    Option.liftPredicate(Schema.is(BuildError)),
+    Option.flatMap((error) =>
+      pipe(
+        error.cause,
+        Option.fromUndefinedOr,
+        Option.map((cause) => `${error.message}: ${describeThrown(cause)}`),
+      ),
+    ),
+    Option.getOrElse(() => describeThrown(failure)),
+  );
+
+/**
  * Build again after each burst of changes.
  *
  * A failed build is reported, and the watch goes on. A change during a build
@@ -224,10 +243,7 @@ const rebuildOnChange = (build: Effect.Effect<void, BuildError>): Effect.Effect<
       sourceChanges,
       Stream.debounce("120 millis"),
       Stream.runForEach(() =>
-        pipe(
-          build,
-          Effect.catchCause((cause) => Console.error(Cause.squash(cause))),
-        ),
+        pipe(build, Effect.catchCause(flow(Cause.squash, describeBuildFailure, Console.error))),
       ),
     );
   });
