@@ -116,7 +116,6 @@ const promptOf = CompletionState.$match({
 const tabFailureText = (error: TabError): string =>
   pipe(
     error.nativeAlternative,
-    Option.fromNullishOr,
     Option.match({
       onNone: () => error.detail,
       onSome: (native) => `${error.detail} (${native})`,

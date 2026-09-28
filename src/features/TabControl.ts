@@ -77,7 +77,6 @@ const withZoom =
 const closeFailureText = (error: TabError): string =>
   pipe(
     error.nativeAlternative,
-    Option.fromUndefinedOr,
     Option.match({
       onNone: () => error.detail,
       onSome: (alternative) => `${error.detail} — use ${alternative}`,
