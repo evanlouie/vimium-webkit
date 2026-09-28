@@ -279,7 +279,8 @@ describe("Mapping", () => {
   it.effect("groups every sequence that is bound to a command", () =>
     Effect.sync(() => {
       const result = compile("map j scrollDown\nmap <down> scrollDown");
-      assert.deepEqual(keysByCommand(result).get("scrollDown"), ["j", "<down>"]);
+      const keys = pipe(result, keysByCommand, Record.get("scrollDown"), Option.getOrNull);
+      assert.deepEqual(keys, ["j", "<down>"]);
     }),
   );
 

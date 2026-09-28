@@ -30,6 +30,7 @@ import {
 } from "effect";
 import { constVoid } from "effect/Function";
 import type { CapabilityReport } from "~/platform/Capabilities.ts";
+import { elementAt, isText } from "~/platform/Elements.ts";
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -93,21 +94,8 @@ export const MOVEMENTS: Record.ReadonlyRecord<string, MovementSpec> = {
 };
 
 // ---------------------------------------------------------------------------
-// Nodes
+// Selection writes
 // ---------------------------------------------------------------------------
-
-// The node type, and not `instanceof`: a node can come from another realm, and
-// `instanceof` is false for it there.
-
-const isElement = (node: Node): node is Element => node.nodeType === Node.ELEMENT_NODE;
-
-/** `node` when it is an element, and its parent element when it is not. */
-const elementAt = (node: Node): Option.Option<Element> =>
-  pipe(
-    node,
-    Option.liftPredicate(isElement),
-    Option.orElse(() => Option.fromNullishOr(node.parentElement)),
-  );
 
 /**
  * Run a selection write that the browser may refuse.
@@ -537,8 +525,6 @@ const walkedNodes = (walker: TreeWalker): Iterable<Node> =>
       Option.map((node) => [node, walker] as const),
     ),
   );
-
-const isText = (node: Node): node is Text => node.nodeType === Node.TEXT_NODE;
 
 /** Is `text` large, drawn and not editable? */
 const isCaretAnchor = (text: Text): boolean =>

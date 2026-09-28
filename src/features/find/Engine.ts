@@ -20,28 +20,18 @@
 import { Array, Boolean, HashSet, Match, Number, Option, Result, flow, pipe } from "effect";
 import { constFalse } from "effect/Function";
 import type { CapabilityReport } from "~/platform/Capabilities.ts";
+import { isElement, isText } from "~/platform/Elements.ts";
 
 // ---------------------------------------------------------------------------
 // Nodes
 // ---------------------------------------------------------------------------
 
-// The node type, and not `instanceof`: a node can come from another realm, and
-// `instanceof` is false for it there.
-
-const isText = (node: Node): node is Text => node.nodeType === Node.TEXT_NODE;
-
-const isElement = (node: Node): node is Element => node.nodeType === Node.ELEMENT_NODE;
-
+/**
+ * Is `root` a document? It reads the node type, and not `instanceof`, as the
+ * guards in `~/platform/Elements.ts` do: a root can come from another realm.
+ */
 const isDocument = (root: Document | ShadowRoot): root is Document =>
   root.nodeType === Node.DOCUMENT_NODE;
-
-/** `node` when it is an element, and its parent element when it is not. */
-export const elementAt = (node: Node): Option.Option<Element> =>
-  pipe(
-    node,
-    Option.liftPredicate(isElement),
-    Option.orElse(() => Option.fromNullishOr(node.parentElement)),
-  );
 
 // ---------------------------------------------------------------------------
 // The haystack
@@ -981,6 +971,10 @@ export const firstMatchInView = (matches: ReadonlyArray<{ readonly rect: RectLik
 /**
  * The index of the match that holds the caret, or of the one just after it.
  *
+ * That is the first match whose range holds the caret or starts after it. A
+ * caret just after a match is still inside it, which is where a click after a
+ * word leaves it. A caret after the last match gives `None`.
+ *
  * `comparePoint` throws when the point is in another tree, which is usual once
  * a shadow root is involved. A failure therefore means "no opinion".
  */
@@ -992,19 +986,20 @@ export const indexAtSelection = (
     selection.focusNode,
     Option.fromNullishOr,
     Option.flatMap((node) =>
-      pipe(matches, Array.findFirstIndex(holdsOrPrecedes(node, selection.focusOffset))),
+      pipe(matches, Array.findFirstIndex(holdsOrFollows(node, selection.focusOffset))),
     ),
   );
 
 /**
- * Does `match` hold the point, or lie before it? That is what
- * `comparePoint` answers with `0` and `1`. A throw is no opinion.
+ * Does `match` hold the point, or lie after it? That is what `comparePoint`
+ * answers with `0` and `-1`: the point is inside the range, or before it. A
+ * throw is no opinion.
  */
-const holdsOrPrecedes =
+const holdsOrFollows =
   (node: Node, offset: number) =>
   (match: FindMatch): boolean =>
     pipe(
-      Result.try(() => match.range.comparePoint(node, offset) >= 0),
+      Result.try(() => match.range.comparePoint(node, offset) <= 0),
       Result.getOrElse(() => false),
     );
 

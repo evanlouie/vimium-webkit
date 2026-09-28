@@ -54,18 +54,24 @@ import {
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
-import { type ParsedFindQuery, parseFindQuery, toRegExp, wordQuery } from "~/domain/FindQuery.ts";
+import {
+  ParsedFindQuery,
+  parseFindQuery,
+  type ReadyFindQuery,
+  toRegExp,
+  wordQuery,
+} from "~/domain/FindQuery.ts";
 import { FIND_HISTORY_LIMIT } from "~/domain/Persisted.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
+import { elementAt } from "~/platform/Elements.ts";
 import { Storage } from "~/platform/Storage.ts";
 import type { HudPromptOptions } from "~/ui/Hud.ts";
-import { Hud } from "~/ui/Hud.ts";
+import { Hud, KeyClaim } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
 import {
   collectTextRuns,
   DEFAULT_MAX_CHARACTERS,
-  elementAt,
   type FindMatch,
   firstMatchInView,
   indexAtSelection,
@@ -194,36 +200,25 @@ const hitsOf = (search: RunSearch, anchor: Option.Option<number>): Hits =>
     }),
   );
 
-/** What a query says before any search: nothing, for a query that can run. */
-const queryOutcome = (query: ParsedFindQuery): Option.Option<SearchOutcome> =>
-  pipe(
-    query.isEmpty,
-    Boolean.match({
-      onTrue: () => Option.some(SearchOutcome.NoQuery()),
-      onFalse: () =>
-        pipe(
-          query.error,
-          Option.map((message) => SearchOutcome.BadPattern({ message })),
-        ),
-    }),
-  );
-
 const matchesOutcome = ({ matches, current, partial }: Found): SearchOutcome =>
   SearchOutcome.Matches({ count: matches.length, index: current, stopped: partial });
 
 /** The report of a search of `query` that gave `search`, and `hits` from it. */
 const outcomeOf = (query: ParsedFindQuery, search: RunSearch, hits: Hits): SearchOutcome =>
   pipe(
-    queryOutcome(query),
-    Option.getOrElse(() =>
-      pipe(
-        hits,
-        Hits.$match({
-          None: () => SearchOutcome.NoMatches({ stopped: search.stopped }),
-          Found: matchesOutcome,
-        }),
-      ),
-    ),
+    query,
+    ParsedFindQuery.$match({
+      Empty: () => SearchOutcome.NoQuery(),
+      Invalid: ({ error }) => SearchOutcome.BadPattern({ message: error }),
+      Ready: () =>
+        pipe(
+          hits,
+          Hits.$match({
+            None: () => SearchOutcome.NoMatches({ stopped: search.stopped }),
+            Found: matchesOutcome,
+          }),
+        ),
+    }),
   );
 
 /** `n` and `N`: the current match moves by `delta`, and wraps, as it does in Vim. */
@@ -905,17 +900,17 @@ export class Find extends Context.Service<
             ),
           );
 
-        /** `true` takes the key. A history key is taken even with no history. */
+        /** A history key that is aimed at our own input is taken, even with no history. */
         const takeHistoryKey = (
           event: KeyboardEvent,
           delta: number,
           value: string,
-        ): Effect.Effect<boolean> =>
+        ): Effect.Effect<KeyClaim> =>
           pipe(
             event.target,
             Option.liftPredicate(isInput),
             Option.match({
-              onNone: () => Effect.succeed(false),
+              onNone: () => Effect.succeed(KeyClaim.Pass()),
               onSome: (input) =>
                 pipe(
                   history,
@@ -923,7 +918,7 @@ export class Find extends Context.Service<
                     onEmpty: () => Effect.void,
                     onNonEmpty: (entries) => applyHistory(input, entries, delta, value),
                   }),
-                  Effect.as(true),
+                  Effect.as(KeyClaim.Taken()),
                 ),
             }),
           );
@@ -937,7 +932,7 @@ export class Find extends Context.Service<
             pipe(
               historyStep(event),
               Option.match({
-                onNone: () => Effect.succeed(false),
+                onNone: () => Effect.succeed(KeyClaim.Pass()),
                 onSome: (delta) => takeHistoryKey(event, delta, value),
               }),
             ),
@@ -1141,7 +1136,7 @@ export class Find extends Context.Service<
 
       const searchWord = Effect.fn("Find.searchWord")(function* (
         word: string,
-        parsed: ParsedFindQuery,
+        parsed: ReadyFindQuery,
         direction: 1 | -1,
       ) {
         yield* ensureStyles;
@@ -1217,13 +1212,13 @@ export class Find extends Context.Service<
         direction: 1 | -1,
       ) {
         const word = yield* probeSelection(wordUnderCursor, "");
-        // An empty word gives an empty query, which does not compile either.
+        const noWord = () => hud.show("No word under the cursor");
         yield* pipe(
           wordQuery(word),
-          Option.liftPredicate((parsed) => Option.isSome(toRegExp(parsed))),
-          Option.match({
-            onNone: () => hud.show("No word under the cursor"),
-            onSome: (parsed) => searchWord(word, parsed, direction),
+          ParsedFindQuery.$match({
+            Empty: noWord,
+            Invalid: noWord,
+            Ready: (parsed) => searchWord(word, parsed, direction),
           }),
         );
       });

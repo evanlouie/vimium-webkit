@@ -10,13 +10,14 @@
  * test can check without a DOM. The engine takes the `RegExp` that this module
  * makes, and knows nothing about how it was made.
  *
- * Nothing here throws. A pattern that does not compile comes back with an
- * `error`, and the HUD shows it while the user still types.
+ * Nothing here throws. A pattern that does not compile comes back `Invalid`,
+ * with the reason, and the HUD shows it while the user still types.
  */
 
 import {
   Array,
   Boolean,
+  Data,
   flow,
   Match,
   Option,
@@ -38,22 +39,35 @@ export interface FindQueryOptions {
   readonly regexFindMode: boolean;
 }
 
-export interface ParsedFindQuery {
-  /** Exactly what the user typed, for the history and for the `n` and `N` repeat. */
-  readonly raw: string;
-  /** The query without the delimiters and without the escape directives. */
-  readonly pattern: string;
-  readonly kind: FindQueryKind;
-  readonly ignoreCase: boolean;
-  /** True when smartcase gave `ignoreCase`, and the user did not state it. */
-  readonly smartcase: boolean;
-  readonly isEmpty: boolean;
-  /** The `RegExp` source of this query. It is `""` when the query is empty. */
-  readonly source: string;
-  readonly flags: string;
-  /** A `Some` when the pattern is not a regular expression that compiles. */
-  readonly error: Option.Option<string>;
-}
+/**
+ * A find query, read once.
+ *
+ * Every state keeps `raw`, exactly what the user typed, for the history and
+ * for the `n` and `N` repeat.
+ */
+export type ParsedFindQuery = Data.TaggedEnum<{
+  /** Nothing is left to search for once the delimiters and the directives are gone. */
+  Empty: { readonly raw: string };
+  /** The pattern is not a regular expression that compiles and is safe to run. */
+  Invalid: { readonly raw: string; readonly error: string };
+  /** A pattern that the engine can run. */
+  Ready: {
+    readonly raw: string;
+    /** The query without the delimiters and without the escape directives. */
+    readonly pattern: string;
+    readonly kind: FindQueryKind;
+    readonly ignoreCase: boolean;
+    /** True when smartcase gave `ignoreCase`, and the user did not state it. */
+    readonly smartcase: boolean;
+    /** The `RegExp` source of this query. */
+    readonly source: string;
+    readonly flags: string;
+  };
+}>;
+
+export const ParsedFindQuery = Data.taggedEnum<ParsedFindQuery>();
+
+export type ReadyFindQuery = Data.TaggedEnum.Value<ParsedFindQuery, "Ready">;
 
 // ---------------------------------------------------------------------------
 // Case analysis
@@ -293,11 +307,22 @@ const compileError = (source: string, flags: string): Option.Option<string> =>
     ),
   );
 
+/** `query`, or `Invalid` when its pattern does not compile or is not safe to run. */
+const validated = (query: ReadyFindQuery): ParsedFindQuery =>
+  pipe(
+    compileError(query.source, query.flags),
+    Option.match({
+      onNone: (): ParsedFindQuery => query,
+      onSome: (error) => ParsedFindQuery.Invalid({ raw: query.raw, error }),
+    }),
+  );
+
 /**
  * Parse a raw find query into everything that the engine needs.
  *
- * This function never fails. A pattern that does not compile comes back with
- * `error` set to a `Some`. An empty query has no error.
+ * This function never fails. A pattern that does not compile comes back
+ * `Invalid`, with the reason. A query with nothing to search for, such as one
+ * of directives alone, comes back `Empty`, and not `Invalid`.
  */
 export const parseFindQuery = (raw: string, options: FindQueryOptions): ParsedFindQuery => {
   const literal = splitRegexLiteral(raw);
@@ -341,23 +366,24 @@ export const parseFindQuery = (raw: string, options: FindQueryOptions): ParsedFi
     Option.getOrElse(() => ""),
   );
   const flags = `${BASE_FLAGS}${caseFlag(ignoreCase)}${extraFlags}`;
-  const source = sourceOf(kind, pattern);
 
-  return {
-    raw,
+  return pipe(
     pattern,
-    kind,
-    ignoreCase,
-    smartcase: Option.isNone(explicitIgnoreCase),
-    isEmpty: pattern.length === 0,
-    source,
-    flags,
-    error: pipe(
-      pattern,
-      Option.liftPredicate(Str.isNonEmpty),
-      Option.flatMap(() => compileError(source, flags)),
+    Option.liftPredicate(Str.isNonEmpty),
+    Option.map((text) =>
+      ParsedFindQuery.Ready({
+        raw,
+        pattern: text,
+        kind,
+        ignoreCase,
+        smartcase: Option.isNone(explicitIgnoreCase),
+        source: sourceOf(kind, text),
+        flags,
+      }),
     ),
-  };
+    Option.map(validated),
+    Option.getOrElse(() => ParsedFindQuery.Empty({ raw })),
+  );
 };
 
 /**
@@ -368,10 +394,11 @@ export const parseFindQuery = (raw: string, options: FindQueryOptions): ParsedFi
  * expression is state that changes, and two searches that share it lose
  * matches. Such a fault is almost impossible to reproduce.
  */
-export const toRegExp: (query: ParsedFindQuery) => Option.Option<RegExp> = flow(
-  Option.liftPredicate(({ isEmpty, error }: ParsedFindQuery) => !isEmpty && Option.isNone(error)),
-  Option.flatMap(({ source, flags }) => pipe(compile(source, flags), Result.getSuccess)),
-);
+export const toRegExp: (query: ParsedFindQuery) => Option.Option<RegExp> = ParsedFindQuery.$match({
+  Empty: () => Option.none(),
+  Invalid: () => Option.none(),
+  Ready: ({ source, flags }) => pipe(compile(source, flags), Result.getSuccess),
+});
 
 /** `\b` when `edge` finds a word character at that end of `text`. */
 const boundary = (edge: RegExp, text: string): string =>
@@ -383,21 +410,27 @@ const boundary = (edge: RegExp, text: string): string =>
  * A `\b` word boundary is added where the word starts or ends with a word
  * character, as the `*` of Vim does. The case still goes through smartcase, so
  * `*` on `Foo` finds `Foo` and not `foo`. Upstream does the same. An empty word
- * gives an empty source.
+ * gives an `Empty` query. A word query is never `Invalid`. Its text is
+ * escaped, so it always compiles, and the pattern limits do not apply to it.
  */
 export const wordQuery = (word: string): ParsedFindQuery => {
   const trimmed = word.trim();
   const ignoreCase = !hasUpperCase(trimmed);
 
-  return {
-    raw: trimmed,
-    pattern: trimmed,
-    kind: "literal",
-    ignoreCase,
-    smartcase: true,
-    isEmpty: trimmed.length === 0,
-    source: `${boundary(/^\w/, trimmed)}${literalSource(trimmed)}${boundary(/\w$/, trimmed)}`,
-    flags: `g${caseFlag(ignoreCase)}`,
-    error: Option.none(),
-  };
+  return pipe(
+    trimmed,
+    Option.liftPredicate(Str.isNonEmpty),
+    Option.map((text): ParsedFindQuery =>
+      ParsedFindQuery.Ready({
+        raw: text,
+        pattern: text,
+        kind: "literal",
+        ignoreCase,
+        smartcase: true,
+        source: `${boundary(/^\w/, text)}${literalSource(text)}${boundary(/\w$/, text)}`,
+        flags: `g${caseFlag(ignoreCase)}`,
+      }),
+    ),
+    Option.getOrElse(() => ParsedFindQuery.Empty({ raw: trimmed })),
+  );
 };
