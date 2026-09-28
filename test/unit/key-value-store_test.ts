@@ -1,19 +1,20 @@
 /**
  * The backend that the application gets from a manager.
  *
- * One property decides what the frames of a page may do: `managerPrivate`. The
- * value store of the manager has it, because the page cannot read that store
- * and every frame of the page reads the same values. No other store has it.
+ * One property decides what the frames of a page may do: the kind of the
+ * store. The value store of the manager is private to the manager, because the
+ * page cannot read that store and every frame of the page reads the same
+ * values. No other store is.
  *
  * A manager with no value API is the configuration that issue #3 names. This
- * test builds the real layer over such a manager, and it holds the three fields
- * that the rest of the application reads.
+ * test builds the real layer over such a manager, and it holds the kind that
+ * the rest of the application reads.
  */
 
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Layer, MutableRef, Option, Record, Stream, pipe } from "effect";
 import { Gm, GmError, GmValueApi } from "~/platform/Gm.ts";
-import { KeyValueStore } from "~/platform/KeyValueStore.ts";
+import { KeyValueStore, kindName, StoreKind } from "~/platform/KeyValueStore.ts";
 
 /** A manager that gives the value API that the test names, and nothing else. */
 const gmLayer = (values: Option.Option<GmValueApi>): Layer.Layer<Gm> => {
@@ -74,12 +75,11 @@ describe("KeyValueStore", () => {
     Effect.gen(function* () {
       const kv = yield* pipe(KeyValueStore, Effect.provide(storeOver(Option.none())));
 
-      assert.strictEqual(kv.kind, "memory");
-      assert.isFalse(kv.durable);
-      assert.isFalse(kv.watchable);
-      // The whole cross-frame session hangs on this field. A memory map belongs
+      // The whole cross-frame session hangs on this kind. A memory map belongs
       // to one frame, so it cannot carry a credential that two frames share.
-      assert.isFalse(kv.managerPrivate);
+      // It does not survive a page load, and it sees no write of another tab.
+      assert.deepEqual(kv.kind, StoreKind.Memory());
+      assert.strictEqual(kindName(kv.kind), "memory");
 
       // The store still works. The application stays alive with no manager.
       yield* kv.set("k", "v");
@@ -92,9 +92,10 @@ describe("KeyValueStore", () => {
     Effect.gen(function* () {
       const kv = yield* pipe(KeyValueStore, Effect.provide(storeOver(Option.some(valueApi()))));
 
-      assert.strictEqual(kv.kind, "gm-sync");
-      assert.isTrue(kv.durable);
-      assert.isTrue(kv.managerPrivate);
+      // The manager gives no change listener, so the store sees no write of
+      // another tab.
+      assert.deepEqual(kv.kind, StoreKind.GmSync({ watchable: false }));
+      assert.strictEqual(kindName(kv.kind), "gm-sync");
     }),
   );
 });

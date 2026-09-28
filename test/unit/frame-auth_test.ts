@@ -42,7 +42,7 @@ import {
 } from "effect";
 import { frameCredentialGroup, sessionGroup } from "~/domain/Persisted.ts";
 import { FrameAuth, type FrameHandshake } from "~/frames/Auth.ts";
-import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
+import { KeyValueStore, STORAGE_PREFIX, StoreKind } from "~/platform/KeyValueStore.ts";
 import { FrameId, FrameRole, Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
 
@@ -64,28 +64,25 @@ interface Store {
   readonly map: Map<string, string>;
 }
 
+/** The value store of the manager, which the page cannot read. */
+const MANAGER_STORE = StoreKind.GmSync({ watchable: false });
+
+/** A map of one realm, which another frame cannot read. */
+const MEMORY_STORE = StoreKind.Memory();
+
 /**
  * One store for every frame of the page.
  *
- * `managerPrivate` is the property that decides everything here: the value
- * store of the manager has it, and no other store does.
+ * The kind of the store decides everything here: the value store of the
+ * manager is private to the manager, and no other store is.
  */
-const makeStore = (managerPrivate: boolean): Store => {
+const makeStore = (kind: StoreKind): Store => {
   const map = new Map<string, string>();
   return {
     map,
     service: KeyValueStore.of({
       setUnsafe: Option.none(),
-      kind: pipe(
-        managerPrivate,
-        Boolean.match({
-          onTrue: () => "gm-sync" as const,
-          onFalse: () => "memory" as const,
-        }),
-      ),
-      durable: managerPrivate,
-      watchable: false,
-      managerPrivate,
+      kind,
       get: (key) => Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
       set: (key, value) =>
         Effect.sync(() => {
@@ -212,10 +209,7 @@ const makeRacingStore = (rival: string): Store => {
     map,
     service: KeyValueStore.of({
       setUnsafe: Option.none(),
-      kind: "gm-sync",
-      durable: true,
-      watchable: false,
-      managerPrivate: true,
+      kind: MANAGER_STORE,
       get: (key) =>
         pipe(
           key === CREDENTIAL_KEY,
@@ -240,7 +234,7 @@ const makeRacingStore = (rival: string): Store => {
 describe("FrameAuth", () => {
   it.effect("creates the credential when the top layer is built", () =>
     Effect.gen(function* () {
-      const store = makeStore(true);
+      const store = makeStore(MANAGER_STORE);
 
       yield* pipe(
         Effect.gen(function* () {
@@ -258,7 +252,7 @@ describe("FrameAuth", () => {
 
   it.effect("admits a child that starts with an empty store", () =>
     Effect.gen(function* () {
-      const store = makeStore(true);
+      const store = makeStore(MANAGER_STORE);
 
       yield* pipe(
         Effect.gen(function* () {
@@ -287,7 +281,7 @@ describe("FrameAuth", () => {
 
   it.effect("refuses a child that has no credential", () =>
     Effect.gen(function* () {
-      const store = makeStore(true);
+      const store = makeStore(MANAGER_STORE);
 
       yield* pipe(
         Effect.gen(function* () {
@@ -305,7 +299,7 @@ describe("FrameAuth", () => {
 
   it.effect("keeps no credential in a store that the page can read", () =>
     Effect.gen(function* () {
-      const store = makeStore(false);
+      const store = makeStore(MEMORY_STORE);
 
       yield* pipe(
         Effect.gen(function* () {
@@ -374,7 +368,7 @@ describe("FrameAuth", () => {
 
   it.effect("keeps the credential out of every group that a feature reads", () =>
     Effect.gen(function* () {
-      const store = makeStore(true);
+      const store = makeStore(MANAGER_STORE);
 
       yield* pipe(
         Effect.gen(function* () {
@@ -433,7 +427,7 @@ describe("FrameAuth", () => {
 
   it.effect("seals a message that only the other end of the link opens", () =>
     Effect.gen(function* () {
-      const store = makeStore(true);
+      const store = makeStore(MANAGER_STORE);
 
       yield* pipe(
         Effect.gen(function* () {
@@ -495,8 +489,8 @@ describe("FrameAuth", () => {
       // The page reads the token, the hello id and the frame id out of the
       // `JOIN` that it sees. It does not hold the credential, so it derives
       // another key and it can neither read a message nor forge one.
-      const ours = makeStore(true);
-      const theirs = makeStore(true);
+      const ours = makeStore(MANAGER_STORE);
+      const theirs = makeStore(MANAGER_STORE);
 
       yield* pipe(
         Effect.gen(function* () {

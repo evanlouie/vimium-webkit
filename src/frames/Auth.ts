@@ -74,7 +74,6 @@
  */
 
 import {
-  Boolean,
   Context,
   Effect,
   flow,
@@ -100,7 +99,7 @@ import {
   type SealedMessage,
 } from "~/domain/FrameMessage.ts";
 import { type FrameCredential, frameCredentialGroup } from "~/domain/Persisted.ts";
-import { KeyValueStore } from "~/platform/KeyValueStore.ts";
+import { KeyValueStore, StoreKind } from "~/platform/KeyValueStore.ts";
 import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { makeGroup, type StorageError } from "~/platform/Storage.ts";
 
@@ -331,10 +330,11 @@ export class FrameAuth extends Context.Service<
        * `localStorage` and calculate a valid proof.
        */
       const privateStore: Effect.Effect<void, FrameAuthError> = pipe(
-        kv.managerPrivate,
-        Boolean.match({
-          onTrue: () => Effect.void,
-          onFalse: () =>
+        kv.kind,
+        StoreKind.$match({
+          GmAsync: () => Effect.void,
+          GmSync: () => Effect.void,
+          Memory: () =>
             Effect.fail(
               new FrameAuthError({
                 reason: "unavailable",

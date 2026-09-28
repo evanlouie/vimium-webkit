@@ -65,7 +65,7 @@ import {
 } from "~/domain/Persisted.ts";
 import type { GmError } from "./Gm.ts";
 import { decodeUnknown, describeSchemaError } from "./SchemaIo.ts";
-import { type KeyValueKind, KeyValueStore, STORAGE_PREFIX } from "./KeyValueStore.ts";
+import { KeyValueStore, STORAGE_PREFIX } from "./KeyValueStore.ts";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -241,14 +241,19 @@ type WritePolicy = Data.TaggedEnum<{
 
 const WritePolicy = Data.taggedEnum<WritePolicy>();
 
+/** The direct write of a backend. It completes before it returns. */
+type SetUnsafe = (key: string, value: string) => void;
+
 /**
- * A promise is not a completed write, so a promise-backed manager never holds a
- * value. Each accepted change goes through the actor while the page is alive,
- * and that keeps one serial write order.
+ * A group holds a value only when the exit path can write it.
+ *
+ * A promise is not a completed write, so a promise-backed manager gives no
+ * direct write, and it never holds a value. Each accepted change goes through
+ * the actor while the page is alive, and that keeps one serial write order.
  */
-const writePolicy = (kind: KeyValueKind, debounceMs: number): WritePolicy =>
+const writePolicy = (setUnsafe: Option.Option<SetUnsafe>, debounceMs: number): WritePolicy =>
   pipe(
-    kind !== "gm-async" && debounceMs > 0,
+    Option.isSome(setUnsafe) && debounceMs > 0,
     Boolean.match({
       onFalse: () => WritePolicy.Immediate(),
       onTrue: () => WritePolicy.Debounced({ delay: Duration.millis(debounceMs) }),
@@ -292,7 +297,7 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
   issues: Queue.Queue<StorageError>,
 ): Effect.fn.Return<ValueGroup<A>, never, Scope.Scope> {
   const key = `${STORAGE_PREFIX}${spec.name}`;
-  const policy = writePolicy(kv.kind, spec.writeDebounceMs);
+  const policy = writePolicy(kv.setUnsafe, spec.writeDebounceMs);
 
   const memory = yield* SubscriptionRef.make(spec.defaults());
   const mailbox = yield* Queue.unbounded<Command<A>>();
@@ -487,8 +492,6 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
       ),
       Effect.andThen(setReadFailure(Option.none())),
     );
-
-  type SetUnsafe = (key: string, value: string) => void;
 
   /** One direct write. A throw becomes a failure, so the exit path never throws. */
   const writeDirect = (setUnsafe: SetUnsafe, bytes: string): Result.Result<void, StorageError> =>

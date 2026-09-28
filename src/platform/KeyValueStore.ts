@@ -20,31 +20,59 @@
  * when it is not durable.
  */
 
-import { Context, Effect, Layer, MutableRef, Option, Record, Stream, pipe } from "effect";
+import { Context, Data, Effect, Layer, MutableRef, Option, Record, Stream, pipe } from "effect";
 import { Gm, type GmError, GmValueApi } from "./Gm.ts";
 
 export const STORAGE_PREFIX = "vimium-webkit:";
 
+/** The name of a store kind, as the capability report and the settings dialog give it. */
 export type KeyValueKind = "gm-async" | "gm-sync" | "memory";
+
+/** A variant with no fields. The type `{}` would mean any value that is not nullish. */
+type NoFields = Record.ReadonlyRecord<never, never>;
+
+/**
+ * Which backend holds the values, and what it can do.
+ *
+ * The two forms of the manager's store survive a page load, and they belong
+ * to the userscript manager. Two properties come with that store, and a
+ * service that holds a secret needs both: page code cannot read it, and every
+ * frame of the page reads the same values, whatever the origin of the frame.
+ * `frames/Auth.ts` keeps the frame credential only in such a store.
+ */
+export type StoreKind = Data.TaggedEnum<{
+  /** The promise form of the manager's store. It cannot report another tab's write. */
+  GmAsync: NoFields;
+  /** The synchronous form of the manager's store. */
+  GmSync: {
+    /** True when another tab's write can be seen without a poll. */
+    readonly watchable: boolean;
+  };
+  /**
+   * A map in this realm, which is lost when the page unloads.
+   *
+   * The map belongs to this realm, so the page cannot read it. It is not
+   * shared with another frame either, which is why it is not a store for the
+   * frame credential. `ARCHITECTURE.md` section 5.1 says why the top frame
+   * does not give a credential of its own to a child instead.
+   */
+  Memory: NoFields;
+}>;
+
+export const StoreKind = Data.taggedEnum<StoreKind>();
+
+/** The name of a store kind. */
+export const kindName: (kind: StoreKind) => KeyValueKind = StoreKind.$match({
+  GmAsync: (): KeyValueKind => "gm-async",
+  GmSync: (): KeyValueKind => "gm-sync",
+  Memory: (): KeyValueKind => "memory",
+});
 
 export class KeyValueStore extends Context.Service<
   KeyValueStore,
   {
-    readonly kind: KeyValueKind;
-    /** True when the backend survives a page load. */
-    readonly durable: boolean;
-    /** True when another tab's write can be seen without a poll. */
-    readonly watchable: boolean;
-
-    /**
-     * True when the store belongs to the userscript manager.
-     *
-     * Two properties come with that store, and a service that holds a secret
-     * needs both: page code cannot read it, and every frame of the page reads the
-     * same values, whatever the origin of the frame. `frames/Auth.ts` keeps the
-     * frame credential only when this is true.
-     */
-    readonly managerPrivate: boolean;
+    /** Which backend this is, and so what it can do. */
+    readonly kind: StoreKind;
 
     readonly get: (key: string) => Effect.Effect<Option.Option<string>, GmError>;
     readonly set: (key: string, value: string) => Effect.Effect<void, GmError>;
@@ -84,10 +112,7 @@ function managerStore(api: GmValueApi): KeyValueStore["Service"] {
     GmValueApi.$match({
       Async: ({ get, set, remove }) =>
         KeyValueStore.of({
-          kind: "gm-async",
-          durable: true,
-          watchable: false,
-          managerPrivate: true,
+          kind: StoreKind.GmAsync(),
           get,
           set,
           remove,
@@ -96,10 +121,7 @@ function managerStore(api: GmValueApi): KeyValueStore["Service"] {
         }),
       Sync: ({ get, set, remove, setUnsafe, changes }) =>
         KeyValueStore.of({
-          kind: "gm-sync",
-          durable: true,
-          watchable: Option.isSome(changes),
-          managerPrivate: true,
+          kind: StoreKind.GmSync({ watchable: Option.isSome(changes) }),
           get,
           set,
           remove,
@@ -121,14 +143,7 @@ function memoryStore(): KeyValueStore["Service"] {
   // A reference and not a `Ref`, because `setUnsafe` writes it with no effect.
   const values = MutableRef.make<Record.ReadonlyRecord<string, string>>({});
   return KeyValueStore.of({
-    kind: "memory",
-    durable: false,
-    watchable: false,
-    // The map belongs to this realm, so the page cannot read it. It is not
-    // shared with another frame either, which is why it is not a store for the
-    // frame credential. `ARCHITECTURE.md` section 5.1 says why the top frame
-    // does not give a credential of its own to a child instead.
-    managerPrivate: false,
+    kind: StoreKind.Memory(),
     get: (key) => Effect.sync(() => pipe(MutableRef.get(values), Record.get(key))),
     set: (key, value) =>
       Effect.sync(() => {

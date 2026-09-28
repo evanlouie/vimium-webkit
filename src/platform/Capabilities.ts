@@ -17,10 +17,11 @@
  */
 
 import { Array, Context, Effect, Layer, Match, Option, Predicate, Record, pipe } from "effect";
+import { constFalse } from "effect/Function";
 import { clipboardReader, clipboardWriter } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Gm } from "~/platform/Gm.ts";
-import { type KeyValueKind, KeyValueStore } from "~/platform/KeyValueStore.ts";
+import { type KeyValueKind, kindName, KeyValueStore, StoreKind } from "~/platform/KeyValueStore.ts";
 import { hasNativeIdleCallback } from "~/platform/Scheduler.ts";
 
 export type ManagerName =
@@ -260,8 +261,15 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
       // Asked of the selected store, and not derived again. Separate predicates
       // can make the warning disagree with the selected backend. One source of
       // truth prevents that defect.
-      value: kv.kind,
-      valueChangeListener: kv.watchable,
+      value: kindName(kv.kind),
+      valueChangeListener: pipe(
+        kv.kind,
+        StoreKind.$match({
+          GmAsync: constFalse,
+          GmSync: ({ watchable }) => watchable,
+          Memory: constFalse,
+        }),
+      ),
       openInTab: gm.canOpenInTab,
       // No manager in the matrix refuses `{ active: false }`, but quoid ignores
       // it. Reported as available, and checked by hand.
