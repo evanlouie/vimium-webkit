@@ -102,7 +102,7 @@ import {
   WIRE_TARGET_TOP,
 } from "~/domain/FrameMessage.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { ANNOUNCE_MESSAGE, FrameId, Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
+import { ANNOUNCE_MESSAGE, type FrameId, Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
 import { FrameAuth, type FrameCipher } from "./Auth.ts";
 
 // ---------------------------------------------------------------------------
@@ -252,17 +252,6 @@ const isInboundOf =
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-/**
- * The wire carries a plain string.
- *
- * `FrameId` is a brand, which exists at compile time only, so this changes no
- * value. The identity itself is checked by the coordinator, which compares the
- * `from` field against the port that the message came on.
- */
-const toFrameId = (value: string): FrameId => FrameId.make(value);
-
-const toRoster: (frames: ReadonlyArray<string>) => ReadonlyArray<FrameId> = Array.map(toFrameId);
-
 const describe = (cause: unknown): string =>
   pipe(
     Match.value(cause),
@@ -400,7 +389,7 @@ const wireTarget: (target: FrameTarget) => string = FrameTarget.$match({
 
 /** A routed message as the subscribers of this frame read it. */
 const inboundOf = (wire: FrameWire): InboundMessage => ({
-  from: toFrameId(wire.from),
+  from: wire.from,
   requestId: pipe(
     wire.requestId,
     Option.liftPredicate((id) => id !== NO_REQUEST_ID),
@@ -1327,7 +1316,7 @@ export class FrameBus extends Context.Service<
             admit({
               port,
               source,
-              frameId: toFrameId(message.frameId),
+              frameId: message.frameId,
               helloId: message.helloId,
               cipher,
             }),
@@ -1514,7 +1503,7 @@ export class FrameBus extends Context.Service<
 
       const joinSession = Effect.fnUntraced(function* (welcome: WelcomeMessage) {
         yield* pipe(nonceRef, Ref.set(Option.some(welcome.nonce)));
-        yield* pipe(rosterRef, Ref.set(toRoster(welcome.frames)));
+        yield* pipe(rosterRef, Ref.set(welcome.frames));
         yield* pipe(admitted, Deferred.succeed(true));
       });
 
@@ -1547,9 +1536,7 @@ export class FrameBus extends Context.Service<
       const deliverFromTop = Effect.fnUntraced(function* (wire: FrameWire) {
         yield* pipe(
           Match.value(wire),
-          Match.when({ kind: "ROSTER" }, ({ frames }) =>
-            pipe(rosterRef, Ref.set(toRoster(frames))),
-          ),
+          Match.when({ kind: "ROSTER" }, ({ frames }) => pipe(rosterRef, Ref.set(frames))),
           Match.orElse(() => Effect.void),
         );
         yield* publishLocal(wire);

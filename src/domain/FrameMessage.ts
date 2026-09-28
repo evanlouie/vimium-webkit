@@ -88,6 +88,7 @@ import {
   Struct,
 } from "effect";
 import { FULLY_ENABLED } from "~/domain/Exclusion.ts";
+import { FrameId } from "~/domain/FrameId.ts";
 
 /** The first, cheap test against the other `postMessage` traffic of a page. */
 export const PROTOCOL_MAGIC = "vimium-webkit/frames";
@@ -196,8 +197,12 @@ const MAX_FRAMES = 512;
 
 const idSchema = Schema.String.check(Schema.isMaxLength(MAX_ID_LENGTH));
 
+/** A frame id on the wire. It travels as a string, and it decodes into the brand. */
+const frameIdSchema = FrameId.check(Schema.isMaxLength(MAX_ID_LENGTH));
+
 /**
- * An identifier of the handshake: a token, a hello id or a frame id.
+ * The alphabet of an identifier of the handshake: a token, a hello id or a
+ * frame id.
  *
  * The alphabet is hexadecimal, because every such value comes from
  * `crypto.getRandomValues`. The restriction is a security control, and not
@@ -207,7 +212,13 @@ const idSchema = Schema.String.check(Schema.isMaxLength(MAX_ID_LENGTH));
  * its choice could then derive the key of the link. A hexadecimal value can
  * spell neither payload.
  */
-const handshakeIdSchema = Schema.String.check(Schema.isPattern(/^[0-9a-f]{8,64}$/));
+const HANDSHAKE_ID = /^[0-9a-f]{8,64}$/;
+
+/** A token, a hello id or a session nonce. */
+const handshakeIdSchema = Schema.String.check(Schema.isPattern(HANDSHAKE_ID));
+
+/** A frame id in the handshake, which decodes into the brand. */
+const handshakeFrameIdSchema = FrameId.check(Schema.isPattern(HANDSHAKE_ID));
 
 /** `localIndex` on the wire: an integer with a bound, and never negative. */
 const localIndexSchema = Schema.Int.check(
@@ -241,7 +252,7 @@ export type HintMode = typeof hintModeSchema.Type;
 
 /** One hint of one frame, as the other frames see it. */
 export const hintDescriptorSchema = Schema.Struct({
-  frameId: idSchema,
+  frameId: frameIdSchema,
   localIndex: localIndexSchema,
   linkText: Schema.String.check(Schema.isMaxLength(MAX_LINK_TEXT)),
   secondary: Schema.Boolean,
@@ -524,7 +535,7 @@ export const joinSchema = pipe(
     kind: Schema.Literal("JOIN"),
     token: handshakeIdSchema,
     helloId: handshakeIdSchema,
-    frameId: handshakeIdSchema,
+    frameId: handshakeFrameIdSchema,
     /** The HMAC over the token, the hello id and the frame id. */
     proof: idSchema,
   }),
@@ -546,10 +557,10 @@ export const welcomeSchema = pipe(
     kind: Schema.Literal("WELCOME"),
     nonce: handshakeIdSchema,
     /** The identity that the coordinator recorded, which the `JOIN` claimed. */
-    frameId: handshakeIdSchema,
+    frameId: handshakeFrameIdSchema,
     /** It gives back the `JOIN` that earned it. Anything else is a race or a spoof. */
     helloId: handshakeIdSchema,
-    frames: Schema.Array(handshakeIdSchema).check(Schema.isMaxLength(MAX_FRAMES)),
+    frames: Schema.Array(handshakeFrameIdSchema).check(Schema.isMaxLength(MAX_FRAMES)),
   }),
 );
 
@@ -669,7 +680,7 @@ export const sealedAad = (link: string, direction: SealDirection, seq: number): 
  */
 const routedSchema = pipe(
   envelopeSchema,
-  Schema.fieldsAssign({ nonce: idSchema, from: idSchema, to: idSchema, requestId: idSchema }),
+  Schema.fieldsAssign({ nonce: idSchema, from: frameIdSchema, to: idSchema, requestId: idSchema }),
 );
 
 const define = <F extends Schema.Struct.Fields>(fields: F) => ({
@@ -695,7 +706,7 @@ const settingsPush = define({
 /** Top to every frame, whenever the registry changes. It keeps `peers` honest. */
 const roster = define({
   kind: Schema.Literal("ROSTER"),
-  frames: Schema.Array(idSchema).check(Schema.isMaxLength(MAX_FRAMES)),
+  frames: Schema.Array(frameIdSchema).check(Schema.isMaxLength(MAX_FRAMES)),
 });
 
 /** Origin frame to top: "run a cross-frame hint round for me". */
@@ -709,7 +720,7 @@ const requestHints = define({
 const collectHints = define({
   kind: Schema.Literal("COLLECT_HINTS"),
   roundId: idSchema,
-  originFrameId: idSchema,
+  originFrameId: frameIdSchema,
   mode: hintModeSchema,
 });
 
@@ -750,7 +761,7 @@ const hintsResult = define({
 const activate = define({
   kind: Schema.Literal("ACTIVATE"),
   roundId: idSchema,
-  originFrameId: idSchema,
+  originFrameId: frameIdSchema,
   mode: hintModeSchema,
   descriptors: sessionDescriptorsSchema,
 });
@@ -899,7 +910,7 @@ export type MessageOf<K extends MessageKind> = Extract<FrameMessage, { kind: K }
 /** The fields that the bus fills in for the sender. */
 export interface WireEnvelope {
   readonly nonce: string;
-  readonly from: string;
+  readonly from: FrameId;
   readonly to: string;
   readonly requestId: string;
 }

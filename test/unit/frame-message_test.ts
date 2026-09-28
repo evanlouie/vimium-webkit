@@ -40,13 +40,17 @@ import {
   WIRE_TARGET_ALL,
   WIRE_TARGET_TOP,
 } from "~/domain/FrameMessage.ts";
+import { FrameId } from "~/domain/FrameId.ts";
 
 const NONCE = "abcdef0123456789";
 const ROUND_ID = "round-1";
 
+/** The frame that sends every routed message of these tests. */
+const SENDER = FrameId.make("1111111111111111");
+
 const envelope = {
   nonce: NONCE,
-  from: "1111111111111111",
+  from: SENDER,
   to: WIRE_TARGET_TOP,
   requestId: NO_REQUEST_ID,
 };
@@ -62,7 +66,7 @@ const kindOf: (parsed: Option.Option<{ readonly kind: string }>) => Option.Optio
   Option.map(({ kind }) => kind);
 
 const descriptor = (frameId: string, localIndex: number, secondary = false): HintDescriptor => ({
-  frameId,
+  frameId: FrameId.make(frameId),
   localIndex,
   linkText: `link ${localIndex}`,
   secondary,
@@ -88,7 +92,7 @@ describe("FrameMessage", () => {
         wire({
           kind: "ACTIVATE",
           roundId: ROUND_ID,
-          originFrameId: "1111111111111111",
+          originFrameId: SENDER,
           mode: "activate",
           descriptors: [descriptor("1111111111111111", 0)],
         }),
@@ -369,7 +373,7 @@ describe("FrameMessage", () => {
         wire({
           kind: "COLLECT_HINTS",
           roundId: ROUND_ID,
-          originFrameId: "1111111111111111",
+          originFrameId: SENDER,
           mode,
         }),
         Option.some(NONCE),
@@ -466,7 +470,7 @@ describe("the descriptors of a round", () => {
             wire({
               kind: "ACTIVATE",
               roundId: ROUND_ID,
-              originFrameId: "1111111111111111",
+              originFrameId: SENDER,
               mode: "activate",
               descriptors: merged,
             }),

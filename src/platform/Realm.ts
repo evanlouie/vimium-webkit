@@ -24,11 +24,16 @@ import {
   flow,
   pipe,
 } from "effect";
+import { FrameId } from "~/domain/FrameId.ts";
 import { Dom } from "./Dom.ts";
 
-/** A frame identity. Random, per frame, and never reused. */
-export const FrameId = pipe(Schema.String, Schema.brand("FrameId"));
-export type FrameId = typeof FrameId.Type;
+/**
+ * The frame identity, given again here.
+ *
+ * `domain/FrameId.ts` owns the brand, because the wire schemas decode into it.
+ * A caller that asks the realm for its identity then needs only one import.
+ */
+export { FrameId };
 
 export class RealmError extends Schema.TaggedError<RealmError>()("RealmError", {
   detail: Schema.String,

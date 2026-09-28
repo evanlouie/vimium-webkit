@@ -99,7 +99,7 @@ import { FrameBus, type InboundMessage, REQUEST_DEADLINE, toFrame, toTop } from 
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { FrameId } from "~/platform/Realm.ts";
+import type { FrameId } from "~/platform/Realm.ts";
 import { Tabs } from "~/platform/Tabs.ts";
 import { Hud } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
@@ -289,13 +289,13 @@ const descriptorsFor = (frameId: FrameId, hints: readonly LocalHint[]): readonly
 /**
  * One entry of the merged list.
  *
- * The wire carries the frame id as a plain string. The bus already checked
- * that a frame speaks for itself, so the id is branded here.
+ * The bus already checked that a frame speaks for itself, and the wire schema
+ * decoded the id of the frame.
  */
 const entryFor =
   (self: FrameId, local: readonly LocalHint[]) =>
   (descriptor: HintDescriptor): HintEntry => ({
-    frameId: FrameId.make(descriptor.frameId),
+    frameId: descriptor.frameId,
     localIndex: descriptor.localIndex,
     linkText: descriptor.linkText,
     secondary: descriptor.secondary,
@@ -2680,7 +2680,7 @@ export class Hints extends Context.Service<
               coordinator: from,
               mode,
               openedAt: now,
-              origin: FrameId.make(originFrameId),
+              origin: originFrameId,
             }),
           ),
         );
@@ -2702,7 +2702,7 @@ export class Hints extends Context.Service<
           roundId: payload.roundId,
           mode: payload.mode,
           entries,
-          role: SessionRole.Participant({ driver: FrameId.make(payload.originFrameId) }),
+          role: SessionRole.Participant({ driver: payload.originFrameId }),
         });
         yield* pipe(
           entries,
