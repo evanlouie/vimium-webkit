@@ -14,6 +14,7 @@
  * install.
  */
 
+import { Boolean, Data, type Record, pipe } from "effect";
 import { fileURLToPath } from "node:url";
 import type { InlineConfig } from "vite";
 
@@ -26,12 +27,41 @@ export const ROOT = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/,
  */
 export const BUILD_TARGET = ["safari16", "chrome111", "firefox101"];
 
+/**
+ * What a bundle is for.
+ *
+ * `Development` is the dev bundle, with its sourcemap inline. `Production` is
+ * the artefact that ships, and the only one that `@updateURL` may name.
+ */
+export type BuildMode = Data.TaggedEnum<{
+  Development: Record.ReadonlyRecord<never, never>;
+  Production: Record.ReadonlyRecord<never, never>;
+}>;
+
+export const BuildMode = Data.taggedEnum<BuildMode>();
+
 export interface BundleOptions {
   readonly entry: string;
-  readonly dev: boolean;
+  readonly mode: BuildMode;
   /** Only for measurement; the shipped artefact is never minified. */
   readonly minify?: boolean;
 }
+
+/** The `NODE_ENV` that the bundle sees. */
+const nodeEnv: (mode: BuildMode) => string = BuildMode.$match({
+  Development: () => "development",
+  Production: () => "production",
+});
+
+const sourcemap: (mode: BuildMode) => "inline" | false = BuildMode.$match({
+  Development: () => "inline" as const,
+  Production: () => false as const,
+});
+
+const minifier: (minify: boolean) => "esbuild" | false = Boolean.match({
+  onTrue: () => "esbuild" as const,
+  onFalse: () => false as const,
+});
 
 export const bundleConfig = (options: BundleOptions): InlineConfig => ({
   root: ROOT,
@@ -42,7 +72,7 @@ export const bundleConfig = (options: BundleOptions): InlineConfig => ({
   },
   define: {
     // Nothing bundled here should ever take a Node branch.
-    "process.env.NODE_ENV": JSON.stringify(options.dev ? "development" : "production"),
+    "process.env.NODE_ENV": pipe(options.mode, nodeEnv, JSON.stringify),
     // Effect reads `globalThis.process` for `hrtime`. That is harmless in
     // Node and not harmless here: a page or a sandboxing manager can make
     // `process` an accessor that *throws*, and this artefact is one IIFE
@@ -54,8 +84,8 @@ export const bundleConfig = (options: BundleOptions): InlineConfig => ({
   build: {
     write: false,
     target: BUILD_TARGET,
-    minify: options.minify === true ? "esbuild" : false,
-    sourcemap: options.dev ? "inline" : false,
+    minify: pipe(options.minify === true, minifier),
+    sourcemap: pipe(options.mode, sourcemap),
     reportCompressedSize: false,
     modulePreload: false,
     cssCodeSplit: false,
