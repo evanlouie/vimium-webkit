@@ -10,7 +10,7 @@
     "url": "git+https://github.com/evanlouie/vimium-webkit.git"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=26"
   },
   "scripts": {
     "build": "tsx --tsconfig tsconfig.node.json build/build.ts",
@@ -41,7 +41,7 @@
     "@effect/tsgo": "^0.46.1",
     "@effect/vitest": "^4.0.0-rc.118",
     "@playwright/test": "^1.63.0",
-    "@types/node": "^22.20.4",
+    "@types/node": "^26.6.3",
     "@vitest/coverage-v8": "^5.0.2",
     "dprint": "^0.57.4",
     "oxlint": "^1.85.0",
