@@ -40,7 +40,7 @@ const storedSettings = (rules: readonly ExclusionRule[]): Layer.Layer<KeyValueSt
       durable: false,
       watchable: false,
       managerPrivate: false,
-      get: (key) => Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
+      get: (key) => Effect.sync(() => Option.fromNullishOr(map.get(key))),
       set: (key, value) =>
         Effect.sync(() => {
           map.set(key, value);
@@ -63,28 +63,20 @@ const storedSettings = (rules: readonly ExclusionRule[]): Layer.Layer<KeyValueSt
  * stub honest: every other field is the field that ships.
  */
 const domAt = (url: string): Layer.Layer<Dom> =>
-  Layer.provide(
-    Layer.effect(
-      Dom,
-      pipe(
-        Dom,
-        Effect.map((dom) => Dom.of(pipe(dom, Struct.assign({ href: Effect.succeed(url) })))),
-      ),
-    ),
-    Dom.layer,
+  pipe(
+    Dom,
+    Effect.map(Struct.assign({ href: Effect.succeed(url) })),
+    Layer.effect(Dom),
+    Layer.provide(Dom.layer),
   );
 
 /** The real `Realm`, told whether this frame is the top frame. */
 const realmAs = (isTop: boolean): Layer.Layer<Realm, never, Dom> =>
-  Layer.provide(
-    Layer.effect(
-      Realm,
-      pipe(
-        Realm,
-        Effect.map((realm) => Realm.of(pipe(realm, Struct.assign({ isTop })))),
-      ),
-    ),
-    Realm.layer,
+  pipe(
+    Realm,
+    Effect.map(Struct.assign({ isTop })),
+    Layer.effect(Realm),
+    Layer.provide(Realm.layer),
   );
 
 const layerFor = (options: {
@@ -93,10 +85,10 @@ const layerFor = (options: {
   readonly rules: readonly ExclusionRule[];
 }): Layer.Layer<Exclusions | Settings | Storage> => {
   const dom = domAt(options.url);
-  const storage = Layer.provide(Storage.layer, storedSettings(options.rules));
-  const settings = Layer.provide(Settings.layer, storage);
-  const base = Layer.mergeAll(dom, Layer.provide(realmAs(options.isTop), dom), settings, storage);
-  return Layer.provideMerge(Exclusions.layer, base);
+  const realm = pipe(realmAs(options.isTop), Layer.provide(dom));
+  const storage = pipe(Storage.layer, Layer.provide(storedSettings(options.rules)));
+  const settings = pipe(Settings.layer, Layer.provide(storage));
+  return pipe(Exclusions.layer, Layer.provideMerge(Layer.mergeAll(dom, realm, settings, storage)));
 };
 
 const EXCLUDED: readonly ExclusionRule[] = [
@@ -119,11 +111,10 @@ describe("Exclusions", () => {
         assert.deepEqual(local, { enabled: false, passKeys: "" });
 
         // The top frame keeps its own verdict up to date from the settings.
-        const applied = yield* Stream.runHead(
-          pipe(
-            SubscriptionRef.changes(exclusions.effective),
-            Stream.filter((rule) => !rule.enabled),
-          ),
+        const applied = yield* pipe(
+          SubscriptionRef.changes(exclusions.effective),
+          Stream.filter((rule) => !rule.enabled),
+          Stream.runHead,
         );
         assert.isTrue(Option.isSome(applied));
         assert.isFalse(yield* exclusions.isEnabled);

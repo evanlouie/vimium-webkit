@@ -35,9 +35,9 @@
  *    loses nothing. See rule 3.
  * 2. **A kept page is not an exit.** `pagehide` with `persisted === true` means
  *    that the page may come back from the back/forward cache. A restored page
- *    never runs its scripts again. The hook therefore gets `final: false`, and
+ *    never runs its scripts again. The hook therefore gets `Resumable`, and
  *    nothing that must be built again may be released. Only `pagehide` with
- *    `persisted === false` gives `final: true`.
+ *    `persisted === false` gives `Final`.
  * 3. **`visibilitychange` to `hidden` runs the same hooks.** It is the last
  *    moment that mobile WebKit reliably gives us. A tab that goes to the
  *    background may never see `pagehide`. It is never final: the tab can come
@@ -52,12 +52,16 @@
  */
 
 import {
+  Array,
+  Boolean,
   Context,
+  Data,
   Effect,
   Fiber,
   Layer,
   Option,
   PubSub,
+  Record,
   Ref,
   Schedule,
   type Scope,
@@ -66,30 +70,36 @@ import {
 } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 
-export type LifecycleEvent =
+/** A variant that carries no data. */
+type NoFields = Record.ReadonlyRecord<never, never>;
+
+export type LifecycleEvent = Data.TaggedEnum<{
   /** The URL changed with no document load. */
-  | {
-      readonly _tag: "UrlChange";
-      readonly url: string;
-      readonly previous: string;
-    }
+  UrlChange: { readonly url: string; readonly previous: string };
   /** The page came back from the back/forward cache. */
-  | { readonly _tag: "Restore" }
+  Restore: NoFields;
   /** The page is going away for good. */
-  | { readonly _tag: "Leave" }
+  Leave: NoFields;
   /** The tab is visible again. Read shared storage again. */
-  | { readonly _tag: "Visible" };
+  Visible: NoFields;
+}>;
+
+export const LifecycleEvent = Data.taggedEnum<LifecycleEvent>();
 
 /**
  * What the browser said when the page went away.
  *
- * One field, because one question decides everything: will this document run
- * again? A hidden tab and a page in the back/forward cache both come back.
+ * One question decides everything: will this document run again? A hidden tab
+ * and a page in the back/forward cache both come back, so both are resumable.
  */
-export interface PageExit {
-  /** True when this document will not run again. */
-  readonly final: boolean;
-}
+export type PageExit = Data.TaggedEnum<{
+  /** This document will not run again. */
+  Final: NoFields;
+  /** This document may run again. */
+  Resumable: NoFields;
+}>;
+
+export const PageExit = Data.taggedEnum<PageExit>();
 
 /**
  * Work that runs inside the browser's own dispatch.
@@ -103,16 +113,40 @@ export type ExitHook = (exit: PageExit) => Effect.Effect<void>;
  * One registration of a hook.
  *
  * The token is the key, and not the function. Two scopes may register the same
- * function reference, and a filter on the reference would remove both.
+ * function reference, and a filter on the reference would remove both. The
+ * token is a plain object, so it is equal to itself only.
  */
 interface Registration {
   readonly hook: ExitHook;
 }
 
+type Registrations = ReadonlyArray<Registration>;
+
+/** The fiber of the last-resource poll, while it runs. */
+type Poller = Fiber.Fiber<unknown, never>;
+
 /** The interval of the last-resource poll. It runs only while visible. */
 const URL_POLL_MS = 900;
 /** The delay after a click, to let the page's router run. */
 const CLICK_SETTLE_MS = 60;
+
+/** The event for the URL now. `None` while the URL has not changed. */
+const urlChange = (previous: string, url: string): Option.Option<LifecycleEvent> =>
+  pipe(
+    url,
+    Option.liftPredicate((next) => next !== previous),
+    Option.map((next) => LifecycleEvent.UrlChange({ url: next, previous })),
+  );
+
+/** What a `pagehide` says. Only a page that the browser does not keep is gone for good. */
+const exitOf = (event: PageTransitionEvent): PageExit =>
+  pipe(
+    event.persisted,
+    Boolean.match({
+      onTrue: () => PageExit.Resumable(),
+      onFalse: () => PageExit.Final(),
+    }),
+  );
 
 export class Lifecycle extends Context.Service<
   Lifecycle,
@@ -133,43 +167,63 @@ export class Lifecycle extends Context.Service<
     Effect.gen(function* () {
       const dom = yield* Dom;
       const bus = yield* PubSub.unbounded<LifecycleEvent>();
-      const url = yield* Ref.make(yield* dom.href);
-      const poller = yield* Ref.make<Option.Option<Fiber.Fiber<unknown, never>>>(Option.none());
-      const exitHooks = yield* Ref.make<ReadonlyArray<Registration>>([]);
+      const url = yield* pipe(dom.href, Effect.flatMap(Ref.make));
+      const poller = yield* Ref.make(Option.none<Poller>());
+      const exitHooks = yield* Ref.make<Registrations>([]);
 
       const emit = (event: LifecycleEvent): Effect.Effect<void> =>
-        Effect.asVoid(PubSub.publish(bus, event));
+        pipe(bus, PubSub.publish(event), Effect.asVoid);
 
       const check = Effect.gen(function* () {
         const next = yield* dom.href;
-        const previous = yield* Ref.getAndSet(url, next);
-        if (next === previous) return;
-        yield* emit({ _tag: "UrlChange", url: next, previous });
-      });
-
-      const startPolling = Effect.gen(function* () {
-        if (Option.isSome(yield* Ref.get(poller))) return;
-        const fiber = yield* Effect.forkScoped(
-          Effect.repeat(check, Schedule.spaced(`${URL_POLL_MS} millis`)),
+        const previous = yield* pipe(url, Ref.getAndSet(next));
+        yield* pipe(
+          urlChange(previous, next),
+          Option.match({ onNone: () => Effect.void, onSome: emit }),
         );
-        yield* Ref.set(poller, Option.some(fiber));
       });
 
-      const stopPolling = Effect.gen(function* () {
-        const running = yield* Ref.getAndSet(poller, Option.none());
-        if (Option.isSome(running)) yield* Fiber.interrupt(running.value);
-      });
+      const keepPoller = (fiber: Poller): Effect.Effect<void> =>
+        pipe(poller, Ref.set(Option.some(fiber)));
+
+      const startPolling = pipe(
+        Ref.get(poller),
+        Effect.flatMap(
+          Option.match({
+            onSome: () => Effect.void,
+            onNone: () =>
+              pipe(
+                check,
+                Effect.repeat(Schedule.spaced(`${URL_POLL_MS} millis`)),
+                Effect.forkScoped,
+                Effect.flatMap(keepPoller),
+              ),
+          }),
+        ),
+      );
+
+      const stopPolling = pipe(
+        poller,
+        Ref.getAndSet(Option.none<Poller>()),
+        Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: Fiber.interrupt })),
+      );
 
       const isVisible = Effect.sync(() => dom.document.visibilityState === "visible");
 
+      const pollWhileVisible = pipe(startPolling, Effect.when(isVisible), Effect.asVoid);
+
+      const register = (entry: Registration): Effect.Effect<void, never, Scope.Scope> => {
+        const add = pipe(exitHooks, Ref.update<Registrations>(Array.append(entry)));
+        const remove = pipe(
+          exitHooks,
+          Ref.update<Registrations>(Array.filter((other) => other !== entry)),
+        );
+        return Effect.acquireRelease(add, () => remove);
+      };
+
+      /** A fresh token for each registration. Read `Registration`. */
       const onExit = (hook: ExitHook): Effect.Effect<void, never, Scope.Scope> =>
-        Effect.suspend(() => {
-          const entry: Registration = { hook };
-          return Effect.acquireRelease(
-            Ref.update(exitHooks, (current) => [...current, entry]),
-            () => Ref.update(exitHooks, (current) => current.filter((other) => other !== entry)),
-          );
-        });
+        Effect.suspend(() => register({ hook }));
 
       /**
        * Start every hook now, on this stack.
@@ -181,20 +235,35 @@ export class Lifecycle extends Context.Service<
        * `yield*` would be wrong: a hook that suspends would become a defect
        * instead of work.
        */
-      const startExitHooks = (exit: PageExit): Effect.Effect<void> =>
-        pipe(
-          Ref.get(exitHooks),
-          Effect.flatMap((entries) =>
-            Effect.forEach(
-              entries,
-              (entry) =>
-                Effect.forkDetach(entry.hook(exit), {
-                  startImmediately: true,
-                }),
-              { discard: true },
-            ),
+      const startExitHooks = Effect.fnUntraced(function* (exit: PageExit) {
+        const entries = yield* Ref.get(exitHooks);
+        yield* pipe(
+          entries,
+          Effect.forEach(
+            ({ hook }) => pipe(hook(exit), Effect.forkDetach({ startImmediately: true })),
+            { discard: true },
           ),
         );
+      });
+
+      /** The tab came forward: poll again, read the URL, and say so. */
+      const comeForward = Effect.gen(function* () {
+        yield* startPolling;
+        yield* check;
+        yield* emit(LifecycleEvent.Visible());
+      });
+
+      /**
+       * The tab went to the background.
+       *
+       * The last moment that mobile WebKit reliably gives us. A tab that goes to
+       * the background may never see `pagehide`. The tab can come forward
+       * again, so this exit is never final.
+       */
+      const goToBackground = pipe(
+        stopPolling,
+        Effect.andThen(startExitHooks(PageExit.Resumable())),
+      );
 
       yield* dom.listen("window", "popstate", () => check);
       yield* dom.listen("window", "hashchange", () => check);
@@ -205,54 +274,58 @@ export class Lifecycle extends Context.Service<
         "window",
         "click",
         () =>
-          Effect.asVoid(
-            Effect.forkDetach(
-              pipe(Effect.sleep(`${CLICK_SETTLE_MS} millis`), Effect.andThen(check)),
-            ),
-          ),
+          pipe(check, Effect.delay(`${CLICK_SETTLE_MS} millis`), Effect.forkDetach, Effect.asVoid),
         { capture: true, passive: true },
       );
 
-      yield* dom.listen("window", "pageshow", (event) =>
-        Effect.gen(function* () {
-          if (event.persisted) yield* emit({ _tag: "Restore" });
-          // `pagehide` stopped the poll. Nothing else starts it again, so a
-          // restored page would lose the one detector that does not depend on
-          // `popstate`, on `hashchange` or on a click.
-          if (yield* isVisible) yield* startPolling;
-          yield* check;
-        }),
-      );
+      const onPageShow = Effect.fnUntraced(function* (event: PageTransitionEvent) {
+        yield* pipe(
+          event.persisted,
+          Boolean.match({
+            onTrue: () => emit(LifecycleEvent.Restore()),
+            onFalse: () => Effect.void,
+          }),
+        );
+        // `pagehide` stopped the poll. Nothing else starts it again, so a
+        // restored page would lose the one detector that does not depend on
+        // `popstate`, on `hashchange` or on a click.
+        yield* pollWhileVisible;
+        yield* check;
+      });
 
-      yield* dom.listen("window", "pagehide", (event) =>
-        Effect.gen(function* () {
-          // The hooks come first, and everything else comes second. They are
-          // the work that the page may have no time for. The bus is last: a
-          // subscriber reads it on another fiber, which can run after the
-          // page is gone.
-          yield* startExitHooks({ final: !event.persisted });
-          yield* stopPolling;
-          if (!event.persisted) yield* emit({ _tag: "Leave" });
-        }),
-      );
+      const onPageHide = Effect.fnUntraced(function* (event: PageTransitionEvent) {
+        // The hooks come first, and everything else comes second. They are the
+        // work that the page may have no time for. The bus is last: a
+        // subscriber reads it on another fiber, which can run after the page
+        // is gone.
+        const exit = exitOf(event);
+        yield* startExitHooks(exit);
+        yield* stopPolling;
+        yield* pipe(
+          exit,
+          PageExit.$match({
+            Final: () => emit(LifecycleEvent.Leave()),
+            Resumable: () => Effect.void,
+          }),
+        );
+      });
+
+      yield* dom.listen("window", "pageshow", onPageShow);
+      yield* dom.listen("window", "pagehide", onPageHide);
 
       yield* dom.listen("document", "visibilitychange", () =>
-        Effect.gen(function* () {
-          if (yield* isVisible) {
-            yield* startPolling;
-            yield* check;
-            yield* emit({ _tag: "Visible" });
-            return;
-          }
-          yield* stopPolling;
-          // The last moment that mobile WebKit reliably gives us. A tab that
-          // goes to the background may never see `pagehide`. The tab can come
-          // forward again, so this exit is never final.
-          yield* startExitHooks({ final: false });
-        }),
+        pipe(
+          isVisible,
+          Effect.flatMap(
+            Boolean.match({
+              onTrue: () => comeForward,
+              onFalse: () => goToBackground,
+            }),
+          ),
+        ),
       );
 
-      if (yield* isVisible) yield* startPolling;
+      yield* pollWhileVisible;
 
       return Lifecycle.of({ events: Stream.fromPubSub(bus), onExit });
     }),

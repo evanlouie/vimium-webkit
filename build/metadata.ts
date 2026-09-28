@@ -6,15 +6,25 @@
  * `platform/Gm.ts` probes for.
  */
 
+import { Array, pipe } from "effect";
 import { SUGGEST_HOSTS } from "~/domain/SearchSuggest.ts";
+import { BuildMode } from "./vite-config.ts";
 
 export interface MetadataInput {
   readonly version: string;
   readonly repository: string;
   readonly downloadUrl: string;
   readonly updateUrl: string;
-  readonly dev?: boolean;
+  readonly mode: BuildMode;
 }
+
+/** The name that the manager shows. A dev bundle says that it is one. */
+const scriptName: (mode: BuildMode) => string = BuildMode.$match({
+  Development: () => "Vimium-WebKit (dev)",
+  Production: () => "Vimium-WebKit",
+});
+
+type Line = readonly [key: string, value: string];
 
 /**
  * Both spellings of every storage/tab/clipboard grant.
@@ -49,8 +59,8 @@ const GRANTS: readonly string[] = [
 ];
 
 export const buildMetadata = (input: MetadataInput): string => {
-  const lines: Array<readonly [string, string]> = [
-    ["name", input.dev === true ? "Vimium-WebKit (dev)" : "Vimium-WebKit"],
+  const lines: ReadonlyArray<Line> = [
+    ["name", scriptName(input.mode)],
     ["namespace", input.repository],
     ["version", input.version],
     [
@@ -67,14 +77,20 @@ export const buildMetadata = (input: MetadataInput): string => {
     // the `@grant` list. Content world is required because quoid only exposes
     // the GM API there (§5.3).
     ["inject-into", "content"],
-    ...GRANTS.map((grant): readonly [string, string] => ["grant", grant]),
+    ...pipe(
+      GRANTS,
+      Array.map((grant): Line => ["grant", grant]),
+    ),
     // Exactly the suggestion endpoints, derived from the table in `suggest.ts`
     // so the grant cannot outlive the code. `@connect *` granted network access
     // to every host on the web for a feature that talks to five, and a
     // userscript's grants are the only thing standing between it and the user's
     // cookies on arbitrary origins. quoid does not implement `@connect` at all,
     // which degrades to "no suggestions" rather than an error.
-    ...SUGGEST_HOSTS.map((host): readonly [string, string] => ["connect", host]),
+    ...pipe(
+      SUGGEST_HOSTS,
+      Array.map((host): Line => ["connect", host]),
+    ),
     ["downloadURL", input.downloadUrl],
     ["updateURL", input.updateUrl],
   ];
@@ -83,8 +99,15 @@ export const buildMetadata = (input: MetadataInput): string => {
   // Tampermonkey — writing `@noframes false` *enables* it in some managers —
   // and running in every frame is required for cross-frame link hints (§6.5).
 
-  const width = Math.max(...lines.map(([key]) => key.length));
-  const body = lines.map(([key, value]) => `// @${key.padEnd(width)}  ${value}`).join("\n");
+  const width = pipe(
+    lines,
+    Array.reduce(0, (widest, [key]) => Math.max(widest, key.length)),
+  );
+  const body = pipe(
+    lines,
+    Array.map(([key, value]) => `// @${key.padEnd(width)}  ${value}`),
+    Array.join("\n"),
+  );
 
   // Exactly one space after `//`, and the block must be the very first thing in
   // the file: ScriptCat rejects the script otherwise.

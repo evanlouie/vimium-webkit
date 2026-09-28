@@ -7,7 +7,17 @@
  * function.
  */
 
-import { Context, Effect, Layer, type ManagedRuntime, Option, Stream, pipe } from "effect";
+import {
+  Context,
+  Effect,
+  Layer,
+  type ManagedRuntime,
+  Match,
+  MutableRef,
+  Option,
+  Stream,
+  pipe,
+} from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Exclusions } from "~/core/Exclusions.ts";
 import { HandlerStack } from "~/core/HandlerStack.ts";
@@ -15,16 +25,16 @@ import { Keyboard } from "~/core/Keyboard.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
+import { FrameBus, FrameRole } from "~/frames/Bus.ts";
 import { FrameLink } from "~/frames/Link.ts";
 import { Capabilities, degradationWarnings } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { Realm } from "~/platform/Realm.ts";
 import { Storage, type StorageError } from "~/platform/Storage.ts";
 import { Insert } from "~/features/Insert.ts";
 import { Omnibar } from "~/features/omnibar/Omnibar.ts";
 import { attachKeyBridge, replayBufferedKeys } from "./KeyBridge.ts";
 import type { BootSignal } from "./Guard.ts";
-import { type ExitHook, Lifecycle } from "./Lifecycle.ts";
+import { type ExitHook, Lifecycle, LifecycleEvent, PageExit } from "./Lifecycle.ts";
 
 /**
  * What the guard learned before the application existed.
@@ -86,16 +96,19 @@ export interface ExitParts {
  *    back/forward cache keeps its runtime. It never runs its scripts again, so
  *    nothing would build the runtime a second time.
  */
-export const onPageExit =
-  (parts: ExitParts): ExitHook =>
-  (exit) =>
-    Effect.gen(function* () {
-      yield* Effect.sync(() => parts.flushAllUnsafe());
-      yield* parts.forgetSuppressed;
-      yield* parts.flushAll;
-      if (!exit.final) return;
-      yield* parts.release;
-    });
+export const onPageExit = (parts: ExitParts): ExitHook =>
+  Effect.fnUntraced(function* (exit: PageExit) {
+    yield* Effect.sync(parts.flushAllUnsafe);
+    yield* parts.forgetSuppressed;
+    yield* parts.flushAll;
+    yield* pipe(
+      exit,
+      PageExit.$match({
+        Final: () => parts.release,
+        Resumable: () => Effect.void,
+      }),
+    );
+  });
 
 /** A runtime, and the one effect that closes it. */
 export interface OwnedRuntime<R, ER> {
@@ -105,11 +118,26 @@ export interface OwnedRuntime<R, ER> {
 }
 
 /**
+ * Say that a runtime failed to close.
+ *
+ * `console.error`, because the runtime that would log it is the one that is
+ * closing, and a userscript shares its console with the page.
+ */
+const reportReleaseFailure = (cause: unknown): void => {
+  console.error("[vimium-webkit] failed to release", cause);
+};
+
+/** Close one runtime. `dispose` gives a promise, so this is the one edge for it. */
+const dispose = <R, ER>(runtime: ManagedRuntime.ManagedRuntime<R, ER>): Effect.Effect<void> =>
+  Effect.promise(() => runtime.dispose().catch(reportReleaseFailure));
+
+/**
  * Build a runtime that can ask to be released.
  *
  * The two needs make a circle: the layer needs a way to release the runtime,
  * and the runtime does not exist until the layer is built. The holder below
  * breaks the circle, because `Effect.suspend` reads it when the release runs.
+ * The release empties the holder, so a second release finds nothing to close.
  *
  * `dispose` closes the scope that the layer owns, so every listener, port,
  * stylesheet, manager callback and fiber goes with it. It also replaces the
@@ -120,21 +148,18 @@ export interface OwnedRuntime<R, ER> {
 export const makeOwnedRuntime = <R, ER>(
   build: (owner: Layer.Layer<RuntimeOwner>) => ManagedRuntime.ManagedRuntime<R, ER>,
 ): OwnedRuntime<R, ER> => {
-  let live: ManagedRuntime.ManagedRuntime<R, ER> | undefined;
+  const live = MutableRef.make(Option.none<ManagedRuntime.ManagedRuntime<R, ER>>());
 
-  const release = Effect.suspend(() => {
-    const current = live;
-    live = undefined;
-    if (current === undefined) return Effect.void;
-    return Effect.promise(() =>
-      current.dispose().catch((cause: unknown) => {
-        console.error("[vimium-webkit] failed to release", cause);
-      }),
-    );
-  });
+  const release = Effect.suspend(() =>
+    pipe(
+      live,
+      MutableRef.getAndSet(Option.none<ManagedRuntime.ManagedRuntime<R, ER>>()),
+      Option.match({ onNone: () => Effect.void, onSome: dispose }),
+    ),
+  );
 
   const runtime = build(RuntimeOwner.layerFrom(release));
-  live = runtime;
+  pipe(live, MutableRef.set(Option.some(runtime)));
   return { runtime, release };
 };
 
@@ -147,10 +172,22 @@ export const makeOwnedRuntime = <R, ER>(
  * be read; using defaults" over a save that was refused.
  */
 const describeStorageIssue = (issue: StorageError): string =>
-  issue.direction === "write"
-    ? `Could not save ${issue.group}: ${issue.detail}. ` + "Your change applies to this tab only."
-    : `Stored ${issue.group} could not be read (${issue.reason}); ` +
-      "using defaults. Open Settings to review.";
+  pipe(
+    Match.value(issue.direction),
+    Match.when(
+      "write",
+      () =>
+        `Could not save ${issue.group}: ${issue.detail}. ` +
+        "Your change applies to this tab only.",
+    ),
+    Match.when(
+      "read",
+      () =>
+        `Stored ${issue.group} could not be read (${issue.reason}); ` +
+        "using defaults. Open Settings to review.",
+    ),
+    Match.exhaustive,
+  );
 
 export const BootstrapLayer: Layer.Layer<
   never,
@@ -160,6 +197,7 @@ export const BootstrapLayer: Layer.Layer<
   | Commands
   | Dom
   | Exclusions
+  | FrameBus
   | FrameLink
   | HandlerStack
   | Insert
@@ -167,7 +205,6 @@ export const BootstrapLayer: Layer.Layer<
   | Lifecycle
   | Modes
   | Omnibar
-  | Realm
   | Report
   | RuntimeOwner
   | Settings
@@ -175,6 +212,7 @@ export const BootstrapLayer: Layer.Layer<
 > = Layer.effectDiscard(
   Effect.gen(function* () {
     const boot = yield* Boot;
+    const bus = yield* FrameBus;
     const capabilities = yield* Capabilities;
     const dom = yield* Dom;
     const exclusions = yield* Exclusions;
@@ -184,19 +222,79 @@ export const BootstrapLayer: Layer.Layer<
     const lifecycle = yield* Lifecycle;
     const modes = yield* Modes;
     const owner = yield* RuntimeOwner;
-    const realm = yield* Realm;
     const report = yield* Report;
     const settings = yield* Settings;
     const keyboard = yield* Keyboard;
     const storage = yield* Storage;
 
+    /** Work that only the top frame does. Its page is the page that the user visits. */
+    const inTopFrame = (work: Effect.Effect<void>): Effect.Effect<void> =>
+      pipe(
+        bus.role,
+        FrameRole.$match({
+          Coordinator: () => work,
+          Member: () => Effect.void,
+        }),
+      );
+
+    /**
+     * Work out the verdict for this frame.
+     *
+     * The top frame reads its own URL. A child frame cannot read the top frame's
+     * URL across origins, so it asks, and it keeps the verdict that it holds
+     * when no answer comes. Upstream Vimium matches on the top frame's URL as
+     * well: without that, an excluded page would still have us live inside its
+     * third-party frames.
+     */
+    const resolveExclusion = pipe(
+      link.effectiveExclusion,
+      Effect.flatMap(exclusions.adopt),
+      Effect.ignore,
+    );
+
+    /** Read the settings and the verdict again, after the page changed under us. */
+    const refresh = Effect.gen(function* () {
+      yield* settings.reload;
+      yield* resolveExclusion;
+      yield* keyboard.syncExclusion;
+      yield* insert.ensureEntered;
+    });
+
+    const wantsFocusBack = pipe(
+      settings.current,
+      Effect.map((current) => current.grabBackFocus),
+    );
+
+    /** Take the focus back from a page that took it on load, when the user asks for that. */
+    const grabBackFocus = pipe(
+      boot.typedIntoEditable,
+      Effect.flatMap(insert.grabBackFocus),
+      Effect.when(wantsFocusBack),
+      Effect.asVoid,
+    );
+
+    /** What each change of the page means for this frame. */
+    const onLifecycle = LifecycleEvent.$match({
+      UrlChange: () =>
+        Effect.gen(function* () {
+          yield* modes.exitAll("navigation");
+          yield* refresh;
+          yield* inTopFrame(omnibar.noteVisit);
+        }),
+      Restore: () => refresh,
+      // The portable substitute for a manager change listener, which quoid and
+      // Stay do not have. Read shared storage again when the tab comes forward,
+      // so that a settings change in another tab lands.
+      Visible: () => Effect.asVoid(settings.reload),
+      Leave: () => modes.exitAll("navigation"),
+    });
+
     // Every storage failure becomes one line for the user. The queue behind
     // `Report` keeps the messages that happen before the HUD exists.
-    yield* Effect.forkScoped(
-      pipe(
-        storage.issues,
-        Stream.runForEach((issue) => report.error(describeStorageIssue(issue))),
-      ),
+    yield* pipe(
+      storage.issues,
+      Stream.runForEach((issue) => report.error(describeStorageIssue(issue))),
+      Effect.forkScoped,
     );
 
     // Every group, and never a subset. A group that was never read holds only the
@@ -204,47 +302,25 @@ export const BootstrapLayer: Layer.Layer<
     // value with the defaults plus one change.
     yield* storage.hydrateAll;
 
-    for (const warning of degradationWarnings(capabilities)) {
-      yield* report.error(warning);
-    }
-
-    /**
-     * Work out the verdict for this frame.
-     *
-     * The top frame reads its own URL. A child frame cannot read the top frame's
-     * URL across origins, so it asks. Upstream Vimium matches on the top frame's
-     * URL as well: without that, an excluded page would still have us live inside
-     * its third-party frames.
-     */
-    const resolveExclusion = Effect.gen(function* () {
-      if (realm.isTop) {
-        yield* exclusions.adopt(yield* exclusions.resolveLocal);
-        return;
-      }
-      const remote = yield* Effect.option(link.effectiveExclusion);
-      if (Option.isSome(remote)) yield* exclusions.adopt(remote.value);
-    });
+    yield* pipe(degradationWarnings(capabilities), Effect.forEach(report.error, { discard: true }));
 
     yield* resolveExclusion;
     yield* keyboard.syncExclusion;
 
-    // The key bridge comes before the replay, and the replay comes before the
-    // guard scope closes. A key that arrives during the start is therefore held,
-    // and then played, exactly once.
     // Before any listener is attached. Insert mode otherwise learns about focus
     // from live events only, and the page has long since focused its search box
     // by the time that the application starts.
     yield* insert.seedFromFocus;
     yield* insert.ensureEntered;
 
-    const settingsNow = yield* settings.current;
-    if (settingsNow.grabBackFocus && realm.isTop) {
-      yield* insert.grabBackFocus(yield* boot.typedIntoEditable);
-    }
-    if (realm.isTop) yield* omnibar.noteVisit;
+    yield* inTopFrame(grabBackFocus);
+    yield* inTopFrame(omnibar.noteVisit);
 
+    // The key bridge comes before the replay, and the replay comes before the
+    // guard scope closes. A key that arrives during the start is therefore held,
+    // and then played, exactly once.
     yield* attachKeyBridge;
-    yield* replayBufferedKeys(yield* boot.drain);
+    yield* pipe(boot.drain, Effect.flatMap(replayBufferedKeys));
 
     // A hook, and not a subscription. The work that a page exit needs must start
     // inside the browser's dispatch. A subscriber of the bus below runs on its
@@ -258,45 +334,7 @@ export const BootstrapLayer: Layer.Layer<
       }),
     );
 
-    yield* Effect.forkScoped(
-      pipe(
-        lifecycle.events,
-        Stream.runForEach((event) =>
-          Effect.gen(function* () {
-            switch (event._tag) {
-              case "UrlChange": {
-                yield* modes.exitAll("navigation");
-                yield* settings.reload;
-                yield* resolveExclusion;
-                yield* keyboard.syncExclusion;
-                yield* insert.ensureEntered;
-                if (realm.isTop) yield* omnibar.noteVisit;
-                return;
-              }
-              case "Restore": {
-                yield* settings.reload;
-                yield* resolveExclusion;
-                yield* keyboard.syncExclusion;
-                yield* insert.ensureEntered;
-                return;
-              }
-              case "Visible": {
-                // The portable substitute for a manager change listener, which
-                // quoid and Stay do not have. Read shared storage again when the
-                // tab comes forward, so that a settings change in another tab
-                // lands.
-                yield* settings.reload;
-                return;
-              }
-              case "Leave": {
-                yield* modes.exitAll("navigation");
-                return;
-              }
-            }
-          }),
-        ),
-      ),
-    );
+    yield* pipe(lifecycle.events, Stream.runForEach(onLifecycle), Effect.forkScoped);
 
     yield* Effect.logDebug(
       `vimium-webkit started in this frame (${boot.reason})`,

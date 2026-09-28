@@ -10,10 +10,22 @@
  * suspend. Read `ARCHITECTURE.md` section 3.
  */
 
-import { Effect, type Scope } from "effect";
-import { HandlerStack } from "~/core/HandlerStack.ts";
+import { Effect, Option, type Scope, flow, pipe } from "effect";
+import { type HandlerEventMap, type HandlerEventName, HandlerStack } from "~/core/HandlerStack.ts";
 import { isUserEvent, Keyboard } from "~/core/Keyboard.ts";
-import { Dom } from "~/platform/Dom.ts";
+import { Dom, type ListenOptions } from "~/platform/Dom.ts";
+
+/** Every listener of the bridge runs in the capture phase, before the page's own. */
+const CAPTURE: ListenOptions = { capture: true };
+
+/** Run `body` for an event that the user made, and drop an event that the page made. */
+const fromUser = <E extends Event, R>(
+  body: (event: E) => Effect.Effect<void, never, R>,
+): ((event: E) => Effect.Effect<void, never, R>) =>
+  flow(
+    Option.liftPredicate(isUserEvent),
+    Option.match({ onNone: () => Effect.void, onSome: body }),
+  );
 
 /**
  * Attach every listener that the handler stack needs.
@@ -50,37 +62,22 @@ export const attachKeyBridge: Effect.Effect<
   const stack = yield* HandlerStack;
   const keyboard = yield* Keyboard;
 
-  yield* dom.listen(
-    "window",
-    "keydown",
-    (event) => (isUserEvent(event) ? Effect.asVoid(stack.bubble("keydown", event)) : Effect.void),
-    { capture: true },
-  );
+  /**
+   * Give the event to the handler stack.
+   *
+   * The stack stops the event itself when a handler asks, so its answer is not
+   * needed here.
+   */
+  const bubble =
+    <K extends HandlerEventName>(name: K) =>
+    (event: HandlerEventMap[K]): Effect.Effect<void> =>
+      Effect.asVoid(stack.bubble(name, event));
 
-  yield* dom.listen(
-    "window",
-    "keyup",
-    (event) => (isUserEvent(event) ? Effect.asVoid(stack.bubble("keyup", event)) : Effect.void),
-    { capture: true },
-  );
-
-  yield* dom.listen("window", "click", (event) => Effect.asVoid(stack.bubble("click", event)), {
-    capture: true,
-  });
-
-  yield* dom.listen(
-    "window",
-    "focus",
-    (event) => (isUserEvent(event) ? Effect.asVoid(stack.bubble("focus", event)) : Effect.void),
-    { capture: true },
-  );
-
-  yield* dom.listen(
-    "window",
-    "blur",
-    (event) => (isUserEvent(event) ? Effect.asVoid(stack.bubble("blur", event)) : Effect.void),
-    { capture: true },
-  );
+  yield* dom.listen("window", "keydown", fromUser(bubble("keydown")), CAPTURE);
+  yield* dom.listen("window", "keyup", fromUser(bubble("keyup")), CAPTURE);
+  yield* dom.listen("window", "click", bubble("click"), CAPTURE);
+  yield* dom.listen("window", "focus", fromUser(bubble("focus")), CAPTURE);
+  yield* dom.listen("window", "blur", fromUser(bubble("blur")), CAPTURE);
 
   // A press whose release we will never see leaves normal mode waiting for a
   // `keyup` that never comes. The everyday case is a window switch in the
@@ -89,18 +86,20 @@ export const attachKeyBridge: Effect.Effect<
   //
   // The page must not reach this either. A page-made `blur` would give the page
   // the release of a press that we took.
-  yield* dom.listen("window", "blur", (event) =>
-    isUserEvent(event) ? keyboard.forgetSuppressed : Effect.void,
+  yield* dom.listen(
+    "window",
+    "blur",
+    fromUser(() => keyboard.forgetSuppressed),
   );
 });
 
 /** Replay the keys that the guard held while the application started. */
-export const replayBufferedKeys = (
+export const replayBufferedKeys = Effect.fnUntraced(function* (
   events: ReadonlyArray<KeyboardEvent>,
-): Effect.Effect<void, never, HandlerStack> =>
-  Effect.gen(function* () {
-    const stack = yield* HandlerStack;
-    for (const event of events) {
-      yield* stack.bubble("keydown", event);
-    }
-  });
+): Effect.fn.Return<void, never, HandlerStack> {
+  const stack = yield* HandlerStack;
+  yield* pipe(
+    events,
+    Effect.forEach((event) => stack.bubble("keydown", event), { discard: true }),
+  );
+});

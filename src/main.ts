@@ -17,10 +17,28 @@
  * receives a key builds the guard, and nothing else.
  */
 
-import { Cause, Effect, Layer, Logger, ManagedRuntime, References, Schema, pipe } from "effect";
+import {
+  Cause,
+  Effect,
+  Layer,
+  Logger,
+  ManagedRuntime,
+  Match,
+  Predicate,
+  References,
+  Schema,
+  flow,
+  pipe,
+} from "effect";
 import { AppLayer } from "~/App.ts";
-import { Boot, BootstrapLayer, makeOwnedRuntime } from "~/boot/Bootstrap.ts";
-import { awaitActivation, claimRealm } from "~/boot/Guard.ts";
+import {
+  Boot,
+  BootstrapLayer,
+  makeOwnedRuntime,
+  type OwnedRuntime,
+  type RuntimeOwner,
+} from "~/boot/Bootstrap.ts";
+import { awaitActivation, type BootSignal, claimRealm } from "~/boot/Guard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Realm } from "~/platform/Realm.ts";
 
@@ -52,62 +70,77 @@ class StartupFailed extends Schema.TaggedError<StartupFailed>()("StartupFailed",
   cause: Schema.optional(Schema.Defect()),
 }) {}
 
-const start = Effect.gen(function* () {
-  if (!(yield* claimRealm)) return;
-
-  // The guard scope stays open until the application has the keyboard. A key
-  // that the user presses during the start therefore still reaches the buffer,
-  // and `BootstrapLayer` plays it.
-  yield* Effect.scoped(
-    Effect.gen(function* () {
-      const signal = yield* awaitActivation;
-
-      /**
-       * The runtime of this frame, and the effect that closes it.
-       *
-       * The application asks for the release on a final page exit, and only
-       * after the last writes reached storage. A page that goes into the
-       * back/forward cache keeps its runtime. A restored page never runs its
-       * scripts again, so nothing here would build a second one.
-       *
-       * This holder belongs to one realm. The script runs again in every frame,
-       * so a child frame that goes away releases the runtime that the child
-       * built. It cannot touch the runtime of any other frame.
-       */
-      const { runtime, release } = makeOwnedRuntime((owner) =>
-        ManagedRuntime.make(
-          pipe(
-            BootstrapLayer,
-            Layer.provide(AppLayer),
-            Layer.provide(Boot.layerFrom(signal)),
-            Layer.provide(owner),
-          ),
-        ),
-      );
-
-      // A failure to start must never break the page. Report it once, and stay
-      // out of the way. The guard's own listeners are harmless.
-      yield* pipe(
-        Effect.tryPromise({
-          try: () => runtime.runPromise(Effect.void),
-          catch: (cause) =>
-            new StartupFailed({
-              detail: cause instanceof Error ? cause.message : String(cause),
-              cause,
-            }),
-        }),
-        Effect.catchCause((cause) =>
-          Effect.gen(function* () {
-            console.error("[vimium-webkit] failed to start", Cause.pretty(cause));
-            // A part of the graph may have been built before the failure, and
-            // that part holds listeners of this page. Nothing else will release
-            // them, because nothing else knows about this runtime.
-            yield* release;
-          }),
-        ),
-      );
-    }),
+/** What a thrown value says. */
+const describe = (cause: unknown): string =>
+  pipe(
+    Match.value(cause),
+    Match.when(Predicate.isError, (error) => error.message),
+    Match.orElse((other) => String(other)),
   );
+
+/** The whole application for one activation, over the owner of its runtime. */
+const applicationLayer =
+  (signal: BootSignal) =>
+  (owner: Layer.Layer<RuntimeOwner>): Layer.Layer<never> =>
+    pipe(
+      BootstrapLayer,
+      Layer.provide(AppLayer),
+      Layer.provide(Boot.layerFrom(signal)),
+      Layer.provide(owner),
+    );
+
+/**
+ * Build the application in its own runtime.
+ *
+ * A failure to start must never break the page. Report it once, and stay out
+ * of the way. The guard's own listeners are harmless.
+ */
+const buildApplication = ({ runtime, release }: OwnedRuntime<never, never>): Effect.Effect<void> =>
+  pipe(
+    Effect.tryPromise({
+      try: () => runtime.runPromise(Effect.void),
+      catch: (cause) => new StartupFailed({ detail: describe(cause), cause }),
+    }),
+    Effect.catchCause((cause) =>
+      pipe(
+        Effect.sync(() => {
+          console.error("[vimium-webkit] failed to start", Cause.pretty(cause));
+        }),
+        // A part of the graph may have been built before the failure, and
+        // that part holds listeners of this page. Nothing else will release
+        // them, because nothing else knows about this runtime.
+        Effect.andThen(release),
+      ),
+    ),
+  );
+
+/**
+ * Wait until the user wants us, and then start.
+ *
+ * The guard scope stays open until the application has the keyboard. A key
+ * that the user presses during the start therefore still reaches the buffer,
+ * and `BootstrapLayer` plays it.
+ */
+const activate = Effect.gen(function* () {
+  const signal = yield* awaitActivation;
+
+  /**
+   * The runtime of this frame, and the effect that closes it.
+   *
+   * The application asks for the release on a final page exit, and only
+   * after the last writes reached storage. A page that goes into the
+   * back/forward cache keeps its runtime. A restored page never runs its
+   * scripts again, so nothing here would build a second one.
+   *
+   * This holder belongs to one realm. The script runs again in every frame,
+   * so a child frame that goes away releases the runtime that the child
+   * built. It cannot touch the runtime of any other frame.
+   */
+  const owned = makeOwnedRuntime(flow(applicationLayer(signal), ManagedRuntime.make));
+
+  yield* buildApplication(owned);
 });
 
-Effect.runFork(Effect.provide(start, GuardLayer));
+const start = pipe(activate, Effect.scoped, Effect.when(claimRealm), Effect.asVoid);
+
+pipe(start, Effect.provide(GuardLayer), Effect.runFork);

@@ -11,9 +11,22 @@
  * frames, and the graph stays a tree.
  */
 
-import { Context, Effect, Layer, Ref, Stream, SubscriptionRef, pipe } from "effect";
+import {
+  Array,
+  Boolean,
+  Context,
+  Effect,
+  Layer,
+  Option,
+  Ref,
+  Stream,
+  String as Str,
+  SubscriptionRef,
+  pipe,
+} from "effect";
 import {
   type EffectiveRule,
+  type ExclusionRule,
   type ExclusionSet,
   FULLY_ENABLED,
   isRawPattern,
@@ -34,11 +47,44 @@ export type { EffectiveRule };
  * dialog lists the same rules. The log also records each drop for diagnosis.
  */
 const warnAboutDropped = (set: ExclusionSet): Effect.Effect<void> =>
-  Effect.forEach(
+  pipe(
     set.dropped,
-    (rule) => Effect.logWarning(`the exclusion rule "${rule.pattern}" was dropped: ${rule.reason}`),
-    { discard: true },
+    Effect.forEach(
+      (rule) =>
+        Effect.logWarning(`the exclusion rule "${rule.pattern}" was dropped: ${rule.reason}`),
+      { discard: true },
+    ),
   );
+
+/**
+ * What names the dropped rules of a set. `None` when the set dropped none.
+ *
+ * The signature changes only when the user changes the rules.
+ */
+const droppedSignature = (set: ExclusionSet): Option.Option<string> =>
+  pipe(
+    set.dropped,
+    Array.map((rule) => rule.pattern),
+    Array.join("\n"),
+    Option.liftPredicate(Str.isNonEmpty),
+  );
+
+/**
+ * Does a raw expression lose this URL to its cap?
+ *
+ * A raw expression reads a capped length of URL, because the static safety
+ * check does not promise a linear match.
+ */
+const beyondRegexCap = (url: string, rules: ReadonlyArray<ExclusionRule>): boolean =>
+  url.length > MAX_REGEX_URL_LENGTH &&
+  pipe(
+    rules,
+    Array.some((rule) => isRawPattern(rule.pattern)),
+  );
+
+const REGEX_CAP_WARNING =
+  `this URL is longer than ${MAX_REGEX_URL_LENGTH} characters, ` +
+  "so an exclusion rule that holds a raw expression cannot match it";
 
 export class Exclusions extends Context.Service<
   Exclusions,
@@ -75,63 +121,71 @@ export class Exclusions extends Context.Service<
 
       const effective = yield* SubscriptionRef.make(FULLY_ENABLED);
 
-      // The same set of dropped rules must not fill the console. The signature
-      // changes only when the user changes the rules.
+      // The same set of dropped rules must not fill the console.
       const warned = yield* Ref.make("");
-      const warnOnce = (set: ExclusionSet): Effect.Effect<void> =>
-        Effect.gen(function* () {
-          const signature = set.dropped.map((rule) => rule.pattern).join("\n");
-          if (signature.length === 0) return;
-          const last = yield* Ref.getAndSet(warned, signature);
-          if (last === signature) return;
-          yield* warnAboutDropped(set);
-        });
 
-      const match = (url: string): Effect.Effect<EffectiveRule> =>
-        Effect.gen(function* () {
-          const current = yield* settings.current;
-          const set = makeExclusionSet(current.exclusionRules);
-          yield* warnOnce(set);
-          // A raw expression reads a capped length of URL, because the static
-          // safety check does not promise a linear match. Say when the cap
-          // takes effect, so that a rule which stops matching is not silent.
-          if (
-            url.length > MAX_REGEX_URL_LENGTH &&
-            current.exclusionRules.some((rule) => isRawPattern(rule.pattern))
-          ) {
-            yield* Effect.logWarning(
-              `this URL is longer than ${MAX_REGEX_URL_LENGTH} characters, ` +
-                "so an exclusion rule that holds a raw expression cannot " +
-                "match it",
-            );
-          }
-          return set.match(url);
-        });
+      /** Remember the signature, and say whether it differs from the last one. */
+      const isNewSignature = (signature: string): Effect.Effect<boolean> =>
+        pipe(
+          warned,
+          Ref.getAndSet(signature),
+          Effect.map((last) => last !== signature),
+        );
+
+      const warnOnce = (set: ExclusionSet): Effect.Effect<void> =>
+        pipe(
+          droppedSignature(set),
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (signature) =>
+              pipe(warnAboutDropped(set), Effect.when(isNewSignature(signature)), Effect.asVoid),
+          }),
+        );
+
+      const match = Effect.fn("Exclusions.match")(function* (url: string) {
+        const { exclusionRules } = yield* settings.current;
+        const set = makeExclusionSet(exclusionRules);
+        yield* warnOnce(set);
+        // Say when the cap takes effect, so that a rule which stops matching
+        // is not silent.
+        yield* pipe(
+          beyondRegexCap(url, exclusionRules),
+          Boolean.match({
+            onFalse: () => Effect.void,
+            onTrue: () => Effect.logWarning(REGEX_CAP_WARNING),
+          }),
+        );
+        return set.match(url);
+      });
+
+      const adopt = (rule: EffectiveRule): Effect.Effect<void> =>
+        pipe(effective, SubscriptionRef.set(rule));
 
       const resolveLocal = pipe(dom.href, Effect.flatMap(match));
 
       // The top frame owns the verdict, so it keeps its own up to date when the
       // rules change. A child frame waits to be told.
-      if (realm.isTop) {
-        yield* Effect.forkScoped(
-          pipe(
-            settings.changes,
-            Stream.runForEach(() =>
-              pipe(
-                resolveLocal,
-                Effect.flatMap((rule) => SubscriptionRef.set(effective, rule)),
-              ),
-            ),
-          ),
-        );
-      }
+      const followRules = pipe(
+        settings.changes,
+        Stream.runForEach(() => pipe(resolveLocal, Effect.flatMap(adopt))),
+        Effect.forkScoped,
+        Effect.asVoid,
+      );
+
+      yield* pipe(
+        realm.isTop,
+        Boolean.match({
+          onTrue: () => followRules,
+          onFalse: () => Effect.void,
+        }),
+      );
 
       return Exclusions.of({
         effective,
         effectiveUnsafe: () => SubscriptionRef.getUnsafe(effective),
         resolveLocal,
         match,
-        adopt: (rule) => SubscriptionRef.set(effective, rule),
+        adopt,
         isEnabled: pipe(
           SubscriptionRef.get(effective),
           Effect.map((rule) => rule.enabled),

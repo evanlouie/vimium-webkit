@@ -18,7 +18,19 @@
  *   that has an `unload` handler and then never sends the event.
  */
 
-import { Deferred, Effect, Option, Ref, Schema, type Scope, pipe } from "effect";
+import {
+  Array,
+  Boolean,
+  Deferred,
+  Effect,
+  Option,
+  Predicate,
+  Ref,
+  Schema,
+  type Scope,
+  flow,
+  pipe,
+} from "effect";
 import { Dom } from "~/platform/Dom.ts";
 import { isEditable } from "~/platform/Elements.ts";
 import { Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
@@ -65,9 +77,34 @@ export interface BootSignal {
   readonly drain: Effect.Effect<ReadonlyArray<KeyboardEvent>>;
 }
 
-interface GuardedGlobal {
-  [GUARD]?: true;
-}
+/** The keys that the guard holds while the application starts, oldest first. */
+type HeldKeys = ReadonlyArray<KeyboardEvent>;
+
+const NO_KEYS: HeldKeys = [];
+
+/** The keys that only change what another key means. */
+const MODIFIER_KEYS: ReadonlyArray<string> = ["Shift", "Control", "Alt", "Meta"];
+
+/** Is the marker of an instance on this realm already? */
+const isClaimed: (window: Window) => boolean = flow(
+  Option.liftPredicate(Predicate.hasProperty(GUARD)),
+  Option.exists((scope) => scope[GUARD] === true),
+);
+
+/**
+ * Put the marker on this realm.
+ *
+ * It is not writable, so the page cannot exchange it for one that lies. It is
+ * configurable, so that a test realm can undo it. A page that deletes it gains
+ * nothing: it cannot make the manager inject a second copy.
+ */
+const mark = (window: Window): boolean =>
+  Reflect.defineProperty(window, GUARD, {
+    value: true,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
 
 /**
  * Claim this realm.
@@ -77,20 +114,17 @@ interface GuardedGlobal {
  */
 export const claimRealm: Effect.Effect<boolean, never, Dom> = Effect.gen(function* () {
   const dom = yield* Dom;
-  const scope = dom.window as unknown as GuardedGlobal;
-  if (scope[GUARD] === true) return false;
-  yield* dom.probeOr(() => {
-    Object.defineProperty(dom.window, GUARD, {
-      value: true,
-      writable: false,
-      enumerable: false,
-      // Configurable, so that a test realm can undo it. A page that deletes
-      // it gains nothing: it cannot make the manager inject a second copy.
-      configurable: true,
-    });
-    return true;
-  }, false);
-  return true;
+  return yield* pipe(
+    isClaimed(dom.window),
+    Boolean.match({
+      onTrue: () => Effect.succeed(false),
+      onFalse: () =>
+        pipe(
+          dom.probeOr(() => mark(dom.window), false),
+          Effect.as(true),
+        ),
+    }),
+  );
 });
 
 /**
@@ -100,49 +134,53 @@ export const claimRealm: Effect.Effect<boolean, never, Dom> = Effect.gen(functio
  * window listener sees it. `event.target` then names the host, and the
  * editable test answers "no" for a user who is typing into a search box.
  *
- * `composedPath()[0]` is the true node while the root is open. A closed root
- * gives the host, which is the correct answer there.
+ * The first node of `composedPath()` is the true node while the root is open.
+ * A closed root gives the host, which is the correct answer there.
  */
 const composedSource = (event: Event): EventTarget | null =>
-  event.composedPath()[0] ?? event.target;
+  pipe(
+    event.composedPath(),
+    Array.head,
+    Option.getOrElse(() => event.target),
+  );
 
 /**
- * Is this a key that must start the application?
+ * Did the user make this key, and not the page?
+ *
+ * The check is inline, because the guard imports nothing above the platform. A
+ * page can dispatch a `KeyboardEvent` that names any key, and only the browser
+ * can set `isTrusted`.
+ */
+const madeByUser = (event: KeyboardEvent): boolean => event.isTrusted === true;
+
+/**
+ * Must this key start the application?
  *
  * A page that the user is only typing into must never pay the cost. The
  * editable test is structural, and not a `getComputedStyle` call, because this
  * runs for every keystroke in every frame.
  */
-const isUninteresting = (event: KeyboardEvent, source: EventTarget | null): boolean => {
-  if (event.isComposing || event.keyCode === 229) return true;
-  const key = event.key;
-  if (key === "Shift" || key === "Control" || key === "Alt" || key === "Meta") {
-    return true;
-  }
-  return isEditable(source);
-};
+const startsApplication = (event: KeyboardEvent, source: EventTarget | null): boolean =>
+  !event.isComposing &&
+  event.keyCode !== 229 &&
+  !pipe(MODIFIER_KEYS, Array.contains(event.key)) &&
+  !isEditable(source);
 
 /**
- * Is this a wake message that we must honour?
+ * The wake message, as `platform/Realm.ts` sends it.
  *
  * Only an ancestor may wake us. An ancestor can already create and destroy this
- * frame, so it gains nothing from waking it. Without the test, the page's own
- * script, a sibling frame or an opener could force a full start in every frame
- * on the page with one known string.
+ * frame, so it gains nothing from waking it. Without the test of the sender,
+ * the page's own script, a sibling frame or an opener could force a full start
+ * in every frame on the page with one known string.
  */
-const isWakeMessage = (data: unknown): boolean => {
-  if (typeof data !== "object" || data === null) return false;
-  const message = data as {
-    magic?: unknown;
-    v?: unknown;
-    kind?: unknown;
-  };
-  return (
-    message.magic === WAKE_MESSAGE.magic &&
-    message.v === WAKE_MESSAGE.v &&
-    message.kind === WAKE_MESSAGE.kind
-  );
-};
+const WakeMessage = Schema.Struct({
+  magic: Schema.Literal(WAKE_MESSAGE.magic),
+  v: Schema.Literal(WAKE_MESSAGE.v),
+  kind: Schema.Literal(WAKE_MESSAGE.kind),
+});
+
+const isWakeMessage = Schema.is(WakeMessage);
 
 /**
  * Listen, and give the signal when something says that the user wants us.
@@ -155,78 +193,110 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
     const dom = yield* Dom;
     const realm = yield* Realm;
 
-    const buffer = yield* Ref.make<ReadonlyArray<KeyboardEvent>>([]);
+    const buffer = yield* Ref.make(NO_KEYS);
     const typed = yield* Ref.make(false);
     const started = yield* Deferred.make<ActivationReason>();
 
     const activate = (reason: ActivationReason): Effect.Effect<void> =>
-      Effect.gen(function* () {
-        // The realm may have gone since we started, for example a frame that was
-        // removed while a timer was pending. Nothing that we build there could be
-        // seen or used.
-        if (!realm.isLive) return;
-        yield* Effect.asVoid(Deferred.succeed(started, reason));
-      });
+      pipe(
+        realm.isLive,
+        Boolean.match({
+          // The realm may have gone since we started, for example a frame that
+          // was removed while a timer was pending. Nothing that we build there
+          // could be seen or used.
+          onFalse: () => Effect.void,
+          onTrue: () => pipe(started, Deferred.succeed(reason), Effect.asVoid),
+        }),
+      );
 
+    /**
+     * Hold a key that starts the application, and start it.
+     *
+     * The application replays this exact event once it is ready. Suppress it
+     * now, while the browser dispatch is still synchronous, or the page acts
+     * once and the replayed binding acts again. A command that needs the user
+     * activation also needs this: `preventDefault` after the start is too late.
+     * A key past the limit of the buffer is still suppressed, and not held.
+     */
+    const holdKey = Effect.fnUntraced(function* (event: KeyboardEvent) {
+      yield* pipe(
+        buffer,
+        Ref.update<HeldKeys>(flow(Array.append(event), Array.take(MAX_BUFFERED_KEYS))),
+      );
+      yield* Effect.sync(() => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      });
+      yield* activate("keydown");
+    });
+
+    const onUserKey = Effect.fnUntraced(function* (event: KeyboardEvent) {
+      // The composed path, and not `event.target`. A key inside an open shadow
+      // root names the host at a window listener. The call belongs to the
+      // page, so it goes through the probe. A page that poisons `composedPath`
+      // then costs us the shadow case only, and not the whole guard.
+      const source = yield* dom.probeOr(() => composedSource(event), event.target);
+      yield* pipe(
+        typed,
+        Ref.update((before) => before || isEditable(source)),
+      );
+      const waiting = yield* pipe(started, Deferred.isDone, Effect.map(Boolean.not));
+      yield* pipe(
+        event,
+        Option.liftPredicate((key) => waiting && startsApplication(key, source)),
+        Option.match({ onNone: () => Effect.void, onSome: holdKey }),
+      );
+    });
+
+    /** Start when an ancestor asks us to. */
+    const wakeFrom = (source: MessageEventSource | null): Effect.Effect<void> =>
+      pipe(activate("wake"), Effect.when(realm.isAncestor(source)), Effect.asVoid);
+
+    // A key that the page made, and not the user, must not start the
+    // application. It must also stay out of the buffer, because the
+    // application replays the buffer. The page would otherwise choose the
+    // command that runs.
     yield* dom.listen(
       "window",
       "keydown",
-      (event) =>
-        Effect.gen(function* () {
-          // A key that the page made, and not the user. The check is inline,
-          // because the guard imports nothing above the platform. A page can
-          // dispatch a `KeyboardEvent` that names any key, and only the browser can
-          // set `isTrusted`. Such a key must not start the application. It must
-          // also stay out of the buffer, because the application replays the
-          // buffer. The page would otherwise choose the command that runs.
-          if (event.isTrusted !== true) return;
-          // The composed path, and not `event.target`. A key inside an open shadow
-          // root names the host at a window listener. The call belongs to the
-          // page, so it goes through the probe. A page that poisons `composedPath`
-          // then costs us the shadow case only, and not the whole guard.
-          const source = yield* dom.probeOr(() => composedSource(event), event.target);
-          if (isEditable(source)) yield* Ref.set(typed, true);
-          if (Option.isSome(yield* Deferred.poll(started))) return;
-          if (isUninteresting(event, source)) return;
-
-          yield* Ref.update(buffer, (current) =>
-            current.length >= MAX_BUFFERED_KEYS ? current : [...current, event],
-          );
-
-          // The application replays this exact event once it is ready. Suppress it
-          // now, while the browser dispatch is still synchronous, or the page acts
-          // once and the replayed binding acts again. A command that needs the
-          // user activation also needs this: `preventDefault` after the start is
-          // too late.
-          event.preventDefault();
-          event.stopImmediatePropagation();
-          yield* activate("keydown");
-        }),
+      flow(
+        Option.liftPredicate(madeByUser),
+        Option.match({ onNone: () => Effect.void, onSome: onUserKey }),
+      ),
       { capture: true },
     );
 
-    yield* dom.listen("window", "message", (event) =>
-      Effect.gen(function* () {
-        if (!isWakeMessage(event.data)) return;
-        if (!(yield* realm.isAncestor(event.source))) return;
-        yield* activate("wake");
-      }),
+    yield* dom.listen(
+      "window",
+      "message",
+      flow(
+        Option.liftPredicate((message: MessageEvent) => isWakeMessage(message.data)),
+        Option.match({ onNone: () => Effect.void, onSome: (message) => wakeFrom(message.source) }),
+      ),
     );
 
     // The top frame warms up on its own, so that the first keystroke feels
     // immediate. A child frame waits for a key of its own, or for the wake that
     // a cross-frame function sends.
-    if (realm.isTop) {
-      yield* Effect.forkScoped(
-        pipe(Effect.sleep(`${IDLE_START_MS} millis`), Effect.andThen(activate("idle"))),
-      );
-    }
+    yield* pipe(
+      realm.isTop,
+      Boolean.match({
+        onTrue: () =>
+          pipe(
+            activate("idle"),
+            Effect.delay(`${IDLE_START_MS} millis`),
+            Effect.forkScoped,
+            Effect.asVoid,
+          ),
+        onFalse: () => Effect.void,
+      }),
+    );
 
     const reason = yield* Deferred.await(started);
 
     return {
       reason,
       typedIntoEditable: Ref.get(typed),
-      drain: Ref.getAndSet(buffer, []),
+      drain: pipe(buffer, Ref.getAndSet(NO_KEYS)),
     };
   });
