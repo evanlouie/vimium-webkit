@@ -13,7 +13,7 @@
  * `Result` with a `KeyNotationError`. Nothing here throws.
  */
 
-import { Option, Result, Schema, pipe } from "effect";
+import { Array, Boolean, Match, Option, Record, Result, Schema, Struct, flow, pipe } from "effect";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -31,48 +31,55 @@ export class KeyNotationError extends Schema.TaggedError<KeyNotationError>()("Ke
   detail: Schema.String,
 }) {}
 
+const notationError = (input: string, detail: string): KeyNotationError =>
+  new KeyNotationError({ input, detail });
+
 // ---------------------------------------------------------------------------
 // Named keys
 // ---------------------------------------------------------------------------
 
 /** `event.key` to the name that is used inside `<...>`. */
-const NAMED_KEYS: ReadonlyMap<string, string> = new Map([
-  [" ", "space"],
-  ["ArrowUp", "up"],
-  ["ArrowDown", "down"],
-  ["ArrowLeft", "left"],
-  ["ArrowRight", "right"],
-  ["Enter", "enter"],
-  ["Escape", "esc"],
-  ["Backspace", "backspace"],
-  ["Delete", "delete"],
-  ["Tab", "tab"],
-  ["Home", "home"],
-  ["End", "end"],
-  ["PageUp", "pageup"],
-  ["PageDown", "pagedown"],
-  ["Insert", "insert"],
-]);
+const NAMED_KEYS: Record.ReadonlyRecord<string, string> = {
+  " ": "space",
+  ArrowUp: "up",
+  ArrowDown: "down",
+  ArrowLeft: "left",
+  ArrowRight: "right",
+  Enter: "enter",
+  Escape: "esc",
+  Backspace: "backspace",
+  Delete: "delete",
+  Tab: "tab",
+  Home: "home",
+  End: "end",
+  PageUp: "pageup",
+  PageDown: "pagedown",
+  Insert: "insert",
+};
 
 /** The canonical names, for the check in `parseAngleKey`. */
-const NAMED_VALUES: ReadonlySet<string> = new Set(NAMED_KEYS.values());
+const NAMED_VALUES: ReadonlyArray<string> = Record.values(NAMED_KEYS);
 
 /** Names that are accepted when a mapping is parsed, folded onto the canonical name. */
-const NAME_ALIASES: ReadonlyMap<string, string> = new Map([
-  ["escape", "esc"],
-  ["return", "enter"],
-  ["cr", "enter"],
-  ["bs", "backspace"],
-  ["del", "delete"],
-  ["spc", "space"],
-  ["pgup", "pageup"],
-  ["pgdn", "pagedown"],
-  ["pagedn", "pagedown"],
-  ["ins", "insert"],
-  ["lt", "<"],
-]);
+const NAME_ALIASES: Record.ReadonlyRecord<string, string> = {
+  escape: "esc",
+  return: "enter",
+  cr: "enter",
+  bs: "backspace",
+  del: "delete",
+  spc: "space",
+  pgup: "pageup",
+  pgdn: "pagedown",
+  pagedn: "pagedown",
+  ins: "insert",
+  lt: "<",
+};
 
+/** A function key in notation, `f1` to `f24`. */
 const isFunctionKey = (key: string): boolean => /^f([1-9]|1\d|2[0-4])$/.test(key);
+
+/** A function key as `event.key` names it, `F1` to `F24`. */
+const isFunctionKeyName = (key: string): boolean => /^F([1-9]|1\d|2[0-4])$/.test(key);
 
 // ---------------------------------------------------------------------------
 // Code points
@@ -86,11 +93,12 @@ const isFunctionKey = (key: string): boolean => /^f([1-9]|1\d|2[0-4])$/.test(key
  * units. A walk over the units gives two halves, and neither half can match a
  * key that the user pressed.
  */
-// oxlint-disable-next-line typescript/no-misused-spread
-const codePoints = (value: string): readonly string[] => [...value];
+const codePoints = (value: string): ReadonlyArray<string> => Array.fromIterable(value);
 
 /** How many characters a string holds, counted by code point. */
 const charCount = (value: string): number => codePoints(value).length;
+
+const isSingleChar = (value: string): boolean => charCount(value) === 1;
 
 // ---------------------------------------------------------------------------
 // AppKit private-use-area normalisation (iOS hardware keyboards)
@@ -120,17 +128,30 @@ const APPKIT_PUA: ReadonlyMap<number, string> = new Map([
 ]);
 
 /** U+F704 to U+F726 are F1 to F35. */
-const appKitFunctionKey = (code: number): string | null => {
-  if (code < 0xf704 || code > 0xf726) return null;
-  return `F${code - 0xf704 + 1}`;
-};
+const isAppKitFunctionKey = (code: number): boolean => code >= 0xf704 && code <= 0xf726;
 
-export const normaliseAppKitKey = (key: string): string => {
-  if (charCount(key) !== 1) return key;
-  const code = key.codePointAt(0);
-  if (code === undefined || code < 0xf700 || code > 0xf8ff) return key;
-  return APPKIT_PUA.get(code) ?? appKitFunctionKey(code) ?? key;
-};
+const appKitFunctionKey = flow(
+  Option.liftPredicate(isAppKitFunctionKey),
+  Option.map((code) => `F${code - 0xf704 + 1}`),
+);
+
+/** The `event.key` that an AppKit code point stands for. */
+const appKitKey = (code: number): Option.Option<string> =>
+  pipe(
+    APPKIT_PUA.get(code),
+    Option.fromUndefinedOr,
+    Option.orElse(() => appKitFunctionKey(code)),
+  );
+
+export const normaliseAppKitKey = (key: string): string =>
+  pipe(
+    key,
+    Option.liftPredicate(isSingleChar),
+    Option.flatMap((char) => pipe(char.codePointAt(0), Option.fromUndefinedOr)),
+    Option.filter((code) => code >= 0xf700 && code <= 0xf8ff),
+    Option.flatMap(appKitKey),
+    Option.getOrElse(() => key),
+  );
 
 // ---------------------------------------------------------------------------
 // Event to notation
@@ -220,21 +241,23 @@ const KEY_CODE_CHARACTERS: ReadonlyMap<number, string> = new Map([
  * The character that a physical key gives with no modifier, per `event.code`.
  *
  * The table names the US positions. It is the fallback of the Option rule, for
- * an event that carries no `keyCode`.
+ * an event that carries no `keyCode`. The letters and the digits follow a
+ * pattern, so `codeCharacter` reads them from the code itself.
  */
-const CODE_CHARACTERS: ReadonlyMap<string, string> = new Map([
-  ["Minus", "-"],
-  ["Equal", "="],
-  ["BracketLeft", "["],
-  ["BracketRight", "]"],
-  ["Backslash", "\\"],
-  ["Semicolon", ";"],
-  ["Quote", "'"],
-  ["Backquote", "`"],
-  ["Comma", ","],
-  ["Period", "."],
-  ["Slash", "/"],
-]);
+const CODE_CHARACTERS: Record.ReadonlyRecord<string, string> = {
+  Space: " ",
+  Minus: "-",
+  Equal: "=",
+  BracketLeft: "[",
+  BracketRight: "]",
+  Backslash: "\\",
+  Semicolon: ";",
+  Quote: "'",
+  Backquote: "`",
+  Comma: ",",
+  Period: ".",
+  Slash: "/",
+};
 
 /** Is this one ASCII letter? */
 const isAsciiLetter = (key: string): boolean => key.length === 1 && key >= "a" && key <= "z";
@@ -247,28 +270,49 @@ const isAsciiLetter = (key: string): boolean => key.length === 1 && key >= "a" &
  * key. `event.key` carries the character with Option applied, and `event.code`
  * carries the US position of the key. Neither one is the key of the user.
  *
- * `null` means that the code names no character, as a function key and an
- * arrow key do.
+ * `Option.none()` means that the code names no character, as `0`, a function
+ * key and an arrow key do.
  */
-const keyCodeCharacter = (keyCode: number | undefined): string | null => {
-  if (keyCode === undefined || keyCode === 0) return null;
-  if (keyCode >= 65 && keyCode <= 90) {
-    return String.fromCharCode(keyCode + 32);
-  }
-  if (keyCode >= 48 && keyCode <= 57) return String.fromCharCode(keyCode);
-  return KEY_CODE_CHARACTERS.get(keyCode) ?? null;
-};
+const keyCodeCharacter = (keyCode: number): Option.Option<string> =>
+  pipe(
+    Match.value(keyCode),
+    Match.when(
+      (code) => code >= 65 && code <= 90,
+      (code) => Option.some(String.fromCharCode(code + 32)),
+    ),
+    Match.when(
+      (code) => code >= 48 && code <= 57,
+      (code) => Option.some(String.fromCharCode(code)),
+    ),
+    Match.orElse((code) => pipe(KEY_CODE_CHARACTERS.get(code), Option.fromUndefinedOr)),
+  );
 
 /** The character of the US physical position, from `event.code`. */
-const codeCharacter = (code: string | undefined): string | null => {
-  if (code === undefined) return null;
-  if (code.length === 4 && code.startsWith("Key")) {
-    return code.slice(3).toLowerCase();
-  }
-  if (code.length === 6 && code.startsWith("Digit")) return code.slice(5);
-  if (code === "Space") return " ";
-  return CODE_CHARACTERS.get(code) ?? null;
-};
+const codeCharacter = (code: string): Option.Option<string> =>
+  pipe(
+    Match.value(code),
+    Match.when(
+      (position) => position.length === 4 && position.startsWith("Key"),
+      (position) => Option.some(position.slice(3).toLowerCase()),
+    ),
+    Match.when(
+      (position) => position.length === 6 && position.startsWith("Digit"),
+      (position) => Option.some(position.slice(5)),
+    ),
+    Match.orElse((position) => pipe(CODE_CHARACTERS, Record.get(position))),
+  );
+
+/**
+ * The character that the key makes with no modifier: the layout first, from
+ * `event.keyCode`, and the US position after it, from `event.code`.
+ */
+const unmodifiedCharacter = (event: KeyEventLike): Option.Option<string> =>
+  pipe(
+    event.keyCode,
+    Option.fromUndefinedOr,
+    Option.flatMap(keyCodeCharacter),
+    Option.orElse(() => pipe(event.code, Option.fromUndefinedOr, Option.flatMap(codeCharacter))),
+  );
 
 /**
  * The character of the physical key for an Option chord on an Apple platform.
@@ -306,15 +350,15 @@ const codeCharacter = (code: string | undefined): string | null => {
  *
  * `Option.none()` means that the event is not such a chord.
  */
-const appleAltKey = (event: KeyEventLike, applePlatform: boolean): Option.Option<string> => {
-  if (!applePlatform || !event.altKey || event.ctrlKey) return Option.none();
-  if (event.code === "IntlBackslash") return Option.none();
-
-  const char = keyCodeCharacter(event.keyCode) ?? codeCharacter(event.code);
-  if (char === null) return Option.none();
-  if (event.shiftKey && !isAsciiLetter(char)) return Option.none();
-  return Option.some(char);
-};
+const appleAltKey = (event: KeyEventLike, applePlatform: boolean): Option.Option<string> =>
+  pipe(
+    event,
+    Option.liftPredicate(
+      (chord) => applePlatform && chord.altKey && !chord.ctrlKey && chord.code !== "IntlBackslash",
+    ),
+    Option.flatMap(unmodifiedCharacter),
+    Option.filter((char) => !event.shiftKey || isAsciiLetter(char)),
+  );
 
 /**
  * What the reader of a key must know about the machine and the settings.
@@ -343,7 +387,93 @@ export const PLAIN_KEY_CONTEXT: KeyContext = {
 
 /** Keep the old layout flag for callers that do not read platform data. */
 const readKeyContext = (context: KeyContext | boolean): KeyContext =>
-  typeof context === "boolean" ? { ignoreKeyboardLayout: context, applePlatform: false } : context;
+  pipe(
+    Match.value(context),
+    Match.when(Match.boolean, (ignoreKeyboardLayout) => ({
+      ignoreKeyboardLayout,
+      applePlatform: false,
+    })),
+    Match.orElse((offered) => offered),
+  );
+
+/**
+ * The character of the physical position, when the layout is ignored.
+ *
+ * `Option.none()` means that the position does not decide, and the character
+ * of the layout decides instead.
+ */
+const physicalChar = (event: KeyEventLike, context: KeyContext): Option.Option<string> =>
+  pipe(
+    event.code,
+    Option.fromUndefinedOr,
+    Option.filter((code) => context.ignoreKeyboardLayout && code.length > 0),
+    Option.flatMap((code) =>
+      pipe(
+        Match.value(code),
+        Match.when(
+          (position) => position.startsWith("Key"),
+          (position) => Option.some(position.slice(3).toLowerCase()),
+        ),
+        // A shifted digit is the exception. The binding names the *character*,
+        // so a fold of `Shift+4` back to `"4"` killed four shipped bindings
+        // (`$`, `#`, `*` and `^`) and gave them to the count prefix. This
+        // option is about physical positions, and the position of a shifted
+        // digit is already clear from the character.
+        Match.when(
+          (position) => position.startsWith("Digit") && !event.shiftKey,
+          (position) => Option.some(position.slice(5)),
+        ),
+        Match.when(
+          (position) => position.startsWith("Numpad"),
+          (position) => Option.some(numpadChar(position.slice(6), event.key)),
+        ),
+        Match.orElse(() => Option.none()),
+      ),
+    ),
+  );
+
+/**
+ * The character of a numpad key.
+ *
+ * `NumpadDivide` and its kind are named keys, and not characters. A lowercase
+ * of them gave `"divide"`, which no notation can write.
+ */
+const numpadChar = (suffix: string, key: string): string =>
+  pipe(
+    suffix,
+    Option.liftPredicate((digit) => /^\d$/.test(digit)),
+    Option.getOrElse(() => normaliseAppKitKey(key)),
+  );
+
+/**
+ * The character of the layout.
+ *
+ * An Option chord on macOS reports a glyph. The character of the layout
+ * decides there, so `map <a-f> ...` still names the F key of the user.
+ */
+const layoutChar = (event: KeyEventLike, context: KeyContext): Option.Option<string> =>
+  pipe(
+    appleAltKey(event, context.applePlatform),
+    Option.getOrElse(() => event.key),
+    normaliseAppKitKey,
+    Option.liftPredicate((key) => key.length > 0 && key !== "Unidentified"),
+    Option.map(namedChar),
+  );
+
+/** The short name of a named key or a function key. Any other key is its character. */
+const namedChar = (key: string): string =>
+  pipe(
+    NAMED_KEYS,
+    Record.get(key),
+    Option.orElse(() =>
+      pipe(
+        key,
+        Option.liftPredicate(isFunctionKeyName),
+        Option.map((name) => name.toLowerCase()),
+      ),
+    ),
+    Option.getOrElse(() => key),
+  );
 
 /**
  * Give the base character. The active keyboard layout can be ignored.
@@ -359,44 +489,18 @@ const readKeyContext = (context: KeyContext | boolean): KeyContext =>
 export const keyChar = (
   event: KeyEventLike,
   offeredContext: KeyContext | boolean,
-): Option.Option<string> => {
-  if (isModifierKey(event)) return Option.none();
-  const context = readKeyContext(offeredContext);
-
-  if (context.ignoreKeyboardLayout && event.code) {
-    const code = event.code;
-    if (code.startsWith("Key")) return Option.some(code.slice(3).toLowerCase());
-    // A shifted digit is the exception. The binding names the *character*, so
-    // a fold of `Shift+4` back to `"4"` killed four shipped bindings (`$`,
-    // `#`, `*` and `^`) and gave them to the count prefix. This option is
-    // about physical positions, and the position of a shifted digit is already
-    // clear from the character.
-    if (code.startsWith("Digit") && !event.shiftKey) {
-      return Option.some(code.slice(5));
-    }
-    if (code.startsWith("Numpad")) {
-      const suffix = code.slice(6);
-      // `NumpadDivide` and its kind are named keys, and not characters. A
-      // lowercase of them gave `"divide"`, which no notation can write.
-      return Option.some(/^\d$/.test(suffix) ? suffix : normaliseAppKitKey(event.key));
-    }
-  }
-
-  // An Option chord on macOS reports a glyph. The character of the layout
-  // decides there, so `map <a-f> ...` still names the F key of the user.
-  const raw = pipe(
-    appleAltKey(event, context.applePlatform),
-    Option.getOrElse(() => event.key),
+): Option.Option<string> =>
+  pipe(
+    event,
+    Option.liftPredicate((press) => !isModifierKey(press)),
+    Option.flatMap((press) => {
+      const context = readKeyContext(offeredContext);
+      return pipe(
+        physicalChar(press, context),
+        Option.orElse(() => layoutChar(press, context)),
+      );
+    }),
   );
-
-  const key = normaliseAppKitKey(raw);
-  if (key.length === 0 || key === "Unidentified") return Option.none();
-
-  const named = NAMED_KEYS.get(key);
-  if (named !== undefined) return Option.some(named);
-  if (/^F([1-9]|1\d|2[0-4])$/.test(key)) return Option.some(key.toLowerCase());
-  return Option.some(key);
-};
 
 /**
  * The canonical modifier order.
@@ -406,8 +510,73 @@ export const keyChar = (
  */
 type ModifierLetter = "c" | "a" | "m" | "s";
 
+/** The modifiers that a key holds. */
+interface Modifiers {
+  readonly ctrl: boolean;
+  readonly alt: boolean;
+  readonly meta: boolean;
+  readonly shift: boolean;
+}
+
+/** The letters of the held modifiers, in the canonical order. */
+const modifierLetters = ({ ctrl, alt, meta, shift }: Modifiers): ReadonlyArray<ModifierLetter> =>
+  pipe(
+    [
+      [ctrl, "c"],
+      [alt, "a"],
+      [meta, "m"],
+      [shift, "s"],
+    ] as const,
+    Array.filter(([held]) => held),
+    Array.map(([, letter]) => letter),
+  );
+
 const isNamedChar = (char: string): boolean =>
-  charCount(char) > 1 || NAMED_KEYS.has(char) || isFunctionKey(char);
+  charCount(char) > 1 || pipe(NAMED_KEYS, Record.has(char)) || isFunctionKey(char);
+
+/**
+ * Write one key.
+ *
+ * A character with no modifier stands alone. A named key and every chord go
+ * inside `<...>`. `named` belongs to the character before any shift fold.
+ */
+const writeKey =
+  (char: string, named: boolean) =>
+  (modifiers: Modifiers): string => {
+    const letters = modifierLetters(modifiers);
+    return pipe(
+      Array.isReadonlyArrayEmpty(letters) && !named,
+      Boolean.match({
+        onFalse: () => pipe(letters, Array.append(char), Array.join("-"), (body) => `<${body}>`),
+        onTrue: () => char,
+      }),
+    );
+  };
+
+/**
+ * Write the key of an event.
+ *
+ * Shift is folded into a character that is not a named key. Under
+ * `ignoreKeyboardLayout`, and for an Option chord on an Apple platform, the
+ * character does not carry the shift, so the fold applies it here.
+ */
+const eventNotation = (event: KeyEventLike, char: string): string => {
+  const named = isNamedChar(char);
+  const held: Modifiers = {
+    ctrl: event.ctrlKey,
+    alt: event.altKey,
+    meta: event.metaKey,
+    shift: event.shiftKey,
+  };
+  return pipe(
+    event.shiftKey && !named,
+    Boolean.match({
+      onFalse: () => pipe(held, writeKey(char, named)),
+      onTrue: () =>
+        pipe(held, Struct.assign({ shift: false }), writeKey(char.toUpperCase(), named)),
+    }),
+  );
+};
 
 /**
  * Write an event as Vimium key notation.
@@ -422,149 +591,119 @@ const isNamedChar = (char: string): boolean =>
 export const keyNotation = (
   event: KeyEventLike,
   context: KeyContext | boolean = PLAIN_KEY_CONTEXT,
-): Option.Option<string> => {
-  const base = keyChar(event, context);
-  if (Option.isNone(base)) return Option.none();
-  let char = base.value;
-
-  const named = isNamedChar(char);
-  const modifiers: ModifierLetter[] = [];
-
-  if (event.ctrlKey) modifiers.push("c");
-  if (event.altKey) modifiers.push("a");
-  if (event.metaKey) modifiers.push("m");
-  if (event.shiftKey && named) modifiers.push("s");
-
-  if (!named && charCount(char) === 1 && event.shiftKey) {
-    // Under `ignoreKeyboardLayout`, and for an Option chord on an Apple
-    // platform, the character does not carry the shift. Apply it here.
-    char = char.toUpperCase();
-  }
-
-  if (modifiers.length === 0 && !named) return Option.some(char);
-  return Option.some(`<${[...modifiers, char].join("-")}>`);
-};
+): Option.Option<string> =>
+  pipe(
+    keyChar(event, context),
+    Option.map((char) => eventNotation(event, char)),
+  );
 
 // ---------------------------------------------------------------------------
 // Notation parsing
 // ---------------------------------------------------------------------------
 
-export interface ParsedKey {
+export interface ParsedKey extends Modifiers {
   readonly notation: string;
   readonly char: string;
-  readonly ctrl: boolean;
-  readonly alt: boolean;
-  readonly meta: boolean;
-  readonly shift: boolean;
 }
 
-const renderKey = (key: Omit<ParsedKey, "notation">): string => {
+/** A parsed key before it has a notation. */
+type Chord = Omit<ParsedKey, "notation">;
+
+const renderKey = (key: Chord): string => {
   const named = isNamedChar(key.char);
-  const upper = key.char.toUpperCase();
-  // A fold of shift into the character works only where the character *has* an
-  // uppercase form. On a digit or on a punctuation mark `toUpperCase()` is the
-  // identity, so `<c-s-1>` became `<c-1>` without a message. That binding is
-  // dead, and it collides with a real `<c-1>` binding. Keep the modifier.
-  const foldable = !named && key.shift && upper !== key.char;
-
-  const modifiers: ModifierLetter[] = [];
-  if (key.ctrl) modifiers.push("c");
-  if (key.alt) modifiers.push("a");
-  if (key.meta) modifiers.push("m");
-  if (key.shift && !foldable) modifiers.push("s");
-
-  const char = foldable ? upper : key.char;
-  if (modifiers.length === 0 && !named) return char;
-  return `<${[...modifiers, char].join("-")}>`;
+  return pipe(
+    key.char.toUpperCase(),
+    // A fold of shift into the character works only where the character
+    // *has* an uppercase form. On a digit or on a punctuation mark
+    // `toUpperCase()` is the identity, so `<c-s-1>` became `<c-1>` without a
+    // message. That binding is dead, and it collides with a real `<c-1>`
+    // binding. Keep the modifier.
+    Option.liftPredicate((upper) => key.shift && !named && upper !== key.char),
+    Option.match({
+      onNone: () => pipe(key, writeKey(key.char, named)),
+      onSome: (upper) => pipe(key, Struct.assign({ shift: false }), writeKey(upper, named)),
+    }),
+  );
 };
+
+/** Every name that a modifier goes by, and the modifier that it names. */
+const MODIFIER_NAMES: Record.ReadonlyRecord<string, keyof Modifiers> = {
+  c: "ctrl",
+  ctrl: "ctrl",
+  control: "ctrl",
+  a: "alt",
+  alt: "alt",
+  opt: "alt",
+  option: "alt",
+  m: "meta",
+  meta: "meta",
+  cmd: "meta",
+  command: "meta",
+  d: "meta",
+  s: "shift",
+  shift: "shift",
+};
+
+/** A `-` between two segments. The last segment can be `-` itself, as in `<c-->`. */
+const SEGMENT_SEPARATOR = /-(?!$)/;
+
+const modifierOf =
+  (original: string) =>
+  (part: string): Result.Result<keyof Modifiers, KeyNotationError> =>
+    pipe(
+      MODIFIER_NAMES,
+      Record.get(part.toLowerCase()),
+      Result.fromOption(() => notationError(original, `unknown modifier "${part}" in ${original}`)),
+    );
+
+/** The canonical name of the key segment. A single character stays itself. */
+const keyName = (segment: string): string =>
+  pipe(
+    segment,
+    Option.liftPredicate(isSingleChar),
+    Option.orElse(() => pipe(NAME_ALIASES, Record.get(segment.toLowerCase()))),
+    Option.getOrElse(() => segment.toLowerCase()),
+  );
+
+/** Can a key of this name ever arrive? */
+const isKnownChar = (char: string): boolean =>
+  charCount(char) <= 1 || pipe(NAMED_VALUES, Array.contains(char)) || isFunctionKey(char);
+
+const readChord = (
+  modifierNames: ReadonlyArray<string>,
+  segment: string,
+  original: string,
+): Result.Result<ParsedKey, KeyNotationError> =>
+  Result.gen(function* () {
+    const named = yield* pipe(modifierNames, Array.map(modifierOf(original)), Result.all);
+    const char = yield* pipe(
+      keyName(segment),
+      Result.liftPredicate(isKnownChar, () =>
+        notationError(original, `unknown key name "${segment}" in ${original}`),
+      ),
+    );
+    const holds = (modifier: keyof Modifiers): boolean => pipe(named, Array.contains(modifier));
+    const chord: Chord = {
+      char,
+      ctrl: holds("ctrl"),
+      alt: holds("alt"),
+      meta: holds("meta"),
+      shift: holds("shift"),
+    };
+    return pipe(chord, Struct.assign({ notation: renderKey(chord) }));
+  });
 
 const parseAngleKey = (
   body: string,
   original: string,
-): Result.Result<ParsedKey, KeyNotationError> => {
-  // Split on `-`. The last segment can be `-` itself, as in `<c-->`.
-  const parts: string[] = [];
-  let index = 0;
-  while (index < body.length) {
-    const dash = body.indexOf("-", index);
-    if (dash === -1 || dash === body.length - 1) {
-      parts.push(body.slice(index));
-      break;
-    }
-    parts.push(body.slice(index, dash));
-    index = dash + 1;
-  }
-
-  const last = parts.pop();
-  if (last === undefined || last.length === 0) {
-    return Result.fail(
-      new KeyNotationError({
-        input: original,
-        detail: `${original} has no key`,
-      }),
-    );
-  }
-
-  let ctrl = false;
-  let alt = false;
-  let meta = false;
-  let shift = false;
-
-  for (const part of parts) {
-    switch (part.toLowerCase()) {
-      case "c":
-      case "ctrl":
-      case "control":
-        ctrl = true;
-        break;
-      case "a":
-      case "alt":
-      case "opt":
-      case "option":
-        alt = true;
-        break;
-      case "m":
-      case "meta":
-      case "cmd":
-      case "command":
-      case "d":
-        meta = true;
-        break;
-      case "s":
-      case "shift":
-        shift = true;
-        break;
-      default:
-        return Result.fail(
-          new KeyNotationError({
-            input: original,
-            detail: `unknown modifier "${part}" in ${original}`,
-          }),
-        );
-    }
-  }
-
-  const lowered = last.toLowerCase();
-  const char = charCount(last) === 1 ? last : (NAME_ALIASES.get(lowered) ?? lowered);
-
-  if (charCount(char) > 1 && !NAMED_VALUES.has(char) && !isFunctionKey(char)) {
-    return Result.fail(
-      new KeyNotationError({
-        input: original,
-        detail: `unknown key name "${last}" in ${original}`,
-      }),
-    );
-  }
-
-  return Result.succeed({
-    notation: renderKey({ char, ctrl, alt, meta, shift }),
-    char,
-    ctrl,
-    alt,
-    meta,
-    shift,
-  });
-};
+): Result.Result<ParsedKey, KeyNotationError> =>
+  pipe(
+    body.split(SEGMENT_SEPARATOR),
+    Array.matchRight({
+      onEmpty: () => Result.fail(notationError(original, `${original} has no key`)),
+      onNonEmpty: (modifierNames, segment) => readChord(modifierNames, segment, original),
+    }),
+  );
 
 const literalKey = (char: string): ParsedKey => ({
   notation: char,
@@ -576,6 +715,47 @@ const literalKey = (char: string): ParsedKey => ({
 });
 
 /**
+ * One key as the user wrote it: a `<...>` group, an unterminated `<...`, or
+ * one character.
+ *
+ * `<` is special only when it can open a named key. `<<` (the upstream binding
+ * for `moveTabLeft`) and a final `<` are literal characters, as in Vimium's own
+ * parser. An unterminated `<c-a` is still an error, because a silent change
+ * into four separate keys is much worse than a message that names the line to
+ * correct. `<lt>` stays available for a literal with no doubt.
+ *
+ * The match is over code points, and not over UTF-16 units. A walk over the
+ * units cuts an emoji into two halves, and each half becomes a key of its own.
+ * Such a key can never match a press.
+ */
+const KEY_TOKEN = /<[^<>][^>]*>|<[^<>][^>]*$|./gsu;
+
+const readToken =
+  (input: string) =>
+  (token: RegExpExecArray): Result.Result<ParsedKey, KeyNotationError> => {
+    const [text] = token;
+    return pipe(
+      Match.value(text),
+      Match.when(isSingleChar, (char) => Result.succeed(literalKey(char))),
+      // A `<x>` with no modifier is a named key, for example `<esc>`. The same
+      // parser reads it, because a split on `-` gives one segment.
+      Match.when(
+        (group) => group.endsWith(">"),
+        (group) => parseAngleKey(group.slice(1, -1), group),
+      ),
+      // A position in a message is a character position, as the match is.
+      Match.orElse(() =>
+        Result.fail(
+          notationError(
+            input,
+            `unterminated "<" at position ${charCount(input.slice(0, token.index))}`,
+          ),
+        ),
+      ),
+    );
+  };
+
+/**
  * Split the key sequence of a mapping into single keys.
  *
  * `"<c-a>gg"` becomes `["<c-a>", "g", "g"]`. Bad input gives a
@@ -584,78 +764,25 @@ const literalKey = (char: string): ParsedKey => ({
  */
 export const parseKeySequence = (
   input: string,
-): Result.Result<readonly ParsedKey[], KeyNotationError> => {
-  const keys: ParsedKey[] = [];
-  // The walk is over code points, and not over UTF-16 units. A walk over the
-  // units cuts an emoji into two halves, and each half becomes a key of its
-  // own. Such a key can never match a press. A position in a message is
-  // therefore a character position as well.
-  const chars = codePoints(input);
-  let index = 0;
-
-  while (index < chars.length) {
-    const char = chars[index];
-    if (char === undefined) break;
-
-    if (char === "<") {
-      // `<` is special only when it can open a named key. `<<` (the upstream
-      // binding for `moveTabLeft`) and a final `<` are literal characters, as
-      // in Vimium's own parser. An unterminated `<c-a` is still an error,
-      // because a silent change into four separate keys is much worse than a
-      // message that names the line to correct. `<lt>` stays available for a
-      // literal with no doubt.
-      const following = chars[index + 1];
-      if (following === "<" || following === ">" || following === undefined) {
-        keys.push(literalKey(char));
-        index += 1;
-        continue;
-      }
-
-      const close = chars.indexOf(">", index + 1);
-      if (close === -1) {
-        return Result.fail(
-          new KeyNotationError({
-            input,
-            detail: `unterminated "<" at position ${index}`,
-          }),
-        );
-      }
-      const body = chars.slice(index + 1, close).join("");
-      if (body.length === 0) {
-        return Result.fail(
-          new KeyNotationError({
-            input,
-            detail: `empty "<>" at position ${index}`,
-          }),
-        );
-      }
-      // A `<x>` with no modifier is a named key, for example `<esc>`. The same
-      // parser reads it, because a split on `-` gives one segment.
-      const parsed = parseAngleKey(body, chars.slice(index, close + 1).join(""));
-      if (Result.isFailure(parsed)) return Result.fail(parsed.failure);
-      keys.push(parsed.success);
-      index = close + 1;
-      continue;
-    }
-
-    keys.push(literalKey(char));
-    index += 1;
-  }
-
-  if (keys.length === 0) {
-    return Result.fail(new KeyNotationError({ input, detail: "empty key sequence" }));
-  }
-  return Result.succeed(keys);
-};
+): Result.Result<Array.NonEmptyReadonlyArray<ParsedKey>, KeyNotationError> =>
+  pipe(
+    input.matchAll(KEY_TOKEN),
+    Array.fromIterable,
+    Array.map(readToken(input)),
+    Result.all,
+    Result.flatMap(
+      Array.match({
+        onEmpty: () => Result.fail(notationError(input, "empty key sequence")),
+        onNonEmpty: (keys) => Result.succeed(keys),
+      }),
+    ),
+  );
 
 /** The canonical notation of each key in a sequence. */
-export const normaliseKeySequence = (
-  input: string,
-): Result.Result<readonly string[], KeyNotationError> =>
-  pipe(
-    parseKeySequence(input),
-    Result.map((keys) => keys.map((key) => key.notation)),
-  );
+export const normaliseKeySequence = flow(
+  parseKeySequence,
+  Result.map(Array.map((key) => key.notation)),
+);
 
 // ---------------------------------------------------------------------------
 // Safari reserved shortcuts
@@ -684,10 +811,6 @@ export const SAFARI_RESERVED: readonly ReservedShortcut[] = [
   { notation: "<c-s-tab>", reason: "Safari: Previous Tab" },
 ];
 
-const RESERVED_BY_NOTATION: ReadonlyMap<string, string> = new Map(
-  SAFARI_RESERVED.map((entry) => [entry.notation, entry.reason]),
-);
-
 /**
  * Why this combination never reaches the page on Safari.
  *
@@ -697,7 +820,14 @@ const RESERVED_BY_NOTATION: ReadonlyMap<string, string> = new Map(
  * wrong verdict for a shifted combination whose unshifted twin is reserved.
  */
 export const reservedReason = (notation: string): Option.Option<string> =>
-  Option.fromNullishOr(RESERVED_BY_NOTATION.get(notation) ?? null);
+  pipe(
+    SAFARI_RESERVED,
+    Array.findFirst((entry) => entry.notation === notation),
+    Option.map((entry) => entry.reason),
+  );
+
+/** A notation with an explicit shift on one character. */
+const SHIFTED_CHORD = /^<(?:[cam]-)*s-(.)>$/u;
 
 /**
  * Does this notation name an explicit shift on a character that shift changes?
@@ -707,12 +837,13 @@ export const reservedReason = (notation: string): Option.Option<string> =>
  * is. The result depends on the layout, which is why this is a warning and not
  * an error. On some layouts the shifted digit is the digit.
  */
-export const shiftedNonLetter = (notation: string): boolean => {
-  const match = /^<(?:[cam]-)*s-(.)>$/u.exec(notation);
-  const char = match?.[1];
-  if (char === undefined) return false;
-  return char.toUpperCase() === char.toLowerCase();
-};
+export const shiftedNonLetter = (notation: string): boolean =>
+  pipe(
+    SHIFTED_CHORD.exec(notation),
+    Option.fromNullishOr,
+    Option.flatMap(Array.get(1)),
+    Option.exists((char) => char.toUpperCase() === char.toLowerCase()),
+  );
 
 /**
  * Combinations that Safari *does* send on macOS, but which
@@ -742,10 +873,10 @@ export const MAX_COUNT = 9999;
  * `0` is a digit only after a count starts. Before that it is a key that the
  * user can bind. This is what makes the upstream `map 0 scrollToLeft` work.
  */
-export const isCountDigit = (notation: string, started: boolean): boolean => {
-  if (charCount(notation) !== 1) return false;
-  return started ? notation >= "0" && notation <= "9" : notation >= "1" && notation <= "9";
-};
+export const isCountDigit = (notation: string, started: boolean): boolean =>
+  isSingleChar(notation) && notation >= lowestCountDigit(started) && notation <= "9";
+
+const lowestCountDigit = Boolean.match({ onFalse: () => "1", onTrue: () => "0" });
 
 /** Add one digit to a count. The result stops at `MAX_COUNT`. */
 export const appendCountDigit = (current: number, notation: string): number =>
