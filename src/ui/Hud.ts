@@ -30,11 +30,14 @@
  */
 
 import {
+  Boolean,
   Context,
+  Data,
   Deferred,
   Effect,
   FiberHandle,
   Layer,
+  Match,
   Option,
   Ref,
   type Scope,
@@ -45,7 +48,7 @@ import {
 } from "effect";
 import { Keyboard } from "~/core/Keyboard.ts";
 import { Modes } from "~/core/Modes.ts";
-import { Report } from "~/core/Report.ts";
+import { Report, type UserMessage } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
@@ -88,6 +91,23 @@ export interface HudLine {
   readonly tone: HudTone;
 }
 
+/** The text of the two live regions. */
+interface RegionText {
+  readonly polite: string;
+  readonly urgent: string;
+}
+
+/** Both regions say nothing. */
+const SILENT: RegionText = { polite: "", urgent: "" };
+
+/** The region that fits the tone of one line gets the text. */
+const regionsFor = pipe(
+  Match.type<HudLine>(),
+  Match.when({ tone: "error" }, ({ text }): RegionText => ({ polite: "", urgent: text })),
+  Match.when({ tone: "info" }, ({ text }): RegionText => ({ polite: text, urgent: "" })),
+  Match.exhaustive,
+);
+
 /**
  * What each of the two live regions says.
  *
@@ -100,14 +120,10 @@ export interface HudLine {
  * hold two lines on screen, and a reader would say the older one again at the
  * next change.
  */
-export const regionText = (
-  line: Option.Option<HudLine>,
-): { readonly polite: string; readonly urgent: string } => {
-  if (Option.isNone(line)) return { polite: "", urgent: "" };
-  return line.value.tone === "error"
-    ? { polite: "", urgent: line.value.text }
-    : { polite: line.value.text, urgent: "" };
-};
+export const regionText: (line: Option.Option<HudLine>) => RegionText = Option.match({
+  onNone: () => SILENT,
+  onSome: regionsFor,
+});
 
 /** The live prompt, as the rest of the service sees it. */
 interface LivePrompt {
@@ -135,6 +151,15 @@ const EMPTY_STATE: HudState = {
   prompt: Option.none(),
 };
 
+/** The half-typed keys, or else the indicator of the mode. The keys have priority. */
+const keysOrMode = (state: HudState): Option.Option<string> =>
+  pipe(
+    state.pending,
+    Option.orElse(() => state.indicator),
+  );
+
+const infoLine = (text: string): HudLine => ({ text, tone: "info" });
+
 /**
  * What the one line of the HUD says.
  *
@@ -143,32 +168,110 @@ const EMPTY_STATE: HudState = {
  * so an indicator that outranked the message would erase it before the user
  * could read it.
  */
-export const visibleLine = (state: HudState): Option.Option<HudLine> => {
-  if (Option.isSome(state.transient)) return state.transient;
-  if (Option.isSome(state.pending)) {
-    return Option.some({ text: state.pending.value, tone: "info" });
-  }
-  if (Option.isSome(state.indicator)) {
-    return Option.some({ text: state.indicator.value, tone: "info" });
-  }
-  return Option.none();
-};
+export const visibleLine = (state: HudState): Option.Option<HudLine> =>
+  pipe(
+    state.transient,
+    Option.orElse(() => pipe(keysOrMode(state), Option.map(infoLine))),
+  );
 
 /** What the status span beside an open prompt says. */
-export const statusText = (state: HudState): string => {
-  if (Option.isSome(state.pending)) return state.pending.value;
-  return pipe(
-    state.indicator,
+export const statusText = (state: HudState): string =>
+  pipe(
+    keysOrMode(state),
     Option.getOrElse(() => ""),
   );
-};
 
-const asKeyboardEvent = (event: Event): Option.Option<KeyboardEvent> =>
-  event instanceof KeyboardEvent ? Option.some(event) : Option.none();
+/** The message is over. */
+const withoutMessage: (current: HudState) => HudState = Struct.assign({
+  transient: Option.none(),
+});
+
+/**
+ * The prompt `id` is over.
+ *
+ * A newer prompt may already own the line, and then nothing changes: the old
+ * prompt must not take the new one with it.
+ */
+const withoutPrompt =
+  (id: number) =>
+  (current: HudState): HudState =>
+    pipe(
+      current.prompt,
+      Option.filter((live) => live.id === id),
+      Option.match({
+        onNone: () => current,
+        onSome: () =>
+          pipe(current, Struct.assign({ transient: Option.none(), prompt: Option.none() })),
+      }),
+    );
+
+/** What the HUD element shows for one state. */
+type HudFrame = Data.TaggedEnum<{
+  /**
+   * A prompt is open, so the HUD stays on screen.
+   *
+   * The message slot sits beside the field, so an error that arrives during a
+   * search stays on screen instead of vanishing.
+   */
+  Prompting: {
+    readonly message: Option.Option<HudLine>;
+    readonly status: HTMLElement;
+    readonly statusText: string;
+  };
+  /** One line, and no prompt. */
+  Showing: { readonly line: HudLine };
+  /** Nothing to say. */
+  Hidden: Record<never, never>;
+}>;
+const HudFrame = Data.taggedEnum<HudFrame>();
+
+/** What the HUD shows for this state. */
+const hudFrame = (state: HudState): HudFrame =>
+  pipe(
+    state.prompt,
+    Option.match({
+      onSome: ({ status }) =>
+        HudFrame.Prompting({ message: state.transient, status, statusText: statusText(state) }),
+      onNone: () =>
+        pipe(
+          visibleLine(state),
+          Option.match({
+            onNone: () => HudFrame.Hidden(),
+            onSome: (line) => HudFrame.Showing({ line }),
+          }),
+        ),
+    }),
+  );
+
+/** What a key press does to an open prompt. */
+type PromptKey = Data.TaggedEnum<{
+  /** The caller took the key, so the prompt only stops its default action. */
+  Taken: Record<never, never>;
+  /** Enter ends the prompt with the text. */
+  Submit: Record<never, never>;
+  /** Escape ends the prompt with "the user cancelled". */
+  Cancel: Record<never, never>;
+  /** Any other key belongs to the field. */
+  Pass: Record<never, never>;
+}>;
+const PromptKey = Data.taggedEnum<PromptKey>();
+
+const asKeyboardEvent: (event: Event) => Option.Option<KeyboardEvent> = Option.liftPredicate(
+  (event: Event): event is KeyboardEvent => event instanceof KeyboardEvent,
+);
 
 /** Escape, and the `<c-[>` synonym that Vim and upstream Vimium accept. */
 const cancelsPrompt = (event: KeyboardEvent): boolean =>
   event.key === "Escape" || (event.ctrlKey && event.key === "[");
+
+/** What a key that the caller did not take does to the prompt. */
+const promptKey = (event: KeyboardEvent): PromptKey =>
+  pipe(
+    Match.value(event),
+    Match.when({ key: "Enter" }, () => PromptKey.Submit()),
+    Match.when(cancelsPrompt, () => PromptKey.Cancel()),
+    Match.orElse(() => PromptKey.Pass()),
+  );
 
 export class Hud extends Context.Service<
   Hud,
@@ -256,6 +359,29 @@ export class Hud extends Context.Service<
           regions.urgent.textContent = text.urgent;
         };
 
+        /** Draw one frame. A hidden HUD keeps its tone while it fades out. */
+        const paint = HudFrame.$match({
+          Prompting: ({ message, status, statusText }) => {
+            writeLine(message);
+            element.dataset["tone"] = pipe(
+              message,
+              Option.map((line) => line.tone),
+              Option.getOrElse(() => "info"),
+            );
+            element.dataset["visible"] = "true";
+            status.textContent = statusText;
+          },
+          Showing: ({ line }) => {
+            writeLine(Option.some(line));
+            element.dataset["tone"] = line.tone;
+            element.dataset["visible"] = "true";
+          },
+          Hidden: () => {
+            writeLine(Option.none());
+            element.dataset["visible"] = "false";
+          },
+        });
+
         const state = yield* Ref.make<HudState>(EMPTY_STATE);
         const nextPromptId = yield* Ref.make(0);
         const timer = yield* FiberHandle.make<void, never>();
@@ -266,56 +392,37 @@ export class Hud extends Context.Service<
           // document element, and a hostile page removes what it can name. A
           // message that nobody sees is worse than no message.
           yield* ui.ensureAttached;
-          yield* Effect.sync(() => {
-            if (Option.isSome(current.prompt)) {
-              // The message slot sits beside the field, so an error that
-              // arrives during a search stays on screen instead of vanishing.
-              const line = current.transient;
-              writeLine(line);
-              element.dataset["tone"] = Option.isSome(line) ? line.value.tone : "info";
-              element.dataset["visible"] = "true";
-              current.prompt.value.status.textContent = statusText(current);
-              return;
-            }
-            const line = visibleLine(current);
-            writeLine(line);
-            if (Option.isNone(line)) {
-              element.dataset["visible"] = "false";
-              return;
-            }
-            element.dataset["tone"] = line.value.tone;
-            element.dataset["visible"] = "true";
-          });
+          yield* Effect.sync(() => paint(hudFrame(current)));
         });
 
         const patch = (change: (current: HudState) => HudState): Effect.Effect<void> =>
-          pipe(Ref.update(state, change), Effect.andThen(render));
+          pipe(state, Ref.update(change), Effect.andThen(render));
 
         /**
          * Take the message away after `durationMs`.
          *
          * A fiber that sleeps, and not a timeout. The handle holds one fiber, so
          * a new message interrupts the one before it, and the layer scope
-         * interrupts the last one.
+         * interrupts the last one. A duration of zero or less keeps the message
+         * until the next one replaces it.
          */
         const arm = Effect.fn("Hud.arm")(function* (durationMs: number) {
-          if (durationMs <= 0) {
-            yield* FiberHandle.clear(timer);
-            return;
-          }
-          yield* FiberHandle.run(
-            timer,
-            pipe(
-              Effect.sleep(durationMs),
-              Effect.andThen(
-                patch((current) => pipe(current, Struct.assign({ transient: Option.none() }))),
-              ),
-            ),
+          yield* pipe(
+            durationMs > 0,
+            Boolean.match({
+              onFalse: () => FiberHandle.clear(timer),
+              onTrue: () =>
+                pipe(
+                  Effect.sleep(durationMs),
+                  Effect.andThen(patch(withoutMessage)),
+                  FiberHandle.run(timer),
+                ),
+            }),
           );
         });
 
         const draw = Effect.fn("Hud.draw")(function* (line: HudLine, durationMs: number) {
-          yield* patch((current) => pipe(current, Struct.assign({ transient: Option.some(line) })));
+          yield* patch(Struct.assign({ transient: Option.some(line) }));
           yield* arm(durationMs);
         });
 
@@ -326,8 +433,13 @@ export class Hud extends Context.Service<
           text: string,
           durationMs: number = DEFAULT_HUD_DURATION_MS,
         ) {
-          if (settings.currentUnsafe().hideHud) return;
-          yield* draw({ text, tone: "info" }, durationMs);
+          yield* pipe(
+            settings.currentUnsafe().hideHud,
+            Boolean.match({
+              onFalse: () => draw(infoLine(text), durationMs),
+              onTrue: () => Effect.void,
+            }),
+          );
         });
 
         // An error ignores `hideHud`. A refused capability that says nothing is
@@ -335,51 +447,56 @@ export class Hud extends Context.Service<
         const error = (text: string): Effect.Effect<void> =>
           draw({ text, tone: "error" }, ERROR_HUD_DURATION_MS);
 
-        const hide = Effect.gen(function* () {
-          const current = yield* Ref.get(state);
-          // A prompt owns the line. Hiding it would leave a modal that has the
-          // keyboard and no place on screen.
-          if (Option.isSome(current.prompt)) return;
-          yield* FiberHandle.clear(timer);
-          yield* patch((one) => pipe(one, Struct.assign({ transient: Option.none() })));
-        });
+        const clearMessage = pipe(FiberHandle.clear(timer), Effect.andThen(patch(withoutMessage)));
+
+        const hide = pipe(
+          Ref.get(state),
+          Effect.flatMap(({ prompt }) =>
+            pipe(
+              prompt,
+              Option.match({
+                // A prompt owns the line. Hiding it would leave a modal that has
+                // the keyboard and no place on screen.
+                onSome: () => Effect.void,
+                onNone: () => clearMessage,
+              }),
+            ),
+          ),
+        );
 
         // ---------------------------------------------------------------
         // Derived state
         // ---------------------------------------------------------------
 
-        yield* Effect.forkScoped(
-          pipe(
-            SubscriptionRef.changes(modes.indicator),
-            Stream.runForEach((value) =>
-              patch((current) =>
-                pipe(current, Struct.assign({ indicator: Option.fromNullishOr(value) })),
-              ),
-            ),
+        yield* pipe(
+          modes.indicator,
+          SubscriptionRef.changes,
+          Stream.runForEach((value) =>
+            patch(Struct.assign({ indicator: Option.fromNullishOr(value) })),
           ),
+          Effect.forkScoped,
         );
 
-        yield* Effect.forkScoped(
-          pipe(
-            SubscriptionRef.changes(keyboard.pending),
-            Stream.runForEach((value) =>
-              patch((current) =>
-                pipe(current, Struct.assign({ pending: Option.fromNullishOr(value) })),
-              ),
-            ),
+        yield* pipe(
+          keyboard.pending,
+          SubscriptionRef.changes,
+          Stream.runForEach((value) =>
+            patch(Struct.assign({ pending: Option.fromNullishOr(value) })),
           ),
+          Effect.forkScoped,
+        );
+
+        /** Draw one message of `Report` in the tone of its level. */
+        const deliver = pipe(
+          Match.type<UserMessage>(),
+          Match.when({ level: "error" }, ({ text }) => error(text)),
+          Match.when({ level: "info" }, ({ text }) => show(text)),
+          Match.exhaustive,
         );
 
         // The one route from a failure to the user. A storage failure, a
         // clipboard refusal and a command failure all arrive here.
-        yield* Effect.forkScoped(
-          pipe(
-            report.messages,
-            Stream.runForEach((message) =>
-              message.level === "error" ? error(message.text) : show(message.text),
-            ),
-          ),
-        );
+        yield* pipe(report.messages, Stream.runForEach(deliver), Effect.forkScoped);
 
         // ---------------------------------------------------------------
         // The prompt
@@ -391,16 +508,25 @@ export class Hud extends Context.Service<
           Effect.gen(function* () {
             const done = yield* Deferred.make<Option.Option<string>>();
             const settle = (value: Option.Option<string>): Effect.Effect<void> =>
-              Effect.asVoid(Deferred.succeed(done, value));
+              pipe(done, Deferred.succeed(value), Effect.asVoid);
 
             // A second prompt replaces the first one. Each prompt owns its own
             // container, so the removal of the old one cannot take the new one
             // with it.
-            const previous = (yield* Ref.get(state)).prompt;
-            if (Option.isSome(previous)) yield* previous.value.cancel;
+            const { prompt: previous } = yield* Ref.get(state);
+            yield* pipe(
+              previous,
+              Option.match({
+                onNone: () => Effect.void,
+                onSome: ({ cancel }) => cancel,
+              }),
+            );
             yield* FiberHandle.clear(timer);
 
-            const id = yield* Ref.modify(nextPromptId, (n) => [n, n + 1]);
+            const id = yield* pipe(
+              nextPromptId,
+              Ref.modify((n: number) => [n, n + 1]),
+            );
 
             const parts = yield* Effect.acquireRelease(
               Effect.sync(() => {
@@ -459,40 +585,77 @@ export class Hud extends Context.Service<
             // so that a click into the field does not fall through to the page.
             yield* acceptPointerEvents(hudLayer);
 
-            yield* patch((current) =>
-              pipe(
-                current,
-                Struct.assign({
-                  prompt: Option.some({
-                    id,
-                    status: parts.status,
-                    cancel: settle(Option.none()),
-                  }),
+            yield* patch(
+              Struct.assign({
+                prompt: Option.some({
+                  id,
+                  status: parts.status,
+                  cancel: settle(Option.none()),
                 }),
-              ),
+              }),
             );
 
-            yield* Effect.addFinalizer(() =>
-              patch((current) =>
-                Option.isSome(current.prompt) && current.prompt.value.id === id
-                  ? pipe(
-                      current,
-                      Struct.assign({ transient: Option.none(), prompt: Option.none() }),
-                    )
-                  : current,
-              ),
-            );
+            yield* Effect.addFinalizer(() => patch(withoutPrompt(id)));
 
             const inputFiber = yield* FiberHandle.make<void, never>();
 
-            if (options.onInput !== undefined) {
-              const onInput = options.onInput;
-              yield* dom.listenOn(parts.input, "input", () =>
-                // Forked, because a body such as the live search of find can
-                // suspend. A newer keystroke interrupts the older search.
-                Effect.asVoid(FiberHandle.run(inputFiber, onInput(parts.input.value))),
+            yield* pipe(
+              options.onInput,
+              Option.fromNullishOr,
+              Option.match({
+                onNone: () => Effect.void,
+                onSome: (onInput) =>
+                  dom.listenOn(parts.input, "input", () =>
+                    // Forked, because a body such as the live search of find can
+                    // suspend. A newer keystroke interrupts the older search.
+                    pipe(onInput(parts.input.value), FiberHandle.run(inputFiber), Effect.asVoid),
+                  ),
+              }),
+            );
+
+            /** Let the caller see the key first, and then decide what it does. */
+            const keyAction = (key: KeyboardEvent): Effect.Effect<PromptKey, never, R> =>
+              pipe(
+                options.onKeydown,
+                Option.fromNullishOr,
+                Option.match({
+                  onNone: () => Effect.succeed(false),
+                  onSome: (onKeydown) => onKeydown(key, parts.input.value),
+                }),
+                Effect.map(
+                  Boolean.match({
+                    onFalse: () => promptKey(key),
+                    onTrue: () => PromptKey.Taken(),
+                  }),
+                ),
               );
-            }
+
+            /** What a key press does. Any other event does nothing. */
+            const actionFor = (event: Event): Effect.Effect<PromptKey, never, R> =>
+              pipe(
+                asKeyboardEvent(event),
+                Option.match({
+                  onNone: () => Effect.succeed(PromptKey.Pass()),
+                  onSome: keyAction,
+                }),
+              );
+
+            /** Carry out what a key press does. */
+            const perform = (event: Event) =>
+              PromptKey.$match({
+                Taken: () => Effect.sync(() => event.preventDefault()),
+                Submit: () =>
+                  pipe(
+                    Effect.sync(() => event.preventDefault()),
+                    Effect.andThen(settle(Option.some(parts.input.value))),
+                  ),
+                Cancel: () =>
+                  pipe(
+                    Effect.sync(() => event.preventDefault()),
+                    Effect.andThen(settle(Option.none())),
+                  ),
+                Pass: () => Effect.void,
+              });
 
             // The capture phase, and `stopPropagation` for every key: the prompt
             // owns the keyboard while it is open, and the handler stack must not
@@ -501,27 +664,11 @@ export class Hud extends Context.Service<
               parts.input,
               "keydown",
               (event) =>
-                Effect.gen(function* () {
-                  event.stopPropagation();
-                  const key = asKeyboardEvent(event);
-                  if (Option.isNone(key)) return;
-                  if (options.onKeydown !== undefined) {
-                    const taken = yield* options.onKeydown(key.value, parts.input.value);
-                    if (taken) {
-                      event.preventDefault();
-                      return;
-                    }
-                  }
-                  if (key.value.key === "Enter") {
-                    event.preventDefault();
-                    yield* settle(Option.some(parts.input.value));
-                    return;
-                  }
-                  if (cancelsPrompt(key.value)) {
-                    event.preventDefault();
-                    yield* settle(Option.none());
-                  }
-                }),
+                pipe(
+                  Effect.sync(() => event.stopPropagation()),
+                  Effect.flatMap(() => actionFor(event)),
+                  Effect.flatMap(perform(event)),
+                ),
               { capture: true },
             );
 
