@@ -75,6 +75,41 @@ export type HintKind =
   | "span"
   | "tabindex";
 
+/** A variant with no fields. The type `{}` would mean any value that is not nullish. */
+type NoFields = Record.ReadonlyRecord<never, never>;
+
+/**
+ * How strong the signal was that earned a hint.
+ *
+ * `Secondary` is the "second-class citizen" of upstream: hinted on a weak
+ * signal (a class name, a bare `<span>`, a `tabindex`). It sorts after
+ * everything else, so that the good hints get the short strings, and it is a
+ * suspected false positive, which is filtered against nearby descendants.
+ */
+export type HintRank = Data.TaggedEnum<{
+  Primary: NoFields;
+  Secondary: NoFields;
+}>;
+
+export const HintRank = Data.taggedEnum<HintRank>();
+
+/** Is this a second-class hint? */
+export const isSecondary = (hint: LocalHint): boolean => HintRank.$is("Secondary")(hint.rank);
+
+/**
+ * Which elements a detection pass hints.
+ *
+ * `Linked` keeps only an element that truly has a URL. The new-tab, copy-URL,
+ * omnibar and download modes act on the URL, so a hint without one would do
+ * nothing.
+ */
+export type HintTargets = Data.TaggedEnum<{
+  Clickable: NoFields;
+  Linked: NoFields;
+}>;
+
+export const HintTargets = Data.taggedEnum<HintTargets>();
+
 export interface LocalHint {
   /** For an image map this is the `<area>`, and not the `<img>`. */
   readonly element: Element;
@@ -91,17 +126,14 @@ export interface LocalHint {
   /** Layout-viewport coordinates, cropped to the visible region. */
   readonly rect: HintRect;
   readonly kind: HintKind;
-  /**
-   * The "second-class citizen" of upstream: hinted on a weak signal (a class
-   * name, a bare `<span>`, a `tabindex`). It sorts after everything else, so
-   * that the good hints get the short strings.
-   */
-  readonly secondary: boolean;
-  /** A suspected false positive. It is filtered against nearby descendants. */
-  readonly possibleFalsePositive: boolean;
+  readonly rank: HintRank;
+  /** The text that filter mode matches, that a copy mode copies, and that the wire carries. */
   readonly linkText: string;
-  /** The `showLinkText` of upstream: draw the text beside the marker. */
-  readonly showLinkText: boolean;
+  /**
+   * The text that filter mode draws beside the marker. The `showLinkText` of
+   * upstream: it is the link text of an element that shows no text of its own.
+   */
+  readonly label: Option.Option<string>;
   /** The absolute URL, when the element navigates. */
   readonly href: Option.Option<string>;
 }
@@ -112,8 +144,7 @@ export interface DetectOptions {
   readonly capabilities: CapabilityReport;
   /** From `Ui.viewport`, which comes from `visualViewport` on iOS. */
   readonly viewport: ViewportRect;
-  /** Copy-URL and new-tab modes hint only what truly has a URL. */
-  readonly requireHref: boolean;
+  readonly targets: HintTargets;
   /**
    * Our own overlay host, which the hit test skips.
    *
@@ -205,17 +236,19 @@ const CLASS = Classification.WeaklyClickable({ kind: "class" });
 const SPAN = Classification.WeaklyClickable({ kind: "span" });
 const TABINDEX = Classification.WeaklyClickable({ kind: "tabindex" });
 
+const PRIMARY = HintRank.Primary();
+const SECONDARY = HintRank.Secondary();
+
 /** What a hint keeps of the classification that earned it. */
 interface Traits {
   readonly kind: HintKind;
   readonly reason: Option.Option<string>;
-  /** A weak signal makes a hint both second-class and a possible false positive. */
-  readonly secondary: boolean;
+  readonly rank: HintRank;
 }
 
 const traitsOf: (classification: Classification) => Traits = Classification.$match({
-  Clickable: ({ kind, reason }) => ({ kind, reason, secondary: false }),
-  WeaklyClickable: ({ kind }) => ({ kind, reason: Option.none(), secondary: true }),
+  Clickable: ({ kind, reason }) => ({ kind, reason, rank: PRIMARY }),
+  WeaklyClickable: ({ kind }) => ({ kind, reason: Option.none(), rank: SECONDARY }),
 });
 
 // ---------------------------------------------------------------------------
@@ -333,11 +366,17 @@ const hrefOf: (element: Element) => Option.Option<string> = flow(
   Option.map((link) => link.href),
 );
 
-/** Copy-URL and new-tab modes admit only what truly has a URL. */
+/** A pass that hints linked elements admits only what truly has a URL. */
 const admitsHref =
-  (options: DetectOptions) =>
+  ({ targets }: DetectOptions) =>
   (href: Option.Option<string>): boolean =>
-    !options.requireHref || Option.isSome(href);
+    pipe(
+      targets,
+      HintTargets.$match({
+        Clickable: constTrue,
+        Linked: () => Option.isSome(href),
+      }),
+    );
 
 // ---------------------------------------------------------------------------
 // Classification
@@ -788,16 +827,15 @@ const areaHint =
         Option.filter(isUsable),
       );
       const href = yield* pipe(hrefOf(area), Option.liftPredicate(admitsHref(options)));
-      const { text, show } = linkTextFor(area, Option.none());
+      const { text, label } = linkTextFor(area, Option.none());
       const hint: LocalHint = {
         element: area,
         hitTarget: Option.some(image),
         rect,
         kind: "area",
-        secondary: false,
-        possibleFalsePositive: false,
+        rank: PRIMARY,
         linkText: text,
-        showLinkText: show,
+        label,
         href,
       };
       return hint;
@@ -838,15 +876,15 @@ const areaHints = ({ image, usemap }: ImageMap, options: DetectOptions): Readonl
 // Link text
 // ---------------------------------------------------------------------------
 
-/** The text that filter mode matches, and whether the marker draws it. */
+/** The text that filter mode matches, and the label that the marker draws, if any. */
 interface LinkText {
   readonly text: string;
-  readonly show: boolean;
+  readonly label: Option.Option<string>;
 }
 
-const quiet = (text: string): LinkText => ({ text, show: false });
+const quiet = (text: string): LinkText => ({ text, label: Option.none() });
 
-const shown = (text: string): LinkText => ({ text, show: true });
+const shown = (text: string): LinkText => ({ text, label: Option.some(text) });
 
 const textOf = (node: Node): string => node.textContent ?? "";
 
@@ -857,7 +895,7 @@ const labelText = (element: Element): LinkText =>
     Option.orElse(() => attributeOf(element, "title")),
     Option.map(Str.trim),
     Option.getOrElse(() => ""),
-    (text) => ({ text, show: Str.isNonEmpty(text) }),
+    (text) => ({ text, label: pipe(text, Option.liftPredicate(Str.isNonEmpty)) }),
   );
 
 /** `text` when it is not empty, and the label of `element` otherwise. */
@@ -1343,8 +1381,14 @@ const wrapsNearbyHint = (
 export const dropFalsePositives = (hints: ReadonlyArray<LocalHint>): ReadonlyArray<LocalHint> =>
   pipe(
     hints,
-    Array.filter(
-      (hint, position) => !hint.possibleFalsePositive || !wrapsNearbyHint(hints, hint, position),
+    Array.filter((hint, position) =>
+      pipe(
+        hint.rank,
+        HintRank.$match({
+          Primary: constTrue,
+          Secondary: () => !wrapsNearbyHint(hints, hint, position),
+        }),
+      ),
     ),
   );
 
@@ -1359,17 +1403,16 @@ const elementHint =
     Option.gen(function* () {
       const href = yield* pipe(hrefOf(element), Option.liftPredicate(admitsHref(options)));
       const rect = yield* visibleClientRect(element, options);
-      const { kind, reason, secondary } = traitsOf(classification);
-      const { text, show } = linkTextFor(element, reason);
+      const { kind, reason, rank } = traitsOf(classification);
+      const { text, label } = linkTextFor(element, reason);
       const hint: LocalHint = {
         element,
         hitTarget: Option.none(),
         rect,
         kind,
-        secondary,
-        possibleFalsePositive: secondary,
+        rank,
         linkText: text,
-        showLinkText: show,
+        label,
         href,
       };
       return hint;
@@ -1400,15 +1443,8 @@ const buildHints =
  * take a short hint string away from a true link.
  */
 const secondaryLast = (hints: ReadonlyArray<LocalHint>): ReadonlyArray<LocalHint> => {
-  const secondary = pipe(
-    hints,
-    Array.filter((hint) => hint.secondary),
-  );
-  return pipe(
-    hints,
-    Array.filter((hint) => !hint.secondary),
-    Array.appendAll(secondary),
-  );
+  const secondary = pipe(hints, Array.filter(isSecondary));
+  return pipe(hints, Array.filter(Predicate.not(isSecondary)), Array.appendAll(secondary));
 };
 
 const SLICES: ChunkedOptions = { budgetMs: CHUNK_BUDGET_MS };

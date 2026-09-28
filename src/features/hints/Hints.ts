@@ -110,7 +110,7 @@ import { type FrameId, FrameRole } from "~/platform/Realm.ts";
 import { Tabs } from "~/platform/Tabs.ts";
 import { Hud } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
-import { detectHints, type HintRect, type LocalHint } from "./Detect.ts";
+import { detectHints, type HintRect, HintTargets, isSecondary, type LocalHint } from "./Detect.ts";
 import { hintCss, makeMarkerLayer, MarkerSpec } from "./Markers.ts";
 
 export type { LocalHint } from "./Detect.ts";
@@ -211,13 +211,22 @@ const INDICATORS: Record.ReadonlyRecord<HintMode, string> = {
 const writesClipboard = (mode: HintMode): boolean =>
   mode === "copy-link-url" || mode === "copy-link-text";
 
-/** The modes that can act only on something that has a URL. */
-export const modeRequiresHref = (mode: HintMode): boolean =>
-  mode === "activate-new-tab" ||
-  mode === "activate-new-tab-background" ||
-  mode === "copy-link-url" ||
-  mode === "open-with-omnibar" ||
-  mode === "download";
+/** What a mode can act on. A mode that acts on a URL hints only what truly has one. */
+const targetsFor = (mode: HintMode): HintTargets =>
+  pipe(
+    Match.value(mode),
+    Match.withReturnType<HintTargets>(),
+    Match.whenOr("activate", "hover", "focus", "copy-link-text", () => HintTargets.Clickable()),
+    Match.whenOr(
+      "activate-new-tab",
+      "activate-new-tab-background",
+      "copy-link-url",
+      "open-with-omnibar",
+      "download",
+      () => HintTargets.Linked(),
+    ),
+    Match.exhaustive,
+  );
 
 /** What the user reads when a check refuses a hint. */
 const MOVED_DETAIL = "The page moved that hint. Nothing was activated.";
@@ -289,7 +298,7 @@ const descriptorsFor = (frameId: FrameId, hints: readonly LocalHint[]): readonly
       // Cut to the bound of the wire. A longer value makes the whole message
       // fail the schema of the receiver, and that frame would lose every hint.
       linkText: hint.linkText.slice(0, MAX_WIRE_LINK_TEXT),
-      secondary: hint.secondary,
+      secondary: isSecondary(hint),
     })),
   );
 
@@ -1194,13 +1203,6 @@ const ownHints: (entries: readonly HintEntry[]) => readonly OwnHint[] = flow(
   Array.getSomes,
 );
 
-/** Filter mode draws the link text beside the number when the hint has no visible text. */
-const labelOf = (hint: LocalHint): Option.Option<string> =>
-  pipe(
-    hint.linkText,
-    Option.liftPredicate(() => hint.showLinkText),
-  );
-
 const alphabetSpec =
   ({ hints, typed }: AlphabetState, placements: readonly Placement[]) =>
   (own: OwnHint): MarkerSpec =>
@@ -1248,7 +1250,7 @@ const filterSpec =
             matchedLength: matchedPrefixLength(match.hintString, digits),
             secondary: own.secondary,
             active: isActive,
-            label: labelOf(own.hint),
+            label: own.hint.label,
           }),
       }),
     );
@@ -1938,7 +1940,7 @@ export class Hints extends Context.Service<
             document: dom.document,
             capabilities,
             viewport,
-            requireHref: modeRequiresHref(mode),
+            targets: targetsFor(mode),
             overlayHost: Option.some(ui.shadow.host),
           }),
           Effect.provideContext(browser),
