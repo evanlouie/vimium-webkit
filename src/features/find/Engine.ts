@@ -17,8 +17,41 @@
  * word.
  */
 
-import { Option } from "effect";
+import {
+  Array,
+  Boolean,
+  HashSet,
+  Iterable,
+  Match,
+  Number,
+  Option,
+  Result,
+  flow,
+  pipe,
+} from "effect";
 import type { CapabilityReport } from "~/platform/Capabilities.ts";
+
+// ---------------------------------------------------------------------------
+// Nodes
+// ---------------------------------------------------------------------------
+
+// The node type, and not `instanceof`: a node can come from another realm, and
+// `instanceof` is false for it there.
+
+const isText = (node: Node): node is Text => node.nodeType === Node.TEXT_NODE;
+
+const isElement = (node: Node): node is Element => node.nodeType === Node.ELEMENT_NODE;
+
+const isDocument = (root: Document | ShadowRoot): root is Document =>
+  root.nodeType === Node.DOCUMENT_NODE;
+
+/** `node` when it is an element, and its parent element when it is not. */
+export const elementAt = (node: Node): Option.Option<Element> =>
+  pipe(
+    node,
+    Option.liftPredicate(isElement),
+    Option.orElse(() => Option.fromNullishOr(node.parentElement)),
+  );
 
 // ---------------------------------------------------------------------------
 // The haystack
@@ -132,7 +165,9 @@ export const MAX_MATCH_LENGTH = 65_536;
 /**
  * The clock for the budget.
  *
- * `performance` is absent in some hosts.
+ * `performance` is absent in some hosts. The check stays a plain conditional,
+ * because the search loop below reads the clock two or three times in each
+ * window: see the measurement on `scanWindows`.
  */
 const now = (): number => (typeof performance !== "undefined" ? performance.now() : Date.now());
 
@@ -142,6 +177,8 @@ export interface SpanSearch {
   /** True when the search stopped before the end of the text. */
   readonly stopped: boolean;
 }
+
+const NOTHING_FOUND: SpanSearch = { spans: [], stopped: false };
 
 /**
  * Every match of `pattern` in `haystack`, up to `limit`.
@@ -170,11 +207,38 @@ export const collectSpans = (
   pattern: RegExp,
   limit: number = DEFAULT_MATCH_LIMIT,
   deadline: number = now() + MATCH_BUDGET_MS,
-): SpanSearch => {
-  if (limit <= 0 || haystack.length === 0) return { spans: [], stopped: false };
+): SpanSearch =>
+  pipe(
+    limit > 0 && haystack.length > 0,
+    Boolean.match({
+      onFalse: () => NOTHING_FOUND,
+      onTrue: () =>
+        scanWindows(
+          haystack,
+          new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`),
+          limit,
+          deadline,
+        ),
+    }),
+  );
 
-  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
-  const regex = new RegExp(pattern.source, flags);
+/**
+ * The window loop of `collectSpans`.
+ *
+ * This is a loop with mutable state on purpose. It runs on every keystroke,
+ * over the whole text of the page, against `MATCH_BUDGET_MS`. An
+ * `Array.unfold` over an immutable state machine found the same spans two to
+ * six times slower in JavaScriptCore: 0.33 ms against 0.97 ms over 2 MB of text
+ * with no match, and 0.03 ms against 0.16 ms for 500 matches. A `Boolean.match`
+ * in `now` and in `nextWindow`, which run for each window, made the whole
+ * search 1.4 to 1.9 times slower, so those two stay plain conditionals too.
+ */
+const scanWindows = (
+  haystack: string,
+  regex: RegExp,
+  limit: number,
+  deadline: number,
+): SpanSearch => {
   const spans: MatchSpan[] = [];
   // Where the next match may begin. A match can end after the window that
   // holds its first character, and the text that it covers is then taken.
@@ -201,8 +265,10 @@ export const collectSpans = (
       // The next window owns this match, and it begins its search there.
       if (start >= windowEnd) break;
 
-      const text = match[0];
-      if (text.length === 0) {
+      // `exec` leaves `lastIndex` at the end of the match, because the
+      // expression is global.
+      const length = regex.lastIndex - match.index;
+      if (length === 0) {
         // A zero-width pattern such as `^` or `x*` never moves `lastIndex` by
         // itself, so the loop would never end. Such a match also cannot be
         // drawn, so it is stepped over and not recorded.
@@ -211,7 +277,7 @@ export const collectSpans = (
         continue;
       }
 
-      const end = start + text.length;
+      const end = start + length;
       if (end >= sliceEnd && sliceEnd < haystack.length) {
         // The match reaches the end of the slice, so the text beside it could
         // make the match longer, or could take it away: `$` matches at the end
@@ -251,6 +317,9 @@ export const collectSpans = (
  * The window doubles only with a margin of four, and it halves as soon as one
  * window overruns the budget. The size therefore follows the cost of the
  * pattern, and one slow pattern costs one slow window.
+ *
+ * It runs once for each window of `scanWindows`, so it keeps the plain
+ * conditionals that the measurement there asks for.
  */
 const nextWindow = (size: number, elapsed: number): number => {
   if (elapsed > WINDOW_BUDGET_MS) {
@@ -275,75 +344,145 @@ export interface ChunkPosition {
  *
  * `starts[i]` is where chunk `i` begins.
  */
-export const chunkStarts = (lengths: ReadonlyArray<number>): ReadonlyArray<number> => {
-  const starts: number[] = [];
-  let total = 0;
-  for (const length of lengths) {
-    starts.push(total);
-    total += length;
-  }
-  return starts;
-};
+export const chunkStarts: (lengths: ReadonlyArray<number>) => ReadonlyArray<number> = flow(
+  Array.scan(0, (total: number, length: number) => total + length),
+  Array.dropRight(1),
+);
+
+/** Which end of a match an offset marks. */
+export type MatchEnd = "start" | "end";
 
 /**
  * Map an offset in the haystack back to a chunk and an offset in it.
  *
- * `preferEnd` decides what happens on the boundary between two chunks. The
- * start of a match belongs to the chunk that *begins* there. The end of a match
- * belongs to the chunk that *ends* there. The other way round gives a range
- * with a boundary in an empty node beside it, and such a range draws no client
+ * `end` decides what happens on the boundary between two chunks. The start of
+ * a match belongs to the chunk that *begins* there. The end of a match belongs
+ * to the chunk that *ends* there. The other way round gives a range with a
+ * boundary in an empty node beside it, and such a range draws no client
  * rectangle at all.
  */
 export const locateOffset = (
   starts: ReadonlyArray<number>,
   lengths: ReadonlyArray<number>,
   offset: number,
-  preferEnd = false,
-): Option.Option<ChunkPosition> => {
-  if (starts.length === 0 || offset < 0) return Option.none();
+  end: MatchEnd = "start",
+): Option.Option<ChunkPosition> =>
+  pipe(
+    lastIndexWhere(starts, (start) => start <= offset),
+    Option.filter(() => offset >= 0),
+    Option.map((found) => chunkFor(starts, lengths, offset, end, found)),
+    Option.flatMap((index) => positionIn(starts, lengths, index, offset)),
+  );
 
-  let low = 0;
-  let high = starts.length - 1;
-  let found = -1;
-  while (low <= high) {
-    const mid = (low + high) >> 1;
-    const start = starts[mid];
-    if (start === undefined) return Option.none();
-    if (start <= offset) {
-      found = mid;
-      low = mid + 1;
-    } else {
-      high = mid - 1;
-    }
-  }
-  if (found === -1) return Option.none();
+/**
+ * The chunk that owns `offset`, from `found`, the last chunk that begins at or
+ * before it.
+ */
+const chunkFor = (
+  starts: ReadonlyArray<number>,
+  lengths: ReadonlyArray<number>,
+  offset: number,
+  end: MatchEnd,
+  found: number,
+): number =>
+  pipe(
+    Match.value(end),
+    // Step forward over a chunk of length zero.
+    Match.when("start", () => skipEmpty(lengths, found, starts.length - 1)),
+    // Step back over the boundary itself, to the chunk that closes there.
+    Match.when("end", () => lastChunkBefore(starts, offset)),
+    Match.exhaustive,
+  );
 
-  // Step back over a chunk of length zero, and over the boundary itself when
-  // the caller asks for the closing side of it.
-  let index = found;
-  if (preferEnd) {
-    while (index > 0) {
-      const start = starts[index];
-      if (start === undefined || start < offset) break;
-      index--;
-    }
-  } else {
-    while (index + 1 < starts.length && (lengths[index] ?? 0) === 0) index++;
-  }
+/** The last chunk that begins before `offset`, or the first chunk. */
+const lastChunkBefore = (starts: ReadonlyArray<number>, offset: number): number =>
+  pipe(
+    lastIndexWhere(starts, (start) => start < offset),
+    Option.getOrElse(() => 0),
+  );
 
-  const start = starts[index];
-  const length = lengths[index];
-  if (start === undefined || length === undefined) return Option.none();
-  const local = offset - start;
-  if (local < 0 || local > length) return Option.none();
-  return Option.some({ index, offset: local });
+/**
+ * The last index of `sorted` at which `holds` is true.
+ *
+ * `holds` must be true for a prefix of `sorted` and false after it, so a
+ * binary search finds the edge.
+ */
+const lastIndexWhere = (
+  sorted: ReadonlyArray<number>,
+  holds: (value: number) => boolean,
+): Option.Option<number> => {
+  const narrow = (low: number, high: number): number =>
+    pipe(
+      low > high,
+      Boolean.match({
+        onTrue: () => high,
+        onFalse: () => {
+          const middle = (low + high) >> 1;
+          return pipe(
+            sorted,
+            Array.get(middle),
+            Option.exists(holds),
+            Boolean.match({
+              onTrue: () => narrow(middle + 1, high),
+              onFalse: () => narrow(low, middle - 1),
+            }),
+          );
+        },
+      }),
+    );
+  return pipe(
+    narrow(0, sorted.length - 1),
+    Option.liftPredicate((index) => index >= 0),
+  );
 };
+
+/** The first index from `from` whose chunk is not empty, and `last` at most. */
+const skipEmpty = (lengths: ReadonlyArray<number>, from: number, last: number): number =>
+  pipe(
+    Iterable.range(from, last),
+    Iterable.findFirst(
+      (index) =>
+        index === last ||
+        pipe(
+          lengths,
+          Array.get(index),
+          Option.exists((length) => length !== 0),
+        ),
+    ),
+    Option.getOrElse(() => last),
+  );
+
+/** The position of `offset` inside chunk `index`, when the chunk holds it. */
+const positionIn = (
+  starts: ReadonlyArray<number>,
+  lengths: ReadonlyArray<number>,
+  index: number,
+  offset: number,
+): Option.Option<ChunkPosition> =>
+  pipe(
+    Option.all({
+      start: pipe(starts, Array.get(index)),
+      length: pipe(lengths, Array.get(index)),
+    }),
+    Option.map(({ start, length }) => ({ local: offset - start, length })),
+    Option.filter(({ local, length }) => local >= 0 && local <= length),
+    Option.map(({ local }) => ({ index, offset: local })),
+  );
 
 // ---------------------------------------------------------------------------
 // The word under an offset
 // ---------------------------------------------------------------------------
 
 const WORD_CHARACTER = /[\p{L}\p{N}_]/u;
+
+/**
+ * Is this one UTF-16 code unit a word character?
+ *
+ * A code unit, and not a code point, so a letter outside the Basic
+ * Multilingual Plane is not part of a word. That is how the search has always
+ * read it.
+ */
+const isWordUnit = (unit: string): boolean => WORD_CHARACTER.test(unit);
 
 /**
  * The word around `offset` in `text`, or `""`.
@@ -353,23 +492,20 @@ const WORD_CHARACTER = /[\p{L}\p{N}_]/u;
  * Vim does the same.
  */
 export const wordAt = (text: string, offset: number): string => {
-  if (text.length === 0) return "";
+  const units = text.split("");
   const clamped = Math.max(0, Math.min(offset, text.length));
-
-  let start = clamped;
-  if (
-    (start >= text.length || !WORD_CHARACTER.test(text[start] ?? "")) &&
-    start > 0 &&
-    WORD_CHARACTER.test(text[start - 1] ?? "")
-  ) {
-    start--;
-  }
-  if (!WORD_CHARACTER.test(text[start] ?? "")) return "";
-
-  let end = start;
-  while (start > 0 && WORD_CHARACTER.test(text[start - 1] ?? "")) start--;
-  while (end < text.length && WORD_CHARACTER.test(text[end] ?? "")) end++;
-  return text.slice(start, end);
+  return pipe(
+    [clamped, clamped - 1],
+    Array.findFirst((index) =>
+      pipe(units, Array.get(index), Option.filter(isWordUnit), Option.as(index)),
+    ),
+    Option.map((anchor) => {
+      const before = pipe(units, Array.take(anchor), Array.reverse, Array.takeWhile(isWordUnit));
+      const after = pipe(units, Array.drop(anchor), Array.takeWhile(isWordUnit));
+      return text.slice(anchor - before.length, anchor + after.length);
+    }),
+    Option.getOrElse(() => ""),
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -377,7 +513,7 @@ export const wordAt = (text: string, offset: number): string => {
 // ---------------------------------------------------------------------------
 
 /** The elements whose text the browser never draws as page content. */
-const OPAQUE_TAGS: ReadonlySet<string> = new Set([
+const OPAQUE_TAGS = HashSet.make(
   "SCRIPT",
   "STYLE",
   "NOSCRIPT",
@@ -394,7 +530,7 @@ const OPAQUE_TAGS: ReadonlySet<string> = new Set([
   "CANVAS",
   "AUDIO",
   "VIDEO",
-]);
+);
 
 /**
  * One unbroken stretch of text nodes that share one tree root.
@@ -414,72 +550,63 @@ export interface CollectOptions {
   readonly view: Window;
   readonly document: Document;
   readonly capabilities: CapabilityReport;
-  readonly root?: Document | ShadowRoot;
   /** The host of our own closed shadow root. It is never searched. */
   readonly excludeHost: Option.Option<Element>;
   /**
    * A hard stop, so that one bad page cannot block the keystroke that opened
    * find.
    */
-  readonly maxCharacters?: number;
+  readonly maxCharacters: number;
 }
 
 /** About the text of one novel. Above this, nobody is reading the page. */
 export const DEFAULT_MAX_CHARACTERS = 2_000_000;
 
-interface VisibilityCache {
+/** What every walk of one search shares. */
+interface WalkContext {
+  readonly document: Document;
   readonly visible: (element: Element) => boolean;
+  readonly excludeHost: Option.Option<Element>;
 }
 
-/**
- * The visibility answers for one walk.
- *
- * `checkVisibility` is used where it exists, which is Safari 17.4 and later. It
- * is the only check that accounts for `content-visibility: auto`, which Safari
- * 18 has, and which makes an answer from `getComputedStyle` wrong. It is called
- * through a narrowed `unknown`, because the DOM library that we compile against
- * does not agree with every Safari version about the option names.
- */
-const visibilityCache = (view: Window, capabilities: CapabilityReport): VisibilityCache => {
-  const cache = new WeakMap<Element, boolean>();
-
-  const check = (element: Element): boolean => {
-    if (capabilities.checkVisibility) {
-      const host = element as unknown as {
-        checkVisibility?: (options?: Record<string, boolean>) => boolean;
-      };
-      if (typeof host.checkVisibility === "function") {
-        return host.checkVisibility({
-          contentVisibilityAuto: true,
-          visibilityProperty: true,
-        });
-      }
-    }
-    const style = view.getComputedStyle(element);
-    return style.display !== "none" && style.visibility !== "hidden";
-  };
-
-  return {
-    visible: (element: Element): boolean => {
-      const cached = cache.get(element);
-      if (cached !== undefined) return cached;
-      let result: boolean;
-      try {
-        result = check(element);
-      } catch {
-        // A detached element, or an element of another document. Treat it as
-        // searchable, instead of dropping half of the page for one bad node.
-        result = true;
-      }
-      cache.set(element, result);
-      return result;
-    },
-  };
+const VISIBILITY_OPTIONS: CheckVisibilityOptions = {
+  contentVisibilityAuto: true,
+  visibilityProperty: true,
 };
 
 /**
- * Collect the searchable text of `root`, and descend into every **open** shadow
- * root.
+ * Does the browser draw `element`?
+ *
+ * `checkVisibility` is used where it exists, which is Safari 17.4 and later. It
+ * is the only check that accounts for `content-visibility: auto`, which Safari
+ * 18 has, and which makes an answer from `getComputedStyle` wrong. The
+ * capability report decides, and the method is still looked for, because an
+ * older Safari has no such method at all.
+ */
+const isVisible =
+  (view: Window, capabilities: CapabilityReport) =>
+  (element: Element): boolean =>
+    pipe(
+      Result.try(() =>
+        pipe(
+          capabilities.checkVisibility && typeof element.checkVisibility === "function",
+          Boolean.match({
+            onTrue: () => element.checkVisibility(VISIBILITY_OPTIONS),
+            onFalse: () => {
+              const style = view.getComputedStyle(element);
+              return style.display !== "none" && style.visibility !== "hidden";
+            },
+          }),
+        ),
+      ),
+      // A detached element, or an element of another document. Treat it as
+      // searchable, instead of dropping half of the page for one bad node.
+      Result.getOrElse(() => true),
+    );
+
+/**
+ * Collect the searchable text of the document, and descend into every
+ * **open** shadow root.
  *
  * A closed root is invisible to us by design. `element.shadowRoot` is `null`,
  * and a patch of `attachShadow` needs a `document-start` that WebKit does not
@@ -488,35 +615,45 @@ const visibilityCache = (view: Window, capabilities: CapabilityReport): Visibili
  * Slotted content is collected exactly once, from the light DOM of the host. A
  * `TreeWalker` over a shadow root never visits the assigned nodes of a slot,
  * because those are not its children. Nothing is counted twice, and nothing is
- * lost.
+ * lost. Each root is also walked once: a shadow root has one host, and that
+ * host lives in one tree.
  */
 export const collectTextRuns = (options: CollectOptions): ReadonlyArray<TextRun> => {
-  const budget = options.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
-  const visibility = visibilityCache(options.view, options.capabilities);
-
-  const runs: TextRun[] = [];
-  const pending: Array<Document | ShadowRoot> = [options.root ?? options.document];
-  const seen = new Set<Document | ShadowRoot>();
-  let remaining = budget;
-
-  while (pending.length > 0 && remaining > 0) {
-    const root = pending.shift();
-    if (root === undefined || seen.has(root)) continue;
-    seen.add(root);
-
-    const collected = collectFromRoot(root, {
-      document: options.document,
-      visibility,
-      excludeHost: options.excludeHost,
-      remaining,
-    });
-    remaining -= collected.consumed;
-    if (Option.isSome(collected.run)) runs.push(collected.run.value);
-    pending.push(...collected.shadowRoots);
-  }
-
-  return runs;
+  const context: WalkContext = {
+    document: options.document,
+    visible: isVisible(options.view, options.capabilities),
+    excludeHost: options.excludeHost,
+  };
+  const start: Walk = { pending: [options.document], remaining: options.maxCharacters };
+  return pipe(Array.unfold(start, nextRoot(context)), Array.getSomes);
 };
+
+/** Where the walk of the roots stands. */
+interface Walk {
+  /** The roots that are still to walk, in the order that they were found. */
+  readonly pending: ReadonlyArray<Document | ShadowRoot>;
+  /** The characters that the walk may still collect. */
+  readonly remaining: number;
+}
+
+/** Walk the next root, and queue the shadow roots that it holds. */
+const nextRoot =
+  (context: WalkContext) =>
+  ({ pending, remaining }: Walk): Option.Option<readonly [Option.Option<TextRun>, Walk]> =>
+    pipe(
+      pending,
+      Option.liftPredicate(Array.isReadonlyArrayNonEmpty),
+      Option.filter(() => remaining > 0),
+      Option.map(Array.unprepend),
+      Option.map(([root, rest]) => {
+        const collected = collectFromRoot(context, remaining, root);
+        const walk: Walk = {
+          pending: pipe(rest, Array.appendAll(collected.shadowRoots)),
+          remaining: remaining - collected.consumed,
+        };
+        return [collected.run, walk] as const;
+      }),
+    );
 
 interface RootCollection {
   readonly run: Option.Option<TextRun>;
@@ -524,86 +661,144 @@ interface RootCollection {
   readonly consumed: number;
 }
 
-interface RootContext {
-  readonly document: Document;
-  readonly visibility: VisibilityCache;
-  readonly excludeHost: Option.Option<Element>;
-  readonly remaining: number;
-}
-
-const collectFromRoot = (root: Document | ShadowRoot, context: RootContext): RootCollection => {
-  const shadowRoots: ShadowRoot[] = [];
-  const nodes: Text[] = [];
-  const lengths: number[] = [];
-  const parts: string[] = [];
-  let consumed = 0;
-
-  // A `ShadowRoot` is a `DocumentFragment`, and it has no `createTreeWalker`.
-  // The factory is on `Document`, and the root of a walker may be any node.
-  const scope: Node = root instanceof Document ? (root.body ?? root) : root;
-
+const collectFromRoot = (
+  context: WalkContext,
+  remaining: number,
+  root: Document | ShadowRoot,
+): RootCollection => {
   const walker = context.document.createTreeWalker(
-    scope,
+    walkScope(root),
     NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
-    {
-      acceptNode: (node: Node): number => {
-        if (node.nodeType === Node.TEXT_NODE) {
-          return node.nodeValue !== null && node.nodeValue.length > 0
-            ? NodeFilter.FILTER_ACCEPT
-            : NodeFilter.FILTER_REJECT;
-        }
-        const element = node as Element;
-        if (Option.isSome(context.excludeHost) && element === context.excludeHost.value) {
-          return NodeFilter.FILTER_REJECT;
-        }
-        if (OPAQUE_TAGS.has(element.tagName)) return NodeFilter.FILTER_REJECT;
-        if (element.hasAttribute("hidden")) return NodeFilter.FILTER_REJECT;
-        // A reject cuts the whole subtree. That is what makes one visibility
-        // check for each element affordable *and* correct: a `display: none` on
-        // an ancestor is never derived again from a descendant.
-        if (!context.visibility.visible(element)) {
-          return NodeFilter.FILTER_REJECT;
-        }
-        // Accepted only so that the loop below can queue the shadow root. The
-        // light children are still walked, and that is where slotted text is.
-        return element.shadowRoot !== null ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
-      },
-    },
+    { acceptNode: nodeVerdict(context) },
   );
-
-  for (
-    let node = walker.nextNode();
-    node !== null && consumed < context.remaining;
-    node = walker.nextNode()
-  ) {
-    if (node.nodeType !== Node.TEXT_NODE) {
-      const shadow = (node as Element).shadowRoot;
-      if (shadow !== null) shadowRoots.push(shadow);
-      continue;
-    }
-    const text = node as Text;
-    const data = text.data;
-    nodes.push(text);
-    lengths.push(data.length);
-    parts.push(normaliseHaystack(data));
-    consumed += data.length;
-  }
-
-  if (nodes.length === 0) {
-    return { run: Option.none(), shadowRoots, consumed };
-  }
-
+  const visited = acceptedNodes(walker, remaining);
+  const nodes = pipe(visited, Array.filter(isText));
+  const texts = pipe(
+    nodes,
+    Array.map((node) => node.data),
+  );
+  const lengths = pipe(
+    texts,
+    Array.map((text) => text.length),
+  );
   return {
-    run: Option.some({
+    run: pipe(
       nodes,
-      lengths,
-      starts: chunkStarts(lengths),
-      haystack: parts.join(""),
-    }),
-    shadowRoots,
-    consumed,
+      Array.match({
+        onEmpty: () => Option.none(),
+        onNonEmpty: (nodes) =>
+          Option.some({
+            nodes,
+            lengths,
+            starts: chunkStarts(lengths),
+            haystack: pipe(texts, Array.join(""), normaliseHaystack),
+          }),
+      }),
+    ),
+    // Accepted elements are the hosts of open shadow roots.
+    shadowRoots: pipe(
+      visited,
+      Array.filter(isElement),
+      Array.map((element) => Option.fromNullishOr(element.shadowRoot)),
+      Array.getSomes,
+    ),
+    consumed: Number.sumAll(lengths),
   };
 };
+
+/**
+ * The node that a walk of `root` starts from.
+ *
+ * A `ShadowRoot` is a `DocumentFragment`, and it has no `createTreeWalker`.
+ * The factory is on `Document`, and the root of a walker may be any node.
+ */
+const walkScope = (root: Document | ShadowRoot): Node =>
+  pipe(
+    root,
+    Option.liftPredicate(isDocument),
+    Option.flatMapNullishOr((document) => document.body),
+    Option.getOrElse((): Node => root),
+  );
+
+/** What the walker does with each node: take it, skip it, or cut its subtree. */
+const nodeVerdict = (context: WalkContext): ((node: Node) => number) =>
+  pipe(
+    Match.type<Node>(),
+    Match.when(isText, textVerdict),
+    Match.when(isElement, elementVerdict(context)),
+    Match.orElse(() => NodeFilter.FILTER_SKIP),
+  );
+
+/** An empty text node holds nothing to find. */
+const textVerdict = (text: Text): number =>
+  pipe(
+    text.data.length > 0,
+    Boolean.match({
+      onTrue: () => NodeFilter.FILTER_ACCEPT,
+      onFalse: () => NodeFilter.FILTER_REJECT,
+    }),
+  );
+
+const elementVerdict =
+  (context: WalkContext) =>
+  (element: Element): number =>
+    pipe(
+      element,
+      Option.liftPredicate((element) => isSearchable(context, element)),
+      Option.match({
+        // A reject cuts the whole subtree. That is what makes one visibility
+        // check for each element affordable *and* correct: a `display: none`
+        // on an ancestor is never derived again from a descendant.
+        onNone: () => NodeFilter.FILTER_REJECT,
+        onSome: hostVerdict,
+      }),
+    );
+
+/**
+ * A searchable element is accepted only so that the walk can queue its shadow
+ * root. The light children are still walked, and that is where slotted text is.
+ */
+const hostVerdict = (element: Element): number =>
+  pipe(
+    element.shadowRoot,
+    Option.fromNullishOr,
+    Option.match({
+      onNone: () => NodeFilter.FILTER_SKIP,
+      onSome: () => NodeFilter.FILTER_ACCEPT,
+    }),
+  );
+
+/**
+ * Can the text under `element` be page content?
+ *
+ * The visibility check comes last, because it is the one that reaches into
+ * layout.
+ */
+const isSearchable = (context: WalkContext, element: Element): boolean =>
+  !pipe(
+    context.excludeHost,
+    Option.exists((host) => host === element),
+  ) &&
+  !pipe(OPAQUE_TAGS, HashSet.has(element.tagName)) &&
+  !element.hasAttribute("hidden") &&
+  context.visible(element);
+
+/** The nodes that `walker` accepts, until the text among them reaches `budget` characters. */
+const acceptedNodes = (walker: TreeWalker, budget: number): ReadonlyArray<Node> =>
+  Array.unfold(0, (consumed) =>
+    pipe(
+      consumed,
+      Option.liftPredicate((consumed) => consumed < budget),
+      Option.flatMapNullishOr(() => walker.nextNode()),
+      Option.map((node) => [node, consumed + textLength(node)] as const),
+    ),
+  );
+
+const textLength: (node: Node) => number = pipe(
+  Match.type<Node>(),
+  Match.when(isText, (text) => text.data.length),
+  Match.orElse(() => 0),
+);
 
 // ---------------------------------------------------------------------------
 // Matches
@@ -618,7 +813,26 @@ export interface FindMatch {
    * It is used only to choose the match that is nearest to the scroll position
    * when a search starts. The highlight always measures again.
    */
-  readonly rect: Option.Option<DOMRect>;
+  readonly rect: DOMRect;
+}
+
+/**
+ * A range from one text position to another.
+ *
+ * `None` when the DOM moved under us between the walk and this call.
+ */
+const spanRange = Option.liftThrowable(
+  (document: Document, start: CaretPosition, end: CaretPosition): Range => {
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    return range;
+  },
+);
+
+interface CaretPosition {
+  readonly node: Text;
+  readonly offset: number;
 }
 
 /** Build a `Range` for `span` inside `run`. */
@@ -626,25 +840,29 @@ export const rangeForSpan = (
   document: Document,
   run: TextRun,
   span: MatchSpan,
-): Option.Option<Range> => {
-  const start = locateOffset(run.starts, run.lengths, span.start);
-  const end = locateOffset(run.starts, run.lengths, span.end, true);
-  if (Option.isNone(start) || Option.isNone(end)) return Option.none();
+): Option.Option<Range> =>
+  Option.gen(function* () {
+    const start = yield* caretIn(run, span.start, "start");
+    const end = yield* caretIn(run, span.end, "end");
+    const range = yield* spanRange(document, start, end);
+    return yield* pipe(
+      range,
+      Option.liftPredicate((range) => !range.collapsed),
+    );
+  });
 
-  const startNode = run.nodes[start.value.index];
-  const endNode = run.nodes[end.value.index];
-  if (startNode === undefined || endNode === undefined) return Option.none();
-
-  try {
-    const range = document.createRange();
-    range.setStart(startNode, start.value.offset);
-    range.setEnd(endNode, end.value.offset);
-    return range.collapsed ? Option.none() : Option.some(range);
-  } catch {
-    // The DOM moved under us between the walk and this call.
-    return Option.none();
-  }
-};
+/** The text node and the offset in it that one end of a match maps to. */
+const caretIn = (run: TextRun, offset: number, end: MatchEnd): Option.Option<CaretPosition> =>
+  pipe(
+    locateOffset(run.starts, run.lengths, offset, end),
+    Option.flatMap((position) =>
+      pipe(
+        run.nodes,
+        Array.get(position.index),
+        Option.map((node) => ({ node, offset: position.offset })),
+      ),
+    ),
+  );
 
 /** What one walk of the runs gave, and whether it read all of them. */
 export interface RunSearch {
@@ -652,6 +870,8 @@ export interface RunSearch {
   /** True when the deadline stopped the search before the end of the text. */
   readonly stopped: boolean;
 }
+
+const NO_RUN_SEARCH: RunSearch = { matches: [], stopped: false };
 
 /**
  * Every match of `pattern` across `runs`, in the order of the runs.
@@ -669,43 +889,71 @@ export const matchesInRuns = (
   pattern: RegExp,
   limit: number = DEFAULT_MATCH_LIMIT,
   deadline: number = now() + MATCH_BUDGET_MS,
-): RunSearch => {
-  const matches: FindMatch[] = [];
-  let stopped = false;
+): RunSearch =>
+  pipe(
+    runs,
+    Array.reduce(NO_RUN_SEARCH, (search, run) =>
+      pipe(
+        search,
+        // A full search takes no more runs.
+        Option.liftPredicate((search) => search.matches.length < limit),
+        Option.map(searchRun(document, run, pattern, limit, deadline)),
+        Option.getOrElse(() => search),
+      ),
+    ),
+  );
 
-  for (const run of runs) {
-    if (matches.length >= limit) break;
-    if (now() > deadline) {
-      stopped = true;
-      break;
-    }
-    const found = collectSpans(run.haystack, pattern, limit - matches.length, deadline);
-    if (found.stopped) stopped = true;
-    for (const span of found.spans) {
-      const range = rangeForSpan(document, run, span);
-      if (Option.isNone(range)) continue;
-      const measured = measure(range.value);
-      if (Option.isNone(measured)) continue;
-      matches.push({
-        range: range.value,
-        text: run.haystack.slice(span.start, span.end),
-        rect: measured,
-      });
-    }
-  }
+/** Add the matches of one run to `search`, unless the deadline has passed. */
+const searchRun =
+  (document: Document, run: TextRun, pattern: RegExp, limit: number, deadline: number) =>
+  (search: RunSearch): RunSearch =>
+    pipe(
+      now() > deadline,
+      Boolean.match({
+        onTrue: () => ({ matches: search.matches, stopped: true }),
+        onFalse: () => addRun(document, run, pattern, limit, deadline)(search),
+      }),
+    );
 
-  return { matches, stopped };
-};
+const addRun =
+  (document: Document, run: TextRun, pattern: RegExp, limit: number, deadline: number) =>
+  (search: RunSearch): RunSearch => {
+    const found = collectSpans(run.haystack, pattern, limit - search.matches.length, deadline);
+    const matches = pipe(
+      found.spans,
+      Array.map((span) => matchFor(document, run, span)),
+      Array.getSomes,
+    );
+    return {
+      matches: pipe(search.matches, Array.appendAll(matches)),
+      stopped: search.stopped || found.stopped,
+    };
+  };
+
+/** The match for `span`, when the browser still draws it. */
+const matchFor = (document: Document, run: TextRun, span: MatchSpan): Option.Option<FindMatch> =>
+  pipe(
+    rangeForSpan(document, run, span),
+    Option.flatMap((range) =>
+      pipe(
+        measure(range),
+        Option.map((rect) => ({ range, text: run.haystack.slice(span.start, span.end), rect })),
+      ),
+    ),
+  );
 
 /** The bounding rectangle of a range that the browser still draws. */
-const measure = (range: Range): Option.Option<DOMRect> => {
-  try {
-    if (range.getClientRects().length === 0) return Option.none();
-    return Option.some(range.getBoundingClientRect());
-  } catch {
-    return Option.none();
-  }
-};
+const measure = (range: Range): Option.Option<DOMRect> =>
+  pipe(
+    Result.try(() =>
+      pipe(
+        range,
+        Option.liftPredicate((range) => range.getClientRects().length > 0),
+        Option.map((range) => range.getBoundingClientRect()),
+      ),
+    ),
+    Result.getOrElse(() => Option.none()),
+  );
 
 /**
  * Just enough of a rectangle for the viewport test.
@@ -725,16 +973,12 @@ export interface RectLike {
  * The parameter is typed by shape, and not against `FindMatch`, so that the
  * function can be exercised without a live `Range`.
  */
-export const firstMatchInView = (
-  matches: ReadonlyArray<{ readonly rect: Option.Option<RectLike> }>,
-): number => {
-  for (let index = 0; index < matches.length; index++) {
-    const match = matches[index];
-    if (match === undefined) continue;
-    if (Option.isSome(match.rect) && match.rect.value.bottom >= 0) return index;
-  }
-  return 0;
-};
+export const firstMatchInView = (matches: ReadonlyArray<{ readonly rect: RectLike }>): number =>
+  pipe(
+    matches,
+    Array.findFirstIndex((match) => match.rect.bottom >= 0),
+    Option.getOrElse(() => 0),
+  );
 
 /**
  * The index of the match that holds the caret, or of the one just after it.
@@ -745,31 +989,34 @@ export const firstMatchInView = (
 export const indexAtSelection = (
   selection: Selection,
   matches: ReadonlyArray<FindMatch>,
-): Option.Option<number> => {
-  const node = selection.focusNode;
-  if (node === null) return Option.none();
-  const offset = selection.focusOffset;
+): Option.Option<number> =>
+  pipe(
+    Option.fromNullishOr(selection.focusNode),
+    Option.flatMap((node) =>
+      pipe(matches, Array.findFirstIndex(holdsOrPrecedes(node, selection.focusOffset))),
+    ),
+  );
 
-  for (let index = 0; index < matches.length; index++) {
-    const match = matches[index];
-    if (match === undefined) continue;
-    try {
-      if (match.range.comparePoint(node, offset) >= 0) {
-        return Option.some(index);
-      }
-    } catch {
-      continue;
-    }
-  }
-  return Option.none();
-};
+/** Does `match` hold the point, or lie after it? A throw is no opinion. */
+const holdsOrPrecedes =
+  (node: Node, offset: number) =>
+  (match: FindMatch): boolean =>
+    pipe(
+      Result.try(() => match.range.comparePoint(node, offset) >= 0),
+      Result.getOrElse(() => false),
+    );
 
 /** The word under the caret, or the selected text. This backs `*` and `#`. */
-export const wordUnderCursor = (selection: Selection): string => {
-  const selected = selection.toString().trim();
-  if (selected.length > 0) return selected;
-
-  const node = selection.focusNode;
-  if (node === null || node.nodeType !== Node.TEXT_NODE) return "";
-  return wordAt(node.nodeValue ?? "", selection.focusOffset);
-};
+export const wordUnderCursor = (selection: Selection): string =>
+  pipe(
+    selection.toString().trim(),
+    Option.liftPredicate((selected) => selected.length > 0),
+    Option.orElse(() =>
+      pipe(
+        Option.fromNullishOr(selection.focusNode),
+        Option.filter(isText),
+        Option.map((node) => wordAt(node.data, selection.focusOffset)),
+      ),
+    ),
+    Option.getOrElse(() => ""),
+  );

@@ -2,7 +2,8 @@
  * Visual mode, visual line mode and caret mode.
  *
  * Ported from the `content_scripts/mode_visual.js` of Vimium (MIT). The three
- * modes are one implementation with two flags:
+ * modes are one implementation, and they differ in two ways. `KindProfile`
+ * holds the difference:
  *
  * | mode        | `alterMethod` | line-wise |
  * | ----------- | ------------- | --------- |
@@ -20,20 +21,36 @@
  * selection: the selection is the state that is handed over.
  */
 
-import { Context, Effect, Exit, Layer, Option, Ref, Scope } from "effect";
+import {
+  Boolean,
+  Context,
+  Data,
+  Effect,
+  Exit,
+  Layer,
+  Match,
+  Option,
+  Predicate,
+  Record,
+  Ref,
+  Schema,
+  Scope,
+  flow,
+  pipe,
+} from "effect";
+import { constVoid } from "effect/Function";
 import { Commands } from "~/core/Commands.ts";
 import { type HandlerResult, SUPPRESS_EVENT } from "~/core/HandlerStack.ts";
 import { type ExitReason, type ModeHandle, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { appendCountDigit, isComposing, isCountDigit, keyNotation } from "~/domain/Key.ts";
-import { Capabilities } from "~/platform/Capabilities.ts";
+import { Capabilities, type CapabilityReport } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Hud } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
 import {
-  type AlterMethod,
   canModify,
   collapseToAnchor,
   collapseToFocus,
@@ -51,12 +68,6 @@ import {
 
 export type VisualKind = "visual" | "visual-line" | "caret";
 
-const INDICATORS: Readonly<Record<VisualKind, string>> = {
-  visual: "Visual",
-  "visual-line": "Visual line",
-  caret: "Caret",
-};
-
 /**
  * WebKit does not give a page the content of the clipboard outside its own
  * paste control, and a userscript cannot make a gesture that changes that. To
@@ -69,7 +80,15 @@ const PASTE_EXPLANATION =
 /** How long the explanation above stays on screen. */
 const PASTE_EXPLANATION_MS = 4000;
 
-const alterFor = (kind: VisualKind): AlterMethod => (kind === "caret" ? "move" : "extend");
+/** `1 character`, or `2 characters`. */
+const characters = (count: number): string =>
+  pipe(
+    count === 1,
+    Boolean.match({
+      onTrue: () => "1 character",
+      onFalse: () => `${count} characters`,
+    }),
+  );
 
 /** A live mode, and the scope that owns it. */
 interface LiveVisual {
@@ -77,6 +96,205 @@ interface LiveVisual {
   readonly scope: Scope.Closeable;
   readonly handle: ModeHandle;
 }
+
+// ---------------------------------------------------------------------------
+// What sets the kinds apart
+// ---------------------------------------------------------------------------
+
+/**
+ * Grow a collapsed selection to one character.
+ *
+ * A collapsed selection draws nothing in a page that is not editable, because
+ * there is no caret of the page to inherit. Caret mode therefore draws one out
+ * of a selection of one character.
+ *
+ * `isCollapsed` is wrong when the selection lives wholly inside an open shadow
+ * root: both boundaries retarget to the same host node. The composed read is
+ * the only one that can tell the difference, and `ShadowRoot.getSelection()`,
+ * which everybody reaches for first, is not implemented in Safari at all.
+ */
+const showCaret = (current: Selection, capabilities: CapabilityReport): void =>
+  pipe(
+    readBoundaries(current, capabilities),
+    Option.match({
+      onNone: () => current.isCollapsed,
+      onSome: (boundaries) => boundaries.collapsed,
+    }),
+    Boolean.match({
+      onFalse: constVoid,
+      onTrue: () => {
+        extendByOneCharacter(current);
+      },
+    }),
+  );
+
+/** What one kind does differently: the table at the top of this file, as data. */
+interface KindProfile {
+  readonly indicator: string;
+  /** Run one motion, `repeat` times. */
+  readonly move: (target: Selection, spec: MovementSpec, repeat: number) => void;
+  /** Shape the selection that the mode starts from. */
+  readonly shape: (current: Selection, capabilities: CapabilityReport) => void;
+}
+
+const VISUAL: KindProfile = {
+  indicator: "Visual",
+  move: (target, spec, repeat) => runMovement(target, "extend", spec, repeat),
+  shape: showCaret,
+};
+
+const VISUAL_LINE: KindProfile = {
+  indicator: "Visual line",
+  move: (target, spec, repeat) => {
+    runMovement(target, "extend", spec, repeat);
+    extendToLines(target);
+  },
+  shape: (current, capabilities) => {
+    showCaret(current, capabilities);
+    extendToLines(current);
+  },
+};
+
+const CARET: KindProfile = {
+  indicator: "Caret",
+  // Fold the display selection of one character away first, so that the move
+  // starts at the caret and not at its far end.
+  move: (target, spec, repeat) => {
+    collapseToAnchor(target);
+    runMovement(target, "move", spec, repeat);
+    extendByOneCharacter(target);
+  },
+  // Caret mode never inherits a range: `c` from visual mode collapses onto the
+  // end that the user was steering.
+  shape: (current, capabilities) => {
+    collapseToFocus(current);
+    showCaret(current, capabilities);
+  },
+};
+
+const profileOf: (kind: VisualKind) => KindProfile = pipe(
+  Match.type<VisualKind>(),
+  Match.when("visual", () => VISUAL),
+  Match.when("visual-line", () => VISUAL_LINE),
+  Match.when("caret", () => CARET),
+  Match.exhaustive,
+);
+
+// ---------------------------------------------------------------------------
+// Keys
+// ---------------------------------------------------------------------------
+
+/** What the keys typed so far mean to the next key. */
+type Typed = Data.TaggedEnum<{
+  /** `count` is the count prefix. It is `0` when none is typed. */
+  Plain: { readonly count: number };
+  /** `g` was pressed, and the next key completes the sequence. */
+  AfterG: { readonly count: number };
+}>;
+
+const Typed = Data.taggedEnum<Typed>();
+
+const NOTHING_TYPED: Typed = Typed.Plain({ count: 0 });
+
+/** What one key asks the mode to do. */
+type KeyCommand = Data.TaggedEnum<{
+  Motion: { readonly spec: MovementSpec; readonly repeat: number };
+  Yank: Record.ReadonlyRecord<never, never>;
+  SwapEnds: Record.ReadonlyRecord<never, never>;
+  Enter: { readonly kind: VisualKind };
+  ExplainPaste: Record.ReadonlyRecord<never, never>;
+}>;
+
+const KeyCommand = Data.taggedEnum<KeyCommand>();
+
+/** The keys of these modes that are not motions. */
+const KEY_COMMANDS: Record.ReadonlyRecord<string, KeyCommand> = {
+  y: KeyCommand.Yank(),
+  o: KeyCommand.SwapEnds(),
+  c: KeyCommand.Enter({ kind: "caret" }),
+  v: KeyCommand.Enter({ kind: "visual" }),
+  V: KeyCommand.Enter({ kind: "visual-line" }),
+  p: KeyCommand.ExplainPaste(),
+  P: KeyCommand.ExplainPaste(),
+};
+
+/** The state after one key, and what the key asks for. */
+interface KeyTransition {
+  readonly next: Typed;
+  readonly commands: ReadonlyArray<KeyCommand>;
+}
+
+const typing = (next: Typed): KeyTransition => ({ next, commands: [] });
+
+/** A key that acts, or that means nothing, drops the count. */
+const acting = (commands: ReadonlyArray<KeyCommand>): KeyTransition => ({
+  next: NOTHING_TYPED,
+  commands,
+});
+
+/** A motion runs `count` times, and once when no count is typed. */
+const motion =
+  (count: number) =>
+  (spec: MovementSpec): KeyCommand =>
+    KeyCommand.Motion({ spec, repeat: Math.max(1, count) });
+
+/** The meaning of `notation` when no `g` is pending. */
+const pressPlain = (notation: string, count: number): KeyTransition =>
+  pipe(
+    Match.value(notation),
+    // The rule of Vim: `0` is a motion, except while a count is being typed.
+    // The count has a limit, because these modes suppress every keyboard
+    // event, so an unlimited `999999999j` was a freeze that Escape could not
+    // end.
+    Match.when(
+      (key) => isCountDigit(key, count > 0),
+      (key) => typing(Typed.Plain({ count: appendCountDigit(count, key) })),
+    ),
+    Match.when("g", () => typing(Typed.AfterG({ count }))),
+    Match.orElse((key) => pipe(commandFor(key, count), Option.toArray, acting)),
+  );
+
+/** What any other key asks for: a motion, another command, or nothing. */
+const commandFor = (key: string, count: number): Option.Option<KeyCommand> =>
+  pipe(
+    MOVEMENTS,
+    Record.get(key),
+    Option.map(motion(count)),
+    Option.orElse(() => pipe(KEY_COMMANDS, Record.get(key))),
+  );
+
+/** `gg`, which is the one motion of two keys. */
+const secondG = (count: number): KeyTransition =>
+  pipe(MOVEMENTS, Record.get("gg"), Option.map(motion(count)), Option.toArray, acting);
+
+/** The meaning of one key, after the keys typed before it. */
+const pressKey = (notation: string): ((typed: Typed) => KeyTransition) =>
+  Typed.$match({
+    AfterG: ({ count }) =>
+      pipe(
+        notation === "g",
+        Boolean.match({
+          onTrue: () => secondG(count),
+          // `gj` is not a binding, but `g` and then a true motion must still
+          // run that motion instead of being swallowed.
+          onFalse: () => pressPlain(notation, count),
+        }),
+      ),
+    Plain: ({ count }) => pressPlain(notation, count),
+  });
+
+// ---------------------------------------------------------------------------
+// Starting
+// ---------------------------------------------------------------------------
+
+/** Why a mode could not establish the selection that it starts from. */
+class VisualStartError extends Schema.TaggedError<VisualStartError>()("VisualStartError", {
+  reason: Schema.Literals(["unavailable", "no-text", "unplaceable"]),
+}) {}
+
+// ---------------------------------------------------------------------------
+// The service
+// ---------------------------------------------------------------------------
 
 export class Visual extends Context.Service<
   Visual,
@@ -107,28 +325,32 @@ export class Visual extends Context.Service<
       const win = dom.window;
 
       const live = yield* Ref.make<Option.Option<LiveVisual>>(Option.none());
-      /** The count prefix that the user is typing. */
-      const count = yield* Ref.make(0);
-      /** `g` was pressed, and the next key completes the sequence. */
-      const pendingG = yield* Ref.make(false);
+      /** The count prefix, and whether a `g` is pending. */
+      const typed = yield* Ref.make(NOTHING_TYPED);
 
       const selection: Effect.Effect<Option.Option<Selection>> = dom.probeOr(
         () => Option.fromNullishOr(win.getSelection()),
         Option.none<Selection>(),
       );
 
+      /** Read or change the selection inside `dom.probeOr`. No selection gives `fallback`. */
+      const probeSelection = <A>(
+        read: (selection: Selection) => A,
+        fallback: A,
+      ): Effect.Effect<A> =>
+        pipe(
+          selection,
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.succeed(fallback),
+              onSome: (target) => dom.probeOr(() => read(target), fallback),
+            }),
+          ),
+        );
+
       /** Run one synchronous piece of selection work, and ignore a refusal. */
       const withSelection = (body: (selection: Selection) => void): Effect.Effect<void> =>
-        Effect.gen(function* () {
-          const target = yield* selection;
-          if (Option.isNone(target)) return;
-          yield* Effect.asVoid(
-            dom.probeOr(() => {
-              body(target.value);
-              return true;
-            }, false),
-          );
-        });
+        probeSelection(body, undefined);
 
       const clearSelection: Effect.Effect<void> = withSelection((target) => {
         // Nothing to do on a refusal. The page owns the selection again in
@@ -145,55 +367,47 @@ export class Visual extends Context.Service<
        * hand-over from `v` to `V` or to `c`, and the selection survives it.
        */
       const release = Effect.fn("Visual.release")(function* (reason: ExitReason) {
-        const entry = yield* Ref.getAndSet(live, Option.none());
-        if (Option.isNone(entry)) return;
-        // The exit comes first, and with the true reason. Closing the scope
-        // alone would exit the mode with `"navigation"`, and the hand-over
-        // would then throw the selection away.
-        yield* entry.value.handle.exit(reason);
-        yield* Scope.close(entry.value.scope, Exit.void);
+        const entry = yield* pipe(live, Ref.getAndSet(Option.none<LiveVisual>()));
+        yield* pipe(
+          entry,
+          Option.match({
+            onNone: () => Effect.void,
+            // The exit comes first, and with the true reason. Closing the
+            // scope alone would exit the mode with `"navigation"`, and the
+            // hand-over would then throw the selection away.
+            onSome: ({ handle, scope }) =>
+              pipe(handle.exit(reason), Effect.andThen(Scope.close(scope, Exit.void))),
+          }),
+        );
       });
 
       /** End the live mode from inside one of its own key handlers. */
       const exitCurrent = Effect.fn("Visual.exitCurrent")(function* () {
         const entry = yield* Ref.get(live);
-        if (Option.isSome(entry)) yield* entry.value.handle.exit("explicit");
-      });
-
-      const takeCount = Effect.gen(function* () {
-        const value = yield* Ref.getAndSet(count, 0);
-        return value > 0 ? value : 1;
+        yield* pipe(
+          entry,
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: ({ handle }) => handle.exit("explicit"),
+          }),
+        );
       });
 
       // -- motions -------------------------------------------------------
 
       const runMotion = Effect.fn("Visual.runMotion")(function* (
         kind: VisualKind,
-        spec: Option.Option<MovementSpec>,
+        spec: MovementSpec,
+        repeat: number,
       ) {
-        const repeat = yield* takeCount;
-        if (Option.isNone(spec)) return;
         const viewport = yield* ui.viewport;
-        const alter = alterFor(kind);
-
         yield* withSelection((target) => {
-          if (alter === "move") {
-            // Caret mode: fold the display selection of one character away
-            // first, so that the move starts at the caret and not at its far
-            // end.
-            collapseToAnchor(target);
-            runMovement(target, "move", spec.value, repeat);
-            extendByOneCharacter(target);
-          } else {
-            runMovement(target, "extend", spec.value, repeat);
-            if (kind === "visual-line") extendToLines(target);
-          }
+          profileOf(kind).move(target, spec, repeat);
           scrollSelectionIntoView(target, viewport);
         });
       });
 
       const swapEnds = Effect.fn("Visual.swapEnds")(function* () {
-        yield* Ref.set(count, 0);
         const viewport = yield* ui.viewport;
         yield* withSelection((target) => {
           reverseSelection(target);
@@ -204,7 +418,7 @@ export class Visual extends Context.Service<
       // -- yank ----------------------------------------------------------
 
       /**
-       * `y`: copy the selection and leave.
+       * Start the write of `text`, and say so.
        *
        * The write is started **inside** the keydown task. Nothing may suspend
        * in front of it: the window of transient activation in WebKit is short,
@@ -216,207 +430,162 @@ export class Visual extends Context.Service<
        * write and the start of the promise both happen inside the dispatch of
        * the browser. Only the wait for the answer runs later.
        */
-      const yank = Effect.fn("Visual.yank")(function* () {
-        yield* Ref.set(count, 0);
-        const target = yield* selection;
-        const text = Option.isNone(target)
-          ? ""
-          : yield* dom.probeOr(() => selectionText(target.value), "");
-
-        if (text.length === 0) {
-          yield* hud.show("Nothing to copy");
-          yield* exitCurrent();
-          return;
-        }
-
-        yield* Effect.asVoid(
-          Effect.forkDetach(
-            Effect.catch(clipboard.write(text), (error) =>
-              report.error(`Copy failed: ${error.detail}`),
-            ),
-            { startImmediately: true },
-          ),
+      const copy = (text: string): Effect.Effect<void> =>
+        pipe(
+          clipboard.write(text),
+          Effect.catch((error) => report.error(`Copy failed: ${error.detail}`)),
+          Effect.forkDetach({ startImmediately: true }),
+          Effect.andThen(hud.show(`Yanked ${characters(text.length)}`)),
         );
 
-        yield* hud.show(`Yanked ${text.length} character${text.length === 1 ? "" : "s"}`);
+      /** `y`: copy the selection and leave. */
+      const yank = Effect.fn("Visual.yank")(function* () {
+        const text = yield* probeSelection(selectionText, "");
+        yield* pipe(
+          text,
+          Option.liftPredicate((text) => text.length > 0),
+          Option.match({
+            onNone: () => hud.show("Nothing to copy"),
+            onSome: copy,
+          }),
+        );
         yield* exitCurrent();
       });
 
       // -- keys ----------------------------------------------------------
 
+      const runCommand = (kind: VisualKind): ((command: KeyCommand) => Effect.Effect<void>) =>
+        KeyCommand.$match({
+          Motion: ({ spec, repeat }) => runMotion(kind, spec, repeat),
+          Yank: () => yank(),
+          SwapEnds: () => swapEnds(),
+          Enter: (command) => enterKind(command.kind),
+          ExplainPaste: () => hud.show(PASTE_EXPLANATION, PASTE_EXPLANATION_MS),
+        });
+
       const handleKey = Effect.fn("Visual.handleKey")(function* (
         kind: VisualKind,
         notation: string,
       ) {
-        if (yield* Ref.getAndSet(pendingG, false)) {
-          if (notation === "g") {
-            yield* runMotion(kind, Option.fromNullishOr(MOVEMENTS.get("gg")));
-            return;
-          }
-          // Fall through: `gj` is not a binding, but `g` and then a true
-          // motion must still run that motion instead of being swallowed.
-        }
-
-        if (isCountDigit(notation, (yield* Ref.get(count)) > 0)) {
-          // The rule of Vim: `0` is a motion, except while a count is being
-          // typed. The count has a limit, because these modes suppress every
-          // keyboard event, so an unlimited `999999999j` was a freeze that
-          // Escape could not end.
-          yield* Ref.update(count, (value) => appendCountDigit(value, notation));
-          return;
-        }
-
-        if (notation === "g") {
-          yield* Ref.set(pendingG, true);
-          return;
-        }
-
-        const movement = MOVEMENTS.get(notation);
-        if (movement !== undefined) {
-          yield* runMotion(kind, Option.some(movement));
-          return;
-        }
-
-        switch (notation) {
-          case "y":
-            yield* yank();
-            return;
-          case "o":
-            yield* swapEnds();
-            return;
-          case "c":
-            yield* Ref.set(count, 0);
-            yield* enterKind("caret");
-            return;
-          case "v":
-            yield* Ref.set(count, 0);
-            yield* enterKind("visual");
-            return;
-          case "V":
-            yield* Ref.set(count, 0);
-            yield* enterKind("visual-line");
-            return;
-          case "p":
-          case "P":
-            yield* Ref.set(count, 0);
-            yield* hud.show(PASTE_EXPLANATION, PASTE_EXPLANATION_MS);
-            return;
-          default:
-            yield* Ref.set(count, 0);
-            return;
-        }
+        const commands = yield* pipe(
+          typed,
+          Ref.modify(flow(pressKey(notation), ({ next, commands }) => [commands, next] as const)),
+        );
+        yield* pipe(commands, Effect.forEach(runCommand(kind), { discard: true }));
       });
 
       const onKeydown =
         (kind: VisualKind) =>
         (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-          Effect.gen(function* () {
+          pipe(
+            event,
             // A keystroke in the middle of a composition belongs to the input
             // method, and not to us.
-            if (isComposing(event)) return SUPPRESS_EVENT;
-            const notation = keyNotation(event, {
-              ignoreKeyboardLayout: settings.currentUnsafe().ignoreKeyboardLayout,
-              applePlatform: capabilities.applePlatform,
-            });
-            if (Option.isNone(notation)) return SUPPRESS_EVENT;
-            yield* handleKey(kind, notation.value);
-            return SUPPRESS_EVENT;
-          });
+            Option.liftPredicate(Predicate.not(isComposing)),
+            Option.flatMap((event) =>
+              keyNotation(event, {
+                ignoreKeyboardLayout: settings.currentUnsafe().ignoreKeyboardLayout,
+                applePlatform: capabilities.applePlatform,
+              }),
+            ),
+            Option.match({
+              onNone: () => Effect.void,
+              onSome: (notation) => handleKey(kind, notation),
+            }),
+            Effect.as(SUPPRESS_EVENT),
+          );
 
       // -- the first selection -------------------------------------------
 
+      /** The selection of this frame, when `Selection.modify` works on it. */
+      const modifiableSelection: Effect.Effect<Selection, VisualStartError> = pipe(
+        probeSelection(Option.liftPredicate(canModify), Option.none<Selection>()),
+        Effect.flatMap(Effect.fromOption(() => new VisualStartError({ reason: "unavailable" }))),
+      );
+
+      /** Put a caret at the start of the first large text of the page. */
+      const placeCaret = (current: Selection): Effect.Effect<void, VisualStartError> =>
+        pipe(
+          dom.probeOr(() => findCaretAnchor(doc), Option.none<Text>()),
+          Effect.flatMap(Effect.fromOption(() => new VisualStartError({ reason: "no-text" }))),
+          Effect.flatMap((anchor) =>
+            pipe(
+              dom.attempt("Selection.setBaseAndExtent", () =>
+                current.setBaseAndExtent(anchor, 0, anchor, 0),
+              ),
+              Effect.mapError(() => new VisualStartError({ reason: "unplaceable" })),
+            ),
+          ),
+        );
+
       /**
-       * Establish the selection that the mode starts from.
-       *
-       * A selection that is already there is adopted, and not replaced. That is
-       * what makes `v` after a find, or after a drag with the mouse, do the
-       * obvious thing.
+       * A selection that is already there is adopted, and not replaced. That
+       * is what makes `v` after a find, or after a drag with the mouse, do the
+       * obvious thing. An empty one gets a caret.
        */
-      const start = Effect.fn("Visual.start")(function* (kind: VisualKind) {
-        const target = yield* selection;
-        const usable =
-          Option.isSome(target) && (yield* dom.probeOr(() => canModify(target.value), false));
-        if (!usable || Option.isNone(target)) {
-          yield* report.error("Text selection is not available in this frame.");
-          yield* exitCurrent();
-          return;
-        }
-        const current = target.value;
-
-        const empty = yield* dom.probeOr(
-          () => current.rangeCount === 0 || current.anchorNode === null,
-          true,
+      const adoptOrPlace = (current: Selection): Effect.Effect<Selection, VisualStartError> =>
+        pipe(
+          dom.probeOr(() => current.rangeCount === 0 || current.anchorNode === null, true),
+          Effect.flatMap(
+            Boolean.match({
+              onFalse: () => Effect.void,
+              onTrue: () => placeCaret(current),
+            }),
+          ),
+          Effect.as(current),
         );
-        if (empty) {
-          const anchor = yield* dom.probeOr(() => findCaretAnchor(doc), Option.none<Text>());
-          if (Option.isNone(anchor)) {
-            yield* hud.show("No text on this page to select.");
-            yield* exitCurrent();
-            return;
-          }
-          const placed = yield* dom.probeOr(() => {
-            current.setBaseAndExtent(anchor.value, 0, anchor.value, 0);
-            return true;
-          }, false);
-          if (!placed) {
-            yield* report.error("Could not place the caret on this page.");
-            yield* exitCurrent();
-            return;
-          }
-        }
 
-        const viewport = yield* ui.viewport;
-        yield* Effect.asVoid(
-          dom.probeOr(() => {
-            // Caret mode never inherits a range: `c` from visual mode collapses
-            // onto the end that the user was steering.
-            if (alterFor(kind) === "move") collapseToFocus(current);
+      const explainRefusal = ({ reason }: VisualStartError): Effect.Effect<void> =>
+        pipe(
+          Match.value(reason),
+          Match.when("unavailable", () =>
+            report.error("Text selection is not available in this frame."),
+          ),
+          Match.when("no-text", () => hud.show("No text on this page to select.")),
+          Match.when("unplaceable", () => report.error("Could not place the caret on this page.")),
+          Match.exhaustive,
+        );
 
-            // `isCollapsed` is wrong when the selection lives wholly inside an
-            // open shadow root: both boundaries retarget to the same host node.
-            // The composed read is the only one that can tell the difference, and
-            // `ShadowRoot.getSelection()`, which everybody reaches for first, is
-            // not implemented in Safari at all.
-            const boundaries = readBoundaries(current, capabilities);
-            const collapsed = Option.isSome(boundaries)
-              ? boundaries.value.collapsed
-              : current.isCollapsed;
-
-            // A collapsed selection draws nothing in a page that is not
-            // editable, because there is no caret of the page to inherit. Caret
-            // mode therefore draws one out of a selection of one character.
-            if (collapsed) extendByOneCharacter(current);
-            if (kind === "visual-line") extendToLines(current);
+      /** Establish the selection that the mode starts from. */
+      const start = Effect.fn("Visual.start")(
+        function* (kind: VisualKind) {
+          const current = yield* pipe(modifiableSelection, Effect.flatMap(adoptOrPlace));
+          const viewport = yield* ui.viewport;
+          yield* dom.probeOr(() => {
+            profileOf(kind).shape(current, capabilities);
             scrollSelectionIntoView(current, viewport);
-            return true;
-          }, false),
-        );
-      });
+          }, undefined);
+        },
+        Effect.catchTag("VisualStartError", (error) =>
+          pipe(explainRefusal(error), Effect.andThen(exitCurrent())),
+        ),
+      );
 
       // -- entering ------------------------------------------------------
 
-      const enterKind = Effect.fn("Visual.enterKind")(function* (kind: VisualKind) {
-        if (!capabilities.selectionModify) {
-          // Every capability that is `false` gets an explanation that the
-          // user can see. This one should be unreachable on any WebKit build
-          // that this application targets.
-          yield* report.error(
-            "Selection.modify() is unavailable, so visual mode cannot run " + "here.",
-          );
-          return;
-        }
+      /**
+       * A `singleton` exit means that `v`, `V` or `c` is handing over to a
+       * sibling. The selection is the state that is handed over, and it must
+       * survive.
+       */
+      const afterExit = (reason: ExitReason): Effect.Effect<void> =>
+        pipe(
+          Match.value(reason),
+          Match.when("singleton", () => Effect.void),
+          Match.orElse(() => clearSelection),
+        );
 
+      const openMode = Effect.fn("Visual.openMode")(function* (kind: VisualKind) {
         // The hand-over. The mode before this one keeps the selection.
         yield* release("singleton");
-        yield* Ref.set(count, 0);
-        yield* Ref.set(pendingG, false);
+        yield* pipe(typed, Ref.set(NOTHING_TYPED));
 
         const scope = yield* Scope.make();
-        const handle = yield* Effect.provideService(
+        const handle = yield* pipe(
           modes.enter(
             {
               name: kind,
-              indicator: INDICATORS[kind],
+              indicator: profileOf(kind).indicator,
               exitOnEscape: true,
               // These modes own the keyboard outright: a key that they do not
               // use must not reach the page, or `j` scrolls out from under the
@@ -428,19 +597,26 @@ export class Visual extends Context.Service<
               keydown: onKeydown(kind),
             },
           ),
-          Scope.Scope,
-          scope,
+          Scope.provide(scope),
         );
 
-        yield* handle.onExit((reason) =>
-          // A `singleton` exit means that `v`, `V` or `c` is handing over to
-          // a sibling. The selection is the state that is handed over, and it
-          // must survive.
-          reason === "singleton" ? Effect.void : clearSelection,
-        );
-
-        yield* Ref.set(live, Option.some({ kind, scope, handle }));
+        yield* handle.onExit(afterExit);
+        yield* pipe(live, Ref.set(Option.some({ kind, scope, handle })));
         yield* start(kind);
+      });
+
+      const enterKind = Effect.fn("Visual.enterKind")(function* (kind: VisualKind) {
+        yield* pipe(
+          capabilities.selectionModify,
+          Boolean.match({
+            // Every capability that is `false` gets an explanation that the
+            // user can see. This one should be unreachable on any WebKit build
+            // that this application targets.
+            onFalse: () =>
+              report.error("Selection.modify() is unavailable, so visual mode cannot run here."),
+            onTrue: () => openMode(kind),
+          }),
+        );
       });
 
       // The layer scope owns the live mode. Closing the runtime therefore ends
