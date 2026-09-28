@@ -20,7 +20,6 @@ import {
   Exit,
   Layer,
   Match,
-  Predicate,
   Result,
   Schema,
   type Scope,
@@ -28,6 +27,7 @@ import {
   pipe,
 } from "effect";
 import { constVoid } from "effect/Function";
+import { describeThrown } from "~/domain/Failure.ts";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -54,15 +54,24 @@ export class DomError extends Schema.TaggedError<DomError>()("DomError", {
 // ---------------------------------------------------------------------------
 
 /**
- * Maps a target type to the events that it can give.
+ * Maps a global of this frame to the events that it can give.
  *
- * The three maps cover every listener in this application. A target that is not
- * one of these uses `listenOn`, which gives a plain `Event`.
+ * Any other target uses `listenOn`.
  */
 export interface TargetEventMap {
   readonly window: WindowEventMap;
   readonly document: DocumentEventMap;
-  readonly element: HTMLElementEventMap;
+}
+
+/**
+ * Maps the event types of a `MessagePort` to the events that it gives.
+ *
+ * The payload is `unknown`, and not the `any` of the DOM types. The page can
+ * hold a copy of a port, so a message on it can carry anything.
+ */
+export interface PortEventMap {
+  readonly message: MessageEvent<unknown>;
+  readonly messageerror: MessageEvent<unknown>;
 }
 
 export interface ListenOptions {
@@ -105,6 +114,9 @@ export class Dom extends Context.Service<
     /** The URL of this frame. A read, because a soft navigation changes it. */
     readonly href: Effect.Effect<string>;
 
+    /** The visibility of this frame's document. A read, because the user can hide the tab. */
+    readonly visibility: Effect.Effect<DocumentVisibilityState>;
+
     /**
      * Read a global that this realm may have poisoned.
      *
@@ -112,14 +124,25 @@ export class Dom extends Context.Service<
      */
     readonly probe: <A>(api: string, read: () => A) => Effect.Effect<A, DomError>;
 
-    /** The same read, with a value for "absent" and for "we could not tell". */
+    /**
+     * The same read, with a fallback for "absent" and for "we could not tell".
+     *
+     * The fallback runs only when the read throws, so it can do work of its own.
+     */
+    readonly probeOrElse: <A>(read: () => A, orElse: () => A) => Effect.Effect<A>;
+
+    /**
+     * `probeOrElse` with a fallback value, which the caller builds before the
+     * read. It stays for the callers that pass a value. New code uses
+     * `probeOrElse`.
+     */
     readonly probeOr: <A>(read: () => A, fallback: A) => Effect.Effect<A>;
 
     /** Run a synchronous DOM call, and name the failure if it throws. */
     readonly attempt: <A>(api: string, run: () => A) => Effect.Effect<A, DomError>;
 
     /**
-     * Listen on `window`, `document` or an element, for the enclosing scope.
+     * Listen on `window` or `document`, for the enclosing scope.
      *
      * The handler runs synchronously, inside the browser's dispatch. That is what
      * lets a key handler call `preventDefault`.
@@ -131,13 +154,33 @@ export class Dom extends Context.Service<
       options?: ListenOptions,
     ) => Effect.Effect<void, never, R | Scope.Scope>;
 
-    /** Listen on any other target. The event is not narrowed. */
-    readonly listenOn: <R>(
-      target: EventTarget,
-      type: string,
-      handler: Listener<Event, R>,
-      options?: ListenOptions,
-    ) => Effect.Effect<void, never, R | Scope.Scope>;
+    /**
+     * Listen on any other target, for the enclosing scope.
+     *
+     * The event map of the target narrows the event. A port gives a
+     * `MessageEvent`, and an element gives the event of its type, such as a
+     * `MouseEvent` for `mousedown`. Any other target gives a plain `Event`.
+     */
+    readonly listenOn: {
+      <T extends keyof PortEventMap, R>(
+        target: MessagePort,
+        type: T,
+        handler: Listener<PortEventMap[T], R>,
+        options?: ListenOptions,
+      ): Effect.Effect<void, never, R | Scope.Scope>;
+      <T extends keyof HTMLElementEventMap, R>(
+        target: HTMLElement,
+        type: T,
+        handler: Listener<HTMLElementEventMap[T], R>,
+        options?: ListenOptions,
+      ): Effect.Effect<void, never, R | Scope.Scope>;
+      <R>(
+        target: EventTarget,
+        type: string,
+        handler: Listener<Event, R>,
+        options?: ListenOptions,
+      ): Effect.Effect<void, never, R | Scope.Scope>;
+    };
 
     /** The same events as a stream, for work that may suspend. */
     readonly events: <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K]>(
@@ -172,13 +215,8 @@ export class Dom extends Context.Service<
       const win = globalThis as Window & typeof globalThis;
       const doc = win.document;
 
-      const probeOr = <A>(read: () => A, fallback: A): Effect.Effect<A> =>
-        Effect.sync(() =>
-          pipe(
-            Result.try(read),
-            Result.getOrElse(() => fallback),
-          ),
-        );
+      const probeOrElse = <A>(read: () => A, orElse: () => A): Effect.Effect<A> =>
+        Effect.sync(() => pipe(Result.try(read), Result.getOrElse(orElse)));
 
       const probe = <A>(api: string, read: () => A): Effect.Effect<A, DomError> =>
         Effect.try({
@@ -187,7 +225,7 @@ export class Dom extends Context.Service<
             new DomError({
               reason: "denied",
               api,
-              detail: describe(cause),
+              detail: describeThrown(cause),
               cause,
             }),
         });
@@ -196,7 +234,7 @@ export class Dom extends Context.Service<
         pipe(
           Match.value(name),
           Match.when("document", (): EventTarget => doc),
-          Match.whenOr("window", "element", (): EventTarget => win),
+          Match.when("window", (): EventTarget => win),
           Match.exhaustive,
         );
 
@@ -212,15 +250,16 @@ export class Dom extends Context.Service<
         target: EventTarget,
         type: string,
         handler: Listener<E, R>,
-        options: ListenOptions | undefined,
+        options?: ListenOptions,
       ) {
         const handlerServices = yield* Effect.context<R>();
         const run = Effect.runSyncExitWith(Context.merge(services, handlerServices));
         const listen = (event: Event): void =>
           pipe(
-            // The browser gives a plain `Event`. Only the DOM types tie an
-            // event name to its event type, so the name that `listen` took is
-            // the evidence, and this assertion is where it becomes the type.
+            // The browser gives a plain `Event`. Only the DOM types tie a
+            // target and an event name to an event type, so the target and
+            // the name that `listen` or `listenOn` took are the evidence, and
+            // this assertion is where they become the type.
             event as E,
             handler,
             run,
@@ -245,14 +284,16 @@ export class Dom extends Context.Service<
         window: win,
         document: doc,
         href: Effect.sync(() => win.location.href),
+        visibility: Effect.sync(() => doc.visibilityState),
         probe,
-        probeOr,
+        probeOrElse,
+        probeOr: (read, fallback) => probeOrElse(read, () => fallback),
         attempt: probe,
 
         listen: (target, type, handler, options) =>
           attach(resolveTarget(target), String(type), handler, options),
 
-        listenOn: (target, type, handler, options) => attach(target, type, handler, options),
+        listenOn: attach,
 
         events: <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K]>(
           target: K,
@@ -314,11 +355,3 @@ const readClock = (): number =>
 const reportListenerFailure = (type: string, cause: Cause.Cause<never>): void => {
   console.error(`[vimium-webkit] the ${type} listener failed`, Cause.pretty(cause));
 };
-
-const describe = (cause: unknown): string =>
-  pipe(
-    Match.value(cause),
-    Match.when(Predicate.isError, (error) => error.message),
-    Match.when(Predicate.isString, (text) => text),
-    Match.orElse((other) => String(other)),
-  );

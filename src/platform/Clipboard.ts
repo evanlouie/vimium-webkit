@@ -25,7 +25,8 @@
  *    where `navigator.clipboard` is `undefined`.
  */
 
-import { Boolean, Context, Effect, Layer, Match, Option, Predicate, Schema, pipe } from "effect";
+import { Boolean, Context, Effect, Layer, Option, Predicate, Schema, pipe } from "effect";
+import { describeThrown } from "~/domain/Failure.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Gm } from "~/platform/Gm.ts";
 
@@ -50,17 +51,9 @@ export class ClipboardError extends Schema.TaggedError<ClipboardError>()("Clipbo
   cause: Schema.optional(Schema.Defect()),
 }) {}
 
-const describe = (cause: unknown): string =>
-  pipe(
-    Match.value(cause),
-    Match.when(Predicate.isError, (error) => error.message),
-    Match.when(Predicate.isString, (text) => text),
-    Match.orElse((other) => String(other)),
-  );
-
 /** The browser or the user refused a clipboard promise. */
 const denied = (cause: unknown): ClipboardError =>
-  new ClipboardError({ reason: "denied", detail: describe(cause), cause });
+  new ClipboardError({ reason: "denied", detail: describeThrown(cause), cause });
 
 // ---------------------------------------------------------------------------
 // The bound browser accessors
@@ -76,7 +69,7 @@ export type ClipboardReader = () => Promise<string>;
  * synchronously from the key handler.
  *
  * This read can throw, because a userscript does not own its globals. Call it
- * inside `Dom.probeOr`.
+ * inside `Dom.probeOrElse`.
  */
 export const clipboardWriter = (
   window: Window & typeof globalThis,
@@ -159,7 +152,7 @@ const execCommandCopy = (doc: Document, text: string): Effect.Effect<void, Clipb
             return doc.execCommand("copy");
           },
           catch: (cause) =>
-            new ClipboardError({ reason: "failed", detail: describe(cause), cause }),
+            new ClipboardError({ reason: "failed", detail: describeThrown(cause), cause }),
         }),
         Effect.flatMap(
           Boolean.match({
@@ -219,15 +212,15 @@ export class Clipboard extends Context.Service<
 
       // The accessors are read once, when the layer is built. The key path
       // then holds plain values, and it does no global read of its own.
-      const writer = yield* dom.probeOr(() => clipboardWriter(dom.window), Option.none());
-      const reader = yield* dom.probeOr(() => clipboardReader(dom.window), Option.none());
-      const execDocument = yield* dom.probeOr(
+      const writer = yield* dom.probeOrElse(() => clipboardWriter(dom.window), Option.none);
+      const reader = yield* dom.probeOrElse(() => clipboardReader(dom.window), Option.none);
+      const execDocument = yield* dom.probeOrElse(
         () =>
           pipe(
             dom.document,
             Option.liftPredicate((doc) => Predicate.isFunction(Reflect.get(doc, "execCommand"))),
           ),
-        Option.none(),
+        Option.none,
       );
 
       /** The `document.execCommand("copy")` path. */

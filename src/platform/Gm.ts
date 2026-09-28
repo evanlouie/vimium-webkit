@@ -18,7 +18,6 @@ import {
   Data,
   Effect,
   Layer,
-  Match,
   MutableRef,
   Option,
   Predicate,
@@ -29,6 +28,7 @@ import {
   pipe,
 } from "effect";
 import { constVoid, flow } from "effect/Function";
+import { describeThrown } from "~/domain/Failure.ts";
 import { Dom } from "./Dom.ts";
 import type {
   GmNamespace,
@@ -80,18 +80,10 @@ export const gmUnavailable = (api: string): GmError =>
     detail: `${api} is not provided by this userscript manager`,
   });
 
-const describe = (cause: unknown): string =>
-  pipe(
-    Match.value(cause),
-    Match.when(Predicate.isError, (error) => error.message),
-    Match.when(Predicate.isString, (text) => text),
-    Match.orElse((other) => String(other)),
-  );
-
 const gmFailed =
   (api: string) =>
   (cause: unknown): GmError =>
-    new GmError({ reason: "failed", api, detail: describe(cause), cause });
+    new GmError({ reason: "failed", api, detail: describeThrown(cause), cause });
 
 /**
  * Run a synchronous manager call.
@@ -458,6 +450,28 @@ export interface XhrRequest {
   readonly timeoutMs?: number;
 }
 
+/**
+ * A response of the manager, as `request` gives it.
+ *
+ * A manager may leave `responseText` out. No reader can tell an absent text
+ * from an empty body, so the text is `""` then.
+ */
+export interface XhrResponse {
+  readonly readyState: number;
+  readonly status: number;
+  readonly statusText: string;
+  readonly responseHeaders: string;
+  readonly responseText: string;
+}
+
+const toXhrResponse = (response: GmXhrResponse): XhrResponse => ({
+  readyState: response.readyState,
+  status: response.status,
+  statusText: response.statusText,
+  responseHeaders: response.responseHeaders,
+  responseText: response.responseText ?? "",
+});
+
 type XhrSend = (
   details: GmXhrDetails,
 ) => GmXhrHandle | undefined | Promise<GmXhrHandle | undefined>;
@@ -721,7 +735,7 @@ export class Gm extends Context.Service<
      * This needs `@connect`, which quoid does not have. Treat `unavailable` as
      * "this function is off", and do not report it more than once.
      */
-    readonly request: (request: XhrRequest) => Effect.Effect<GmXhrResponse, GmError>;
+    readonly request: (request: XhrRequest) => Effect.Effect<XhrResponse, GmError>;
 
     /** Add a menu entry for the life of the enclosing scope. */
     readonly registerMenuCommand: (
@@ -803,9 +817,10 @@ const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
       send,
       Effect.fromOption(() => gmUnavailable("GM_xmlhttpRequest")),
     );
-    return yield* Effect.callback<GmXhrResponse, GmError>((resume) =>
+    const response = yield* Effect.callback<GmXhrResponse, GmError>((resume) =>
       startRequest(start, input, resume),
     );
+    return toXhrResponse(response);
   });
 
   const register: Option.Option<MenuRegister> = pipe(

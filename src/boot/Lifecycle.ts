@@ -208,7 +208,10 @@ export class Lifecycle extends Context.Service<
         Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: Fiber.interrupt })),
       );
 
-      const isVisible = Effect.sync(() => dom.document.visibilityState === "visible");
+      const isVisible = pipe(
+        dom.visibility,
+        Effect.map((state) => state === "visible"),
+      );
 
       const pollWhileVisible = pipe(startPolling, Effect.when(isVisible), Effect.asVoid);
 

@@ -72,7 +72,7 @@ const recordingListen =
     );
   };
 
-/** The one field of the document that the lifecycle reads. */
+/** The one field of the document that the lifecycle reads, through `Dom.visibility`. */
 interface FakeDocument {
   visibilityState: DocumentVisibilityState;
 }
@@ -86,10 +86,7 @@ const recordingDom = (
     Dom,
     Effect.map(
       Struct.assign({
-        // Node has no `Document`, and a whole one is hundreds of members. The
-        // lifecycle reads `visibilityState` and nothing else, so the stub says
-        // that it is a document. This is the one assertion in the file.
-        document: document as Document,
+        visibility: Effect.sync(() => document.visibilityState),
         href: Effect.succeed("https://example.test/one"),
         listen: recordingListen(attached),
       }),
