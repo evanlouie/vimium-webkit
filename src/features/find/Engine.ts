@@ -20,28 +20,18 @@
 import { Array, Boolean, HashSet, Match, Number, Option, Result, flow, pipe } from "effect";
 import { constFalse } from "effect/Function";
 import type { CapabilityReport } from "~/platform/Capabilities.ts";
+import { isElement, isText } from "~/platform/Elements.ts";
 
 // ---------------------------------------------------------------------------
 // Nodes
 // ---------------------------------------------------------------------------
 
-// The node type, and not `instanceof`: a node can come from another realm, and
-// `instanceof` is false for it there.
-
-const isText = (node: Node): node is Text => node.nodeType === Node.TEXT_NODE;
-
-const isElement = (node: Node): node is Element => node.nodeType === Node.ELEMENT_NODE;
-
+/**
+ * Is `root` a document? It reads the node type, and not `instanceof`, as the
+ * guards in `~/platform/Elements.ts` do: a root can come from another realm.
+ */
 const isDocument = (root: Document | ShadowRoot): root is Document =>
   root.nodeType === Node.DOCUMENT_NODE;
-
-/** `node` when it is an element, and its parent element when it is not. */
-export const elementAt = (node: Node): Option.Option<Element> =>
-  pipe(
-    node,
-    Option.liftPredicate(isElement),
-    Option.orElse(() => Option.fromNullishOr(node.parentElement)),
-  );
 
 // ---------------------------------------------------------------------------
 // The haystack

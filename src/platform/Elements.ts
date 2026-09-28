@@ -8,6 +8,23 @@
 
 import { Array, Option, flow, pipe } from "effect";
 
+// The node type, and not `instanceof`: a node can come from another realm, and
+// `instanceof` is false for it there.
+
+/** Is `node` a text node, whichever realm made it? */
+export const isText = (node: Node): node is Text => node.nodeType === Node.TEXT_NODE;
+
+/** Is `node` an element, whichever realm made it? */
+export const isElement = (node: Node): node is Element => node.nodeType === Node.ELEMENT_NODE;
+
+/** `node` when it is an element, and its parent element when it is not. */
+export const elementAt = (node: Node): Option.Option<Element> =>
+  pipe(
+    node,
+    Option.liftPredicate(isElement),
+    Option.orElse(() => Option.fromNullishOr(node.parentElement)),
+  );
+
 /** The element that has focus inside `active`, through every nested shadow root. */
 const innermostActive = (active: Element): Element =>
   pipe(

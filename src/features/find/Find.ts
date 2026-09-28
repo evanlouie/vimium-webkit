@@ -58,6 +58,7 @@ import { type ParsedFindQuery, parseFindQuery, toRegExp, wordQuery } from "~/dom
 import { FIND_HISTORY_LIMIT } from "~/domain/Persisted.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
+import { elementAt } from "~/platform/Elements.ts";
 import { Storage } from "~/platform/Storage.ts";
 import type { HudPromptOptions } from "~/ui/Hud.ts";
 import { Hud } from "~/ui/Hud.ts";
@@ -65,7 +66,6 @@ import { Ui } from "~/ui/Ui.ts";
 import {
   collectTextRuns,
   DEFAULT_MAX_CHARACTERS,
-  elementAt,
   type FindMatch,
   firstMatchInView,
   indexAtSelection,
