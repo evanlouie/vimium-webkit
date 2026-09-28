@@ -31,7 +31,18 @@
  * `dispose` method.
  */
 
-import { Effect, FiberHandle, Option, Ref, type Scope, pipe } from "effect";
+import {
+  Array,
+  Data,
+  Effect,
+  FiberHandle,
+  flow,
+  Option,
+  pipe,
+  Ref,
+  type Scope,
+  String,
+} from "effect";
 import { Dom } from "~/platform/Dom.ts";
 import { Ui } from "~/ui/Ui.ts";
 import type { HintRect } from "./Detect.ts";
@@ -178,29 +189,48 @@ export const isSafeUserCss = (css: string): boolean =>
  * CSS that moves or relabels a marker can make a hint point at an element that
  * the user did not choose, and that is why `isSafeUserCss` exists.
  */
-export const hintCss = (userDefinedLinkHintCss: string): string => {
-  const user = userDefinedLinkHintCss.trim();
-  if (user.length === 0 || !isSafeUserCss(user)) return HINT_CSS;
-  return `${HINT_CSS}\n/* user */\n${user}\n`;
-};
+export const hintCss: (userDefinedLinkHintCss: string) => string = flow(
+  String.trim,
+  Option.liftPredicate((user) => user.length > 0 && isSafeUserCss(user)),
+  Option.match({
+    onNone: () => HINT_CSS,
+    onSome: (user) => `${HINT_CSS}\n/* user */\n${user}\n`,
+  }),
+);
 
 // ---------------------------------------------------------------------------
 // The markers
 // ---------------------------------------------------------------------------
 
-export interface MarkerSpec {
-  readonly rect: HintRect;
-  readonly hintString: string;
-  /** How many first characters are already typed. They are drawn dimmed. */
-  readonly matchedLength: number;
+/** The classes of a marker that do not depend on whether it is drawn. */
+type MarkerStyle = {
   readonly secondary: boolean;
   /** Filter mode: the candidate that `Enter` would activate. */
   readonly active: boolean;
-  /** Filter mode: drawn beside the number when the hint has no visible text. */
-  readonly linkText: string;
-  readonly showLinkText: boolean;
-  readonly hidden: boolean;
-}
+};
+
+/**
+ * What one marker draws.
+ *
+ * A marker is hidden when the typed keys filter it out, or when the page took
+ * its target away. A hidden marker keeps its element for the next draw, and
+ * the classes of its style.
+ */
+export type MarkerSpec = Data.TaggedEnum<{
+  Hidden: MarkerStyle;
+  Shown: MarkerStyle & {
+    readonly rect: HintRect;
+    readonly hintString: string;
+    /** How many first characters are already typed. They are drawn dimmed. */
+    readonly matchedLength: number;
+    /** Filter mode: the link text beside the number, for a hint that has no visible text. */
+    readonly label: Option.Option<string>;
+  };
+}>;
+
+export const MarkerSpec = Data.taggedEnum<MarkerSpec>();
+
+type ShownMarker = Data.TaggedEnum.Value<MarkerSpec, "Shown">;
 
 /** Keep the marker inside the viewport when a hint sits against an edge. */
 const MARKER_INSET = 2;
@@ -228,46 +258,109 @@ export interface MarkerLayer {
   readonly clear: Effect.Effect<void>;
 }
 
-const paintText = (document: Document, marker: HTMLElement, spec: MarkerSpec): void => {
-  const matched = spec.hintString.slice(0, spec.matchedLength);
-  const rest = spec.hintString.slice(spec.matchedLength);
-  const label = spec.showLinkText ? spec.linkText.slice(0, MAX_LABEL_LENGTH) : "";
+interface ScrollPosition {
+  readonly x: number;
+  readonly y: number;
+}
+
+const SHOWN_CLASSES = ["vw-hint"];
+const HIDDEN_CLASSES = ["vw-hint", "vw-hint--hidden"];
+
+/** The class list of a marker: the classes of its state, then those of its style. */
+const classList = (state: ReadonlyArray<string>, { secondary, active }: MarkerStyle): string =>
+  pipe(
+    [
+      { name: "vw-hint--secondary", on: secondary },
+      { name: "vw-hint--active", on: active },
+    ],
+    Array.filter(({ on }) => on),
+    Array.map(({ name }) => name),
+    Array.prependAll(state),
+    Array.join(" "),
+  );
+
+/** The class list of a marker that has no spec, or of every marker after `clear`. */
+const HIDDEN_CLASS = classList(HIDDEN_CLASSES, { secondary: false, active: false });
+
+const textSpan = (document: Document, className: string, text: string): HTMLSpanElement => {
+  const span = document.createElement("span");
+  span.className = className;
+  span.textContent = text;
+  return span;
+};
+
+/** A span for text that is not empty. An empty span would add nothing. */
+const optionalSpan = (
+  document: Document,
+  className: string,
+): ((text: string) => Option.Option<HTMLSpanElement>) =>
+  flow(
+    Option.liftPredicate(String.isNonEmpty),
+    Option.map((content) => textSpan(document, className, content)),
+  );
+
+const paintText = (document: Document, marker: HTMLElement, shown: ShownMarker): void => {
+  const matched = shown.hintString.slice(0, shown.matchedLength);
+  const rest = shown.hintString.slice(shown.matchedLength);
+  const label = pipe(
+    shown.label,
+    Option.map((text) => text.slice(0, MAX_LABEL_LENGTH)),
+    Option.flatMap(optionalSpan(document, "vw-hint__text")),
+  );
 
   // `textContent` on each part, and never `innerHTML`: the page supplies the
   // link text, and it would otherwise be a route for injection into our own
   // overlay.
-  marker.replaceChildren();
-  if (matched.length > 0) {
-    const dim = document.createElement("span");
-    dim.className = "vw-hint__matched";
-    dim.textContent = matched;
-    marker.appendChild(dim);
-  }
-  marker.appendChild(document.createTextNode(rest));
-  if (label.length > 0) {
-    const text = document.createElement("span");
-    text.className = "vw-hint__text";
-    text.textContent = label;
-    marker.appendChild(text);
-  }
+  marker.replaceChildren(
+    ...Array.getSomes([
+      pipe(matched, optionalSpan(document, "vw-hint__matched")),
+      Option.some(document.createTextNode(rest)),
+      label,
+    ]),
+  );
 };
 
-const paint = (document: Document, marker: HTMLElement, spec: MarkerSpec): void => {
-  const classes = ["vw-hint"];
-  if (spec.hidden) classes.push("vw-hint--hidden");
-  if (spec.secondary) classes.push("vw-hint--secondary");
-  if (spec.active) classes.push("vw-hint--active");
-  marker.className = classes.join(" ");
-  if (spec.hidden) return;
-
-  const left = Math.max(MARKER_INSET, spec.rect.left);
-  const top = Math.max(MARKER_INSET, spec.rect.top);
+const paintShown = (document: Document, marker: HTMLElement, shown: ShownMarker): void => {
+  marker.className = classList(SHOWN_CLASSES, shown);
+  const left = Math.max(MARKER_INSET, shown.rect.left);
+  const top = Math.max(MARKER_INSET, shown.rect.top);
   // Whole pixels: a marker on a fractional boundary is drawn blurred, and hint
   // text at 11px has no legibility to spare.
   marker.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
-
-  paintText(document, marker, spec);
+  paintText(document, marker, shown);
 };
+
+const hide = (marker: HTMLElement): void => {
+  marker.className = HIDDEN_CLASS;
+};
+
+const paint = (document: Document, marker: HTMLElement): ((spec: MarkerSpec) => void) =>
+  MarkerSpec.$match({
+    Hidden: (style) => {
+      marker.className = classList(HIDDEN_CLASSES, style);
+    },
+    Shown: (shown) => paintShown(document, marker, shown),
+  });
+
+/** Draw each spec on the marker at its place. A marker without a spec is hidden. */
+const paintAll = (
+  document: Document,
+  elements: ReadonlyArray<HTMLElement>,
+  specs: readonly MarkerSpec[],
+): void =>
+  pipe(
+    elements,
+    Array.forEach((marker, index) =>
+      pipe(
+        specs,
+        Array.get(index),
+        Option.match({
+          onNone: () => hide(marker),
+          onSome: paint(document, marker),
+        }),
+      ),
+    ),
+  );
 
 /**
  * Build the marker layer for the enclosing scope.
@@ -298,18 +391,16 @@ export const makeMarkerLayer: Effect.Effect<MarkerLayer, never, Dom | Ui | Scope
 
     const markers = yield* Ref.make<ReadonlyArray<HTMLElement>>([]);
 
+    const readScroll = (): ScrollPosition => ({ x: dom.window.scrollX, y: dom.window.scrollY });
+
     /** Where the page stood when the rects of the current specs were measured. */
-    const first = yield* dom.probeOr(() => ({ x: dom.window.scrollX, y: dom.window.scrollY }), {
-      x: 0,
-      y: 0,
-    });
+    const first = yield* dom.probeOr(readScroll, { x: 0, y: 0 });
     const originRef = yield* Ref.make(first);
 
     const scrollNow = pipe(
-      Ref.get(originRef),
-      Effect.flatMap((origin) =>
-        dom.probeOr(() => ({ x: dom.window.scrollX, y: dom.window.scrollY }), origin),
-      ),
+      originRef,
+      Ref.get,
+      Effect.flatMap((origin) => dom.probeOr(readScroll, origin)),
     );
 
     const applyOffset = Effect.gen(function* () {
@@ -325,7 +416,7 @@ export const makeMarkerLayer: Effect.Effect<MarkerLayer, never, Dom | Ui | Scope
 
     const reanchor = Effect.gen(function* () {
       const scroll = yield* scrollNow;
-      yield* Ref.set(originRef, scroll);
+      yield* pipe(originRef, Ref.set(scroll));
       yield* applyOffset;
     });
 
@@ -334,8 +425,11 @@ export const makeMarkerLayer: Effect.Effect<MarkerLayer, never, Dom | Ui | Scope
     // cross-origin frame and of Low Power Mode to 30 each second, which is
     // exactly the back pressure that we want here.
     const frame = yield* FiberHandle.make<void, never>();
-    const reposition = Effect.asVoid(
-      FiberHandle.run(frame, pipe(dom.nextFrame, Effect.andThen(applyOffset))),
+    const reposition = pipe(
+      dom.nextFrame,
+      Effect.andThen(applyOffset),
+      FiberHandle.run(frame),
+      Effect.asVoid,
     );
 
     // The capture phase: a scroll does not bubble from an element that scrolls,
@@ -350,13 +444,43 @@ export const makeMarkerLayer: Effect.Effect<MarkerLayer, never, Dom | Ui | Scope
       () => Option.fromNullishOr(dom.window.visualViewport),
       Option.none<VisualViewport>(),
     );
-    if (Option.isSome(visualViewport)) {
-      const visual = visualViewport.value;
-      yield* dom.listenOn(visual, "resize", () => reposition, { passive: true });
-      yield* dom.listenOn(visual, "scroll", () => reposition, { passive: true });
-    }
+    yield* pipe(
+      visualViewport,
+      Option.match({
+        onNone: () => Effect.void,
+        onSome: (visual) =>
+          pipe(
+            ["resize", "scroll"],
+            Effect.forEach(
+              (type) => dom.listenOn(visual, type, () => reposition, { passive: true }),
+              {
+                discard: true,
+              },
+            ),
+          ),
+      }),
+    );
 
     yield* applyOffset;
+
+    const newMarker = (): HTMLElement => {
+      const marker = document.createElement("div");
+      marker.className = "vw-hint";
+      container.appendChild(marker);
+      return marker;
+    };
+
+    /** The markers, with new ones after them until `count` specs fit. */
+    const grownTo =
+      (count: number) =>
+      (current: ReadonlyArray<HTMLElement>): ReadonlyArray<HTMLElement> =>
+        pipe(
+          count - current.length,
+          Option.liftPredicate((missing) => missing > 0),
+          Option.map(Array.makeBy(newMarker)),
+          Option.map(Array.prependAll(current)),
+          Option.getOrElse(() => current),
+        );
 
     /**
      * Make sure that there are at least `count` marker elements.
@@ -365,46 +489,18 @@ export const makeMarkerLayer: Effect.Effect<MarkerLayer, never, Dom | Ui | Scope
      * the scope, so the markers go with it. There is nothing else to remove.
      */
     const grow = (count: number): Effect.Effect<ReadonlyArray<HTMLElement>> =>
-      Ref.modify(markers, (current) => {
-        if (current.length >= count) return [current, current];
-        const next = [...current];
-        while (next.length < count) {
-          const marker = document.createElement("div");
-          marker.className = "vw-hint";
-          container.appendChild(marker);
-          next.push(marker);
-        }
-        return [next, next];
-      });
+      pipe(markers, Ref.modify(flow(grownTo(count), (next) => [next, next] as const)));
 
     const render = (specs: readonly MarkerSpec[]): Effect.Effect<void> =>
       pipe(
         grow(specs.length),
-        Effect.flatMap((elements) =>
-          Effect.sync(() => {
-            for (let index = 0; index < elements.length; index++) {
-              const marker = elements[index];
-              if (marker === undefined) continue;
-              const spec = specs[index];
-              if (spec === undefined) {
-                marker.className = "vw-hint vw-hint--hidden";
-                continue;
-              }
-              paint(document, marker, spec);
-            }
-          }),
-        ),
+        Effect.flatMap((elements) => Effect.sync(() => paintAll(document, elements, specs))),
       );
 
     const clear = pipe(
-      Ref.get(markers),
-      Effect.flatMap((elements) =>
-        Effect.sync(() => {
-          for (const marker of elements) {
-            marker.className = "vw-hint vw-hint--hidden";
-          }
-        }),
-      ),
+      markers,
+      Ref.get,
+      Effect.flatMap((elements) => Effect.sync(() => pipe(elements, Array.forEach(hide)))),
     );
 
     return { render, reanchor, clear };

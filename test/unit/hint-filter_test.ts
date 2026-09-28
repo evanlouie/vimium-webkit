@@ -8,10 +8,12 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option } from "effect";
+import { Array, Effect, Option, pipe } from "effect";
 import {
   type FilterCandidate,
   filterHints,
+  type FilterMatch,
+  type FilterOutcome,
   type FilterQuery,
   linkWords,
   matchedPrefixLength,
@@ -21,13 +23,28 @@ import {
 const DIGITS = "0123456789";
 
 const candidates = (...texts: readonly string[]): readonly FilterCandidate[] =>
-  texts.map((linkText, index) => ({ index, linkText, secondary: false }));
+  pipe(
+    texts,
+    Array.map((linkText, index) => ({ index, linkText, secondary: false })),
+  );
 
 const query = (text: string, digits = ""): FilterQuery => ({
   text,
   digits,
   numberCharacters: DIGITS,
 });
+
+/** The fields of a match, when there is one. */
+const indexOf = Option.map(({ index }: FilterMatch) => index);
+const hintStringOf = Option.map(({ hintString }: FilterMatch) => hintString);
+
+/** The hint string that one candidate got. */
+const hintStringFor = (outcome: FilterOutcome, index: number): Option.Option<string> =>
+  pipe(
+    outcome.matched,
+    Array.findFirst((match) => match.index === index),
+    hintStringOf,
+  );
 
 describe("HintFilter", () => {
   it.effect("lowercases and splits the link text on whitespace", () =>
@@ -74,14 +91,16 @@ describe("HintFilter", () => {
   it.effect("numbers every hint from 1 when the query is empty", () =>
     Effect.sync(() => {
       const outcome = filterHints(candidates("one", "two", "three"), query(""));
-      assert.deepEqual(
-        outcome.matched.map((match) => match.hintString),
-        ["1", "2", "3"],
+      const hintStrings = pipe(
+        outcome.matched,
+        Array.map((match) => match.hintString),
       );
-      assert.deepEqual(
-        outcome.matched.map((match) => match.index),
-        [0, 1, 2],
+      const indices = pipe(
+        outcome.matched,
+        Array.map((match) => match.index),
       );
+      assert.deepEqual(hintStrings, ["1", "2", "3"]);
+      assert.deepEqual(indices, [0, 1, 2]);
       assert.lengthOf(outcome.candidates, 3);
       assert.isTrue(Option.isNone(outcome.exact));
     }),
@@ -91,7 +110,7 @@ describe("HintFilter", () => {
     Effect.sync(() => {
       const outcome = filterHints(candidates("Sign in", "Sign out", "Search"), query("out"));
       assert.lengthOf(outcome.matched, 1);
-      assert.strictEqual(outcome.matched[0]?.index, 1);
+      assert.deepEqual(indexOf(Array.head(outcome.matched)), Option.some(1));
     }),
   );
 
@@ -100,11 +119,11 @@ describe("HintFilter", () => {
       const all = candidates("Alpha", "Beta", "Gamma");
 
       const before = filterHints(all, query(""));
-      assert.strictEqual(before.matched.find((match) => match.index === 2)?.hintString, "3");
+      assert.deepEqual(hintStringFor(before, 2), Option.some("3"));
 
       // Once "gam" removes Beta, Gamma becomes hint 1 and not hint 3.
       const after = filterHints(all, query("gam"));
-      assert.strictEqual(after.matched.find((match) => match.index === 2)?.hintString, "1");
+      assert.deepEqual(hintStringFor(after, 2), Option.some("1"));
     }),
   );
 
@@ -115,7 +134,7 @@ describe("HintFilter", () => {
         query("download"),
       );
       // The exact single word is the shortest, so it scores highest.
-      assert.strictEqual(outcome.matched[0]?.index, 1);
+      assert.deepEqual(indexOf(Array.head(outcome.matched)), Option.some(1));
     }),
   );
 
@@ -126,11 +145,12 @@ describe("HintFilter", () => {
         query("", "1"),
       );
       // "1" is a prefix of "10", "11" and "12", so it cannot activate alone.
-      assert.deepEqual(
-        outcome.candidates.map((match) => match.hintString),
-        ["1", "10", "11", "12"],
+      const hintStrings = pipe(
+        outcome.candidates,
+        Array.map((match) => match.hintString),
       );
-      assert.strictEqual(Option.getOrNull(outcome.exact)?.hintString, "1");
+      assert.deepEqual(hintStrings, ["1", "10", "11", "12"]);
+      assert.deepEqual(hintStringOf(outcome.exact), Option.some("1"));
     }),
   );
 
@@ -138,7 +158,7 @@ describe("HintFilter", () => {
     Effect.sync(() => {
       const outcome = filterHints(candidates("a", "b", "c"), query("", "2"));
       assert.lengthOf(outcome.candidates, 1);
-      assert.strictEqual(Option.getOrNull(outcome.exact)?.index, 1);
+      assert.deepEqual(indexOf(outcome.exact), Option.some(1));
     }),
   );
 
@@ -146,7 +166,7 @@ describe("HintFilter", () => {
     Effect.sync(() => {
       const outcome = filterHints(candidates("Sign in", "Sign out", "Search"), query("sea"));
       assert.lengthOf(outcome.candidates, 1);
-      assert.strictEqual(Option.getOrNull(outcome.exact)?.index, 2);
+      assert.deepEqual(indexOf(outcome.exact), Option.some(2));
     }),
   );
 
@@ -167,7 +187,7 @@ describe("HintFilter", () => {
       );
       assert.lengthOf(outcome.matched, 3);
       assert.lengthOf(outcome.candidates, 1);
-      assert.strictEqual(Option.getOrNull(outcome.exact)?.hintString, "2");
+      assert.deepEqual(hintStringOf(outcome.exact), Option.some("2"));
     }),
   );
 
