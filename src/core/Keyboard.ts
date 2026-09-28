@@ -59,7 +59,7 @@ import { Commands } from "./Commands.ts";
 import { Exclusions } from "./Exclusions.ts";
 import { CONTINUE_BUBBLING, type HandlerResult, SUPPRESS_EVENT } from "./HandlerStack.ts";
 import { Mappings } from "./Mappings.ts";
-import { isEscape, Modes } from "./Modes.ts";
+import { isEscape, KeyPolicy, Modes } from "./Modes.ts";
 import { Report } from "./Report.ts";
 import { Settings } from "./Settings.ts";
 
@@ -704,7 +704,13 @@ export class Keyboard extends Context.Service<
         yield* reset;
         const handle = yield* pipe(
           modes.enter(
-            { name: "normal" },
+            {
+              name: "normal",
+              indicator: Option.none(),
+              exitOn: [],
+              keyboard: KeyPolicy.Shared(),
+              singleton: Option.none(),
+            },
             {
               keydown: onKeydown,
               keyup: onKeyup,

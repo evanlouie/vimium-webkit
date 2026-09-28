@@ -37,7 +37,7 @@ import {
   PASS_EVENT_TO_PAGE,
   SUPPRESS_EVENT,
 } from "~/core/HandlerStack.ts";
-import { isEscape, type ModeHandle, Modes } from "~/core/Modes.ts";
+import { isEscape, KeyPolicy, type ModeHandle, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -303,8 +303,10 @@ export class Insert extends Context.Service<
             badge,
             modes.enter<never>({
               name: "insert-indicator",
-              indicator: INSERT_INDICATOR,
-              singleton: "insert-indicator",
+              indicator: Option.some(INSERT_INDICATOR),
+              exitOn: [],
+              keyboard: KeyPolicy.Shared(),
+              singleton: Option.some("insert-indicator"),
             }),
           );
         });
@@ -411,8 +413,10 @@ export class Insert extends Context.Service<
             modes.enter(
               {
                 name: "insert",
-                indicator: null,
-                singleton: "insert",
+                indicator: Option.none(),
+                exitOn: [],
+                keyboard: KeyPolicy.Shared(),
+                singleton: Option.some("insert"),
               },
               {
                 keydown: onKeydown,

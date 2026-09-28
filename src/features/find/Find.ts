@@ -51,7 +51,7 @@ import {
   SUPPRESS_EVENT,
   SUPPRESS_PROPAGATION,
 } from "~/core/HandlerStack.ts";
-import { Modes } from "~/core/Modes.ts";
+import { ExitTrigger, KeyPolicy, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import {
@@ -792,11 +792,10 @@ export class Find extends Context.Service<
             modes.enter(
               {
                 name: "post-find",
-                indicator: null,
-                exitOnEscape: true,
-                exitOnClick: true,
-                exitOnFocus: true,
-                singleton: "find",
+                indicator: Option.none(),
+                exitOn: [ExitTrigger.Escape(), ExitTrigger.Click(), ExitTrigger.Focus()],
+                keyboard: KeyPolicy.Shared(),
+                singleton: Option.some("find"),
               },
               {
                 // Everything except Escape, which the mode itself takes,
@@ -1013,11 +1012,12 @@ export class Find extends Context.Service<
         const handle = yield* modes.enter(
           {
             name: "find",
-            indicator: prompt.indicator,
+            indicator: Option.some(prompt.indicator),
             // The HUD input owns Escape: it has to settle the prompt, and an
             // exit at the level of the mode would leave the prompt open.
-            exitOnEscape: false,
-            singleton: "find",
+            exitOn: [],
+            keyboard: KeyPolicy.Shared(),
+            singleton: Option.some("find"),
           },
           {
             keydown: passIfOurs,

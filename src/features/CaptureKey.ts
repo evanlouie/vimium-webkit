@@ -13,7 +13,7 @@
 
 import { Deferred, Effect, Option, flow, pipe } from "effect";
 import { SUPPRESS_EVENT } from "~/core/HandlerStack.ts";
-import { Modes } from "~/core/Modes.ts";
+import { ExitTrigger, KeyPolicy, Modes } from "~/core/Modes.ts";
 import { isComposing, isModifierKey, keyNotation } from "~/domain/Key.ts";
 
 export interface CaptureKeyOptions {
@@ -60,10 +60,10 @@ export const captureNextKey: (
   const handle = yield* modes.enter(
     {
       name: "capture-next-key",
-      indicator: options.prompt,
-      exitOnEscape: true,
-      suppressAllKeyboardEvents: true,
-      singleton: "capture-next-key",
+      indicator: Option.some(options.prompt),
+      exitOn: [ExitTrigger.Escape()],
+      keyboard: KeyPolicy.Owned(),
+      singleton: Option.some("capture-next-key"),
     },
     {
       keydown: flow(

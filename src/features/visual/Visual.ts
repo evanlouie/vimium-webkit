@@ -41,7 +41,7 @@ import {
 import { constVoid } from "effect/Function";
 import { Commands } from "~/core/Commands.ts";
 import { type HandlerResult, SUPPRESS_EVENT } from "~/core/HandlerStack.ts";
-import { type ExitReason, type ModeHandle, Modes } from "~/core/Modes.ts";
+import { type ExitReason, ExitTrigger, KeyPolicy, type ModeHandle, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { appendCountDigit, isComposing, isCountDigit, keyNotation } from "~/domain/Key.ts";
@@ -585,13 +585,13 @@ export class Visual extends Context.Service<
           modes.enter(
             {
               name: kind,
-              indicator: profileOf(kind).indicator,
-              exitOnEscape: true,
+              indicator: Option.some(profileOf(kind).indicator),
+              exitOn: [ExitTrigger.Escape()],
               // These modes own the keyboard outright: a key that they do not
               // use must not reach the page, or `j` scrolls out from under the
               // selection.
-              suppressAllKeyboardEvents: true,
-              singleton: "visual",
+              keyboard: KeyPolicy.Owned(),
+              singleton: Option.some("visual"),
             },
             {
               keydown: onKeydown(kind),

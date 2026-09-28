@@ -74,7 +74,7 @@ import {
 import { constVoid } from "effect/Function";
 import { Commands } from "~/core/Commands.ts";
 import { type HandlerResult, SUPPRESS_EVENT } from "~/core/HandlerStack.ts";
-import { type ExitReason, type ModeHandle, Modes } from "~/core/Modes.ts";
+import { type ExitReason, ExitTrigger, KeyPolicy, type ModeHandle, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings, type SettingsData } from "~/core/Settings.ts";
 import {
@@ -2244,14 +2244,14 @@ export class Hints extends Context.Service<
         const handle = yield* modes.enter(
           {
             name: "hints",
-            indicator: pipe(INDICATORS, Struct.get(config.mode)),
+            indicator: pipe(INDICATORS, Struct.get(config.mode), Option.some),
             // Hint mode handles Escape itself, because the origin must relay it
             // before the teardown. The generic exit would run first.
-            exitOnEscape: false,
+            exitOn: [],
             // Hint mode owns the keyboard: a key that we do not use must not
             // reach the page, or `j` scrolls while the user picks a link.
-            suppressAllKeyboardEvents: true,
-            singleton: "hints",
+            keyboard: KeyPolicy.Owned(),
+            singleton: Option.some("hints"),
           },
           { keydown: onKeydown },
         );
@@ -2369,9 +2369,10 @@ export class Hints extends Context.Service<
         const handle = yield* modes.enter(
           {
             name: "hints/buffer",
-            exitOnEscape: true,
-            suppressAllKeyboardEvents: true,
-            singleton: "hints",
+            indicator: Option.none(),
+            exitOn: [ExitTrigger.Escape()],
+            keyboard: KeyPolicy.Owned(),
+            singleton: Option.some("hints"),
           },
           {
             keydown: (event) =>

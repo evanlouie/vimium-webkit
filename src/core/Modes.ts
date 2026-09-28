@@ -49,23 +49,48 @@ export type ExitReason =
   /** A body of the mode handler failed, so the stack dropped the frame. */
   | "defect";
 
-export interface ModeOptions {
-  readonly name: string;
-  /** Text that the HUD shows while the mode is live. `null` shows nothing. */
-  readonly indicator?: ModeIndicator;
-  readonly exitOnEscape?: boolean;
-  readonly exitOnBlur?: EventTarget | null;
-  readonly exitOnClick?: boolean;
-  readonly exitOnFocus?: boolean;
+/** A variant that carries no data. */
+type NoFields = Record.ReadonlyRecord<never, never>;
+
+/** An event that ends a mode, besides an explicit exit, its singleton group and a navigation. */
+export type ExitTrigger = Data.TaggedEnum<{
   /**
-   * Take every keyboard event while the mode is live.
+   * Escape, or its `<c-[>` synonym. The mode takes the key, so that the page
+   * does not also act on it.
+   */
+  Escape: NoFields;
+  /** Any click. */
+  Click: NoFields;
+  /** Any focus. */
+  Focus: NoFields;
+  /** The blur of one target. */
+  Blur: { readonly target: EventTarget };
+}>;
+export const ExitTrigger = Data.taggedEnum<ExitTrigger>();
+
+/** Who gets a keyboard event that the bodies of the mode leave unanswered. */
+export type KeyPolicy = Data.TaggedEnum<{
+  /** The handlers below the mode, and then the page. */
+  Shared: NoFields;
+  /**
+   * Nobody. The mode takes every keyboard event while it is live.
    *
    * For a modal overlay that owns the keyboard, and for the mode that holds
-   * keys while the application starts.
+   * keys while the hints are collected.
    */
-  readonly suppressAllKeyboardEvents?: boolean;
+  Owned: NoFields;
+}>;
+export const KeyPolicy = Data.taggedEnum<KeyPolicy>();
+
+export interface ModeOptions {
+  readonly name: string;
+  /** Text that the HUD shows while the mode is live. */
+  readonly indicator: Option.Option<string>;
+  /** The events that end the mode. */
+  readonly exitOn: ReadonlyArray<ExitTrigger>;
+  readonly keyboard: KeyPolicy;
   /** Only one mode per group may be live. A second one exits the first. */
-  readonly singleton?: string;
+  readonly singleton: Option.Option<string>;
 }
 
 /** A live mode. Hold it to exit the mode, or to learn that it exited. */
@@ -99,9 +124,6 @@ interface ModeState {
 }
 
 type ExitBody = (reason: ExitReason) => Effect.Effect<void>;
-
-/** A variant that carries no data. */
-type NoFields = Record.ReadonlyRecord<never, never>;
 
 /** The life of one mode. A mode that exited never comes back. */
 type Life = Data.TaggedEnum<{
@@ -231,7 +253,7 @@ export class Modes extends Context.Service<
         handlers?: Omit<Handler<R>, "name" | "onDefect">,
       ): Effect.Effect<ModeHandle, never, R | Scope.Scope> =>
         Effect.gen(function* () {
-          const group = Option.fromUndefinedOr(options.singleton);
+          const group = options.singleton;
           const life = yield* Ref.make<Life>(Life.Live({ handler: Option.none(), bodies: [] }));
 
           const close = Effect.fnUntraced(function* (
@@ -308,28 +330,36 @@ export class Modes extends Context.Service<
             <A extends Event>(body: (event: A) => Effect.Effect<Option.Option<HandlerResult>>) =>
               flow(body, Effect.map(Option.getOrElse(() => unanswered)));
 
-          const keyboard = pipe(
-            options.suppressAllKeyboardEvents === true,
-            Boolean.match({ onFalse: () => CONTINUE_BUBBLING, onTrue: () => SUPPRESS_EVENT }),
+          const keyEvent = pipe(
+            options.keyboard,
+            KeyPolicy.$match({ Shared: () => CONTINUE_BUBBLING, Owned: () => SUPPRESS_EVENT }),
             answered,
           );
           const other = answered(CONTINUE_BUBBLING);
 
-          /** An exit that a flag of the options asks for. */
-          const exitWhen = (flag: boolean | undefined, reason: ExitReason): Effect.Effect<void> =>
+          /** The exit for `reason`, when a trigger of the mode fires. */
+          const exitWhen = (
+            fires: (trigger: ExitTrigger) => boolean,
+            reason: ExitReason,
+          ): Effect.Effect<void> =>
             pipe(
-              flag === true,
+              options.exitOn,
+              Array.some(fires),
               Boolean.match({ onFalse: () => Effect.void, onTrue: () => exit(reason) }),
             );
 
-          const keydown = keyboard(provided(own.keydown));
+          const keydown = keyEvent(provided(own.keydown));
           const click = other(provided(own.click));
           const focus = other(provided(own.focus));
           const blur = other(provided(own.blur));
-          const escapeExits = options.exitOnEscape === true;
-          const clickExit = exitWhen(options.exitOnClick, "click");
-          const focusExit = exitWhen(options.exitOnFocus, "focus");
-          const blurTarget = Option.fromNullishOr(options.exitOnBlur);
+          const escapeExits = pipe(options.exitOn, Array.some(ExitTrigger.$is("Escape")));
+          const clickExit = exitWhen(ExitTrigger.$is("Click"), "click");
+          const focusExit = exitWhen(ExitTrigger.$is("Focus"), "focus");
+          const blurExit = (target: EventTarget | null): Effect.Effect<void> =>
+            exitWhen(
+              (trigger) => ExitTrigger.$is("Blur")(trigger) && trigger.target === target,
+              "blur",
+            );
 
           const id = yield* stack.push<never>({
             name: options.name,
@@ -348,26 +378,15 @@ export class Modes extends Context.Service<
                   onTrue: () => pipe(exit("escape"), Effect.as(SUPPRESS_EVENT)),
                 }),
               ),
-            keypress: keyboard(provided(own.keypress)),
-            keyup: keyboard(provided(own.keyup)),
+            keypress: keyEvent(provided(own.keypress)),
+            keyup: keyEvent(provided(own.keyup)),
             click: (event) => pipe(clickExit, Effect.andThen(click(event))),
             focus: (event) => pipe(focusExit, Effect.andThen(focus(event))),
-            blur: (event) =>
-              pipe(
-                blurTarget,
-                Option.filter((target) => event.target === target),
-                Option.match({ onNone: () => Effect.void, onSome: () => exit("blur") }),
-                Effect.andThen(blur(event)),
-              ),
+            blur: (event) => pipe(blurExit(event.target), Effect.andThen(blur(event))),
           });
 
           yield* pipe(life, Ref.update(attached(id)));
-          yield* pipe(
-            state,
-            Ref.update(
-              joined({ handle, indicator: Option.fromNullishOr(options.indicator) }, group),
-            ),
-          );
+          yield* pipe(state, Ref.update(joined({ handle, indicator: options.indicator }, group)));
           yield* refreshIndicator;
 
           // The scope owns the mode. Nothing has to remember to exit it.
