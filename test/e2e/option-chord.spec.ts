@@ -47,6 +47,15 @@ test.describe("an Alt chord", () => {
 
   test("reports the Apple flag from the browser probe", async ({ vw, page }) => {
     await vw.open("/scrollables.html");
+
+    // The answer depends on the machine that runs the browser, so the browser
+    // gives the expected value. Chromium and Firefox on a Linux runner are not
+    // Apple platforms, and Playwright's WebKit reports a Mac on every host.
+    const expected = await page.evaluate(() =>
+      /Mac|iPhone|iPad|iPod/.test(
+        `${navigator.userAgent} ${navigator.platform}`,
+      )
+    );
     await page.keyboard.press("?");
 
     // The diagnostics are the report that `Keyboard` receives. This checks the
@@ -54,7 +63,7 @@ test.describe("an Alt chord", () => {
     await expect.poll(async () => {
       const diagnostics = await overlayText(page, ".vw-diagnostics");
       return diagnostics?.split("\n").some((line) =>
-        /^applePlatform\s+true$/.test(line)
+        new RegExp(`^applePlatform\\s+${expected}$`).test(line)
       ) ?? false;
     }).toBe(true);
   });
