@@ -25,7 +25,24 @@
  * and the fiber starts only after that.
  */
 
-import { Context, Effect, FiberHandle, Layer, Option, Ref, pipe, Struct } from "effect";
+import {
+  Array,
+  Boolean,
+  Context,
+  Data,
+  Effect,
+  FiberHandle,
+  HashSet,
+  Iterable,
+  Layer,
+  Match,
+  Option,
+  Predicate,
+  Ref,
+  Struct,
+  flow,
+  pipe,
+} from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
@@ -38,6 +55,9 @@ export interface ScrollPosition {
   readonly x: number;
   readonly y: number;
 }
+
+/** Where `scrollTo` goes: one end of the range, or an offset in CSS pixels. */
+type OffsetTarget = "start" | "end" | number;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -70,33 +90,70 @@ const MAX_FRAME_MS = 100;
 
 const AXIS_PROPERTIES = {
   y: {
+    offset: "scrollTop",
+    overflow: "overflowY",
     scrollSize: "scrollHeight",
     clientSize: "clientHeight",
     viewport: "innerHeight",
   },
   x: {
+    offset: "scrollLeft",
+    overflow: "overflowX",
     scrollSize: "scrollWidth",
     clientSize: "clientWidth",
     viewport: "innerWidth",
   },
 } as const;
 
-const SCROLLABLE_OVERFLOW: ReadonlySet<string> = new Set(["auto", "scroll", "overlay"]);
+const SCROLLABLE_OVERFLOW: ReadonlyArray<string> = ["auto", "scroll", "overlay"];
 
 // ---------------------------------------------------------------------------
 // Pure geometry
 // ---------------------------------------------------------------------------
+
+/** Which way a scroll goes along its axis. */
+type Direction = "backward" | "forward";
+
+/** Only a negative distance goes back. A distance of zero goes forward. */
+const directionOf = (amount: number): Direction =>
+  pipe(
+    amount < 0,
+    Boolean.match({
+      onFalse: (): Direction => "forward",
+      onTrue: (): Direction => "backward",
+    }),
+  );
+
+/** `scrollTo` walks towards the start only to reach the start. */
+const directionTo = (position: OffsetTarget): Direction =>
+  pipe(
+    Match.value(position),
+    Match.withReturnType<Direction>(),
+    Match.when("start", () => "backward"),
+    Match.orElse(() => "forward"),
+  );
+
+/** The offset that `scrollTo` writes, given the largest offset of the element. */
+const offsetFor = (position: OffsetTarget, max: number): number =>
+  pipe(
+    Match.value(position),
+    Match.when("start", () => 0),
+    Match.when("end", () => max),
+    Match.orElse((offset) => offset),
+  );
+
+/** A distance of zero is nothing to scroll. */
+const nonZero = Option.liftPredicate((amount: number) => amount !== 0);
 
 /** Upstream's easing budget: a longer scroll gets proportionally less time. */
 const durationFor = (amount: number): number =>
   Math.max(100, 20 * Math.log(Math.max(Math.E, Math.abs(amount))));
 
 const readOffset = (element: Element, axis: ScrollAxis): number =>
-  axis === "y" ? element.scrollTop : element.scrollLeft;
+  element[AXIS_PROPERTIES[axis].offset];
 
 const writeOffset = (element: Element, axis: ScrollAxis, value: number): void => {
-  if (axis === "y") element.scrollTop = value;
-  else element.scrollLeft = value;
+  element[AXIS_PROPERTIES[axis].offset] = value;
 };
 
 /** Apply one offset change, and answer how far the element truly moved. */
@@ -106,8 +163,49 @@ const applyOffset = (element: Element, axis: ScrollAxis, delta: number): number 
   return readOffset(element, axis) - before;
 };
 
+/** What an element did with a distance that it was asked to move. */
+type Motion = Data.TaggedEnum<{
+  /** It moved this far. A frame that asks for nothing moves nothing. */
+  Moved: { readonly distance: number };
+  /** It moved nothing, although it was asked to move `delta`. */
+  Refused: { readonly delta: number };
+}>;
+const Motion = Data.taggedEnum<Motion>();
+
+/** Ask an element to move, and classify what it did. */
+const moveElement = (element: Element, axis: ScrollAxis, delta: number): Motion =>
+  pipe(
+    applyOffset(element, axis, delta),
+    Option.liftPredicate((moved) => moved !== 0),
+    Option.match({
+      onNone: () => Motion.Refused({ delta }),
+      onSome: (moved) => Motion.Moved({ distance: moved }),
+    }),
+  );
+
 /**
- * Can `element` absorb a scroll of this sign along `axis`?
+ * Has the element room left to scroll in this direction?
+ *
+ * Sub-pixel layout regularly leaves a fraction of a pixel of overflow on an
+ * element that has nothing to scroll, so a pixel of overflow is no room.
+ */
+const hasRoom = (element: Element, axis: ScrollAxis, direction: Direction): boolean => {
+  const properties = AXIS_PROPERTIES[axis];
+  const room = element[properties.scrollSize] - element[properties.clientSize];
+  const offset = readOffset(element, axis);
+  return (
+    room > 1 &&
+    pipe(
+      Match.value(direction),
+      Match.when("backward", () => offset > 0),
+      Match.when("forward", () => offset < room - 1),
+      Match.exhaustive,
+    )
+  );
+};
+
+/**
+ * Can `element` absorb a scroll in this direction along `axis`?
  *
  * The check is read-only on purpose. Upstream confirms scrollability by moving
  * the offset by one pixel and reading it back. That probe is wrong in both
@@ -127,51 +225,73 @@ const isScrollable = (
   view: Window,
   element: Element,
   axis: ScrollAxis,
-  amountSign: number,
-): boolean => {
-  const properties = AXIS_PROPERTIES[axis];
-  const style = view.getComputedStyle(element);
-  const overflow = axis === "y" ? style.overflowY : style.overflowX;
-  if (!SCROLLABLE_OVERFLOW.has(overflow)) return false;
+  direction: Direction,
+): boolean =>
+  pipe(
+    SCROLLABLE_OVERFLOW,
+    Array.contains(view.getComputedStyle(element)[AXIS_PROPERTIES[axis].overflow]),
+  ) && hasRoom(element, axis, direction);
 
-  const scrollSize = element[properties.scrollSize];
-  const clientSize = element[properties.clientSize];
-  // Sub-pixel layout regularly leaves a fraction of a pixel of overflow on an
-  // element that has nothing to scroll.
-  if (scrollSize - clientSize <= 1) return false;
-
-  const offset = readOffset(element, axis);
-  return amountSign < 0 ? offset > 0 : offset < scrollSize - clientSize - 1;
-};
+const isShadowRoot = (node: Node): node is ShadowRoot => node instanceof ShadowRoot;
 
 /**
- * The nearest ancestor that can absorb the scroll.
+ * The element above this one.
  *
  * The walk goes through an open shadow root with `getRootNode().host`. A scroll
  * container inside a web component is invisible to a `parentElement` walk.
  */
+const parentOf = (element: Element): Option.Option<Element> =>
+  pipe(
+    element.parentElement,
+    Option.fromNullOr,
+    Option.orElse(() =>
+      pipe(
+        element.getRootNode(),
+        Option.liftPredicate(isShadowRoot),
+        Option.map((root) => root.host),
+      ),
+    ),
+  );
+
+/** The start and every element above it, up to the root and without it. */
+const ancestorsBelow =
+  (root: Element) =>
+  (start: Option.Option<Element>): Iterable<Element> =>
+    Iterable.unfold(
+      start,
+      flow(
+        Option.filter((element) => element !== root),
+        Option.map((element) => [element, parentOf(element)] as const),
+      ),
+    );
+
+/** The nearest ancestor that can absorb the scroll, or else the root. */
 const findScrollableAncestor = (
   view: Window,
   root: Element,
   start: Element | null,
   axis: ScrollAxis,
-  amount: number,
-): Element => {
-  let node: Element | null = start;
+  direction: Direction,
+): Element =>
+  pipe(
+    start,
+    Option.fromNullOr,
+    ancestorsBelow(root),
+    Iterable.findFirst((element) => isScrollable(view, element, axis, direction)),
+    Option.getOrElse(() => root),
+  );
 
-  while (node !== null && node !== root) {
-    if (isScrollable(view, node, axis, Math.sign(amount) || 1)) return node;
-    const parent: Element | null = node.parentElement;
-    if (parent !== null) {
-      node = parent;
-      continue;
-    }
-    const treeRoot = node.getRootNode();
-    node = treeRoot instanceof ShadowRoot ? treeRoot.host : null;
-  }
-
-  return root;
-};
+/**
+ * The physical key of a press.
+ *
+ * An empty `code` is not a physical key that we can watch, so it is absent and
+ * not a value.
+ */
+const physicalKey = (event: KeyboardEvent): Option.Option<string> =>
+  pipe(
+    event.code,
+    Option.liftPredicate((code) => code !== ""),
+  );
 
 // ---------------------------------------------------------------------------
 // The animation state
@@ -202,7 +322,8 @@ interface Animation {
 /** What one step decided, before the element is asked to move. */
 interface Frame {
   readonly element: Element;
-  readonly frameDelta: number;
+  /** The distance that this frame asks for, when it asks for any. */
+  readonly delta: Option.Option<number>;
   readonly progress: number;
 }
 
@@ -210,6 +331,17 @@ interface Frame {
 interface Outcome {
   readonly running: boolean;
   readonly rate: number;
+}
+
+/** Everything that the end of a step reads, besides the animation. */
+interface Settlement {
+  readonly rate: number;
+  /** How far the element truly moved in this frame. */
+  readonly distance: number;
+  readonly progress: number;
+  /** The physical keys that are down now. */
+  readonly held: HashSet.HashSet<string>;
+  readonly stepSize: number;
 }
 
 /**
@@ -220,16 +352,125 @@ interface Outcome {
  * next step then aims at zero total distance and jumps backwards by everything
  * covered so far.
  */
-const merge = (animation: Animation, amount: number): Animation =>
-  pipe(
-    animation,
-    Struct.assign({
-      origin: animation.applied,
-      amount: animation.amount + amount,
-      duration: durationFor(Math.abs(animation.amount + amount - animation.applied)),
-      elapsed: 0,
-    }),
-  );
+const merged =
+  (amount: number) =>
+  (animation: Animation): Animation =>
+    pipe(
+      animation,
+      Struct.assign({
+        origin: animation.applied,
+        amount: animation.amount + amount,
+        duration: durationFor(Math.abs(animation.amount + amount - animation.applied)),
+        elapsed: 0,
+      }),
+    );
+
+/**
+ * Add distance to the animation that this press owns.
+ *
+ * The answer is the extended animation. An animation of an earlier press, or
+ * none at all, stays as it is and answers `None`.
+ */
+const extendedBy =
+  (press: number, amount: number) =>
+  (
+    state: Option.Option<Animation>,
+  ): readonly [Option.Option<Animation>, Option.Option<Animation>] => {
+    const extended = pipe(
+      state,
+      Option.filter((animation) => animation.generation === press),
+      Option.map(merged(amount)),
+    );
+    return [
+      extended,
+      pipe(
+        extended,
+        Option.orElse(() => state),
+      ),
+    ];
+  };
+
+/**
+ * Run a transition on the animation of an axis.
+ *
+ * An axis with no animation answers `None`, and it stays without one.
+ */
+const onAnimation =
+  <B>(transition: (animation: Animation) => readonly [B, Option.Option<Animation>]) =>
+  (state: Option.Option<Animation>): readonly [Option.Option<B>, Option.Option<Animation>] =>
+    pipe(
+      state,
+      Option.match({
+        onNone: () => [Option.none<B>(), state] as const,
+        onSome: flow(transition, ([answer, next]) => [Option.some(answer), next] as const),
+      }),
+    );
+
+/**
+ * Count one more frame of an animation.
+ *
+ * The answer is what the frame must draw, and the animation that has counted
+ * the time of the frame.
+ */
+const timed =
+  (timestamp: number, rate: number) =>
+  (animation: Animation): readonly [Frame, Option.Option<Animation>] => {
+    const previous = pipe(
+      animation.lastTimestamp,
+      Option.getOrElse(() => timestamp - NOMINAL_FRAME_MS),
+    );
+    const delta = Math.min(Math.max(0, timestamp - previous), MAX_FRAME_MS);
+    const elapsed = animation.elapsed + delta;
+    // The calibration scales the *rate*, and not the distance. A
+    // multiplication of the target distance by it made every scroll 60%
+    // longer than `scrollStepSize` says, as soon as the calibration reached
+    // its ceiling of 1.6 — which takes a few presses.
+    const progress = Math.min(1, (elapsed * rate) / animation.duration);
+    const goal = animation.origin + (animation.amount - animation.origin) * progress;
+    return [
+      {
+        element: animation.element,
+        delta: nonZero(Math.trunc(goal - animation.applied)),
+        progress,
+      },
+      pipe(
+        animation,
+        Struct.assign({
+          elapsed,
+          frames: animation.frames + 1,
+          lastTimestamp: Option.some(timestamp),
+        }),
+        Option.some,
+      ),
+    ];
+  };
+
+/** The first frames, and a leg with no frame, say nothing about throughput. */
+const isWarmingUp = (animation: Animation): boolean =>
+  animation.elapsed < CALIBRATION_WARMUP_MS || animation.frames === 0;
+
+/** The distance per frame so far, once the first frames are behind. */
+const throughput: (animation: Animation) => Option.Option<number> = flow(
+  Option.liftPredicate(Predicate.not(isWarmingUp)),
+  Option.map(({ applied, frames }) => Math.abs(applied) / frames),
+);
+
+/** Nudge the calibration towards the target throughput. */
+const corrected =
+  (calibration: number) =>
+  (perFrame: number): number =>
+    pipe(
+      Match.value(perFrame),
+      Match.when(
+        (measured) => measured < CALIBRATION_TARGET_PX_PER_FRAME * 0.75,
+        () => Math.min(MAX_CALIBRATION, calibration * 1.05),
+      ),
+      Match.when(
+        (measured) => measured > CALIBRATION_TARGET_PX_PER_FRAME * 1.25,
+        () => Math.max(MIN_CALIBRATION, calibration * 0.95),
+      ),
+      Match.orElse(() => calibration),
+    );
 
 /**
  * Move the calibration towards about 150px per frame.
@@ -239,19 +480,64 @@ const merge = (animation: Animation, amount: number): Animation =>
  * thread drops frames at any time. Measuring the true throughput and correcting
  * it is the only way to make a held key feel the same in both cases.
  */
-const recalibrate = (calibration: number, animation: Animation): number => {
-  if (animation.elapsed < CALIBRATION_WARMUP_MS || animation.frames === 0) {
-    return calibration;
-  }
-  const perFrame = Math.abs(animation.applied) / animation.frames;
-  if (perFrame < CALIBRATION_TARGET_PX_PER_FRAME * 0.75) {
-    return Math.min(MAX_CALIBRATION, calibration * 1.05);
-  }
-  if (perFrame > CALIBRATION_TARGET_PX_PER_FRAME * 1.25) {
-    return Math.max(MIN_CALIBRATION, calibration * 0.95);
-  }
-  return calibration;
-};
+const recalibrate = (calibration: number, animation: Animation): number =>
+  pipe(
+    animation,
+    throughput,
+    Option.map(corrected(calibration)),
+    Option.getOrElse(() => calibration),
+  );
+
+/**
+ * Key repeat: extend the animation instead of restarting it, so a held key
+ * gives one continuous glide and not a staircase.
+ */
+const repeatedLeg = (animation: Animation, stepSize: number): Animation =>
+  pipe(
+    animation,
+    Struct.assign({
+      origin: animation.applied,
+      amount: animation.amount + Math.sign(animation.amount) * Math.abs(stepSize),
+      duration: durationFor(Math.abs(stepSize)),
+      elapsed: 0,
+    }),
+  );
+
+/** The key that holds an animation open, while it is still down. */
+const heldKey = (animation: Animation, held: HashSet.HashSet<string>): Option.Option<string> =>
+  pipe(
+    animation.code,
+    Option.filter((code) => pipe(held, HashSet.has(code))),
+  );
+
+/** The animation after a frame. A finished leg ends it, unless its key is still held. */
+const nextLeg = (
+  animation: Animation,
+  { progress, held, stepSize }: Settlement,
+): Option.Option<Animation> =>
+  pipe(
+    progress >= 1,
+    Boolean.match({
+      onFalse: () => Option.some(animation),
+      onTrue: () =>
+        pipe(
+          heldKey(animation, held),
+          Option.map(() => repeatedLeg(animation, stepSize)),
+        ),
+    }),
+  );
+
+/** Count the distance that a frame moved, and decide what follows it. */
+const settled =
+  (settlement: Settlement) =>
+  (current: Animation): readonly [Outcome, Option.Option<Animation>] => {
+    const animation: Animation = pipe(
+      current,
+      Struct.assign({ applied: current.applied + settlement.distance }),
+    );
+    const next = nextLeg(animation, settlement);
+    return [{ running: Option.isSome(next), rate: recalibrate(settlement.rate, animation) }, next];
+  };
 
 // ---------------------------------------------------------------------------
 // The service
@@ -274,10 +560,7 @@ export class Scroller extends Context.Service<
       event: Option.Option<KeyboardEvent>,
     ) => Effect.Effect<void>;
 
-    readonly scrollTo: (
-      axis: ScrollAxis,
-      position: "start" | "end" | number,
-    ) => Effect.Effect<void>;
+    readonly scrollTo: (axis: ScrollAxis, position: OffsetTarget) => Effect.Effect<void>;
 
     readonly position: Effect.Effect<ScrollPosition>;
 
@@ -301,10 +584,10 @@ export class Scroller extends Context.Service<
         const calibration = yield* Ref.make(1);
         /** Increased on every keydown that is not a repeat: "this press". */
         const generation = yield* Ref.make(0);
-        const heldCodes = yield* Ref.make<ReadonlySet<string>>(new Set());
+        const heldCodes = yield* Ref.make(HashSet.empty<string>());
         const animations: Record<ScrollAxis, Ref.Ref<Option.Option<Animation>>> = {
-          x: yield* Ref.make<Option.Option<Animation>>(Option.none()),
-          y: yield* Ref.make<Option.Option<Animation>>(Option.none()),
+          x: yield* Ref.make(Option.none<Animation>()),
+          y: yield* Ref.make(Option.none<Animation>()),
         };
         // One handle per axis. `x` and `y` animate at the same time, and a new
         // scroll on one axis must not stop the other one.
@@ -316,6 +599,35 @@ export class Scroller extends Context.Service<
         const rootElement = (): Element =>
           dom.document.scrollingElement ?? dom.document.documentElement;
 
+        /** Move an element, and do not ask how far it went. */
+        const shift =
+          (axis: ScrollAxis, delta: number) =>
+          (element: Element): Effect.Effect<void> =>
+            Effect.sync(() => {
+              applyOffset(element, axis, delta);
+            });
+
+        /**
+         * Give a distance to the document instead of the element that refused
+         * it. The document gets nothing when it is that element.
+         */
+        const handOff = (element: Element, axis: ScrollAxis, delta: number): Effect.Effect<void> =>
+          pipe(
+            rootElement(),
+            Option.liftPredicate((root) => root !== element),
+            Option.match({ onNone: () => Effect.void, onSome: shift(axis, delta) }),
+          );
+
+        /** What a page step measures: the viewport for the document, and the box of a container. */
+        const pageSize = (element: Element, axis: ScrollAxis): number =>
+          pipe(
+            element === rootElement(),
+            Boolean.match({
+              onFalse: () => element[AXIS_PROPERTIES[axis].clientSize],
+              onTrue: () => dom.window[AXIS_PROPERTIES[axis].viewport],
+            }),
+          );
+
         /**
          * Should this scroll be animated at all?
          *
@@ -324,16 +636,25 @@ export class Scroller extends Context.Service<
          * anyway overrides an accessibility setting with a preference.
          */
         const animated = Effect.gen(function* () {
-          if (!settings.currentUnsafe().smoothScroll) return false;
-          const reduced = yield* dom.probeOr(
-            () => dom.window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-            false,
+          const { smoothScroll } = settings.currentUnsafe();
+          return yield* pipe(
+            smoothScroll,
+            Boolean.match({
+              onFalse: () => Effect.succeed(false),
+              onTrue: () =>
+                pipe(
+                  dom.probeOr(
+                    () => dom.window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+                    false,
+                  ),
+                  Effect.map(Boolean.not),
+                ),
+            }),
           );
-          return !reduced;
         });
 
         /** The element that must absorb the scroll. */
-        const target = (axis: ScrollAxis, amount: number): Effect.Effect<Element> =>
+        const target = (axis: ScrollAxis, direction: Direction): Effect.Effect<Element> =>
           dom.probeOr(
             () =>
               findScrollableAncestor(
@@ -341,32 +662,99 @@ export class Scroller extends Context.Service<
                 rootElement(),
                 deepActiveElement(dom.document),
                 axis,
-                amount,
+                direction,
               ),
             rootElement(),
           );
 
         const cancel = (axis: ScrollAxis): Effect.Effect<void> =>
-          Effect.gen(function* () {
-            yield* Ref.set(animations[axis], Option.none());
-            yield* FiberHandle.clear(fibers[axis]);
-          });
+          pipe(
+            animations[axis],
+            Ref.set(Option.none<Animation>()),
+            Effect.andThen(FiberHandle.clear(fibers[axis])),
+          );
 
         const applyInstant = Effect.fn("Scroller.applyInstant")(function* (
           element: Element,
           axis: ScrollAxis,
           amount: number,
         ) {
-          yield* Effect.sync(() => {
-            const moved = applyOffset(element, axis, amount);
-            // The chosen element refused the scroll, so it lied about being
-            // scrollable. Give the distance to the document instead.
-            if (moved === 0) {
-              const root = rootElement();
-              if (root !== element) applyOffset(root, axis, amount);
-            }
-          });
+          const motion = yield* Effect.sync(() => moveElement(element, axis, amount));
+          yield* pipe(
+            motion,
+            Motion.$match({
+              Moved: () => Effect.void,
+              // The chosen element refused the scroll, so it lied about being
+              // scrollable. Give the distance to the document instead.
+              Refused: () => handOff(element, axis, amount),
+            }),
+          );
         });
+
+        /**
+         * The element refused the scroll of a frame. It is at the end of its
+         * range, or it lied about being scrollable. Give the rest to the
+         * document instead of stopping without a word, while the animation has
+         * moved nothing yet. The animation ends either way.
+         */
+        const refused = Effect.fnUntraced(function* (
+          axis: ScrollAxis,
+          element: Element,
+          delta: number,
+        ) {
+          const state = yield* Ref.get(animations[axis]);
+          yield* pipe(
+            state,
+            Option.exists((animation) => animation.applied !== 0),
+            Boolean.match({
+              onFalse: () => handOff(element, axis, delta),
+              onTrue: () => Effect.void,
+            }),
+          );
+          yield* pipe(animations[axis], Ref.set(Option.none<Animation>()));
+          return false;
+        });
+
+        /** The element moved. Count the distance, and decide what follows. */
+        const settle = Effect.fnUntraced(function* (
+          axis: ScrollAxis,
+          rate: number,
+          moved: number,
+          progress: number,
+        ) {
+          const held = yield* Ref.get(heldCodes);
+          const stepSize = settings.currentUnsafe().scrollStepSize;
+          const outcome = yield* pipe(
+            animations[axis],
+            Ref.modify(onAnimation(settled({ rate, distance: moved, progress, held, stepSize }))),
+          );
+          const { running, rate: next } = pipe(
+            outcome,
+            Option.getOrElse((): Outcome => ({ running: false, rate })),
+          );
+          yield* pipe(calibration, Ref.set(next));
+          return running;
+        });
+
+        /** Draw one frame, and answer whether the animation continues. */
+        const draw = (axis: ScrollAxis, rate: number, frame: Frame): Effect.Effect<boolean> =>
+          pipe(
+            Effect.sync(() =>
+              pipe(
+                frame.delta,
+                Option.match({
+                  onNone: () => Motion.Moved({ distance: 0 }),
+                  onSome: (delta) => moveElement(frame.element, axis, delta),
+                }),
+              ),
+            ),
+            Effect.flatMap(
+              Motion.$match({
+                Moved: ({ distance: moved }) => settle(axis, rate, moved, frame.progress),
+                Refused: ({ delta }) => refused(axis, frame.element, delta),
+              }),
+            ),
+          );
 
         /**
          * One step of the animation.
@@ -375,124 +763,39 @@ export class Scroller extends Context.Service<
          * written in two indivisible sections, with the element write between
          * them, so a key repeat that arrives in the middle is not lost.
          */
-        const step = (axis: ScrollAxis, timestamp: number): Effect.Effect<boolean> =>
-          Effect.gen(function* () {
-            const rate = yield* Ref.get(calibration);
-            const frame = yield* Ref.modify(
-              animations[axis],
-              (state): [Option.Option<Frame>, Option.Option<Animation>] => {
-                if (Option.isNone(state)) return [Option.none(), state];
-                const animation = state.value;
-                const previous = pipe(
-                  animation.lastTimestamp,
-                  Option.getOrElse(() => timestamp - NOMINAL_FRAME_MS),
-                );
-                const delta = Math.min(Math.max(0, timestamp - previous), MAX_FRAME_MS);
-                const elapsed = animation.elapsed + delta;
-                // The calibration scales the *rate*, and not the distance. A
-                // multiplication of the target distance by it made every scroll
-                // 60% longer than `scrollStepSize` says, as soon as the
-                // calibration reached its ceiling of 1.6 — which takes a few
-                // presses.
-                const progress = Math.min(1, (elapsed * rate) / animation.duration);
-                const goal = animation.origin + (animation.amount - animation.origin) * progress;
-                return [
-                  Option.some({
-                    element: animation.element,
-                    frameDelta: Math.trunc(goal - animation.applied),
-                    progress,
-                  }),
-                  Option.some(
-                    pipe(
-                      animation,
-                      Struct.assign({
-                        elapsed,
-                        frames: animation.frames + 1,
-                        lastTimestamp: Option.some(timestamp),
-                      }),
-                    ),
-                  ),
-                ];
-              },
-            );
+        const step = Effect.fnUntraced(function* (axis: ScrollAxis, timestamp: number) {
+          const rate = yield* Ref.get(calibration);
+          const frame = yield* pipe(
+            animations[axis],
+            Ref.modify(onAnimation(timed(timestamp, rate))),
+          );
+          return yield* pipe(
+            frame,
+            Option.match({
+              onNone: () => Effect.succeed(false),
+              onSome: (next) => draw(axis, rate, next),
+            }),
+          );
+        });
 
-            if (Option.isNone(frame)) return false;
-            const { element, frameDelta, progress } = frame.value;
-
-            const moved = yield* Effect.sync(() =>
-              frameDelta === 0 ? 0 : applyOffset(element, axis, frameDelta),
-            );
-
-            if (frameDelta !== 0 && moved === 0) {
-              // The element refused the scroll. It is at the end of its range, or
-              // it lied about being scrollable. Give the rest to the document
-              // instead of stopping without a word.
-              const state = yield* Ref.get(animations[axis]);
-              const applied = Option.isSome(state) ? state.value.applied : 0;
-              const root = rootElement();
-              if (root !== element && applied === 0) {
-                yield* Effect.sync(() => {
-                  applyOffset(root, axis, frameDelta);
-                });
-              }
-              yield* Ref.set(animations[axis], Option.none());
-              return false;
-            }
-
-            const held = yield* Ref.get(heldCodes);
-            const stepSize = settings.currentUnsafe().scrollStepSize;
-
-            const outcome = yield* Ref.modify(
-              animations[axis],
-              (state): [Outcome, Option.Option<Animation>] => {
-                if (Option.isNone(state)) {
-                  return [{ running: false, rate }, state];
-                }
-                const animation: Animation = pipe(
-                  state.value,
-                  Struct.assign({ applied: state.value.applied + moved }),
-                );
-                const next = recalibrate(rate, animation);
-                const stillHeld = Option.isSome(animation.code) && held.has(animation.code.value);
-
-                if (progress >= 1 && !stillHeld) {
-                  return [{ running: false, rate: next }, Option.none()];
-                }
-                if (progress >= 1 && stillHeld) {
-                  // Key repeat: extend the animation instead of restarting it, so
-                  // a held key gives one continuous glide and not a staircase.
-                  return [
-                    { running: true, rate: next },
-                    Option.some(
-                      pipe(
-                        animation,
-                        Struct.assign({
-                          origin: animation.applied,
-                          amount:
-                            animation.amount + Math.sign(animation.amount) * Math.abs(stepSize),
-                          duration: durationFor(Math.abs(stepSize)),
-                          elapsed: 0,
-                        }),
-                      ),
-                    ),
-                  ];
-                }
-                return [{ running: true, rate: next }, Option.some(animation)];
-              },
-            );
-
-            yield* Ref.set(calibration, outcome.rate);
-            return outcome.running;
-          });
-
+        /**
+         * One step on every animation frame, until a step ends the animation.
+         *
+         * A recursion, and not `Effect.repeat`. A schedule yields to the
+         * scheduler between two runs, which is a macrotask in Safari, and the
+         * request for the next frame would wait behind it.
+         */
         const loop = (axis: ScrollAxis): Effect.Effect<void> =>
-          Effect.gen(function* () {
-            let running = true;
-            while (running) {
-              const timestamp = yield* dom.nextFrame;
-              running = yield* step(axis, timestamp);
-            }
-          });
+          pipe(
+            dom.nextFrame,
+            Effect.flatMap((timestamp) => step(axis, timestamp)),
+            Effect.flatMap(
+              Boolean.match({
+                onFalse: () => Effect.void,
+                onTrue: () => loop(axis),
+              }),
+            ),
+          );
 
         /** A defect in the animation leaves the page stuck. The user must know. */
         const animate = (axis: ScrollAxis): Effect.Effect<void> =>
@@ -512,27 +815,70 @@ export class Scroller extends Context.Service<
           amount: number,
           code: Option.Option<string>,
         ) {
-          yield* Ref.set(
-            animations[axis],
-            Option.some<Animation>({
-              element,
-              code,
-              generation: yield* Ref.get(generation),
-              amount,
-              origin: 0,
-              duration: durationFor(Math.abs(amount)),
-              elapsed: 0,
-              applied: 0,
-              frames: 0,
-              lastTimestamp: Option.none(),
-            }),
-          );
+          const press = yield* Ref.get(generation);
+          const animation: Animation = {
+            element,
+            code,
+            generation: press,
+            amount,
+            origin: 0,
+            duration: durationFor(Math.abs(amount)),
+            elapsed: 0,
+            applied: 0,
+            frames: 0,
+            lastTimestamp: Option.none(),
+          };
+          yield* pipe(animations[axis], Ref.set(Option.some(animation)));
           // The first step happens here, inside the keystroke, and not on the
           // next frame. Nothing above suspends, so the page moves while the
-          // browser is still dispatching the key.
+          // browser is still dispatching the key. The fiber takes over only
+          // when that step leaves distance to cover.
           const now = yield* dom.now;
-          if (!(yield* step(axis, now))) return;
-          yield* FiberHandle.run(fibers[axis], animate(axis));
+          yield* pipe(animate(axis), FiberHandle.run(fibers[axis]), Effect.when(step(axis, now)));
+        });
+
+        /**
+         * A second press while the first one still glides. Adding the
+         * distance, instead of cancelling, is what makes three taps scroll
+         * three steps whatever their timing. A cancel discarded what the first
+         * press had not yet applied.
+         */
+        const join = Effect.fnUntraced(function* (
+          axis: ScrollAxis,
+          animation: Animation,
+          amount: number,
+          code: Option.Option<string>,
+        ) {
+          const press = yield* Ref.get(generation);
+          const joined: Animation = pipe(
+            animation,
+            merged(amount),
+            Struct.assign({
+              code: pipe(
+                code,
+                Option.orElse(() => animation.code),
+              ),
+              generation: press,
+            }),
+          );
+          yield* pipe(animations[axis], Ref.set(Option.some(joined)));
+        });
+
+        const glide = Effect.fnUntraced(function* (
+          element: Element,
+          axis: ScrollAxis,
+          amount: number,
+          code: Option.Option<string>,
+        ) {
+          const existing = yield* Ref.get(animations[axis]);
+          yield* pipe(
+            existing,
+            Option.filter((animation) => animation.element === element),
+            Option.match({
+              onNone: () => start(element, axis, amount, code),
+              onSome: (animation) => join(axis, animation, amount, code),
+            }),
+          );
         });
 
         const scrollElementBy = Effect.fn("Scroller.scrollElementBy")(function* (
@@ -541,67 +887,70 @@ export class Scroller extends Context.Service<
           amount: number,
           event: Option.Option<KeyboardEvent>,
         ) {
-          if (!(yield* animated)) {
-            yield* applyInstant(element, axis, amount);
-            return;
-          }
-
-          // An empty `code` is not a physical key that we can watch, so it is
-          // absent and not a value.
-          const code = pipe(
-            event,
-            Option.flatMap((value) =>
-              value.code === "" ? Option.none() : Option.some(value.code),
-            ),
+          const smooth = yield* animated;
+          const code = pipe(event, Option.flatMap(physicalKey));
+          yield* pipe(
+            smooth,
+            Boolean.match({
+              onFalse: () => applyInstant(element, axis, amount),
+              onTrue: () => glide(element, axis, amount, code),
+            }),
           );
-          const existing = yield* Ref.get(animations[axis]);
-          if (Option.isSome(existing) && existing.value.element === element) {
-            // A second press while the first one still glides. Adding the
-            // distance, instead of cancelling, is what makes three taps scroll
-            // three steps whatever their timing. A cancel discarded what the
-            // first press had not yet applied.
-            yield* Ref.set(
-              animations[axis],
-              Option.some(
-                pipe(
-                  merge(existing.value, amount),
-                  Struct.assign({
-                    code: Option.isSome(code) ? code : existing.value.code,
-                    generation: yield* Ref.get(generation),
-                  }),
-                ),
-              ),
-            );
-            return;
-          }
-
-          yield* start(element, axis, amount, code);
         });
 
         /** Extend the running animation when this press already owns it. */
-        const mergeThisPress = (axis: ScrollAxis, amount: number): Effect.Effect<boolean> =>
-          Effect.gen(function* () {
-            const existing = yield* Ref.get(animations[axis]);
-            const press = yield* Ref.get(generation);
-            if (Option.isNone(existing) || existing.value.generation !== press) {
-              return false;
-            }
-            yield* Ref.set(animations[axis], Option.some(merge(existing.value, amount)));
-            return true;
-          });
+        const extendThisPress = Effect.fnUntraced(function* (axis: ScrollAxis, amount: number) {
+          const press = yield* Ref.get(generation);
+          return yield* pipe(animations[axis], Ref.modify(extendedBy(press, amount)));
+        });
+
+        /**
+         * Scroll by a distance that is not zero.
+         *
+         * The animation of this press takes the distance when it runs. The
+         * element is resolved only when it does not. The walk reads a computed
+         * style at every step, and on the key-repeat path its result is thrown
+         * away. That is waste at about 30 Hz.
+         */
+        const scrollDistance = (
+          axis: ScrollAxis,
+          amount: number,
+          event: Option.Option<KeyboardEvent>,
+          element: Effect.Effect<Element>,
+        ): Effect.Effect<void> =>
+          pipe(
+            extendThisPress(axis, amount),
+            Effect.flatMap(
+              Option.match({
+                onNone: () =>
+                  pipe(
+                    element,
+                    Effect.flatMap((resolved) => scrollElementBy(resolved, axis, amount, event)),
+                  ),
+                onSome: () => Effect.void,
+              }),
+            ),
+          );
 
         const scrollBy = Effect.fn("Scroller.scrollBy")(function* (
           axis: ScrollAxis,
           amount: number,
           event: Option.Option<KeyboardEvent>,
         ) {
-          if (amount === 0) return;
-          // Checked *before* a target is resolved. The walk reads a computed
-          // style at every step, and on the key-repeat path its result is
-          // thrown away. That is waste at about 30 Hz.
-          if (yield* mergeThisPress(axis, amount)) return;
-          const element = yield* target(axis, amount);
-          yield* scrollElementBy(element, axis, amount, event);
+          yield* pipe(
+            amount,
+            nonZero,
+            Option.match({
+              onNone: () => Effect.void,
+              onSome: (moved) =>
+                scrollDistance(
+                  axis,
+                  moved,
+                  event,
+                  Effect.suspend(() => target(axis, directionOf(moved))),
+                ),
+            }),
+          );
         });
 
         const scrollByViewport = Effect.fn("Scroller.scrollByViewport")(function* (
@@ -611,48 +960,64 @@ export class Scroller extends Context.Service<
         ) {
           // One walk, and not two: `scrollBy` would resolve the same target
           // again.
-          const element = yield* target(axis, fraction);
-          const properties = AXIS_PROPERTIES[axis];
-          const size =
-            element === rootElement()
-              ? dom.window[properties.viewport]
-              : element[properties.clientSize];
-
-          const amount = Math.round(size * fraction);
-          if (amount === 0) return;
-          if (yield* mergeThisPress(axis, amount)) return;
-          yield* scrollElementBy(element, axis, amount, event);
+          const element = yield* target(axis, directionOf(fraction));
+          yield* pipe(
+            Math.round(pageSize(element, axis) * fraction),
+            nonZero,
+            Option.match({
+              onNone: () => Effect.void,
+              onSome: (moved) => scrollDistance(axis, moved, event, Effect.succeed(element)),
+            }),
+          );
         });
 
         const scrollTo = Effect.fn("Scroller.scrollTo")(function* (
           axis: ScrollAxis,
-          position: "start" | "end" | number,
+          position: OffsetTarget,
         ) {
-          const element = yield* target(axis, position === "start" ? -1 : 1);
+          const element = yield* target(axis, directionTo(position));
           const properties = AXIS_PROPERTIES[axis];
-          const max = element[properties.scrollSize] - element[properties.clientSize];
-          const value = position === "start" ? 0 : position === "end" ? max : position;
+          const value = offsetFor(
+            position,
+            element[properties.scrollSize] - element[properties.clientSize],
+          );
           yield* cancel(axis);
           yield* Effect.sync(() => {
             writeOffset(element, axis, value);
           });
         });
 
+        const hold = (code: string): Effect.Effect<void> =>
+          pipe(heldCodes, Ref.update(HashSet.add(code)));
+
+        const release = (code: string): Effect.Effect<void> =>
+          pipe(heldCodes, Ref.update(HashSet.remove(code)));
+
+        /** A new press, and not a repeat: "this press" moves on, and its key is down. */
+        const notePress = Effect.fnUntraced(function* (event: KeyboardEvent) {
+          yield* pipe(
+            generation,
+            Ref.update((value) => value + 1),
+          );
+          yield* pipe(
+            physicalKey(event),
+            Option.match({ onNone: () => Effect.void, onSome: hold }),
+          );
+        });
+
         const noteKeydown = Effect.fn("Scroller.noteKeydown")(function* (event: KeyboardEvent) {
-          if (event.repeat) return;
-          yield* Ref.update(generation, (value) => value + 1);
-          if (event.code) {
-            yield* Ref.update(heldCodes, (codes) => new Set(codes).add(event.code));
-          }
+          yield* pipe(
+            event,
+            Option.liftPredicate((press) => !press.repeat),
+            Option.match({ onNone: () => Effect.void, onSome: notePress }),
+          );
         });
 
         const noteKeyup = Effect.fn("Scroller.noteKeyup")(function* (event: KeyboardEvent) {
-          if (!event.code) return;
-          yield* Ref.update(heldCodes, (codes) => {
-            const next = new Set(codes);
-            next.delete(event.code);
-            return next;
-          });
+          yield* pipe(
+            physicalKey(event),
+            Option.match({ onNone: () => Effect.void, onSome: release }),
+          );
         });
 
         // A lost `keyup` — the window loses focus in the middle of a repeat —
@@ -662,7 +1027,9 @@ export class Scroller extends Context.Service<
         // `window` listener ran for *every element blur on the page*. That is
         // thousands of calls on a form-heavy site, to answer a question that only
         // the blur of the window can answer.
-        yield* dom.listen("window", "blur", () => Ref.set(heldCodes, new Set()));
+        yield* dom.listen("window", "blur", () =>
+          pipe(heldCodes, Ref.set(HashSet.empty<string>())),
+        );
 
         const service = Scroller.of({
           scrollBy,
