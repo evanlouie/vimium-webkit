@@ -33,7 +33,7 @@ import {
   flow,
   pipe,
 } from "effect";
-import { type EffectiveRule, isPassKey } from "~/domain/Exclusion.ts";
+import { EffectiveRule, isPassKey } from "~/domain/Exclusion.ts";
 import {
   appendCountDigit,
   isComposing,
@@ -732,14 +732,10 @@ export class Keyboard extends Context.Service<
         ),
       );
 
-      const followExclusion = (rule: EffectiveRule): Effect.Effect<void> =>
-        pipe(
-          rule.enabled,
-          Boolean.match({
-            onFalse: () => exitNormal,
-            onTrue: () => enterNormal,
-          }),
-        );
+      const followExclusion: (rule: EffectiveRule) => Effect.Effect<void> = EffectiveRule.match({
+        Disabled: () => exitNormal,
+        Enabled: () => enterNormal,
+      });
 
       const syncExclusion = pipe(
         SubscriptionRef.get(exclusions.effective),

@@ -76,6 +76,7 @@ import {
 import {
   type ChallengeMessage,
   challengeMessage,
+  encodeLinkMessage,
   encodeMessage,
   type FrameMessage,
   type FrameWire,
@@ -337,13 +338,23 @@ const readJson = (text: string): Option.Option<unknown> =>
     Result.getSuccess,
   );
 
-/** The JSON text of an outbound message. A message with no text is not sent. */
-const serialize = (message: FrameWire | WelcomeMessage): Option.Option<string> =>
+/** The JSON text of an encoded message. */
+const jsonText = (encoded: unknown): Option.Option<string> =>
   pipe(
-    Result.try(() => JSON.stringify(message)),
+    Result.try(() => JSON.stringify(encoded)),
     Result.getSuccess,
-    Option.filter((text) => text.length > 0),
   );
+
+/**
+ * The JSON text of an outbound message, in its wire shape.
+ *
+ * A message that does not encode, or that has no text, is not sent.
+ */
+const serialize: (message: FrameWire | WelcomeMessage) => Option.Option<string> = flow(
+  encodeLinkMessage,
+  Option.flatMap(jsonText),
+  Option.filter((text) => text.length > 0),
+);
 
 /** The other direction of travel. */
 const opposite = (direction: SealDirection): SealDirection =>

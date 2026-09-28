@@ -25,7 +25,7 @@ import {
   pipe,
 } from "effect";
 import {
-  type EffectiveRule,
+  EffectiveRule,
   type ExclusionRule,
   type ExclusionSet,
   FULLY_ENABLED,
@@ -186,10 +186,7 @@ export class Exclusions extends Context.Service<
         resolveLocal,
         match,
         adopt,
-        isEnabled: pipe(
-          SubscriptionRef.get(effective),
-          Effect.map((rule) => rule.enabled),
-        ),
+        isEnabled: pipe(SubscriptionRef.get(effective), Effect.map(EffectiveRule.guards.Enabled)),
       });
     }),
   );

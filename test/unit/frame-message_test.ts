@@ -12,6 +12,8 @@ import { Array, Boolean, Effect, flow, Option, Order, Record, Schema, pipe, Stru
 import {
   compareDescriptors,
   DEFAULT_EXCLUSION,
+  effectiveExclusionSchema,
+  encodeLinkMessage,
   encodeMessage,
   ENVELOPE,
   type FrameMessage,
@@ -40,6 +42,7 @@ import {
   WIRE_TARGET_ALL,
   WIRE_TARGET_TOP,
 } from "~/domain/FrameMessage.ts";
+import { EffectiveRule } from "~/domain/Exclusion.ts";
 import { FrameId } from "~/domain/FrameId.ts";
 
 const NONCE = "abcdef0123456789";
@@ -75,12 +78,15 @@ const descriptor = (frameId: string, localIndex: number, secondary = false): Hin
 describe("FrameMessage", () => {
   it.effect("accepts a message of a kind that carries a payload", () =>
     Effect.sync(() => {
-      const parsed = parseWire(
-        wire({
+      // The verdict has a wire shape of its own, so the message goes through
+      // the encoder of the bus.
+      const parsed = pipe(
+        encodeMessage(envelope, {
           kind: "EXCLUSION_RESULT",
-          exclusion: { enabled: false, passKeys: "jk" },
+          exclusion: EffectiveRule.cases.Enabled.make({ passKeys: "jk" }),
         }),
-        Option.some(NONCE),
+        encodeLinkMessage,
+        Option.flatMap((encoded) => parseWire(encoded, Option.some(NONCE))),
       );
       assert.deepEqual(kindOf(parsed), Option.some("EXCLUSION_RESULT"));
     }),
@@ -393,7 +399,8 @@ describe("FrameMessage", () => {
 
   it.effect("stays enabled when the top frame never answers", () =>
     Effect.sync(() => {
-      assert.deepEqual(DEFAULT_EXCLUSION, { enabled: true, passKeys: "" });
+      const onTheWire = pipe(DEFAULT_EXCLUSION, Schema.encodeSync(effectiveExclusionSchema));
+      assert.deepEqual(onTheWire, { enabled: true, passKeys: "" });
     }),
   );
 });

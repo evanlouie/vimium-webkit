@@ -40,7 +40,7 @@ import {
   pipe,
 } from "effect";
 import type { EffectiveRule } from "~/domain/Exclusion.ts";
-import { DEFAULT_EXCLUSION, type EffectiveExclusion, isKind } from "~/domain/FrameMessage.ts";
+import { DEFAULT_EXCLUSION, isKind } from "~/domain/FrameMessage.ts";
 import { Exclusions } from "~/core/Exclusions.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
@@ -62,12 +62,6 @@ const readExclusion = (reply: InboundMessage): Option.Option<EffectiveRule> =>
     Option.liftPredicate(isKind("EXCLUSION_RESULT")),
     Option.map(({ exclusion }) => exclusion),
   );
-
-/** The verdict as the wire carries it: the two fields, and nothing else. */
-const wireVerdict = ({ enabled, passKeys }: EffectiveRule): EffectiveExclusion => ({
-  enabled,
-  passKeys,
-});
 
 /** Where the cursor stands in `frames`. A cursor on no known frame stands on the first. */
 const cursorIndex = (frames: ReadonlyArray<FrameId>, cursor: Option.Option<FrameId>): number =>
@@ -157,10 +151,7 @@ export class FrameLink extends Context.Service<
 
       const broadcastVerdict = Effect.gen(function* () {
         const rule = yield* topVerdict;
-        yield* pipe(
-          bus.broadcast({ kind: "SETTINGS", exclusion: wireVerdict(rule) }),
-          Effect.ignore,
-        );
+        yield* pipe(bus.broadcast({ kind: "SETTINGS", exclusion: rule }), Effect.ignore);
       });
 
       const pushSettings: Effect.Effect<void> = pipe(
@@ -229,7 +220,7 @@ export class FrameLink extends Context.Service<
           pipe(
             topVerdict,
             Effect.map((rule) =>
-              Option.some({ kind: "EXCLUSION_RESULT" as const, exclusion: wireVerdict(rule) }),
+              Option.some({ kind: "EXCLUSION_RESULT" as const, exclusion: rule }),
             ),
           ),
         );

@@ -20,11 +20,12 @@ import {
   Option,
   Predicate,
   Result,
+  Schema,
   String as Str,
   flow,
   pipe,
 } from "effect";
-import { constVoid } from "effect/Function";
+import { constFalse, constVoid } from "effect/Function";
 import { exclusionRuleSchema } from "~/domain/Persisted.ts";
 import type { ExclusionRule } from "~/domain/Persisted.ts";
 import { isLinearRegex, regexSafetyError } from "~/domain/RegexSafety.ts";
@@ -38,16 +39,30 @@ import { isLinearRegex, regexSafetyError } from "~/domain/RegexSafety.ts";
 export { exclusionRuleSchema };
 export type { ExclusionRule };
 
-export interface EffectiveRule {
-  readonly enabled: boolean;
-  /** The keys that go directly to the page. Empty when we are fully enabled. */
-  readonly passKeys: string;
-}
+/**
+ * The verdict of the exclusion rules for one page.
+ *
+ * `Disabled` keeps us off the page entirely. `Enabled` keeps us on, and gives
+ * the page the keys in `passKeys`.
+ *
+ * It is a schema, because the verdict travels between frames.
+ * `domain/FrameMessage.ts` keeps the two fields of the wire, and decodes them
+ * into this union.
+ */
+export const EffectiveRule = Schema.TaggedUnion({
+  Disabled: {},
+  Enabled: {
+    /** The keys that go directly to the page. Empty when we are fully enabled. */
+    passKeys: Schema.String,
+  },
+});
 
-export const FULLY_ENABLED: EffectiveRule = { enabled: true, passKeys: "" };
+export type EffectiveRule = typeof EffectiveRule.Type;
+
+export const FULLY_ENABLED: EffectiveRule = EffectiveRule.cases.Enabled.make({ passKeys: "" });
 
 /** The verdict of a rule with no pass keys: we stay off the page entirely. */
-const FULLY_DISABLED: EffectiveRule = { enabled: false, passKeys: "" };
+const FULLY_DISABLED: EffectiveRule = EffectiveRule.cases.Disabled.make({});
 
 const escapeRegExp = (input: string): string => input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -443,10 +458,10 @@ const passedKeys = ({ passKeys }: CompiledRule): Option.Option<string> =>
  *
  * Each key appears once, in the order that the rules first name it.
  */
-const passing = (keys: ReadonlyArray<string>): EffectiveRule => ({
-  enabled: true,
-  passKeys: pipe(keys, Array.flatMap(Array.fromIterable), Array.dedupe, Array.join("")),
-});
+const passing = (keys: ReadonlyArray<string>): EffectiveRule =>
+  EffectiveRule.cases.Enabled.make({
+    passKeys: pipe(keys, Array.flatMap(Array.fromIterable), Array.dedupe, Array.join("")),
+  });
 
 /**
  * The verdict of the rules that match one URL.
@@ -524,4 +539,11 @@ export const makeExclusionSet = (rules: ReadonlyArray<ExclusionRule>): Exclusion
  * of characters, so `<c-a>` can never be in one. Upstream has the same limit.
  */
 export const isPassKey = (rule: EffectiveRule, notation: string): boolean =>
-  notation.length === 1 && rule.passKeys.includes(notation);
+  notation.length === 1 &&
+  pipe(
+    rule,
+    EffectiveRule.match({
+      Disabled: constFalse,
+      Enabled: ({ passKeys }) => passKeys.includes(notation),
+    }),
+  );
