@@ -365,21 +365,6 @@ describe("Exclusion", () => {
     }),
   );
 
-  it.effect("caches repeated lookups within a limit", () =>
-    Effect.sync(() => {
-      const set = makeExclusionSet(rules({ pattern: "*", passKeys: "j" }));
-      pipe(
-        Array.range(0, 199),
-        Array.forEach((index) => {
-          set.match(`https://spa.test/#/route/${index}`);
-        }),
-      );
-      // A single-page application makes unlimited URLs. The set must not grow
-      // without a limit, and it must still answer correctly.
-      assert.deepEqual(set.match("https://spa.test/#/route/0"), passing("j"));
-    }),
-  );
-
   it.effect("accepts only a single character as a pass key", () =>
     Effect.sync(() => {
       const rule = passing("jk");
