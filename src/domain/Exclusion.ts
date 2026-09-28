@@ -8,11 +8,23 @@
  * rule, and must not read its own URL. An error here leaves Vimium-WebKit
  * active inside an advertisement iframe on a page that the user excluded.
  *
- * The rule set is a frozen object of pure functions, and not a class. The
- * memoisation lives inside one set, so two sets cannot share a result.
+ * The rule set is a record of pure functions, and not a class. The memoisation
+ * lives inside one set, so two sets cannot share a result.
  */
 
-import { Option } from "effect";
+import {
+  Array,
+  Boolean,
+  Data,
+  Match,
+  Option,
+  Predicate,
+  Result,
+  String as Str,
+  flow,
+  pipe,
+} from "effect";
+import { constVoid } from "effect/Function";
 import { exclusionRuleSchema } from "~/domain/Persisted.ts";
 import type { ExclusionRule } from "~/domain/Persisted.ts";
 import { isLinearRegex, regexSafetyError } from "~/domain/RegexSafety.ts";
@@ -33,6 +45,9 @@ export interface EffectiveRule {
 }
 
 export const FULLY_ENABLED: EffectiveRule = { enabled: true, passKeys: "" };
+
+/** The verdict of a rule with no pass keys: we stay off the page entirely. */
+const FULLY_DISABLED: EffectiveRule = { enabled: false, passKeys: "" };
 
 const escapeRegExp = (input: string): string => input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -78,35 +93,106 @@ const MAX_PATTERN_LENGTH = 1024;
  */
 export type UrlMatcher = (url: string) => boolean;
 
+/** A matcher that refuses a URL longer than `limit`, and never reads it. */
+const capped =
+  (limit: number) =>
+  (matches: UrlMatcher): UrlMatcher =>
+  (url) =>
+    url.length <= limit && matches(url);
+
+// ---------------------------------------------------------------------------
+// Globs
+// ---------------------------------------------------------------------------
+
 /**
- * Match the literal segments of `pattern` in order, anchored at both ends.
+ * A glob, read once into the parts that the matcher checks.
  *
- * The first segment must be a prefix, and the last segment must be a suffix.
+ * A glob with no `*` matches one URL. Any other glob keeps the text before the
+ * first `*` as a prefix, the text after the last `*` as a suffix, and the
+ * segments between them. An empty segment, which `**` makes, matches where the
+ * last segment ended.
+ */
+type GlobShape = Data.TaggedEnum<{
+  Literal: { readonly text: string };
+  Wildcard: {
+    readonly prefix: string;
+    readonly inner: ReadonlyArray<string>;
+    readonly suffix: string;
+  };
+}>;
+
+const GlobShape = Data.taggedEnum<GlobShape>();
+
+type Wildcard = Data.TaggedEnum.Value<GlobShape, "Wildcard">;
+
+const readGlob: (glob: string) => GlobShape = flow(
+  Str.split("*"),
+  Array.unprepend,
+  ([prefix, rest]) =>
+    pipe(
+      rest,
+      Array.matchRight({
+        onEmpty: () => GlobShape.Literal({ text: prefix }),
+        onNonEmpty: (inner, suffix) => GlobShape.Wildcard({ prefix, inner, suffix }),
+      }),
+    ),
+);
+
+/**
+ * Where to look next, once `segment` is found at or after `cursor`.
+ *
+ * `None` when the segment does not occur before `limit`, where the suffix
+ * starts.
+ */
+const placeSegment =
+  (url: string, limit: number) =>
+  (cursor: Option.Option<number>, segment: string): Option.Option<number> =>
+    pipe(
+      cursor,
+      Option.map((from) => url.indexOf(segment, from)),
+      Option.filter((found) => found !== -1 && found + segment.length <= limit),
+      Option.map((found) => found + segment.length),
+    );
+
+/**
+ * Match the literal segments of a glob in order, anchored at both ends.
+ *
+ * The prefix must start the URL, and the suffix must end it.
  * `https://example.com/*` can therefore not match `https://evil.example.com.x/`.
  */
-const globMatcher = (pattern: string): UrlMatcher => {
-  const segments = pattern.split("*");
-  const first = segments[0] ?? "";
-  const last = segments[segments.length - 1] ?? "";
-  const middle = segments.slice(1, -1);
+const wildcardMatches =
+  ({ prefix, inner, suffix }: Wildcard): UrlMatcher =>
+  (url) =>
+    url.startsWith(prefix) &&
+    url.length >= prefix.length + suffix.length &&
+    url.endsWith(suffix) &&
+    pipe(
+      inner,
+      Array.reduce(Option.some(prefix.length), placeSegment(url, url.length - suffix.length)),
+      Option.isSome,
+    );
 
-  return (url: string): boolean => {
-    if (segments.length === 1) return url === first;
-    if (!url.startsWith(first)) return false;
-    if (url.length < first.length + last.length) return false;
-    if (!url.endsWith(last)) return false;
+const globMatcher: (shape: GlobShape) => UrlMatcher = GlobShape.$match({
+  Literal:
+    ({ text }): UrlMatcher =>
+    (url) =>
+      url === text,
+  Wildcard: wildcardMatches,
+});
 
-    let cursor = first.length;
-    const limit = url.length - last.length;
-    for (const segment of middle) {
-      if (segment.length === 0) continue;
-      const found = url.indexOf(segment, cursor);
-      if (found === -1 || found + segment.length > limit) return false;
-      cursor = found + segment.length;
-    }
-    return true;
-  };
-};
+/** The regular expression source that a glob is equivalent to. */
+const globSource: (glob: string) => string = flow(
+  // A run of `*` means what one `*` means, and `.*.*` is a shape that the
+  // safety check refuses. Collapse the run before the translation.
+  Str.replace(/\*+/g, "*"),
+  Str.split("*"),
+  Array.map(escapeRegExp),
+  Array.join(".*"),
+);
+
+// ---------------------------------------------------------------------------
+// Patterns
+// ---------------------------------------------------------------------------
 
 /** Is this pattern a raw regular expression, and not a glob? */
 export const isRawPattern = (pattern: string): boolean => {
@@ -114,70 +200,91 @@ export const isRawPattern = (pattern: string): boolean => {
   return trimmed.length > 1 && trimmed.startsWith("/") && trimmed.endsWith("/");
 };
 
-/** What one pattern gave: a matcher, or the reason that we dropped it. */
-type Compiled =
-  | { readonly ok: true; readonly matches: UrlMatcher }
-  | { readonly ok: false; readonly reason: string };
+/** A pattern, trimmed and read once: a raw expression between two `/`, or a glob. */
+type Pattern = Data.TaggedEnum<{
+  Expression: { readonly body: string };
+  Glob: { readonly glob: string };
+}>;
+
+const Pattern = Data.taggedEnum<Pattern>();
 
 /**
- * Compile a Vimium URL pattern.
+ * Read a pattern that the user wrote, or say why it gives no rule.
  *
  * `*` is the only wildcard. A pattern between two `/` characters is a raw
- * regular expression, which is the escape of upstream. A bad rule costs the
- * user that rule, and no other rule, so every failure comes back as a reason
- * and never as an exception.
+ * regular expression, which is the escape of upstream.
  */
-const compile = (pattern: string): Compiled => {
-  const trimmed = pattern.trim();
-  if (trimmed.length === 0) return { ok: false, reason: "the rule is empty" };
-  if (trimmed.length > MAX_PATTERN_LENGTH) {
-    return {
-      ok: false,
-      reason: `the pattern is longer than ${MAX_PATTERN_LENGTH} characters`,
-    };
-  }
+const readPattern: (pattern: string) => Result.Result<Pattern, string> = flow(
+  Str.trim,
+  Result.liftPredicate(Str.isNonEmpty, () => "the rule is empty"),
+  Result.filterOrFail(
+    (trimmed) => trimmed.length <= MAX_PATTERN_LENGTH,
+    () => `the pattern is longer than ${MAX_PATTERN_LENGTH} characters`,
+  ),
+  Result.map((trimmed) =>
+    pipe(
+      isRawPattern(trimmed),
+      Boolean.match({
+        onTrue: () => Pattern.Expression({ body: trimmed.slice(1, -1) }),
+        onFalse: () => Pattern.Glob({ glob: trimmed }),
+      }),
+    ),
+  ),
+);
 
-  if (isRawPattern(trimmed)) {
-    const source = `^${trimmed.slice(1, -1)}$`;
-    let regexp: RegExp;
-    try {
-      regexp = new RegExp(source);
-    } catch (cause) {
-      const detail = cause instanceof Error ? cause.message : String(cause);
-      return {
-        ok: false,
-        reason: `the expression does not compile: ${detail}`,
-      };
-    }
+/** What a thrown value says. A `RegExp` that does not compile throws a `SyntaxError`. */
+const describeCause = (cause: unknown): string =>
+  pipe(
+    Match.value(cause),
+    Match.when(Predicate.isError, (error) => error.message),
+    Match.orElse((other) => String(other)),
+  );
+
+/** Compile a raw expression, or say why we drop it. */
+const compileExpression = (body: string): Result.Result<UrlMatcher, string> =>
+  Result.gen(function* () {
+    const source = `^${body}$`;
+    const regexp = yield* Result.try({
+      try: () => new RegExp(source),
+      catch: (cause) => `the expression does not compile: ${describeCause(cause)}`,
+    });
     // The page chooses the URL, and the rules run on every navigation. An
     // expression that backtracks turns one crafted URL into a tab that does
     // not answer: `(a+)+$` against forty characters already takes minutes.
     // The check refuses the shapes that it can prove ambiguous, and the cap
     // below bounds the work of every shape that it accepts.
-    const problem = regexSafetyError(source, "");
-    if (Option.isSome(problem)) return { ok: false, reason: problem.value };
-    return {
-      ok: true,
-      matches: (url: string): boolean => url.length <= MAX_REGEX_URL_LENGTH && regexp.test(url),
-    };
-  }
+    yield* pipe(
+      regexSafetyError(source, ""),
+      Option.match({ onNone: () => Result.void, onSome: Result.fail }),
+    );
+    return pipe((url: string) => regexp.test(url), capped(MAX_REGEX_URL_LENGTH));
+  });
 
-  const match = globMatcher(trimmed);
-  return {
-    ok: true,
-    matches: (url: string): boolean => url.length <= MAX_URL_LENGTH && match(url),
-  };
-};
+/**
+ * Compile a Vimium URL pattern.
+ *
+ * A bad rule costs the user that rule, and no other rule, so every failure
+ * comes back as a reason and never as an exception.
+ */
+const compile: (pattern: string) => Result.Result<UrlMatcher, string> = flow(
+  readPattern,
+  Result.flatMap(
+    Pattern.$match({
+      Expression: ({ body }) => compileExpression(body),
+      Glob: ({ glob }) => pipe(glob, readGlob, globMatcher, capped(MAX_URL_LENGTH), Result.succeed),
+    }),
+  ),
+);
 
 /**
  * The matcher for one pattern, or `Option.none()` when we drop the rule.
  *
  * Use `patternProblem` when the caller must tell the user why.
  */
-export const compilePattern = (pattern: string): Option.Option<UrlMatcher> => {
-  const outcome = compile(pattern);
-  return outcome.ok ? Option.some(outcome.matches) : Option.none();
-};
+export const compilePattern: (pattern: string) => Option.Option<UrlMatcher> = flow(
+  compile,
+  Result.getSuccess,
+);
 
 /**
  * Why did this pattern give no matcher?
@@ -185,10 +292,14 @@ export const compilePattern = (pattern: string): Option.Option<UrlMatcher> => {
  * A `None` means that the pattern compiled. A `Some` carries a reason that a
  * user can read, so that a dropped rule is never silent.
  */
-export const patternProblem = (pattern: string): Option.Option<string> => {
-  const outcome = compile(pattern);
-  return outcome.ok ? Option.none() : Option.some(outcome.reason);
-};
+export const patternProblem: (pattern: string) => Option.Option<string> = flow(
+  compile,
+  Result.getFailure,
+);
+
+// ---------------------------------------------------------------------------
+// The settings text
+// ---------------------------------------------------------------------------
 
 /** One rule of the settings text, and the line that holds it. */
 export interface NumberedRule {
@@ -197,32 +308,34 @@ export interface NumberedRule {
   readonly rule: ExclusionRule;
 }
 
+/** The rule on one trimmed line: the pattern, and the pass keys after the first space. */
+const readRule = (line: string): ExclusionRule =>
+  pipe(
+    line,
+    Str.search(/\s/),
+    Option.match({
+      onNone: () => ({ pattern: line, passKeys: "" }),
+      onSome: (space) => ({
+        pattern: line.slice(0, space),
+        passKeys: line.slice(space + 1).trim(),
+      }),
+    }),
+  );
+
 /**
  * Read the rules of the settings text: `pattern [passKeys]` on each line.
  *
  * An empty line gives no rule, and `#` starts a comment. The line number comes
  * with each rule, so that a caller can mark the line that holds a bad rule.
  */
-export const parseExclusionLines = (text: string): ReadonlyArray<NumberedRule> => {
-  const out: NumberedRule[] = [];
-  const lines = text.split(/\r?\n/);
-  for (let index = 0; index < lines.length; index++) {
-    const trimmed = (lines[index] ?? "").trim();
-    if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
-    const space = trimmed.search(/\s/);
-    out.push({
-      line: index + 1,
-      rule:
-        space === -1
-          ? { pattern: trimmed, passKeys: "" }
-          : {
-              pattern: trimmed.slice(0, space),
-              passKeys: trimmed.slice(space + 1).trim(),
-            },
-    });
-  }
-  return out;
-};
+export const parseExclusionLines = (text: string): ReadonlyArray<NumberedRule> =>
+  pipe(
+    text,
+    Str.split(/\r?\n/),
+    Array.map((line, index) => ({ line: index + 1, text: line.trim() })),
+    Array.filter(({ text }) => Str.isNonEmpty(text) && !text.startsWith("#")),
+    Array.map(({ line, text }) => ({ line, rule: readRule(text) })),
+  );
 
 /**
  * The lines of the settings text that give no rule, and why.
@@ -232,16 +345,16 @@ export const parseExclusionLines = (text: string): ReadonlyArray<NumberedRule> =
  * shows this list. The function is pure, so a test can hold the whole table of
  * reasons.
  */
-export const exclusionProblems = (text: string): ReadonlyArray<string> => {
-  const problems: string[] = [];
-  for (const { line, rule } of parseExclusionLines(text)) {
-    const problem = patternProblem(rule.pattern);
-    if (Option.isSome(problem)) {
-      problems.push(`line ${line}: ${rule.pattern} - ${problem.value}`);
-    }
-  }
-  return problems;
-};
+export const exclusionProblems: (text: string) => ReadonlyArray<string> = flow(
+  parseExclusionLines,
+  Array.map(({ line, rule }) =>
+    pipe(
+      patternProblem(rule.pattern),
+      Option.map((problem) => `line ${line}: ${rule.pattern} - ${problem}`),
+    ),
+  ),
+  Array.getSomes,
+);
 
 /**
  * The regular expression that a glob is *equivalent* to.
@@ -250,31 +363,28 @@ export const exclusionProblems = (text: string): ReadonlyArray<string> => {
  * It is not used to match. See `UrlMatcher`.
  *
  * The safety check runs on a raw expression only. A glob cannot backtrack,
- * because `globMatcher` reads it greedily, and a run of `*` in a glob becomes
- * one `.*` here. The two functions therefore accept the same patterns.
+ * because the glob matcher reads it greedily, and a run of `*` in a glob
+ * becomes one `.*` here. The two functions therefore accept the same patterns.
  */
-export const patternToRegExp = (pattern: string): Option.Option<RegExp> => {
-  const trimmed = pattern.trim();
-  if (trimmed.length === 0 || trimmed.length > MAX_PATTERN_LENGTH) {
-    return Option.none();
-  }
+export const patternToRegExp: (pattern: string) => Option.Option<RegExp> = flow(
+  readPattern,
+  Result.getSuccess,
+  Option.flatMap(
+    Pattern.$match({
+      Expression: ({ body }) =>
+        pipe(
+          `^${body}$`,
+          Option.liftPredicate((source) => isLinearRegex(source, "")),
+        ),
+      Glob: ({ glob }) => Option.some(`^${globSource(glob)}$`),
+    }),
+  ),
+  Option.flatMap(Option.liftThrowable((source: string) => new RegExp(source))),
+);
 
-  const raw = isRawPattern(trimmed);
-  const body = raw
-    ? trimmed.slice(1, -1)
-    : // A run of `*` means what one `*` means, and `.*.*` is a shape that the
-      // safety check refuses. Collapse the run before the translation.
-      trimmed.replace(/\*+/g, "*").split("*").map(escapeRegExp).join(".*");
-  const source = `^${body}$`;
-
-  if (raw && !isLinearRegex(source, "")) return Option.none();
-
-  try {
-    return Option.some(new RegExp(source));
-  } catch {
-    return Option.none();
-  }
-};
+// ---------------------------------------------------------------------------
+// The rule set
+// ---------------------------------------------------------------------------
 
 interface CompiledRule {
   readonly matches: UrlMatcher;
@@ -311,54 +421,96 @@ export interface ExclusionSet {
   readonly match: (url: string) => EffectiveRule;
 }
 
+const compileRule = ({
+  pattern,
+  passKeys,
+}: ExclusionRule): Result.Result<CompiledRule, DroppedRule> =>
+  pipe(
+    pattern,
+    compile,
+    Result.mapBoth({
+      onSuccess: (matches) => ({ matches, passKeys }),
+      onFailure: (reason) => ({ pattern, reason }),
+    }),
+  );
+
+/** The keys that one matching rule gives to the page. `None` when it gives none. */
+const passedKeys = ({ passKeys }: CompiledRule): Option.Option<string> =>
+  pipe(passKeys, Option.liftPredicate(Str.isNonEmpty));
+
+/** The verdict of rules that each give the page some keys: every key once, in the order that the rules first name it. */
+const passing = (keys: ReadonlyArray<string>): EffectiveRule => ({
+  enabled: true,
+  passKeys: pipe(keys, Array.flatMap(Array.fromIterable), Array.dedupe, Array.join("")),
+});
+
 /**
- * Compile the rules once, and give a frozen set of functions.
+ * The verdict of the rules that match one URL.
+ *
+ * A rule that gives the page no key turns us off, and it wins over every other
+ * rule. The keys therefore join only when every rule gives some.
+ */
+const verdictFor =
+  (rules: ReadonlyArray<CompiledRule>) =>
+  (url: string): EffectiveRule =>
+    pipe(
+      rules,
+      Array.filter((rule) => rule.matches(url)),
+      Array.match({
+        onEmpty: () => FULLY_ENABLED,
+        onNonEmpty: flow(
+          Array.map(passedKeys),
+          Option.all,
+          Option.match({ onNone: () => FULLY_DISABLED, onSome: passing }),
+        ),
+      }),
+    );
+
+/**
+ * How many verdicts one set keeps.
+ *
+ * A single-page application can make an unlimited number of different URLs,
+ * and a set answers on every navigation.
+ */
+const CACHE_LIMIT = 64;
+
+/**
+ * Keep the verdicts of `resolve`, up to the limit.
+ *
+ * The cache is the only mutable value in this module, and it belongs to one
+ * set. A hit gives what a miss would give, so the set still answers as a pure
+ * function of the URL.
+ */
+const remembered = (resolve: (url: string) => EffectiveRule): ((url: string) => EffectiveRule) => {
+  const cache = new Map<string, EffectiveRule>();
+  const remember = (url: string): EffectiveRule => {
+    const verdict = resolve(url);
+    pipe(
+      cache.size > CACHE_LIMIT,
+      Boolean.match({ onFalse: constVoid, onTrue: () => cache.clear() }),
+    );
+    cache.set(url, verdict);
+    return verdict;
+  };
+  return (url) =>
+    pipe(
+      cache.get(url),
+      Option.fromUndefinedOr,
+      Option.getOrElse(() => remember(url)),
+    );
+};
+
+/**
+ * Compile the rules once, and give a set of functions.
  *
  * The cache belongs to the returned set, and the set holds no other state. Two
  * calls with the same rules give two independent sets, and each one answers
  * every URL in the same way. The result is therefore the same as a set with no
  * cache.
  */
-export const makeExclusionSet = (rules: readonly ExclusionRule[]): ExclusionSet => {
-  const compiled: CompiledRule[] = [];
-  const dropped: DroppedRule[] = [];
-  for (const rule of rules) {
-    const outcome = compile(rule.pattern);
-    if (outcome.ok) {
-      compiled.push({ matches: outcome.matches, passKeys: rule.passKeys });
-    } else {
-      dropped.push({ pattern: rule.pattern, reason: outcome.reason });
-    }
-  }
-
-  const cache = new Map<string, EffectiveRule>();
-
-  const resolve = (url: string): EffectiveRule => {
-    const matching = compiled.filter((rule) => rule.matches(url));
-    if (matching.length === 0) return FULLY_ENABLED;
-    if (matching.some((rule) => rule.passKeys.length === 0)) {
-      return { enabled: false, passKeys: "" };
-    }
-    const keys = new Set<string>();
-    for (const rule of matching) {
-      for (const key of rule.passKeys) keys.add(key);
-    }
-    return { enabled: true, passKeys: [...keys].join("") };
-  };
-
-  const match = (url: string): EffectiveRule => {
-    const cached = cache.get(url);
-    if (cached !== undefined) return cached;
-
-    const result = resolve(url);
-    // The cache has a limit. A single-page application can make an unlimited
-    // number of different URLs, and this function runs on every navigation.
-    if (cache.size > 64) cache.clear();
-    cache.set(url, result);
-    return result;
-  };
-
-  return Object.freeze({ size: compiled.length, dropped, match });
+export const makeExclusionSet = (rules: ReadonlyArray<ExclusionRule>): ExclusionSet => {
+  const [dropped, compiled] = pipe(rules, Array.map(compileRule), Array.separate);
+  return { size: compiled.length, dropped, match: remembered(verdictFor(compiled)) };
 };
 
 /**
