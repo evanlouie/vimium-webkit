@@ -9,27 +9,110 @@
  * what a safe URL is.
  */
 
-import { Context, Effect, Layer, Option } from "effect";
+import {
+  Array,
+  Boolean,
+  Context,
+  Effect,
+  Iterable,
+  Layer,
+  Match,
+  Option,
+  Order,
+  pipe,
+} from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
 import { Report } from "~/core/Report.ts";
-import { Settings } from "~/core/Settings.ts";
+import { Settings, type SettingsData } from "~/core/Settings.ts";
 import { FrameLink } from "~/frames/Link.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Tabs } from "~/platform/Tabs.ts";
 import { Hud } from "~/ui/Hud.ts";
+
+/** Where `go` opens a URL. */
+export type Destination = "this-tab" | "new-tab";
+
+/** Text that begins with a scheme, such as `https:` or `mailto:`. */
+const SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+
+/** A host name with a dot in it, and nothing or a path after it. */
+const BARE_HOST = /^[^\s/]+\.[^\s/]{2,}(\/|$)/;
 
 /**
  * A bare word becomes a search. Anything that looks like a URL is a URL.
  *
  * Pure, and exported, so that the rule is testable without a document.
  */
-export const toUrl = (input: string, searchUrl: string): string => {
-  const trimmed = input.trim();
-  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) return trimmed;
-  if (/^[^\s/]+\.[^\s/]{2,}(\/|$)/.test(trimmed)) return `https://${trimmed}`;
-  return searchUrl.replace("%s", encodeURIComponent(trimmed));
+export const toUrl = (input: string, searchUrl: string): string =>
+  pipe(
+    Match.value(input.trim()),
+    Match.when(
+      (text) => SCHEME.test(text),
+      (text) => text,
+    ),
+    Match.when(
+      (text) => BARE_HOST.test(text),
+      (text) => `https://${text}`,
+    ),
+    Match.orElse((text) => searchUrl.replace("%s", encodeURIComponent(text))),
+  );
+
+const parseUrl = Option.liftThrowable((href: string) => new URL(href));
+
+/** A copy of the URL without its query and its fragment. */
+const undecorated = (url: URL): URL => {
+  const bare = new URL(url.href);
+  bare.hash = "";
+  bare.search = "";
+  return bare;
 };
+
+/** The levels of the path, without the empty ones that a double slash leaves. */
+const pathSegments = (url: URL): ReadonlyArray<string> =>
+  pipe(
+    url.pathname.split("/"),
+    Array.filter((part) => part.length > 0),
+  );
+
+/** The URL with only these levels of the path, as a directory. */
+const withSegments =
+  (url: URL) =>
+  (segments: ReadonlyArray<string>): string => {
+    const parent = new URL(url.href);
+    parent.pathname = pipe(
+      segments,
+      Array.match({
+        onEmpty: () => "/",
+        onNonEmpty: (kept) => `/${pipe(kept, Array.join("/"))}/`,
+      }),
+    );
+    return parent.href;
+  };
+
+/** The URL `levels` levels up from this one, when there is anything to go up. */
+const upFrom =
+  (levels: number) =>
+  (url: URL): Option.Option<string> => {
+    const decorated = url.hash.length > 0 || url.search.length > 0;
+    const bare = undecorated(url);
+    const segments = pathSegments(bare);
+    // The levels that the path loses, after the query and the fragment.
+    const drop = pipe(
+      decorated,
+      Boolean.match({ onFalse: () => levels, onTrue: () => levels - 1 }),
+    );
+    return pipe(
+      Match.value({ decorated, spent: drop <= 0, atRoot: segments.length === 0 }),
+      Match.withReturnType<Option.Option<string>>(),
+      Match.when({ decorated: true, spent: true }, () => Option.some(bare.href)),
+      Match.when({ atRoot: true }, () => Option.none()),
+      Match.when({ spent: true }, () => Option.some(bare.href)),
+      Match.orElse(() =>
+        pipe(segments, Array.take(segments.length - drop), withSegments(bare), Option.some),
+      ),
+    );
+  };
 
 /**
  * `gu` — drop one level of the path.
@@ -38,24 +121,83 @@ export const toUrl = (input: string, searchUrl: string): string => {
  * rule, `2gu` on a URL that had a fragment removed the fragment and two path
  * segments, which is three steps for a count of two.
  */
-export const goUpUrl = (href: string, levels: number): Option.Option<string> => {
-  try {
-    const url = new URL(href);
-    const hadDecoration = url.hash.length > 0 || url.search.length > 0;
-    url.hash = "";
-    url.search = "";
-    if (hadDecoration && levels <= 1) return Option.some(url.href);
+export const goUpUrl = (href: string, levels: number): Option.Option<string> =>
+  pipe(href, parseUrl, Option.flatMap(upFrom(levels)));
 
-    const segments = url.pathname.split("/").filter((part) => part.length > 0);
-    if (segments.length === 0) return Option.none();
-    const drop = hadDecoration ? levels - 1 : levels;
-    if (drop <= 0) return Option.some(url.href);
-    segments.splice(Math.max(0, segments.length - drop));
-    url.pathname = `/${segments.join("/")}${segments.length > 0 ? "/" : ""}`;
-    return Option.some(url.href);
-  } catch {
-    return Option.none();
-  }
+/** The direction of a `rel` link. */
+type Rel = "prev" | "next";
+
+/** What `[[` and `]]` look for, and what they call the link. */
+const REL_LINKS = {
+  prev: {
+    selector: 'a[rel~="prev"], a[rel~="previous"], link[rel~="prev"]',
+    name: "previous",
+    patterns: (settings: SettingsData): string => settings.previousPatterns,
+  },
+  next: {
+    selector: 'a[rel~="next"], link[rel~="next"]',
+    name: "next",
+    patterns: (settings: SettingsData): string => settings.nextPatterns,
+  },
+} as const;
+
+const isAnchor = (element: Element): element is HTMLAnchorElement =>
+  element instanceof HTMLAnchorElement;
+
+/** A link that a text pattern names, and the rank of the first pattern that does. */
+interface Candidate {
+  readonly element: HTMLAnchorElement;
+  readonly rank: number;
+}
+
+const byRank: Order.Order<Candidate> = pipe(
+  Order.Number,
+  Order.mapInput((candidate: Candidate) => candidate.rank),
+);
+
+/** The text of a link and its accessible label, as one lower-case string. */
+const linkText = (anchor: HTMLAnchorElement): string => {
+  const text = (anchor.textContent ?? "").trim().toLowerCase();
+  const label = (anchor.getAttribute("aria-label") ?? "").trim().toLowerCase();
+  return `${text} ${label}`.trim();
+};
+
+/** The link as a candidate, when one of the patterns names it. A long text names nothing. */
+const candidateOf =
+  (patterns: ReadonlyArray<string>) =>
+  (anchor: HTMLAnchorElement): Option.Option<Candidate> =>
+    pipe(
+      linkText(anchor),
+      Option.liftPredicate((haystack) => haystack.length > 0 && haystack.length <= 60),
+      Option.flatMap((haystack) =>
+        pipe(
+          patterns,
+          Array.findFirstIndex((pattern) => haystack === pattern || haystack.includes(pattern)),
+        ),
+      ),
+      Option.map((rank) => ({ element: anchor, rank })),
+    );
+
+/** The first link that the best-ranked pattern names, in document order. */
+const textLink = (
+  document: Document,
+  patterns: ReadonlyArray<string>,
+): Option.Option<HTMLAnchorElement> => {
+  const normalised = pipe(
+    patterns,
+    Array.map((pattern) => pattern.trim().toLowerCase()),
+    Array.filter((pattern) => pattern.length > 0),
+  );
+  return pipe(
+    document.querySelectorAll("a[href]"),
+    Array.fromIterable,
+    Array.filter(isAnchor),
+    Array.map(candidateOf(normalised)),
+    Array.getSomes,
+    Array.sort(byRank),
+    Array.head,
+    Option.map(({ element }) => element),
+  );
 };
 
 /**
@@ -66,50 +208,29 @@ export const goUpUrl = (href: string, levels: number): Option.Option<string> => 
  */
 export const findRelLink = (
   document: Document,
-  rel: "prev" | "next",
+  rel: Rel,
   patterns: readonly string[],
-): Option.Option<HTMLAnchorElement> => {
-  const relSelector =
-    rel === "prev"
-      ? 'a[rel~="prev"], a[rel~="previous"], link[rel~="prev"]'
-      : 'a[rel~="next"], link[rel~="next"]';
+): Option.Option<HTMLAnchorElement> =>
+  pipe(
+    // `querySelectorAll`, and not `querySelector`. A `<link rel="next">` is in
+    // `<head>` and therefore comes first in tree order. On the usual layout for
+    // paginated content — a machine-readable `<link>` and a visible `<a>` — the
+    // first match was the `<link>`, and the unambiguous anchor beside it was
+    // abandoned for a text rule.
+    document.querySelectorAll(REL_LINKS[rel].selector),
+    Iterable.findFirst(isAnchor),
+    Option.orElse(() => textLink(document, patterns)),
+  );
 
-  // `querySelectorAll`, and not `querySelector`. A `<link rel="next">` is in
-  // `<head>` and therefore comes first in tree order. On the usual layout for
-  // paginated content — a machine-readable `<link>` and a visible `<a>` — the
-  // first match was the `<link>`, and the unambiguous anchor beside it was
-  // abandoned for a text rule.
-  for (const tagged of document.querySelectorAll(relSelector)) {
-    if (tagged instanceof HTMLAnchorElement) return Option.some(tagged);
-  }
-
-  const normalised = patterns
-    .map((pattern) => pattern.trim().toLowerCase())
-    .filter((pattern) => pattern.length > 0);
-
-  const candidates: Array<{ element: HTMLAnchorElement; rank: number }> = [];
-  for (const anchor of document.querySelectorAll("a[href]")) {
-    if (!(anchor instanceof HTMLAnchorElement)) continue;
-    const text = (anchor.textContent ?? "").trim().toLowerCase();
-    const label = (anchor.getAttribute("aria-label") ?? "").trim().toLowerCase();
-    const haystack = `${text} ${label}`.trim();
-    if (haystack.length === 0 || haystack.length > 60) continue;
-    const rank = normalised.findIndex(
-      (pattern) => haystack === pattern || haystack.includes(pattern),
-    );
-    if (rank !== -1) candidates.push({ element: anchor, rank });
-  }
-
-  candidates.sort((left, right) => left.rank - right.rank);
-  const best = candidates[0];
-  return best === undefined ? Option.none() : Option.some(best.element);
-};
+/** "key", or "3 keys". */
+const keysLabel = (count: number): string =>
+  pipe(count === 1, Boolean.match({ onFalse: () => `${count} keys`, onTrue: () => "key" }));
 
 export class Navigation extends Context.Service<
   Navigation,
   {
     /** Go to a URL, or search for the text. This is the shared `go` step. */
-    readonly go: (input: string, options: { readonly newTab: boolean }) => Effect.Effect<void>;
+    readonly go: (input: string, destination: Destination) => Effect.Effect<void>;
   }
 >()("vimium/features/Navigation") {
   static readonly layer: Layer.Layer<
@@ -128,107 +249,114 @@ export class Navigation extends Context.Service<
       const settings = yield* Settings;
       const tabs = yield* Tabs;
 
-      const go = Effect.fn("Navigation.go")(function* (
-        input: string,
-        options: { readonly newTab: boolean },
-      ) {
+      /** A refusal reaches the user in the words of the service that refused. */
+      const reportFailure = (error: { readonly detail: string }): Effect.Effect<void> =>
+        report.error(error.detail);
+
+      const navigate = (url: string): Effect.Effect<void> =>
+        pipe(tabs.navigate(url), Effect.catch(reportFailure));
+
+      /** A DOM call whose failure leaves nothing to say. */
+      const attempt = (api: string, run: () => void): Effect.Effect<void> =>
+        pipe(dom.attempt(api, run), Effect.ignore);
+
+      const go = Effect.fn("Navigation.go")(function* (input: string, destination: Destination) {
         const current = yield* settings.current;
         const url = toUrl(input, current.searchUrl);
-        yield* Effect.catch(
-          options.newTab ? Effect.asVoid(tabs.open(url, { active: true })) : tabs.navigate(url),
-          (error) => report.error(error.detail),
+        yield* pipe(
+          Match.value(destination),
+          Match.when("this-tab", () => tabs.navigate(url)),
+          Match.when("new-tab", () => pipe(tabs.open(url, { active: true }), Effect.asVoid)),
+          Match.exhaustive,
+          Effect.catch(reportFailure),
         );
       });
 
-      const followRelLink = Effect.fn("Navigation.followRelLink")(function* (rel: "prev" | "next") {
+      const followRelLink = Effect.fn("Navigation.followRelLink")(function* (rel: Rel) {
         const current = yield* settings.current;
-        const patterns =
-          rel === "prev" ? current.previousPatterns.split(",") : current.nextPatterns.split(",");
-        const link = yield* dom.probeOr(
-          () => findRelLink(dom.document, rel, patterns),
+        const { name, patterns } = REL_LINKS[rel];
+        const texts = patterns(current).split(",");
+        const found = yield* dom.probeOr(
+          () => findRelLink(dom.document, rel, texts),
           Option.none<HTMLAnchorElement>(),
         );
-        if (Option.isNone(link)) {
-          yield* report.error(`No "${rel === "prev" ? "previous" : "next"}" link found`);
-          return;
-        }
-        yield* Effect.ignore(
-          dom.attempt("HTMLAnchorElement.click", () => {
-            link.value.click();
+        yield* pipe(
+          found,
+          Option.match({
+            onNone: () => report.error(`No "${name}" link found`),
+            onSome: (anchor) =>
+              attempt("HTMLAnchorElement.click", () => {
+                anchor.click();
+              }),
           }),
         );
       });
 
       yield* commands.registerAll({
         reload: () =>
-          Effect.ignore(
-            dom.attempt("location.reload", () => {
-              dom.window.location.reload();
-            }),
-          ),
+          attempt("location.reload", () => {
+            dom.window.location.reload();
+          }),
 
         goBack: ({ count }) =>
-          Effect.ignore(
-            dom.attempt("history.go", () => {
-              dom.window.history.go(-count);
-            }),
-          ),
+          attempt("history.go", () => {
+            dom.window.history.go(-count);
+          }),
 
         goForward: ({ count }) =>
-          Effect.ignore(
-            dom.attempt("history.go", () => {
-              dom.window.history.go(count);
-            }),
-          ),
+          attempt("history.go", () => {
+            dom.window.history.go(count);
+          }),
 
         goUp: ({ count }) =>
-          Effect.gen(function* () {
-            const href = yield* dom.href;
-            const url = goUpUrl(href, count);
-            if (Option.isNone(url)) {
-              yield* report.error("Already at the root of this site");
-              return;
-            }
-            yield* Effect.catch(tabs.navigate(url.value), (error) => report.error(error.detail));
-          }),
+          pipe(
+            dom.href,
+            Effect.map((href) => goUpUrl(href, count)),
+            Effect.flatMap(
+              Option.match({
+                onNone: () => report.error("Already at the root of this site"),
+                onSome: navigate,
+              }),
+            ),
+          ),
 
         goToRoot: () =>
-          Effect.gen(function* () {
-            const href = yield* dom.href;
-            yield* Effect.catch(tabs.navigate(new URL("/", href).href), (error) =>
-              report.error(error.detail),
-            );
-          }),
+          pipe(
+            dom.href,
+            Effect.map((href) => new URL("/", href).href),
+            Effect.flatMap(navigate),
+          ),
 
         goPrevious: () => followRelLink("prev"),
         goNext: () => followRelLink("next"),
 
         toggleViewSource: () =>
-          Effect.gen(function* () {
-            const href = yield* dom.href;
+          pipe(
+            dom.href,
             // `internal` trust: we built this URL from our own location, and
             // `view-source:` is deliberately outside the set that a
             // page-supplied URL may use.
-            yield* Effect.catch(
+            Effect.flatMap((href) =>
               tabs.open(`view-source:${href}`, {
                 active: true,
                 trust: "internal",
               }),
-              () => report.error("Your userscript manager refused to open view-source:"),
-            );
-          }),
+            ),
+            Effect.asVoid,
+            Effect.catch(() =>
+              report.error("Your userscript manager refused to open view-source:"),
+            ),
+          ),
 
-        nextFrame: () => Effect.catch(link.focusFrame(1), (error) => report.error(error.detail)),
+        nextFrame: () => pipe(link.focusFrame(1), Effect.catch(reportFailure)),
 
-        mainFrame: () => Effect.catch(link.focusFrame(-1), (error) => report.error(error.detail)),
+        mainFrame: () => pipe(link.focusFrame(-1), Effect.catch(reportFailure)),
 
         passNextKey: ({ count }) =>
-          Effect.gen(function* () {
-            yield* hud.show(
-              `Passing the next ${count === 1 ? "key" : `${count} keys`} to the page`,
-            );
-            yield* keyboard.passNextKey(count);
-          }),
+          pipe(
+            hud.show(`Passing the next ${keysLabel(count)} to the page`),
+            Effect.andThen(keyboard.passNextKey(count)),
+          ),
       });
 
       return Navigation.of({ go });
