@@ -95,7 +95,14 @@ import {
 } from "~/domain/HintFilter.ts";
 import { hintStrings, matchByPrefix, normaliseHintCharacters } from "~/domain/HintString.ts";
 import { isComposing, type KeyContext, keyNotation } from "~/domain/Key.ts";
-import { FrameBus, type InboundMessage, REQUEST_DEADLINE, toFrame, toTop } from "~/frames/Bus.ts";
+import {
+  FrameBus,
+  type InboundMessage,
+  type InboundOf,
+  REQUEST_DEADLINE,
+  toFrame,
+  toTop,
+} from "~/frames/Bus.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -1480,38 +1487,11 @@ const omittedNotice = (dropped: number): Option.Option<string> =>
     Option.map((dropped) => `${dropped} hints were omitted to fit the frame message.`),
   );
 
-/** What a handler of `FrameBus.serve` gives back. */
-type ServeResult = Effect.Effect<Option.Option<FrameMessage>>;
-
 /**
- * Answer one kind of message.
- *
- * `FrameBus.serve` routes by kind already. The refinement narrows the type of
- * the payload for the handler.
+ * The end of a handler of `FrameBus.serve` that acts on a message, and sends no
+ * reply. It goes after the body, as a modifier of `Effect.fn`.
  */
-const answering =
-  <M extends FrameMessage>(
-    isKind: (message: FrameMessage) => message is M,
-    handler: (message: M, inbound: InboundMessage) => ServeResult,
-  ) =>
-  (inbound: InboundMessage): ServeResult =>
-    pipe(
-      inbound.message,
-      Option.liftPredicate(isKind),
-      Option.match({
-        onNone: () => Effect.succeedNone,
-        onSome: (message) => handler(message, inbound),
-      }),
-    );
-
-/** Act on one kind of message, and give no reply. */
-const acting = <M extends FrameMessage>(
-  isKind: (message: FrameMessage) => message is M,
-  handler: (message: M, inbound: InboundMessage) => Effect.Effect<void>,
-): ((inbound: InboundMessage) => ServeResult) =>
-  answering(isKind, (message, inbound) =>
-    pipe(handler(message, inbound), Effect.as(Option.none())),
-  );
+const noReply = Effect.as(Option.none<FrameMessage>());
 
 // ---------------------------------------------------------------------------
 // The service
@@ -2626,13 +2606,14 @@ export class Hints extends Context.Service<
       // The messages that this service answers
       // ---------------------------------------------------------------------
 
-      // A handler that drops a message fails with `NoSuchElementError`, and
+      // `FrameBus.serve` gives each handler the messages of its kind only. A
+      // handler that drops a message fails with `NoSuchElementError`, and
       // `Effect.option` turns that into no reply.
 
-      const answerRequestHints = Effect.fnUntraced(function* (
-        { roundId, mode }: MessageOf<"REQUEST_HINTS">,
-        { from }: InboundMessage,
-      ) {
+      const answerRequestHints = Effect.fnUntraced(function* ({
+        message: { roundId, mode },
+        from,
+      }: InboundOf<"REQUEST_HINTS">) {
         yield* unlessCancelled(roundId);
         const now = yield* dom.now;
         const live = yield* pipe(
@@ -2661,10 +2642,10 @@ export class Hints extends Context.Service<
         };
       }, Effect.option);
 
-      const answerCollectHints = Effect.fnUntraced(function* (
-        { roundId, mode, originFrameId }: MessageOf<"COLLECT_HINTS">,
-        { from }: InboundMessage,
-      ) {
+      const answerCollectHints = Effect.fnUntraced(function* ({
+        message: { roundId, mode, originFrameId },
+        from,
+      }: InboundOf<"COLLECT_HINTS">) {
         yield* unlessCancelled(roundId);
         const hints = yield* detectLocal(mode);
         yield* unlessCancelled(roundId);
@@ -2710,7 +2691,7 @@ export class Hints extends Context.Service<
         );
       });
 
-      const onActivate = Effect.fnUntraced(function* (payload: MessageOf<"ACTIVATE">) {
+      const onActivate = Effect.fnUntraced(function* ({ message: payload }: InboundOf<"ACTIVATE">) {
         const round = yield* Ref.get(roundRef);
         const now = yield* dom.now;
         yield* pipe(
@@ -2718,7 +2699,7 @@ export class Hints extends Context.Service<
           Option.filter(joinsRound(payload, bus.frameId, now)),
           whenSome(() => joinRound(payload)),
         );
-      });
+      }, noReply);
 
       /** Act on a hint of this frame for the origin, and tell the origin how it went. */
       const actForOrigin = Effect.fnUntraced(function* (
@@ -2752,10 +2733,10 @@ export class Hints extends Context.Service<
         );
       });
 
-      const onActivateHint = Effect.fnUntraced(function* (
-        payload: MessageOf<"ACTIVATE_HINT">,
-        { from }: InboundMessage,
-      ) {
+      const onActivateHint = Effect.fnUntraced(function* ({
+        message: payload,
+        from,
+      }: InboundOf<"ACTIVATE_HINT">) {
         const round = yield* Ref.get(roundRef);
         const now = yield* dom.now;
         yield* pipe(
@@ -2766,12 +2747,12 @@ export class Hints extends Context.Service<
             Admit: () => admitHintRequest(payload),
           }),
         );
-      });
+      }, noReply);
 
-      const onCancelHints = Effect.fnUntraced(function* (
-        { roundId }: MessageOf<"CANCEL_HINTS">,
-        { from }: InboundMessage,
-      ) {
+      const onCancelHints = Effect.fnUntraced(function* ({
+        message: { roundId },
+        from,
+      }: InboundOf<"CANCEL_HINTS">) {
         yield* rememberCancelled(roundId);
 
         const localRound = yield* Ref.get(roundRef);
@@ -2798,7 +2779,7 @@ export class Hints extends Context.Service<
           pendingActivationRef,
           Ref.update(Option.filter((pending) => pending.roundId !== roundId)),
         );
-      });
+      }, noReply);
 
       const settled = Effect.gen(function* () {
         yield* pipe(pendingActivationRef, Ref.set(Option.none()));
@@ -2811,10 +2792,11 @@ export class Hints extends Context.Service<
         Option.match({ onNone: () => settled, onSome: (refusal) => report.error(refusal) }),
       );
 
-      const onActivationResult = Effect.fnUntraced(function* (
-        { roundId, detail }: MessageOf<"ACTIVATION_RESULT">,
-        { from, requestId }: InboundMessage,
-      ) {
+      const onActivationResult = Effect.fnUntraced(function* ({
+        message: { roundId, detail },
+        from,
+        requestId,
+      }: InboundOf<"ACTIVATION_RESULT">) {
         const pending = yield* Ref.get(pendingActivationRef);
         yield* pipe(
           pending,
@@ -2824,12 +2806,12 @@ export class Hints extends Context.Service<
           ),
           whenSome(() => settleActivation(detail)),
         );
-      });
+      }, noReply);
 
-      const onKeystroke = Effect.fnUntraced(function* (
-        { roundId, notation }: MessageOf<"KEYSTROKE">,
-        { from }: InboundMessage,
-      ) {
+      const onKeystroke = Effect.fnUntraced(function* ({
+        message: { roundId, notation },
+        from,
+      }: InboundOf<"KEYSTROKE">) {
         // The round of the page ends when the frame that owns it leaves.
         yield* pipe(
           topRoundRef,
@@ -2845,45 +2827,23 @@ export class Hints extends Context.Service<
           Option.filter(followsKeysOf(from, roundId)),
           whenSome((session) => session.key(notation)),
         );
-      });
+      }, noReply);
 
       // The top frame is the broker of the round. A child frame asks it, and
       // it fans the request out to every frame.
       yield* pipe(
         bus.role,
         FrameRole.$match({
-          Top: () =>
-            bus.serve(
-              "REQUEST_HINTS",
-              answering((message) => message.kind === "REQUEST_HINTS", answerRequestHints),
-            ),
+          Top: () => bus.serve("REQUEST_HINTS", answerRequestHints),
           Child: () => Effect.void,
         }),
       );
-      yield* bus.serve(
-        "COLLECT_HINTS",
-        answering((message) => message.kind === "COLLECT_HINTS", answerCollectHints),
-      );
-      yield* bus.serve(
-        "ACTIVATE",
-        acting((message) => message.kind === "ACTIVATE", onActivate),
-      );
-      yield* bus.serve(
-        "ACTIVATE_HINT",
-        acting((message) => message.kind === "ACTIVATE_HINT", onActivateHint),
-      );
-      yield* bus.serve(
-        "CANCEL_HINTS",
-        acting((message) => message.kind === "CANCEL_HINTS", onCancelHints),
-      );
-      yield* bus.serve(
-        "ACTIVATION_RESULT",
-        acting((message) => message.kind === "ACTIVATION_RESULT", onActivationResult),
-      );
-      yield* bus.serve(
-        "KEYSTROKE",
-        acting((message) => message.kind === "KEYSTROKE", onKeystroke),
-      );
+      yield* bus.serve("COLLECT_HINTS", answerCollectHints);
+      yield* bus.serve("ACTIVATE", onActivate);
+      yield* bus.serve("ACTIVATE_HINT", onActivateHint);
+      yield* bus.serve("CANCEL_HINTS", onCancelHints);
+      yield* bus.serve("ACTIVATION_RESULT", onActivationResult);
+      yield* bus.serve("KEYSTROKE", onKeystroke);
 
       // ---------------------------------------------------------------------
       // The interface
