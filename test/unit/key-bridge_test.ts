@@ -12,7 +12,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer, Ref, SubscriptionRef } from "effect";
+import { Effect, Layer, Ref, SubscriptionRef, pipe, Struct } from "effect";
 import { attachKeyBridge } from "~/boot/KeyBridge.ts";
 import { CONTINUE_BUBBLING, HandlerStack } from "~/core/HandlerStack.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
@@ -29,37 +29,48 @@ interface Attached {
 
 /** `Dom`, with `listen` recording instead of touching a window. */
 const recordingDom = (attached: Ref.Ref<ReadonlyArray<Attached>>): Layer.Layer<Dom> =>
-  Layer.effect(
-    Dom,
-    Effect.map(Dom, (dom) =>
-      Dom.of({
-        ...dom,
-        // The cast says what the stub already is: every listener of the bridge
-        // needs no service, so the recorded body is an `Effect<void>`.
-        listen: ((
-          _target: unknown,
-          type: unknown,
-          handler: (event: Event) => Effect.Effect<void>,
-        ) =>
-          Ref.update(attached, (current) => [
-            ...current,
-            { type: String(type), run: handler },
-          ])) as unknown as Dom["Service"]["listen"],
-      }),
+  pipe(
+    Layer.effect(
+      Dom,
+      pipe(
+        Dom,
+        Effect.map((dom) =>
+          Dom.of(
+            pipe(
+              dom,
+              Struct.assign({
+                listen: ((
+                  _target: unknown,
+                  type: unknown,
+                  handler: (event: Event) => Effect.Effect<void>,
+                ) =>
+                  Ref.update(attached, (current) => [
+                    ...current,
+                    { type: String(type), run: handler },
+                  ])) as unknown as Dom["Service"]["listen"],
+              }),
+            ),
+          ),
+        ),
+      ),
     ),
-  ).pipe(Layer.provide(Dom.layer));
+    Layer.provide(Dom.layer),
+  );
 
 /** `Keyboard`, reduced to the one method that the bridge calls. */
 const stubKeyboard = (forgotten: Ref.Ref<number>): Layer.Layer<Keyboard> =>
   Layer.effect(
     Keyboard,
-    Effect.map(SubscriptionRef.make<string | null>(null), (pending) =>
-      Keyboard.of({
-        pending,
-        syncExclusion: Effect.void,
-        passNextKey: () => Effect.void,
-        forgetSuppressed: Ref.update(forgotten, (count) => count + 1),
-      }),
+    pipe(
+      SubscriptionRef.make<string | null>(null),
+      Effect.map((pending) =>
+        Keyboard.of({
+          pending,
+          syncExclusion: Effect.void,
+          passNextKey: () => Effect.void,
+          forgetSuppressed: Ref.update(forgotten, (count) => count + 1),
+        }),
+      ),
     ),
   );
 
@@ -96,9 +107,9 @@ const withBridge = (
           const stack = yield* HandlerStack;
           const seen = yield* Ref.make<ReadonlyArray<string>>([]);
           const record = (name: string) => () =>
-            Effect.as(
+            pipe(
               Ref.update(seen, (current) => [...current, name]),
-              CONTINUE_BUBBLING,
+              Effect.as(CONTINUE_BUBBLING),
             );
 
           yield* stack.push({

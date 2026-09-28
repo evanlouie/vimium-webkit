@@ -8,7 +8,7 @@
  * that only calls the manager completes inside that window.
  */
 
-import { Context, Effect, Layer, Option } from "effect";
+import { Context, Effect, Layer, Option, pipe } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Report } from "~/core/Report.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
@@ -57,8 +57,13 @@ export class UrlClipboard extends Context.Service<
       const openPasted = Effect.fn("UrlClipboard.openPasted")(function* (newTab: boolean) {
         yield* Effect.forkDetach(
           Effect.ignore(
-            Effect.flatMap(clipboard.read, (text) =>
-              text.trim().length === 0 ? Effect.void : hud.show(`Clipboard: ${text.slice(0, 80)}`),
+            pipe(
+              clipboard.read,
+              Effect.flatMap((text) =>
+                text.trim().length === 0
+                  ? Effect.void
+                  : hud.show(`Clipboard: ${text.slice(0, 80)}`),
+              ),
             ),
           ),
         );
@@ -72,12 +77,16 @@ export class UrlClipboard extends Context.Service<
       });
 
       yield* commands.registerAll({
-        copyCurrentUrl: () => Effect.flatMap(dom.href, (href) => copy(href, "URL")),
+        copyCurrentUrl: () =>
+          pipe(
+            dom.href,
+            Effect.flatMap((href) => copy(href, "URL")),
+          ),
 
         copyCurrentTitle: () =>
-          Effect.flatMap(
+          pipe(
             dom.probeOr(() => dom.document.title, ""),
-            (title) => copy(title, "title"),
+            Effect.flatMap((title) => copy(title, "title")),
           ),
 
         openCopiedUrlInCurrentTab: () => openPasted(false),

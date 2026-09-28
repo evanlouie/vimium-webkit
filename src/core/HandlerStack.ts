@@ -11,7 +11,7 @@
  * `ARCHITECTURE.md` section 3.
  */
 
-import { Cause, Context, Effect, Layer, Option, Ref } from "effect";
+import { Cause, Context, Effect, Layer, Option, Ref, pipe, Struct } from "effect";
 
 // ---------------------------------------------------------------------------
 // Answers
@@ -165,7 +165,7 @@ export class HandlerStack extends Context.Service<
             if (typeof body !== "function") continue;
             const run = body as (event: Event) => Effect.Effect<HandlerResult, never, R>;
             bound[key] = (event: Event): Effect.Effect<HandlerResult> =>
-              Effect.provideContext(run(event), services);
+              pipe(run(event), Effect.provideContext(services));
           }
 
           // The cleanup body. It takes a cause, and not an event, so it is
@@ -173,7 +173,7 @@ export class HandlerStack extends Context.Service<
           const onDefect = handler.onDefect;
           if (onDefect !== undefined) {
             bound["onDefect"] = (cause: Cause.Cause<never>): Effect.Effect<void> =>
-              Effect.provideContext(onDefect(cause), services);
+              pipe(onDefect(cause), Effect.provideContext(services));
           }
 
           return bound as unknown as BoundHandler;
@@ -196,13 +196,18 @@ export class HandlerStack extends Context.Service<
         });
 
       const remove = (id: HandlerId): Effect.Effect<void> =>
-        Ref.update(state, (current) => ({
-          ...current,
-          entries: current.entries.filter((entry) => entry.id !== id),
-        }));
+        Ref.update(state, (current) =>
+          pipe(
+            current,
+            Struct.assign({ entries: current.entries.filter((entry) => entry.id !== id) }),
+          ),
+        );
 
       const has = (id: HandlerId): Effect.Effect<boolean> =>
-        Effect.map(Ref.get(state), (current) => current.entries.some((entry) => entry.id === id));
+        pipe(
+          Ref.get(state),
+          Effect.map((current) => current.entries.some((entry) => entry.id === id)),
+        );
 
       const bodyOf = (
         handler: BoundHandler,
@@ -253,10 +258,13 @@ export class HandlerStack extends Context.Service<
               yield* remove(entry.id);
               const onDefect = entry.handler.onDefect;
               if (onDefect !== undefined) {
-                yield* Effect.catchCause(onDefect(outcome.cause), (cause) =>
-                  Effect.logError(
-                    `the owner of "${entry.handler.name}" failed to clean up`,
-                    Cause.pretty(cause),
+                yield* pipe(
+                  onDefect(outcome.cause),
+                  Effect.catchCause((cause) =>
+                    Effect.logError(
+                      `the owner of "${entry.handler.name}" failed to clean up`,
+                      Cause.pretty(cause),
+                    ),
                   ),
                 );
               }
@@ -292,11 +300,15 @@ export class HandlerStack extends Context.Service<
         remove,
         has,
         bubble,
-        reset: Ref.update(state, (current) => ({ ...current, entries: [] })),
-        names: Effect.map(Ref.get(state), (current) =>
-          current.entries.map((entry) => entry.handler.name),
+        reset: Ref.update(state, (current) => pipe(current, Struct.assign({ entries: [] }))),
+        names: pipe(
+          Ref.get(state),
+          Effect.map((current) => current.entries.map((entry) => entry.handler.name)),
         ),
-        depth: Effect.map(Ref.get(state), (current) => current.entries.length),
+        depth: pipe(
+          Ref.get(state),
+          Effect.map((current) => current.entries.length),
+        ),
       });
     }),
   );

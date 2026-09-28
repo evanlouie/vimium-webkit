@@ -5,7 +5,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Result } from "effect";
+import { Effect, Result, Record, pipe, Struct } from "effect";
 import {
   defaultSettings,
   LOCAL_MARK_TTL_MS,
@@ -37,7 +37,7 @@ describe("Persisted", () => {
   it.effect("keeps every other field when one field is absent", () =>
     Effect.sync(() => {
       const full = defaultSettings();
-      const keys = Object.keys(full);
+      const keys = Record.keys(full);
       assert.isAbove(keys.length, 20, "the point is that there are many");
 
       for (const missing of keys) {
@@ -56,12 +56,16 @@ describe("Persisted", () => {
 
   it.effect("costs exactly one field when one field is corrupt", () =>
     Effect.sync(() => {
-      const parsed = decodeSettings({
-        ...defaultSettings(),
-        scrollStepSize: "sixty",
-        keyMappings: 42,
-        exclusionRules: "not an array",
-      });
+      const parsed = decodeSettings(
+        pipe(
+          defaultSettings(),
+          Struct.assign({
+            scrollStepSize: "sixty",
+            keyMappings: 42,
+            exclusionRules: "not an array",
+          }),
+        ),
+      );
 
       assert.isTrue(Result.isSuccess(parsed));
       if (Result.isFailure(parsed)) return;
@@ -77,10 +81,9 @@ describe("Persisted", () => {
   it.effect("removes duplicate hint characters during decoding", () =>
     Effect.sync(() => {
       // A duplicate makes two hints answer to the same string.
-      const parsed = decodeSettings({
-        ...defaultSettings(),
-        linkHintCharacters: "aabbcc",
-      });
+      const parsed = decodeSettings(
+        pipe(defaultSettings(), Struct.assign({ linkHintCharacters: "aabbcc" })),
+      );
       assert.isTrue(Result.isSuccess(parsed));
       if (Result.isFailure(parsed)) return;
       assert.strictEqual(parsed.success.linkHintCharacters, "abc");
@@ -89,10 +92,9 @@ describe("Persisted", () => {
 
   it.effect("repairs hint number characters during decoding", () =>
     Effect.sync(() => {
-      const parsed = decodeSettings({
-        ...defaultSettings(),
-        linkHintNumbers: "012\ufe0f3",
-      });
+      const parsed = decodeSettings(
+        pipe(defaultSettings(), Struct.assign({ linkHintNumbers: "012\ufe0f3" })),
+      );
       assert.isTrue(Result.isSuccess(parsed));
       if (Result.isFailure(parsed)) return;
       assert.strictEqual(parsed.success.linkHintNumbers, "0123");
@@ -101,10 +103,9 @@ describe("Persisted", () => {
 
   it.effect("falls back on a search URL that has no %s", () =>
     Effect.sync(() => {
-      const parsed = decodeSettings({
-        ...defaultSettings(),
-        searchUrl: "https://example.com/search",
-      });
+      const parsed = decodeSettings(
+        pipe(defaultSettings(), Struct.assign({ searchUrl: "https://example.com/search" })),
+      );
       assert.isTrue(Result.isSuccess(parsed));
       if (Result.isFailure(parsed)) return;
       assert.strictEqual(parsed.success.searchUrl, "https://www.google.com/search?q=%s");
@@ -125,7 +126,7 @@ describe("Persisted", () => {
       const marks = markTable(LOCAL_MARK_URL_LIMIT + 50, (index) => now - index);
       const pruned = pruneMarks(marks, now);
 
-      assert.lengthOf(Object.keys(pruned.local), LOCAL_MARK_URL_LIMIT);
+      assert.lengthOf(Record.keys(pruned.local), LOCAL_MARK_URL_LIMIT);
       assert.isTrue("https://example.com/0" in pruned.local, "the newest stays");
       assert.isFalse(
         `https://example.com/${LOCAL_MARK_URL_LIMIT + 49}` in pruned.local,
@@ -152,9 +153,9 @@ describe("Persisted", () => {
       };
 
       const pruned = pruneMarks(marks, now);
-      assert.deepEqual(Object.keys(pruned.local), ["https://fresh.test/"]);
+      assert.deepEqual(Record.keys(pruned.local), ["https://fresh.test/"]);
       // The user names a global mark, so it is never expired.
-      assert.deepEqual(Object.keys(pruned.global), ["A"]);
+      assert.deepEqual(Record.keys(pruned.global), ["A"]);
     }),
   );
 });

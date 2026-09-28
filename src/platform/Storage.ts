@@ -39,6 +39,7 @@ import {
   type Scope,
   Stream,
   SubscriptionRef,
+  pipe,
 } from "effect";
 import type { GroupSpec } from "~/domain/Persisted.ts";
 import {
@@ -364,8 +365,9 @@ export const makeGroup = <A>(
         // its fiber is interrupted, so an interrupted `set` could still land
         // after a later `remove`.
         yield* Effect.uninterruptible(
-          Effect.mapError(kv.set(key, encoded.success), (cause) =>
-            raise("backend", "write", cause.detail, cause),
+          pipe(
+            kv.set(key, encoded.success),
+            Effect.mapError((cause) => raise("backend", "write", cause.detail, cause)),
           ),
         );
         readFailure = null;
@@ -445,11 +447,13 @@ export const makeGroup = <A>(
 
     const armTimer = FiberHandle.run(
       timer,
-      Effect.andThen(
+      pipe(
         Effect.sleep(debounce),
-        Effect.sync(() => {
-          Queue.offerUnsafe(mailbox, { _tag: "Flush", reply: Option.none() });
-        }),
+        Effect.andThen(
+          Effect.sync(() => {
+            Queue.offerUnsafe(mailbox, { _tag: "Flush", reply: Option.none() });
+          }),
+        ),
       ),
     );
 
@@ -529,10 +533,13 @@ export const makeGroup = <A>(
             const inner = yield* Deferred.make<void, StorageError>();
             yield* applyWrite(next, inner);
             yield* Effect.forkDetach(
-              Effect.matchEffect(Deferred.await(inner), {
-                onFailure: (error) => Deferred.fail(command.reply, error),
-                onSuccess: () => Deferred.succeed(command.reply, next),
-              }),
+              pipe(
+                Deferred.await(inner),
+                Effect.matchEffect({
+                  onFailure: (error) => Deferred.fail(command.reply, error),
+                  onSuccess: () => Deferred.succeed(command.reply, next),
+                }),
+              ),
             );
             return;
           }
@@ -561,8 +568,9 @@ export const makeGroup = <A>(
             yield* publish(defaults);
             const removed = yield* Effect.exit(
               Effect.uninterruptible(
-                Effect.mapError(kv.remove(key), (cause) =>
-                  raise("backend", "write", cause.detail, cause),
+                pipe(
+                  kv.remove(key),
+                  Effect.mapError((cause) => raise("backend", "write", cause.detail, cause)),
                 ),
               ),
             );
@@ -586,12 +594,15 @@ export const makeGroup = <A>(
         }
       });
 
-    yield* Effect.forkScoped(Effect.forever(Effect.flatMap(Queue.take(mailbox), handle)));
+    yield* Effect.forkScoped(Effect.forever(pipe(Queue.take(mailbox), Effect.flatMap(handle))));
 
     // Another tab's writes enter through the same queue, so they take their
     // turn like everything else.
     yield* Effect.forkScoped(
-      Stream.runForEach(kv.changes(key), (raw) => Queue.offer(mailbox, { _tag: "Remote", raw })),
+      pipe(
+        kv.changes(key),
+        Stream.runForEach((raw) => Queue.offer(mailbox, { _tag: "Remote", raw })),
+      ),
     );
 
     const ask = <Ok, Err>(

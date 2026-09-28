@@ -28,7 +28,18 @@
  * test can read against the schema keeps that promise true.
  */
 
-import { Context, Effect, Exit, FiberHandle, Layer, Option, Ref, Scope } from "effect";
+import {
+  Context,
+  Effect,
+  Exit,
+  FiberHandle,
+  Layer,
+  Option,
+  Ref,
+  Scope,
+  pipe,
+  Struct,
+} from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { SUPPRESS_EVENT, SUPPRESS_PROPAGATION } from "~/core/HandlerStack.ts";
 import { Mappings } from "~/core/Mappings.ts";
@@ -267,7 +278,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         // the user can see what to change instead of an empty box.
         read: (settings) =>
           settings.keyMappings.length > 0 ? settings.keyMappings : DEFAULT_MAPPINGS.trim(),
-        write: (settings, value) => ({ ...settings, keyMappings: value }),
+        write: (settings, value) => pipe(settings, Struct.assign({ keyMappings: value })),
       },
     ],
   },
@@ -282,22 +293,25 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         clamps: outsideRange(1, 10_000),
         truncates: notWhole,
         read: (settings) => String(settings.scrollStepSize),
-        write: (settings, value) => ({
-          ...settings,
-          scrollStepSize: clampNumber(
-            Number.parseInt(value, 10),
-            1,
-            10_000,
-            settings.scrollStepSize,
+        write: (settings, value) =>
+          pipe(
+            settings,
+            Struct.assign({
+              scrollStepSize: clampNumber(
+                Number.parseInt(value, 10),
+                1,
+                10_000,
+                settings.scrollStepSize,
+              ),
+            }),
           ),
-        }),
       },
       {
         kind: "toggle",
         key: "smoothScroll",
         label: "Smooth scrolling",
         read: (settings) => settings.smoothScroll,
-        write: (settings, value) => ({ ...settings, smoothScroll: value }),
+        write: (settings, value) => pipe(settings, Struct.assign({ smoothScroll: value })),
       },
     ],
   },
@@ -311,10 +325,13 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         note: "Two or more, and all different.",
         refuses: shorterThanTwo,
         read: (settings) => settings.linkHintCharacters,
-        write: (settings, value) => ({
-          ...settings,
-          linkHintCharacters: value.length >= 2 ? value : settings.linkHintCharacters,
-        }),
+        write: (settings, value) =>
+          pipe(
+            settings,
+            Struct.assign({
+              linkHintCharacters: value.length >= 2 ? value : settings.linkHintCharacters,
+            }),
+          ),
       },
       {
         kind: "line",
@@ -323,27 +340,28 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         note: "Two or more.",
         refuses: shorterThanTwo,
         read: (settings) => settings.linkHintNumbers,
-        write: (settings, value) => ({
-          ...settings,
-          linkHintNumbers: value.length >= 2 ? value : settings.linkHintNumbers,
-        }),
+        write: (settings, value) =>
+          pipe(
+            settings,
+            Struct.assign({
+              linkHintNumbers: value.length >= 2 ? value : settings.linkHintNumbers,
+            }),
+          ),
       },
       {
         kind: "toggle",
         key: "filterLinkHints",
         label: "Filter link hints by text instead of by letter",
         read: (settings) => settings.filterLinkHints,
-        write: (settings, value) => ({ ...settings, filterLinkHints: value }),
+        write: (settings, value) => pipe(settings, Struct.assign({ filterLinkHints: value })),
       },
       {
         kind: "toggle",
         key: "waitForEnterForFilteredHints",
         label: "Require Enter to activate a filtered hint",
         read: (settings) => settings.waitForEnterForFilteredHints,
-        write: (settings, value) => ({
-          ...settings,
-          waitForEnterForFilteredHints: value,
-        }),
+        write: (settings, value) =>
+          pipe(settings, Struct.assign({ waitForEnterForFilteredHints: value })),
       },
       {
         kind: "block",
@@ -352,10 +370,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         note: "Applied inside our shadow root only. No @import and no url().",
         minHeight: "100px",
         read: (settings) => settings.userDefinedLinkHintCss,
-        write: (settings, value) => ({
-          ...settings,
-          userDefinedLinkHintCss: value,
-        }),
+        write: (settings, value) =>
+          pipe(settings, Struct.assign({ userDefinedLinkHintCss: value })),
       },
     ],
   },
@@ -367,7 +383,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         key: "regexFindMode",
         label: "Treat find queries as regular expressions",
         read: (settings) => settings.regexFindMode,
-        write: (settings, value) => ({ ...settings, regexFindMode: value }),
+        write: (settings, value) => pipe(settings, Struct.assign({ regexFindMode: value })),
       },
       {
         kind: "toggle",
@@ -375,7 +391,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         label: "Shadow the Find shortcut of the browser",
         note: "May not be preventable on iOS (WebKit bug 191768).",
         read: (settings) => settings.shadowNativeFind,
-        write: (settings, value) => ({ ...settings, shadowNativeFind: value }),
+        write: (settings, value) => pipe(settings, Struct.assign({ shadowNativeFind: value })),
       },
     ],
   },
@@ -388,7 +404,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         label: "Default search URL",
         note: "It must contain %s, which is where your words go.",
         read: (settings) => settings.searchUrl,
-        write: (settings, value) => ({ ...settings, searchUrl: value }),
+        write: (settings, value) => pipe(settings, Struct.assign({ searchUrl: value })),
       },
       {
         kind: "block",
@@ -397,14 +413,14 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         note: "One `keyword: url-with-%s Description` for each line.",
         minHeight: "120px",
         read: (settings) => settings.searchEngines,
-        write: (settings, value) => ({ ...settings, searchEngines: value }),
+        write: (settings, value) => pipe(settings, Struct.assign({ searchEngines: value })),
       },
       {
         kind: "line",
         key: "newTabUrl",
         label: "Page that a new tab opens",
         read: (settings) => settings.newTabUrl,
-        write: (settings, value) => ({ ...settings, newTabUrl: value }),
+        write: (settings, value) => pipe(settings, Struct.assign({ newTabUrl: value })),
       },
       {
         kind: "toggle",
@@ -414,10 +430,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
           "Sends what you type in the omnibar to your search engine, with " +
           "your cookies, as you type it.",
         read: (settings) => settings.enableSearchSuggestions,
-        write: (settings, value) => ({
-          ...settings,
-          enableSearchSuggestions: value,
-        }),
+        write: (settings, value) =>
+          pipe(settings, Struct.assign({ enableSearchSuggestions: value })),
       },
     ],
   },
@@ -430,14 +444,14 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         key: "previousPatterns",
         label: "Words for the previous page",
         read: (settings) => settings.previousPatterns,
-        write: (settings, value) => ({ ...settings, previousPatterns: value }),
+        write: (settings, value) => pipe(settings, Struct.assign({ previousPatterns: value })),
       },
       {
         kind: "line",
         key: "nextPatterns",
         label: "Words for the next page",
         read: (settings) => settings.nextPatterns,
-        write: (settings, value) => ({ ...settings, nextPatterns: value }),
+        write: (settings, value) => pipe(settings, Struct.assign({ nextPatterns: value })),
       },
     ],
   },
@@ -449,7 +463,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         key: "hideHud",
         label: "Hide the HUD",
         read: (settings) => settings.hideHud,
-        write: (settings, value) => ({ ...settings, hideHud: value }),
+        write: (settings, value) => pipe(settings, Struct.assign({ hideHud: value })),
       },
       {
         kind: "toggle",
@@ -457,10 +471,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         label: "Match the colour scheme of the page",
         note: "When off, the overlay follows your system appearance instead.",
         read: (settings) => settings.followPageColorScheme,
-        write: (settings, value) => ({
-          ...settings,
-          followPageColorScheme: value,
-        }),
+        write: (settings, value) => pipe(settings, Struct.assign({ followPageColorScheme: value })),
       },
     ],
   },
@@ -472,17 +483,14 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         key: "ignoreKeyboardLayout",
         label: "Use physical key positions (ignore the keyboard layout)",
         read: (settings) => settings.ignoreKeyboardLayout,
-        write: (settings, value) => ({
-          ...settings,
-          ignoreKeyboardLayout: value,
-        }),
+        write: (settings, value) => pipe(settings, Struct.assign({ ignoreKeyboardLayout: value })),
       },
       {
         kind: "toggle",
         key: "grabBackFocus",
         label: "Take focus back from a page that steals it on load",
         read: (settings) => settings.grabBackFocus,
-        write: (settings, value) => ({ ...settings, grabBackFocus: value }),
+        write: (settings, value) => pipe(settings, Struct.assign({ grabBackFocus: value })),
       },
       {
         kind: "toggle",
@@ -490,7 +498,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         label: "Leave the arrow keys and space to a focused video or audio player",
         note: "Turn off to scroll with them everywhere, even while a player has " + "focus.",
         read: (settings) => settings.passMediaKeys,
-        write: (settings, value) => ({ ...settings, passMediaKeys: value }),
+        write: (settings, value) => pipe(settings, Struct.assign({ passMediaKeys: value })),
       },
       {
         kind: "toggle",
@@ -500,7 +508,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
           "Not true browser zoom: it does not change the URL bar, and it " +
           "breaks position:fixed on some sites.",
         read: (settings) => settings.enableCssZoom,
-        write: (settings, value) => ({ ...settings, enableCssZoom: value }),
+        write: (settings, value) => pipe(settings, Struct.assign({ enableCssZoom: value })),
       },
     ],
   },
@@ -515,10 +523,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
           "Recorded on this device only, and readable in the storage " +
           "viewer of your userscript manager.",
         read: (settings) => settings.enableHistoryIndex,
-        write: (settings, value) => ({
-          ...settings,
-          enableHistoryIndex: value,
-        }),
+        write: (settings, value) => pipe(settings, Struct.assign({ enableHistoryIndex: value })),
       },
       {
         kind: "block",
@@ -527,10 +532,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         note: "One URL pattern for each line, for example " + "https://mail.example.com/*",
         minHeight: "80px",
         read: (settings) => settings.historyIndexDenylist.join("\n"),
-        write: (settings, value) => ({
-          ...settings,
-          historyIndexDenylist: [...parseLines(value)],
-        }),
+        write: (settings, value) =>
+          pipe(settings, Struct.assign({ historyIndexDenylist: [...parseLines(value)] })),
       },
       {
         kind: "number",
@@ -541,15 +544,18 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         clamps: outsideRange(0, 50_000),
         truncates: notWhole,
         read: (settings) => String(settings.historyIndexLimit),
-        write: (settings, value) => ({
-          ...settings,
-          historyIndexLimit: clampNumber(
-            Number.parseInt(value, 10),
-            0,
-            50_000,
-            settings.historyIndexLimit,
+        write: (settings, value) =>
+          pipe(
+            settings,
+            Struct.assign({
+              historyIndexLimit: clampNumber(
+                Number.parseInt(value, 10),
+                0,
+                50_000,
+                settings.historyIndexLimit,
+              ),
+            }),
           ),
-        }),
       },
     ],
   },
@@ -567,10 +573,8 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         minHeight: "100px",
         problems: exclusionProblems,
         read: (settings) => formatExclusionRules(settings.exclusionRules),
-        write: (settings, value) => ({
-          ...settings,
-          exclusionRules: [...parseExclusionText(value)],
-        }),
+        write: (settings, value) =>
+          pipe(settings, Struct.assign({ exclusionRules: [...parseExclusionText(value)] })),
       },
     ],
   },
@@ -1113,9 +1117,9 @@ export class Dialog extends Context.Service<
         notes: FormNotes,
       ) {
         const outcome = yield* Effect.catch(Effect.asSome(settings.save(next)), (error) =>
-          Effect.as(
+          pipe(
             report.error(`Settings were not saved: ${error.detail}`),
-            Option.none<SettingsData>(),
+            Effect.as(Option.none<SettingsData>()),
           ),
         );
         // The failure already went to the user. Success must not be claimed

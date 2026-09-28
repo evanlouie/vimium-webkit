@@ -73,7 +73,7 @@
  * the safe result as well.
  */
 
-import { Context, Effect, Layer, Option, Queue, Ref, Schema } from "effect";
+import { Context, Effect, Layer, Option, Queue, Ref, Schema, pipe } from "effect";
 import {
   ENVELOPE,
   joinProofPayload,
@@ -251,8 +251,11 @@ export class FrameAuth extends Context.Service<
       // `FrameAuthError`, so this line is a record and not the only signal.
       yield* Effect.forkScoped(
         Effect.forever(
-          Effect.flatMap(Queue.take(issues), (issue) =>
-            Effect.logDebug(`the credential store failed: ${issue.detail}`),
+          pipe(
+            Queue.take(issues),
+            Effect.flatMap((issue) =>
+              Effect.logDebug(`the credential store failed: ${issue.detail}`),
+            ),
           ),
         ),
       );
@@ -335,7 +338,7 @@ export class FrameAuth extends Context.Service<
         const again = yield* store.hydrate;
         if (again.secret.length > 0) return again.secret;
 
-        yield* Effect.mapError(
+        yield* pipe(
           store.update((current) =>
             // The same test again, against the value that the group holds.
             // Another tab can reach this group through the change stream of
@@ -347,11 +350,13 @@ export class FrameAuth extends Context.Service<
                   secret: created,
                 },
           ),
-          (cause) =>
-            new FrameAuthError({
-              reason: "unavailable",
-              detail: `could not store the credential: ${cause.detail}`,
-            }),
+          Effect.mapError(
+            (cause) =>
+              new FrameAuthError({
+                reason: "unavailable",
+                detail: `could not store the credential: ${cause.detail}`,
+              }),
+          ),
         );
 
         // Keep the value that storage holds, and not the value that this
@@ -520,7 +525,10 @@ export class FrameAuth extends Context.Service<
                 }),
             }),
           );
-          return Option.map(plain, (buffer) => decoder.decode(new Uint8Array(buffer)));
+          return pipe(
+            plain,
+            Option.map((buffer) => decoder.decode(new Uint8Array(buffer))),
+          );
         });
 
         return { seal, open } satisfies FrameCipher;

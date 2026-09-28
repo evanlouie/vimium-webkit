@@ -16,7 +16,7 @@
  * already built, so the report and the services can never disagree.
  */
 
-import { Context, Effect, Layer, Option, Predicate } from "effect";
+import { Context, Effect, Layer, Option, Predicate, Record } from "effect";
 import { clipboardReader, clipboardWriter } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Gm } from "~/platform/Gm.ts";
@@ -302,7 +302,7 @@ export const degradationWarnings = (report: CapabilityReport): readonly string[]
 
 /** The report as text, for a bug report. */
 export const formatCapabilities = (report: CapabilityReport): string =>
-  Object.entries(report)
+  Record.toEntries(report)
     .map(([key, value]) => `${key.padEnd(24)} ${String(value)}`)
     .join("\n");
 

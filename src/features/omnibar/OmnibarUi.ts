@@ -18,7 +18,7 @@
  * There is no `dispose` method.
  */
 
-import { Effect, FiberHandle, Option, Ref, type Scope } from "effect";
+import { Effect, FiberHandle, Option, Ref, type Scope, pipe } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 import { deepActiveElement } from "~/platform/Elements.ts";
 import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
@@ -429,7 +429,7 @@ export const makeOmnibarView = (
     // one before it started.
     const repositionFiber = yield* FiberHandle.make<void, never>();
     const reposition = Effect.asVoid(
-      FiberHandle.run(repositionFiber, Effect.andThen(dom.nextFrame, applyViewport)),
+      FiberHandle.run(repositionFiber, pipe(dom.nextFrame, Effect.andThen(applyViewport))),
     );
 
     yield* dom.listen("window", "resize", () => reposition, { passive: true });

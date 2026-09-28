@@ -15,7 +15,7 @@
  * key press gives an explanation instead of silence.
  */
 
-import { Context, Effect, Layer, Option, Ref, Schema } from "effect";
+import { Context, Effect, Layer, Option, Ref, Schema, pipe } from "effect";
 import {
   type CommandDef,
   type CommandGroup,
@@ -99,7 +99,7 @@ export class Commands extends Context.Service<
         Effect.gen(function* () {
           const services = yield* Effect.context<R>();
           const bound: CommandBody<never> = (invocation) =>
-            Effect.provideContext(body(invocation), services);
+            pipe(body(invocation), Effect.provideContext(services));
           yield* Ref.update(bodies, (current) => {
             const next = new Map(current);
             next.set(name, bound);
@@ -148,7 +148,11 @@ export class Commands extends Context.Service<
             { discard: true },
           ),
         run,
-        isRunnable: (name) => Effect.map(Ref.get(bodies), (current) => current.has(name)),
+        isRunnable: (name) =>
+          pipe(
+            Ref.get(bodies),
+            Effect.map((current) => current.has(name)),
+          ),
         definition: definitionOf,
         all: COMMAND_LIST,
         names: COMMAND_NAMES,

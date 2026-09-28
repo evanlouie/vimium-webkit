@@ -12,7 +12,7 @@
  * not reset them. Both now live in this service.
  */
 
-import { Context, Effect, Layer, Option, Ref, type Scope, SubscriptionRef } from "effect";
+import { Context, Effect, Layer, Option, Ref, type Scope, SubscriptionRef, pipe } from "effect";
 import {
   CONTINUE_BUBBLING,
   type Handler,
@@ -154,8 +154,9 @@ export class Modes extends Context.Service<
 
               const bodies = yield* Ref.getAndSet(exitBodies, []);
               for (const body of bodies) {
-                yield* Effect.catchCause(body(reason), (cause) =>
-                  Effect.logError("a mode exit body failed", cause),
+                yield* pipe(
+                  body(reason),
+                  Effect.catchCause((cause) => Effect.logError("a mode exit body failed", cause)),
                 );
               }
               yield* refreshIndicator;
@@ -163,7 +164,10 @@ export class Modes extends Context.Service<
 
           const handle: ModeHandle = {
             name: options.name,
-            isActive: Effect.map(Ref.get(exited), (value) => !value),
+            isActive: pipe(
+              Ref.get(exited),
+              Effect.map((value) => !value),
+            ),
             exit,
             onExit: (body) =>
               Effect.gen(function* () {
@@ -192,7 +196,7 @@ export class Modes extends Context.Service<
             (event: A): Effect.Effect<Option.Option<HandlerResult>> =>
               body === undefined
                 ? Effect.succeedNone
-                : Effect.provideContext(Effect.asSome(body(event)), services);
+                : pipe(Effect.asSome(body(event)), Effect.provideContext(services));
 
           const keydownBody = provided(own.keydown);
           const keypressBody = provided(own.keypress);
@@ -204,9 +208,17 @@ export class Modes extends Context.Service<
           const keyboard =
             (body: (event: KeyboardEvent) => Effect.Effect<Option.Option<HandlerResult>>) =>
             (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-              Effect.map(body(event), (result) =>
-                Option.getOrElse(result, () =>
-                  options.suppressAllKeyboardEvents === true ? SUPPRESS_EVENT : CONTINUE_BUBBLING,
+              pipe(
+                body(event),
+                Effect.map((result) =>
+                  pipe(
+                    result,
+                    Option.getOrElse(() =>
+                      options.suppressAllKeyboardEvents === true
+                        ? SUPPRESS_EVENT
+                        : CONTINUE_BUBBLING,
+                    ),
+                  ),
                 ),
               );
 
@@ -232,12 +244,18 @@ export class Modes extends Context.Service<
             click: (event) =>
               Effect.gen(function* () {
                 if (options.exitOnClick === true) yield* exit("click");
-                return Option.getOrElse(yield* clickBody(event), () => CONTINUE_BUBBLING);
+                return pipe(
+                  yield* clickBody(event),
+                  Option.getOrElse(() => CONTINUE_BUBBLING),
+                );
               }),
             focus: (event) =>
               Effect.gen(function* () {
                 if (options.exitOnFocus === true) yield* exit("focus");
-                return Option.getOrElse(yield* focusBody(event), () => CONTINUE_BUBBLING);
+                return pipe(
+                  yield* focusBody(event),
+                  Option.getOrElse(() => CONTINUE_BUBBLING),
+                );
               }),
             blur: (event) =>
               Effect.gen(function* () {
@@ -245,7 +263,10 @@ export class Modes extends Context.Service<
                 if (target !== null && target !== undefined && event.target === target) {
                   yield* exit("blur");
                 }
-                return Option.getOrElse(yield* blurBody(event), () => CONTINUE_BUBBLING);
+                return pipe(
+                  yield* blurBody(event),
+                  Option.getOrElse(() => CONTINUE_BUBBLING),
+                );
               }),
           });
 
@@ -277,8 +298,9 @@ export class Modes extends Context.Service<
         enter,
         exitAll,
         indicator,
-        activeNames: Effect.map(Ref.get(state), (current) =>
-          current.active.map((mode) => mode.handle.name),
+        activeNames: pipe(
+          Ref.get(state),
+          Effect.map((current) => current.active.map((mode) => mode.handle.name)),
         ),
       });
     }),

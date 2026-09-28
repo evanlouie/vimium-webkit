@@ -18,7 +18,7 @@
  *   that has an `unload` handler and then never sends the event.
  */
 
-import { Deferred, Effect, Option, Ref, Schema, type Scope } from "effect";
+import { Deferred, Effect, Option, Ref, Schema, type Scope, pipe } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 import { isEditable } from "~/platform/Elements.ts";
 import { Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
@@ -218,7 +218,7 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
     // a cross-frame function sends.
     if (realm.isTop) {
       yield* Effect.forkScoped(
-        Effect.andThen(Effect.sleep(`${IDLE_START_MS} millis`), activate("idle")),
+        pipe(Effect.sleep(`${IDLE_START_MS} millis`), Effect.andThen(activate("idle"))),
       );
     }
 

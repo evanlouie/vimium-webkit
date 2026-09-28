@@ -7,7 +7,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option } from "effect";
+import { Effect, Option, pipe } from "effect";
 import {
   compilePattern,
   exclusionProblems,
@@ -125,7 +125,10 @@ describe("Exclusion", () => {
       for (const [pattern, url] of wanted) {
         assert.isTrue(
           Option.isNone(patternProblem(pattern)),
-          `${pattern} was dropped: ${Option.getOrElse(patternProblem(pattern), () => "")}`,
+          `${pattern} was dropped: ${pipe(
+            patternProblem(pattern),
+            Option.getOrElse(() => ""),
+          )}`,
         );
         assert.strictEqual(matches(pattern, url), true, pattern);
       }

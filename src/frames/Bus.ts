@@ -63,6 +63,7 @@ import {
   Schema,
   Scope,
   Stream,
+  pipe,
 } from "effect";
 import {
   encodeMessage,
@@ -436,9 +437,9 @@ export const makeSealedLink = Effect.fn("FrameBus.link")(function* (
         yield* Effect.logDebug("this link has sent as many messages as it may");
         return;
       }
-      const text = yield* Effect.orElseSucceed(
+      const text = yield* pipe(
         Effect.try(() => JSON.stringify(message)),
-        () => "",
+        Effect.orElseSucceed(() => ""),
       );
       if (text.length === 0) return;
 
@@ -459,8 +460,9 @@ export const makeSealedLink = Effect.fn("FrameBus.link")(function* (
       const last = yield* Ref.get(lastSeen);
       if (sealed.seq <= last) return;
 
-      const opened = yield* Effect.orElseSucceed(cipher.open(inbound, sealed), () =>
-        Option.none<string>(),
+      const opened = yield* pipe(
+        cipher.open(inbound, sealed),
+        Effect.orElseSucceed(() => Option.none<string>()),
       );
       if (Option.isNone(opened)) return;
       yield* Ref.set(lastSeen, sealed.seq);
@@ -470,8 +472,8 @@ export const makeSealedLink = Effect.fn("FrameBus.link")(function* (
       yield* receive(parsed.value);
     });
 
-  yield* Effect.forkScoped(Effect.forever(Effect.flatMap(Queue.take(outbox), sealAndPost)));
-  yield* Effect.forkScoped(Effect.forever(Effect.flatMap(Queue.take(mailbox), open)));
+  yield* Effect.forkScoped(Effect.forever(pipe(Queue.take(outbox), Effect.flatMap(sealAndPost))));
+  yield* Effect.forkScoped(Effect.forever(pipe(Queue.take(mailbox), Effect.flatMap(open))));
 
   yield* host.listenOn(port, "message", (event) =>
     Effect.suspend(() => {
@@ -590,14 +592,16 @@ export class FrameBus extends Context.Service<
         );
       }, Option.none<string>());
 
-      const freshId: Effect.Effect<string, FrameError> = Effect.flatMap(
+      const freshId: Effect.Effect<string, FrameError> = pipe(
         randomId,
-        Effect.fromOption(
-          () =>
-            new FrameError({
-              reason: "failed",
-              detail: "this realm has no random source",
-            }),
+        Effect.flatMap(
+          Effect.fromOption(
+            () =>
+              new FrameError({
+                reason: "failed",
+                detail: "this realm has no random source",
+              }),
+          ),
         ),
       );
 
@@ -622,10 +626,13 @@ export class FrameBus extends Context.Service<
       const records = yield* Effect.acquireRelease(
         Ref.make<ReadonlyArray<FrameRecord>>([]),
         (ref) =>
-          Effect.flatMap(Ref.getAndSet(ref, []), (open) =>
-            Effect.forEach(open, (record) => record.release, {
-              discard: true,
-            }),
+          pipe(
+            Ref.getAndSet(ref, []),
+            Effect.flatMap((open) =>
+              Effect.forEach(open, (record) => record.release, {
+                discard: true,
+              }),
+            ),
           ),
       );
 
@@ -634,17 +641,23 @@ export class FrameBus extends Context.Service<
         to: string,
         requestId: string,
       ): Effect.Effect<FrameWire, FrameError> =>
-        Effect.flatMap(Ref.get(nonceRef), (nonce) =>
-          Option.isNone(nonce)
-            ? Effect.fail(
-                new FrameError({
-                  reason: "unauthenticated",
-                  detail: "this frame is not admitted to a session",
-                }),
-              )
-            : Effect.succeed(
-                encodeMessage({ nonce: nonce.value, from: realm.frameId, to, requestId }, message),
-              ),
+        pipe(
+          Ref.get(nonceRef),
+          Effect.flatMap((nonce) =>
+            Option.isNone(nonce)
+              ? Effect.fail(
+                  new FrameError({
+                    reason: "unauthenticated",
+                    detail: "this frame is not admitted to a session",
+                  }),
+                )
+              : Effect.succeed(
+                  encodeMessage(
+                    { nonce: nonce.value, from: realm.frameId, to, requestId },
+                    message,
+                  ),
+                ),
+          ),
         );
 
       const postAll = (open: ReadonlyArray<FrameRecord>, wire: FrameWire): Effect.Effect<void> =>
@@ -699,11 +712,13 @@ export class FrameBus extends Context.Service<
       ];
 
       const publishRoster = (open: ReadonlyArray<FrameRecord>): Effect.Effect<void> =>
-        Effect.flatMap(
+        pipe(
           Effect.result(
             wireFor({ kind: "ROSTER", frames: rosterOf(open) }, WIRE_TARGET_ALL, NO_REQUEST_ID),
           ),
-          (built) => (Result.isSuccess(built) ? postAll(open, built.success) : Effect.void),
+          Effect.flatMap((built) =>
+            Result.isSuccess(built) ? postAll(open, built.success) : Effect.void,
+          ),
         );
 
       // ---------------------------------------------------------------------
@@ -743,8 +758,11 @@ export class FrameBus extends Context.Service<
       });
 
       const attemptRef = yield* Effect.acquireRelease(Ref.make(Option.none<Attempt>()), (ref) =>
-        Effect.flatMap(Ref.getAndSet(ref, Option.none<Attempt>()), (attempt) =>
-          Option.isNone(attempt) ? Effect.void : attempt.value.release,
+        pipe(
+          Ref.getAndSet(ref, Option.none<Attempt>()),
+          Effect.flatMap((attempt) =>
+            Option.isNone(attempt) ? Effect.void : attempt.value.release,
+          ),
         ),
       );
 
@@ -776,7 +794,10 @@ export class FrameBus extends Context.Service<
         const wire = yield* wireFor(
           message,
           to,
-          Option.getOrElse(requestId, () => NO_REQUEST_ID),
+          pipe(
+            requestId,
+            Option.getOrElse(() => NO_REQUEST_ID),
+          ),
         );
         yield* route(wire);
       });
@@ -925,11 +946,11 @@ export class FrameBus extends Context.Service<
         });
 
         const scope = yield* Scope.make();
-        const release = Effect.andThen(
+        const release = pipe(
           Effect.sync(() => {
             port.close();
           }),
-          Scope.close(scope, Exit.void),
+          Effect.andThen(Scope.close(scope, Exit.void)),
         );
 
         const link = yield* Scope.provide(
@@ -984,9 +1005,9 @@ export class FrameBus extends Context.Service<
           helloId: message.helloId,
           frameId: message.frameId,
         };
-        const proven = yield* Effect.orElseSucceed(
+        const proven = yield* pipe(
           auth.verifyJoin(handshake, message.proof),
-          () => false,
+          Effect.orElseSucceed(() => false),
         );
         const stillThere = yield* knownWindow(source);
         const closePort = Effect.sync(() => {
@@ -1302,8 +1323,11 @@ export class FrameBus extends Context.Service<
         // `pendingJoins` for why the order is a requirement, and not a taste.
         yield* Effect.forkIn(
           Effect.forever(
-            Effect.flatMap(Queue.take(pendingJoins), (join) =>
-              Effect.ignore(completeJoin(join.port, join.source, join.message)),
+            pipe(
+              Queue.take(pendingJoins),
+              Effect.flatMap((join) =>
+                Effect.ignore(completeJoin(join.port, join.source, join.message)),
+              ),
             ),
           ),
           layerScope,
@@ -1367,9 +1391,10 @@ export class FrameBus extends Context.Service<
       const incoming = Stream.fromPubSub(inbox);
 
       const peers: Effect.Effect<ReadonlyArray<FrameId>> = realm.isTop
-        ? Effect.map(sweep, rosterOf)
-        : Effect.map(Ref.get(rosterRef), (roster) =>
-            roster.length > 0 ? roster : [realm.frameId],
+        ? pipe(sweep, Effect.map(rosterOf))
+        : pipe(
+            Ref.get(rosterRef),
+            Effect.map((roster) => (roster.length > 0 ? roster : [realm.frameId])),
           );
 
       const request = Effect.fn("FrameBus.request")(function* <A>(
@@ -1397,16 +1422,19 @@ export class FrameBus extends Context.Service<
               }
             });
 
-            return yield* Effect.timeoutOrElse(wait, {
-              duration: timeout,
-              orElse: () =>
-                Effect.fail(
-                  new FrameError({
-                    reason: "timeout",
-                    detail: `no answer to ${message.kind} inside the deadline`,
-                  }),
-                ),
-            });
+            return yield* pipe(
+              wait,
+              Effect.timeoutOrElse({
+                duration: timeout,
+                orElse: () =>
+                  Effect.fail(
+                    new FrameError({
+                      reason: "timeout",
+                      detail: `no answer to ${message.kind} inside the deadline`,
+                    }),
+                  ),
+              }),
+            );
           }),
         );
       });
@@ -1416,14 +1444,19 @@ export class FrameBus extends Context.Service<
         handler: (message: InboundMessage) => Effect.Effect<Option.Option<FrameMessage>, never, R>,
       ) {
         yield* Effect.forkScoped(
-          Stream.runForEach(
-            Stream.filter(incoming, (message) => message.message.kind === kind),
-            (message) =>
-              Effect.flatMap(handler(message), (reply) =>
-                Option.isNone(reply)
-                  ? Effect.void
-                  : Effect.ignore(post(toFrame(message.from), reply.value, message.requestId)),
+          pipe(
+            incoming,
+            Stream.filter((message) => message.message.kind === kind),
+            Stream.runForEach((message) =>
+              pipe(
+                handler(message),
+                Effect.flatMap((reply) =>
+                  Option.isNone(reply)
+                    ? Effect.void
+                    : Effect.ignore(post(toFrame(message.from), reply.value, message.requestId)),
+                ),
               ),
+            ),
           ),
         );
       });
@@ -1433,10 +1466,13 @@ export class FrameBus extends Context.Service<
         isTop: realm.isTop,
         ready: realm.isTop
           ? Effect.succeed(true)
-          : Effect.timeoutOrElse(Deferred.await(admitted), {
-              duration: REQUEST_DEADLINE,
-              orElse: () => Effect.succeed(false),
-            }),
+          : pipe(
+              Deferred.await(admitted),
+              Effect.timeoutOrElse({
+                duration: REQUEST_DEADLINE,
+                orElse: () => Effect.succeed(false),
+              }),
+            ),
         incoming,
         send,
         broadcast: (message) => post(toAll, message, Option.none()),

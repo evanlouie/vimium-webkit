@@ -10,6 +10,7 @@
  *   npm run watch          rebuild on change
  */
 
+import { Record } from "effect";
 import { watch } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { build as viteBuild, type Rolldown } from "vite";
@@ -61,7 +62,7 @@ interface ModuleSize {
  * is large.
  */
 const sizeReport = (chunk: Rolldown.OutputChunk): readonly ModuleSize[] =>
-  Object.entries(chunk.modules)
+  Record.toEntries(chunk.modules)
     .map(([module, meta]) => ({
       module: module.startsWith(ROOT)
         ? module.slice(ROOT.length + 1)

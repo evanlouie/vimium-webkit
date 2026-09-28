@@ -6,7 +6,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option } from "effect";
+import { Effect, Option, pipe, Struct } from "effect";
 import { type HudLine, type HudState, regionText, statusText, visibleLine } from "~/ui/Hud.ts";
 import { anyHeld, shiftHold } from "~/ui/Ui.ts";
 
@@ -103,15 +103,13 @@ describe("the HUD line", () => {
       };
       assert.deepEqual(visibleLine(full), Option.some({ text: "Saved", tone: "info" }));
       assert.deepEqual(
-        visibleLine({ ...full, transient: Option.none() }),
+        visibleLine(pipe(full, Struct.assign({ transient: Option.none() }))),
         Option.some({ text: "g", tone: "info" }),
       );
       assert.deepEqual(
-        visibleLine({
-          ...full,
-          transient: Option.none(),
-          pending: Option.none(),
-        }),
+        visibleLine(
+          pipe(full, Struct.assign({ transient: Option.none(), pending: Option.none() })),
+        ),
         Option.some({ text: "Insert mode", tone: "info" }),
       );
     }),
@@ -119,8 +117,14 @@ describe("the HUD line", () => {
 
   it.effect("puts the keys and the mode beside an open prompt", () =>
     Effect.sync(() => {
-      assert.strictEqual(statusText({ ...EMPTY_STATE, pending: Option.some("2g") }), "2g");
-      assert.strictEqual(statusText({ ...EMPTY_STATE, indicator: Option.some("3/17") }), "3/17");
+      assert.strictEqual(
+        statusText(pipe(EMPTY_STATE, Struct.assign({ pending: Option.some("2g") }))),
+        "2g",
+      );
+      assert.strictEqual(
+        statusText(pipe(EMPTY_STATE, Struct.assign({ indicator: Option.some("3/17") }))),
+        "3/17",
+      );
     }),
   );
 });

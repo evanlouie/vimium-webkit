@@ -7,7 +7,7 @@
  * function.
  */
 
-import { Context, Effect, Layer, type ManagedRuntime, Option, Stream } from "effect";
+import { Context, Effect, Layer, type ManagedRuntime, Option, Stream, pipe } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Exclusions } from "~/core/Exclusions.ts";
 import { HandlerStack } from "~/core/HandlerStack.ts";
@@ -193,7 +193,10 @@ export const BootstrapLayer: Layer.Layer<
     // Every storage failure becomes one line for the user. The queue behind
     // `Report` keeps the messages that happen before the HUD exists.
     yield* Effect.forkScoped(
-      Stream.runForEach(storage.issues, (issue) => report.error(describeStorageIssue(issue))),
+      pipe(
+        storage.issues,
+        Stream.runForEach((issue) => report.error(describeStorageIssue(issue))),
+      ),
     );
 
     // Every group, and never a subset. A group that was never read holds only the
@@ -256,39 +259,42 @@ export const BootstrapLayer: Layer.Layer<
     );
 
     yield* Effect.forkScoped(
-      Stream.runForEach(lifecycle.events, (event) =>
-        Effect.gen(function* () {
-          switch (event._tag) {
-            case "UrlChange": {
-              yield* modes.exitAll("navigation");
-              yield* settings.reload;
-              yield* resolveExclusion;
-              yield* keyboard.syncExclusion;
-              yield* insert.ensureEntered;
-              if (realm.isTop) yield* omnibar.noteVisit;
-              return;
+      pipe(
+        lifecycle.events,
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            switch (event._tag) {
+              case "UrlChange": {
+                yield* modes.exitAll("navigation");
+                yield* settings.reload;
+                yield* resolveExclusion;
+                yield* keyboard.syncExclusion;
+                yield* insert.ensureEntered;
+                if (realm.isTop) yield* omnibar.noteVisit;
+                return;
+              }
+              case "Restore": {
+                yield* settings.reload;
+                yield* resolveExclusion;
+                yield* keyboard.syncExclusion;
+                yield* insert.ensureEntered;
+                return;
+              }
+              case "Visible": {
+                // The portable substitute for a manager change listener, which
+                // quoid and Stay do not have. Read shared storage again when the
+                // tab comes forward, so that a settings change in another tab
+                // lands.
+                yield* settings.reload;
+                return;
+              }
+              case "Leave": {
+                yield* modes.exitAll("navigation");
+                return;
+              }
             }
-            case "Restore": {
-              yield* settings.reload;
-              yield* resolveExclusion;
-              yield* keyboard.syncExclusion;
-              yield* insert.ensureEntered;
-              return;
-            }
-            case "Visible": {
-              // The portable substitute for a manager change listener, which
-              // quoid and Stay do not have. Read shared storage again when the
-              // tab comes forward, so that a settings change in another tab
-              // lands.
-              yield* settings.reload;
-              return;
-            }
-            case "Leave": {
-              yield* modes.exitAll("navigation");
-              return;
-            }
-          }
-        }),
+          }),
+        ),
       ),
     );
 

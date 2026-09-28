@@ -24,7 +24,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer, Option, Result, Stream } from "effect";
+import { Effect, Layer, Option, Result, Stream, pipe, Struct } from "effect";
 import { frameCredentialGroup, sessionGroup } from "~/domain/Persisted.ts";
 import { FrameAuth, type FrameHandshake } from "~/frames/Auth.ts";
 import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
@@ -99,7 +99,8 @@ const frameLayer = (store: Store, isTop: boolean, frameId: string): Layer.Layer<
   // `Layer.fresh`, because a test builds two frames in one fiber and the layer
   // of a service is otherwise built once and shared. Two frames of a page each
   // hold their own instance.
-  return Layer.fresh(FrameAuth.layer).pipe(
+  return pipe(
+    Layer.fresh(FrameAuth.layer),
     Layer.provide(Layer.mergeAll(kv, realmLayer(isTop, frameId))),
   );
 };
@@ -127,7 +128,7 @@ const storedSecret = (store: Store): string => {
 const credentialValue = (secret: string): string =>
   JSON.stringify({
     schemaVersion: frameCredentialGroup.schemaVersion,
-    data: { ...frameCredentialGroup.defaults(), secret },
+    data: pipe(frameCredentialGroup.defaults(), Struct.assign({ secret })),
   });
 
 /**
@@ -179,12 +180,15 @@ describe("FrameAuth", () => {
     Effect.gen(function* () {
       const store = makeStore(true);
 
-      yield* Effect.gen(function* () {
-        // Nothing is asked of the service. The layer alone must be enough,
-        // because a child needs the credential before the first handshake and
-        // only the top frame may write it.
-        yield* FrameAuth;
-      }).pipe(Effect.provide(frameLayer(store, true, TOP_FRAME)));
+      yield* pipe(
+        Effect.gen(function* () {
+          // Nothing is asked of the service. The layer alone must be enough,
+          // because a child needs the credential before the first handshake and
+          // only the top frame may write it.
+          yield* FrameAuth;
+        }),
+        Effect.provide(frameLayer(store, true, TOP_FRAME)),
+      );
 
       assert.isAbove(storedSecret(store).length, 0);
     }),
@@ -194,20 +198,36 @@ describe("FrameAuth", () => {
     Effect.gen(function* () {
       const store = makeStore(true);
 
-      yield* Effect.gen(function* () {
-        const top = yield* FrameAuth;
+      yield* pipe(
+        Effect.gen(function* () {
+          const top = yield* FrameAuth;
 
-        yield* Effect.gen(function* () {
-          const child = yield* FrameAuth;
-          const proof = yield* child.joinProof(HANDSHAKE);
-          assert.isTrue(yield* top.verifyJoin(HANDSHAKE, proof));
+          yield* pipe(
+            Effect.gen(function* () {
+              const child = yield* FrameAuth;
+              const proof = yield* child.joinProof(HANDSHAKE);
+              assert.isTrue(yield* top.verifyJoin(HANDSHAKE, proof));
 
-          // The proof names one attempt and one identity, and nothing else.
-          assert.isFalse(yield* top.verifyJoin({ ...HANDSHAKE, frameId: TOP_FRAME }, proof));
-          assert.isFalse(yield* top.verifyJoin({ ...HANDSHAKE, token: "abcdefabcdefabcd" }, proof));
-          assert.isFalse(yield* top.verifyJoin(HANDSHAKE, "bm90LWEtcHJvb2Y"));
-        }).pipe(Effect.provide(frameLayer(store, false, CHILD_FRAME)));
-      }).pipe(Effect.provide(frameLayer(store, true, TOP_FRAME)));
+              // The proof names one attempt and one identity, and nothing else.
+              assert.isFalse(
+                yield* top.verifyJoin(
+                  pipe(HANDSHAKE, Struct.assign({ frameId: TOP_FRAME })),
+                  proof,
+                ),
+              );
+              assert.isFalse(
+                yield* top.verifyJoin(
+                  pipe(HANDSHAKE, Struct.assign({ token: "abcdefabcdefabcd" })),
+                  proof,
+                ),
+              );
+              assert.isFalse(yield* top.verifyJoin(HANDSHAKE, "bm90LWEtcHJvb2Y"));
+            }),
+            Effect.provide(frameLayer(store, false, CHILD_FRAME)),
+          );
+        }),
+        Effect.provide(frameLayer(store, true, TOP_FRAME)),
+      );
     }),
   );
 
@@ -215,13 +235,16 @@ describe("FrameAuth", () => {
     Effect.gen(function* () {
       const store = makeStore(true);
 
-      yield* Effect.gen(function* () {
-        const child = yield* FrameAuth;
-        const outcome = yield* Effect.result(child.joinProof(HANDSHAKE));
-        assert.isTrue(Result.isFailure(outcome));
-        if (Result.isSuccess(outcome)) return;
-        assert.strictEqual(outcome.failure.reason, "unauthenticated");
-      }).pipe(Effect.provide(frameLayer(store, false, CHILD_FRAME)));
+      yield* pipe(
+        Effect.gen(function* () {
+          const child = yield* FrameAuth;
+          const outcome = yield* Effect.result(child.joinProof(HANDSHAKE));
+          assert.isTrue(Result.isFailure(outcome));
+          if (Result.isSuccess(outcome)) return;
+          assert.strictEqual(outcome.failure.reason, "unauthenticated");
+        }),
+        Effect.provide(frameLayer(store, false, CHILD_FRAME)),
+      );
 
       assert.strictEqual(storedSecret(store), "");
     }),
@@ -231,27 +254,33 @@ describe("FrameAuth", () => {
     Effect.gen(function* () {
       const store = makeStore(false);
 
-      yield* Effect.gen(function* () {
-        const top = yield* FrameAuth;
-        // Every route to the credential must fail. The service also gives no
-        // way to read the credential itself: a caller can ask for a proof, for
-        // a check of a proof and for a cipher, and for nothing else.
-        assert.isFalse(Object.hasOwn(top, "secret"), "the service publishes the credential");
-        const outcome = yield* Effect.result(top.joinProof(HANDSHAKE));
-        assert.isTrue(Result.isFailure(outcome));
-        if (Result.isSuccess(outcome)) return;
-        assert.strictEqual(outcome.failure.reason, "unavailable");
-      }).pipe(Effect.provide(frameLayer(store, true, TOP_FRAME)));
+      yield* pipe(
+        Effect.gen(function* () {
+          const top = yield* FrameAuth;
+          // Every route to the credential must fail. The service also gives no
+          // way to read the credential itself: a caller can ask for a proof, for
+          // a check of a proof and for a cipher, and for nothing else.
+          assert.isFalse(Object.hasOwn(top, "secret"), "the service publishes the credential");
+          const outcome = yield* Effect.result(top.joinProof(HANDSHAKE));
+          assert.isTrue(Result.isFailure(outcome));
+          if (Result.isSuccess(outcome)) return;
+          assert.strictEqual(outcome.failure.reason, "unavailable");
+        }),
+        Effect.provide(frameLayer(store, true, TOP_FRAME)),
+      );
 
       // Nothing was written, so a same-origin child of a hostile page has
       // nothing to read and cannot calculate a proof.
       assert.strictEqual(storedSecret(store), "");
 
-      yield* Effect.gen(function* () {
-        const child = yield* FrameAuth;
-        const outcome = yield* Effect.result(child.joinProof(HANDSHAKE));
-        assert.isTrue(Result.isFailure(outcome));
-      }).pipe(Effect.provide(frameLayer(store, false, CHILD_FRAME)));
+      yield* pipe(
+        Effect.gen(function* () {
+          const child = yield* FrameAuth;
+          const outcome = yield* Effect.result(child.joinProof(HANDSHAKE));
+          assert.isTrue(Result.isFailure(outcome));
+        }),
+        Effect.provide(frameLayer(store, false, CHILD_FRAME)),
+      );
     }),
   );
 
@@ -260,24 +289,33 @@ describe("FrameAuth", () => {
       const rival = "cml2YWwtY3JlZGVudGlhbA";
       const store = makeRacingStore(rival);
 
-      yield* Effect.gen(function* () {
-        yield* FrameAuth;
-      }).pipe(Effect.provide(frameLayer(store, true, TOP_FRAME)));
+      yield* pipe(
+        Effect.gen(function* () {
+          yield* FrameAuth;
+        }),
+        Effect.provide(frameLayer(store, true, TOP_FRAME)),
+      );
 
       // The credential of the other frame is still there. To replace it would
       // break every link that already derived a key from it.
       assert.strictEqual(storedSecret(store), rival);
 
       // The frames of this tab use the credential that storage holds.
-      yield* Effect.gen(function* () {
-        const top = yield* FrameAuth;
+      yield* pipe(
+        Effect.gen(function* () {
+          const top = yield* FrameAuth;
 
-        yield* Effect.gen(function* () {
-          const child = yield* FrameAuth;
-          const proof = yield* child.joinProof(HANDSHAKE);
-          assert.isTrue(yield* top.verifyJoin(HANDSHAKE, proof));
-        }).pipe(Effect.provide(frameLayer(store, false, CHILD_FRAME)));
-      }).pipe(Effect.provide(frameLayer(store, true, TOP_FRAME)));
+          yield* pipe(
+            Effect.gen(function* () {
+              const child = yield* FrameAuth;
+              const proof = yield* child.joinProof(HANDSHAKE);
+              assert.isTrue(yield* top.verifyJoin(HANDSHAKE, proof));
+            }),
+            Effect.provide(frameLayer(store, false, CHILD_FRAME)),
+          );
+        }),
+        Effect.provide(frameLayer(store, true, TOP_FRAME)),
+      );
     }),
   );
 
@@ -285,9 +323,12 @@ describe("FrameAuth", () => {
     Effect.gen(function* () {
       const store = makeStore(true);
 
-      yield* Effect.gen(function* () {
-        yield* FrameAuth;
-      }).pipe(Effect.provide(frameLayer(store, true, TOP_FRAME)));
+      yield* pipe(
+        Effect.gen(function* () {
+          yield* FrameAuth;
+        }),
+        Effect.provide(frameLayer(store, true, TOP_FRAME)),
+      );
 
       const secret = storedSecret(store);
       assert.isAbove(secret.length, 0, "no credential was created");
@@ -295,25 +336,27 @@ describe("FrameAuth", () => {
       // A feature holds `Storage`, and nothing else. Every group that a
       // feature can name is read here, and none of them carries the
       // credential.
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        const readable = [
-          yield* storage.settings.hydrate,
-          yield* storage.marks.hydrate,
-          yield* storage.findHistory.hydrate,
-          yield* storage.history.hydrate,
-          yield* storage.session.hydrate,
-        ];
-        for (const group of readable) {
-          assert.notInclude(
-            JSON.stringify(group),
-            secret,
-            "a feature can read the frame credential",
-          );
-        }
-      }).pipe(
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          const readable = [
+            yield* storage.settings.hydrate,
+            yield* storage.marks.hydrate,
+            yield* storage.findHistory.hydrate,
+            yield* storage.history.hydrate,
+            yield* storage.session.hydrate,
+          ];
+          for (const group of readable) {
+            assert.notInclude(
+              JSON.stringify(group),
+              secret,
+              "a feature can read the frame credential",
+            );
+          }
+        }),
         Effect.provide(
-          Layer.fresh(Storage.layer).pipe(
+          pipe(
+            Layer.fresh(Storage.layer),
             Layer.provide(Layer.succeed(KeyValueStore, store.service)),
           ),
         ),
@@ -333,49 +376,61 @@ describe("FrameAuth", () => {
     Effect.gen(function* () {
       const store = makeStore(true);
 
-      yield* Effect.gen(function* () {
-        const top = yield* FrameAuth;
-        const topCipher = yield* top.cipher(HANDSHAKE);
+      yield* pipe(
+        Effect.gen(function* () {
+          const top = yield* FrameAuth;
+          const topCipher = yield* top.cipher(HANDSHAKE);
 
-        yield* Effect.gen(function* () {
-          const child = yield* FrameAuth;
-          const childCipher = yield* child.cipher(HANDSHAKE);
+          yield* pipe(
+            Effect.gen(function* () {
+              const child = yield* FrameAuth;
+              const childCipher = yield* child.cipher(HANDSHAKE);
 
-          const text = JSON.stringify({ kind: "HINTS", linkText: "Buy now" });
-          const sealed = yield* childCipher.seal("up", 0, text);
+              const text = JSON.stringify({ kind: "HINTS", linkText: "Buy now" });
+              const sealed = yield* childCipher.seal("up", 0, text);
 
-          // The page reads the port. It must read nothing.
-          assert.notInclude(sealed.data, "HINTS");
-          assert.notInclude(sealed.data, "Buy now");
+              // The page reads the port. It must read nothing.
+              assert.notInclude(sealed.data, "HINTS");
+              assert.notInclude(sealed.data, "Buy now");
 
-          assert.deepEqual(yield* topCipher.open("up", sealed), Option.some(text));
+              assert.deepEqual(yield* topCipher.open("up", sealed), Option.some(text));
 
-          // A message that is sent back to its sender.
-          assert.isTrue(Option.isNone(yield* topCipher.open("down", sealed)));
-          // A message that is played again with another counter.
-          assert.isTrue(Option.isNone(yield* topCipher.open("up", { ...sealed, seq: 1 })));
-          // A message whose ciphertext was changed. The first character of
-          // base64 carries six bits of the first byte, so a change there is
-          // always a change of the bytes. The last character can carry two
-          // bits only, and a change there can decode to the same bytes.
-          assert.isTrue(
-            Option.isNone(
-              yield* topCipher.open("up", {
-                ...sealed,
-                data: `${sealed.data.startsWith("A") ? "B" : "A"}${sealed.data.slice(1)}`,
-              }),
-            ),
+              // A message that is sent back to its sender.
+              assert.isTrue(Option.isNone(yield* topCipher.open("down", sealed)));
+              // A message that is played again with another counter.
+              assert.isTrue(
+                Option.isNone(yield* topCipher.open("up", pipe(sealed, Struct.assign({ seq: 1 })))),
+              );
+              // A message whose ciphertext was changed. The first character of
+              // base64 carries six bits of the first byte, so a change there is
+              // always a change of the bytes. The last character can carry two
+              // bits only, and a change there can decode to the same bytes.
+              assert.isTrue(
+                Option.isNone(
+                  yield* topCipher.open(
+                    "up",
+                    pipe(
+                      sealed,
+                      Struct.assign({
+                        data: `${sealed.data.startsWith("A") ? "B" : "A"}${sealed.data.slice(1)}`,
+                      }),
+                    ),
+                  ),
+                ),
+              );
+
+              // The key belongs to one attempt, so a message of one link never
+              // opens on another.
+              const other = yield* top.cipher(
+                pipe(HANDSHAKE, Struct.assign({ helloId: "abcdefabcdefabcd" })),
+              );
+              assert.isTrue(Option.isNone(yield* other.open("up", sealed)));
+            }),
+            Effect.provide(frameLayer(store, false, CHILD_FRAME)),
           );
-
-          // The key belongs to one attempt, so a message of one link never
-          // opens on another.
-          const other = yield* top.cipher({
-            ...HANDSHAKE,
-            helloId: "abcdefabcdefabcd",
-          });
-          assert.isTrue(Option.isNone(yield* other.open("up", sealed)));
-        }).pipe(Effect.provide(frameLayer(store, false, CHILD_FRAME)));
-      }).pipe(Effect.provide(frameLayer(store, true, TOP_FRAME)));
+        }),
+        Effect.provide(frameLayer(store, true, TOP_FRAME)),
+      );
     }),
   );
 
@@ -387,20 +442,26 @@ describe("FrameAuth", () => {
       const ours = makeStore(true);
       const theirs = makeStore(true);
 
-      yield* Effect.gen(function* () {
-        const frame = yield* FrameAuth;
-        const cipher = yield* frame.cipher(HANDSHAKE);
-        const sealed = yield* cipher.seal("down", 0, "the session nonce");
+      yield* pipe(
+        Effect.gen(function* () {
+          const frame = yield* FrameAuth;
+          const cipher = yield* frame.cipher(HANDSHAKE);
+          const sealed = yield* cipher.seal("down", 0, "the session nonce");
 
-        yield* Effect.gen(function* () {
-          const page = yield* FrameAuth;
-          const forger = yield* page.cipher(HANDSHAKE);
-          assert.isTrue(Option.isNone(yield* forger.open("down", sealed)));
+          yield* pipe(
+            Effect.gen(function* () {
+              const page = yield* FrameAuth;
+              const forger = yield* page.cipher(HANDSHAKE);
+              assert.isTrue(Option.isNone(yield* forger.open("down", sealed)));
 
-          const forged = yield* forger.seal("down", 0, "a false welcome");
-          assert.isTrue(Option.isNone(yield* cipher.open("down", forged)));
-        }).pipe(Effect.provide(frameLayer(theirs, true, TOP_FRAME)));
-      }).pipe(Effect.provide(frameLayer(ours, true, TOP_FRAME)));
+              const forged = yield* forger.seal("down", 0, "a false welcome");
+              assert.isTrue(Option.isNone(yield* cipher.open("down", forged)));
+            }),
+            Effect.provide(frameLayer(theirs, true, TOP_FRAME)),
+          );
+        }),
+        Effect.provide(frameLayer(ours, true, TOP_FRAME)),
+      );
     }),
   );
 });

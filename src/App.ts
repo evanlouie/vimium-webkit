@@ -14,7 +14,7 @@
  * `src/boot/Guard.ts` for that decision.
  */
 
-import { Layer, Logger, ManagedRuntime, References } from "effect";
+import { Layer, Logger, ManagedRuntime, References, pipe } from "effect";
 import { Lifecycle } from "~/boot/Lifecycle.ts";
 import { Commands } from "~/core/Commands.ts";
 import { Exclusions } from "~/core/Exclusions.ts";
@@ -70,27 +70,35 @@ const Observability = Layer.mergeAll(
 );
 
 /** The browser and the userscript manager. */
-const PlatformLayer = Layer.mergeAll(Realm.layer, Gm.layer, Lifecycle.layer).pipe(
+const PlatformLayer = pipe(
+  Layer.mergeAll(Realm.layer, Gm.layer, Lifecycle.layer),
   Layer.provideMerge(Dom.layer),
   Layer.provideMerge(Observability),
 );
 
 /** Storage, and the services that read it. */
-const StorageLayer = Layer.mergeAll(
-  Storage.layer.pipe(Layer.provideMerge(KeyValueStore.layer)),
-  Capabilities.layer.pipe(Layer.provide(KeyValueStore.layer)),
-  Clipboard.layer,
-  Tabs.layer,
-).pipe(Layer.provideMerge(PlatformLayer));
+const StorageLayer = pipe(
+  Layer.mergeAll(
+    pipe(Storage.layer, Layer.provideMerge(KeyValueStore.layer)),
+    pipe(Capabilities.layer, Layer.provide(KeyValueStore.layer)),
+    Clipboard.layer,
+    Tabs.layer,
+  ),
+  Layer.provideMerge(PlatformLayer),
+);
 
 /** Settings, the key trie, modes and the command registry. */
-const CoreLayer = Layer.mergeAll(
-  Mappings.layer,
-  Exclusions.layer,
-  Modes.layer.pipe(Layer.provideMerge(HandlerStack.layer)),
-  Commands.layer,
-  Report.layer,
-).pipe(Layer.provideMerge(Settings.layer), Layer.provideMerge(StorageLayer));
+const CoreLayer = pipe(
+  Layer.mergeAll(
+    Mappings.layer,
+    Exclusions.layer,
+    pipe(Modes.layer, Layer.provideMerge(HandlerStack.layer)),
+    Commands.layer,
+    Report.layer,
+  ),
+  Layer.provideMerge(Settings.layer),
+  Layer.provideMerge(StorageLayer),
+);
 
 /**
  * The keyboard.
@@ -99,16 +107,18 @@ const CoreLayer = Layer.mergeAll(
  * sequence and therefore reads `Keyboard.pending`. The keyboard itself reads
  * only the core, and never the overlay: it reports a failure through `Report`.
  */
-const KeyboardLayer = Keyboard.layer.pipe(Layer.provideMerge(CoreLayer));
+const KeyboardLayer = pipe(Keyboard.layer, Layer.provideMerge(CoreLayer));
 
 /** The overlay. */
-const UiLayer = Layer.mergeAll(Hud.layer, Dialog.layer).pipe(
+const UiLayer = pipe(
+  Layer.mergeAll(Hud.layer, Dialog.layer),
   Layer.provideMerge(Ui.layer),
   Layer.provideMerge(KeyboardLayer),
 );
 
 /** The cross-frame bus, and the protocol on top of it. */
-const FramesLayer = FrameLink.layer.pipe(
+const FramesLayer = pipe(
+  FrameLink.layer,
   Layer.provideMerge(FrameBus.layer),
   Layer.provideMerge(FrameAuth.layer),
   Layer.provideMerge(UiLayer),
@@ -122,21 +132,24 @@ const FramesLayer = FrameLink.layer.pipe(
  * imports another feature. A feature that needs what another feature does asks
  * the registry by name, with `Commands.run`.
  */
-const FeatureLayer = Layer.mergeAll(
-  Scroller.layer,
-  Insert.layer,
-  Marks.layer.pipe(Layer.provide(Scroller.layer)),
-  Hints.layer,
-  Find.layer,
-  Visual.layer,
-  Omnibar.layer,
-  TabControl.layer,
-  // `UrlClipboard` opens a URL that the user pasted, which is the same step
-  // that `Navigation` takes for a typed URL. It asks for that service rather
-  // than repeating the rule about what a bare word means.
-  UrlClipboard.layer.pipe(Layer.provide(Navigation.layer)),
-  Navigation.layer,
-).pipe(Layer.provideMerge(FramesLayer));
+const FeatureLayer = pipe(
+  Layer.mergeAll(
+    Scroller.layer,
+    Insert.layer,
+    pipe(Marks.layer, Layer.provide(Scroller.layer)),
+    Hints.layer,
+    Find.layer,
+    Visual.layer,
+    Omnibar.layer,
+    TabControl.layer,
+    // `UrlClipboard` opens a URL that the user pasted, which is the same step
+    // that `Navigation` takes for a typed URL. It asks for that service rather
+    // than repeating the rule about what a bare word means.
+    pipe(UrlClipboard.layer, Layer.provide(Navigation.layer)),
+    Navigation.layer,
+  ),
+  Layer.provideMerge(FramesLayer),
+);
 
 /**
  * The whole application.

@@ -14,7 +14,7 @@
  * user stops typing.
  */
 
-import { Context, Effect, Exit, Layer, Option, Ref, Scope } from "effect";
+import { Context, Effect, Exit, Layer, Option, Ref, Scope, pipe, Struct } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import {
   CONTINUE_BUBBLING,
@@ -195,9 +195,9 @@ export class Insert extends Context.Service<
             }
           });
 
-        const isInserting = Effect.map(
+        const isInserting = pipe(
           Ref.get(state),
-          (current) => current.global || Option.isSome(current.element),
+          Effect.map((current) => current.global || Option.isSome(current.element)),
         );
 
         /**
@@ -256,10 +256,9 @@ export class Insert extends Context.Service<
             const target = yield* focusedNode(event);
             if (ownsFocus(target)) return CONTINUE_BUBBLING;
             if (acceptsTyping(target)) {
-              yield* Ref.update(state, (current) => ({
-                ...current,
-                element: Option.some(target),
-              }));
+              yield* Ref.update(state, (current) =>
+                pipe(current, Struct.assign({ element: Option.some(target) })),
+              );
               yield* showIndicator();
             }
             return CONTINUE_BUBBLING;
@@ -276,7 +275,7 @@ export class Insert extends Context.Service<
             if (Option.isNone(current.element) || target !== current.element.value) {
               return CONTINUE_BUBBLING;
             }
-            yield* Ref.set(state, { ...current, element: Option.none() });
+            yield* Ref.set(state, pipe(current, Struct.assign({ element: Option.none() })));
             if (!current.global) yield* hideIndicator;
             return CONTINUE_BUBBLING;
           });
@@ -313,7 +312,7 @@ export class Insert extends Context.Service<
 
         const enterGlobal = Effect.fn("Insert.enter")(function* () {
           yield* ensureEntered();
-          yield* Ref.update(state, (current) => ({ ...current, global: true }));
+          yield* Ref.update(state, (current) => pipe(current, Struct.assign({ global: true })));
           yield* showIndicator();
         });
 
@@ -357,13 +356,13 @@ export class Insert extends Context.Service<
           // feature. A build with no hints answers "unavailable", and the count
           // path below still works.
           if (inputs.length > 1 && count <= 1) {
-            const handedOver = yield* Effect.match(
+            const handedOver = yield* pipe(
               commands.run("LinkHints.activateModeToFocus", {
                 count: 1,
                 options: {},
                 event: null,
               }),
-              { onFailure: () => false, onSuccess: () => true },
+              Effect.match({ onFailure: () => false, onSuccess: () => true }),
             );
             if (handedOver) return;
           }
@@ -385,10 +384,9 @@ export class Insert extends Context.Service<
             }),
           );
 
-          yield* Ref.update(state, (current) => ({
-            ...current,
-            element: Option.some(target),
-          }));
+          yield* Ref.update(state, (current) =>
+            pipe(current, Struct.assign({ element: Option.some(target) })),
+          );
           yield* showIndicator();
         });
 
@@ -405,10 +403,9 @@ export class Insert extends Context.Service<
           const active = deepActiveElement(dom.document);
           if (ownsFocus(active)) return;
           if (!acceptsTyping(active)) return;
-          yield* Ref.update(state, (current) => ({
-            ...current,
-            element: Option.some(active),
-          }));
+          yield* Ref.update(state, (current) =>
+            pipe(current, Struct.assign({ element: Option.some(active) })),
+          );
           yield* showIndicator();
         });
 
@@ -434,10 +431,9 @@ export class Insert extends Context.Service<
               active.blur();
             }),
           );
-          yield* Ref.update(state, (current) => ({
-            ...current,
-            element: Option.none(),
-          }));
+          yield* Ref.update(state, (current) =>
+            pipe(current, Struct.assign({ element: Option.none() })),
+          );
           yield* hideIndicator;
         });
 

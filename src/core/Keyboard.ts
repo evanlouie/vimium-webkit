@@ -14,7 +14,18 @@
  * suspend. Read `ARCHITECTURE.md` section 3.
  */
 
-import { Context, Effect, Exit, Layer, Option, Ref, Scope, Stream, SubscriptionRef } from "effect";
+import {
+  Context,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  Ref,
+  Scope,
+  Stream,
+  SubscriptionRef,
+  pipe,
+} from "effect";
 import { isPassKey } from "~/domain/Exclusion.ts";
 import { appendCountDigit, isCountDigit } from "~/domain/Key.ts";
 import { isComposing, isModifierKey, keyNotation } from "~/domain/Key.ts";
@@ -167,7 +178,13 @@ export class Keyboard extends Context.Service<
       });
 
       // A new trie must not leave a half-walked sequence behind it.
-      yield* Effect.forkScoped(Stream.runForEach(Stream.drop(mappings.changes, 1), () => reset));
+      yield* Effect.forkScoped(
+        pipe(
+          mappings.changes,
+          Stream.drop(1),
+          Stream.runForEach(() => reset),
+        ),
+      );
 
       const suppress = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
         Effect.gen(function* () {
@@ -437,7 +454,7 @@ export class Keyboard extends Context.Service<
        * sequence that survives a focus change is a surprise in each case. The
        * cost is small, because the user types the sequence again.
        */
-      const onFocus = (): Effect.Effect<HandlerResult> => Effect.as(reset, CONTINUE_BUBBLING);
+      const onFocus = (): Effect.Effect<HandlerResult> => pipe(reset, Effect.as(CONTINUE_BUBBLING));
 
       /**
        * Normal mode follows the exclusion verdict.
@@ -478,14 +495,17 @@ export class Keyboard extends Context.Service<
         yield* handle.onExit(() => exitNormal);
       });
 
-      const syncExclusion = Effect.flatMap(SubscriptionRef.get(exclusions.effective), (rule) =>
-        rule.enabled ? enterNormal : exitNormal,
+      const syncExclusion = pipe(
+        SubscriptionRef.get(exclusions.effective),
+        Effect.flatMap((rule) => (rule.enabled ? enterNormal : exitNormal)),
       );
 
       yield* syncExclusion;
       yield* Effect.forkScoped(
-        Stream.runForEach(Stream.drop(SubscriptionRef.changes(exclusions.effective), 1), (rule) =>
-          rule.enabled ? enterNormal : exitNormal,
+        pipe(
+          SubscriptionRef.changes(exclusions.effective),
+          Stream.drop(1),
+          Stream.runForEach((rule) => (rule.enabled ? enterNormal : exitNormal)),
         ),
       );
 

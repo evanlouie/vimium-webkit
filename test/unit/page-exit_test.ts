@@ -20,7 +20,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Exit, Layer, ManagedRuntime } from "effect";
+import { Effect, Exit, Layer, ManagedRuntime, pipe } from "effect";
 import { makeOwnedRuntime, onPageExit } from "~/boot/Bootstrap.ts";
 
 // ---------------------------------------------------------------------------
@@ -176,7 +176,7 @@ describe("the order of the exit", () => {
         forgetSuppressed: note("forget"),
         // The true flush suspends: it hands the value to the storage actor,
         // and the answer comes back on another fiber.
-        flushAll: Effect.andThen(Effect.yieldNow, note("write")),
+        flushAll: pipe(Effect.yieldNow, Effect.andThen(note("write"))),
         release: note("release"),
       })({ final: true });
 

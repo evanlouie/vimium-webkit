@@ -23,7 +23,7 @@
  * service. The local history index is never read here, and never sent.
  */
 
-import { Clock, Duration, Effect, FiberHandle, Option, Ref, type Scope } from "effect";
+import { Clock, Duration, Effect, FiberHandle, Option, Ref, type Scope, pipe } from "effect";
 import { Settings } from "~/core/Settings.ts";
 import {
   parseSuggestResponse,
@@ -102,30 +102,30 @@ export const makeSuggester: Effect.Effect<Suggester, never, Gm | Settings | Scop
       // replacement pattern.
       const url = endpoint.replaceAll("%s", () => encodeURIComponent(query));
 
-      return yield* Effect.matchEffect(
-        // Two deadlines, and both are needed. The manager gets `timeoutMs`,
-        // and not every manager honours it. `Effect.timeoutOption` interrupts
-        // the fiber, which releases the request handle. That interruption is
-        // what the old `AbortController` did.
-        Effect.timeoutOption(
-          gm.request({
-            url,
-            method: "GET",
-            timeoutMs: SUGGEST_TIMEOUT_MS,
-          }),
-          Duration.millis(SUGGEST_TIMEOUT_MS),
+      return yield* pipe(
+        gm.request({
+          url,
+          method: "GET",
+          timeoutMs: SUGGEST_TIMEOUT_MS,
+        }),
+        Effect.timeoutOption(Duration.millis(SUGGEST_TIMEOUT_MS)),
+        Effect.matchEffect(
+          // Two deadlines, and both are needed. The manager gets `timeoutMs`,
+          // and not every manager honours it. `Effect.timeoutOption` interrupts
+          // the fiber, which releases the request handle. That interruption is
+          // what the old `AbortController` did.
+          {
+            onFailure: (error) =>
+              // Latched, and silent by design. On a manager without `@connect`
+              // this is a permanent condition, and not an incident. Every other
+              // failure — no network, a timeout, a refusal by CORS — leaves the
+              // list as it is.
+              error.reason === "unavailable"
+                ? pipe(Ref.set(available, false), Effect.as(NO_SUGGESTIONS))
+                : Effect.succeed(NO_SUGGESTIONS),
+            onSuccess: (response) => Effect.succeed(readResponse(response)),
+          },
         ),
-        {
-          onFailure: (error) =>
-            // Latched, and silent by design. On a manager without `@connect`
-            // this is a permanent condition, and not an incident. Every other
-            // failure — no network, a timeout, a refusal by CORS — leaves the
-            // list as it is.
-            error.reason === "unavailable"
-              ? Effect.as(Ref.set(available, false), NO_SUGGESTIONS)
-              : Effect.succeed(NO_SUGGESTIONS),
-          onSuccess: (response) => Effect.succeed(readResponse(response)),
-        },
       );
     });
 

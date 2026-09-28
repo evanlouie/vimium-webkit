@@ -8,7 +8,7 @@
  * other binding.
  */
 
-import { Option, Result } from "effect";
+import { Option, Result, Record } from "effect";
 import {
   isCountDigit,
   normaliseKeySequence,
@@ -385,7 +385,7 @@ const parseMapLine = (
   return Option.some({
     keys,
     command,
-    options: Object.fromEntries(entries),
+    options: Record.fromEntries(entries),
     source: line.text,
     line: line.number,
   });

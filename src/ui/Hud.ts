@@ -40,6 +40,8 @@ import {
   type Scope,
   Stream,
   SubscriptionRef,
+  pipe,
+  Struct,
 } from "effect";
 import { Keyboard } from "~/core/Keyboard.ts";
 import { Modes } from "~/core/Modes.ts";
@@ -155,7 +157,10 @@ export const visibleLine = (state: HudState): Option.Option<HudLine> => {
 /** What the status span beside an open prompt says. */
 export const statusText = (state: HudState): string => {
   if (Option.isSome(state.pending)) return state.pending.value;
-  return Option.getOrElse(state.indicator, () => "");
+  return pipe(
+    state.indicator,
+    Option.getOrElse(() => ""),
+  );
 };
 
 const asKeyboardEvent = (event: Event): Option.Option<KeyboardEvent> =>
@@ -284,7 +289,7 @@ export class Hud extends Context.Service<
         });
 
         const patch = (change: (current: HudState) => HudState): Effect.Effect<void> =>
-          Effect.andThen(Ref.update(state, change), render);
+          pipe(Ref.update(state, change), Effect.andThen(render));
 
         /**
          * Take the message away after `durationMs`.
@@ -300,18 +305,17 @@ export class Hud extends Context.Service<
           }
           yield* FiberHandle.run(
             timer,
-            Effect.andThen(
+            pipe(
               Effect.sleep(durationMs),
-              patch((current) => ({ ...current, transient: Option.none() })),
+              Effect.andThen(
+                patch((current) => pipe(current, Struct.assign({ transient: Option.none() }))),
+              ),
             ),
           );
         });
 
         const draw = Effect.fn("Hud.draw")(function* (line: HudLine, durationMs: number) {
-          yield* patch((current) => ({
-            ...current,
-            transient: Option.some(line),
-          }));
+          yield* patch((current) => pipe(current, Struct.assign({ transient: Option.some(line) })));
           yield* arm(durationMs);
         });
 
@@ -337,7 +341,7 @@ export class Hud extends Context.Service<
           // keyboard and no place on screen.
           if (Option.isSome(current.prompt)) return;
           yield* FiberHandle.clear(timer);
-          yield* patch((one) => ({ ...one, transient: Option.none() }));
+          yield* patch((one) => pipe(one, Struct.assign({ transient: Option.none() })));
         });
 
         // ---------------------------------------------------------------
@@ -345,28 +349,35 @@ export class Hud extends Context.Service<
         // ---------------------------------------------------------------
 
         yield* Effect.forkScoped(
-          Stream.runForEach(SubscriptionRef.changes(modes.indicator), (value) =>
-            patch((current) => ({
-              ...current,
-              indicator: Option.fromNullishOr(value),
-            })),
+          pipe(
+            SubscriptionRef.changes(modes.indicator),
+            Stream.runForEach((value) =>
+              patch((current) =>
+                pipe(current, Struct.assign({ indicator: Option.fromNullishOr(value) })),
+              ),
+            ),
           ),
         );
 
         yield* Effect.forkScoped(
-          Stream.runForEach(SubscriptionRef.changes(keyboard.pending), (value) =>
-            patch((current) => ({
-              ...current,
-              pending: Option.fromNullishOr(value),
-            })),
+          pipe(
+            SubscriptionRef.changes(keyboard.pending),
+            Stream.runForEach((value) =>
+              patch((current) =>
+                pipe(current, Struct.assign({ pending: Option.fromNullishOr(value) })),
+              ),
+            ),
           ),
         );
 
         // The one route from a failure to the user. A storage failure, a
         // clipboard refusal and a command failure all arrive here.
         yield* Effect.forkScoped(
-          Stream.runForEach(report.messages, (message) =>
-            message.level === "error" ? error(message.text) : show(message.text),
+          pipe(
+            report.messages,
+            Stream.runForEach((message) =>
+              message.level === "error" ? error(message.text) : show(message.text),
+            ),
           ),
         );
 
@@ -448,23 +459,26 @@ export class Hud extends Context.Service<
             // so that a click into the field does not fall through to the page.
             yield* acceptPointerEvents(hudLayer);
 
-            yield* patch((current) => ({
-              ...current,
-              prompt: Option.some({
-                id,
-                status: parts.status,
-                cancel: settle(Option.none()),
-              }),
-            }));
+            yield* patch((current) =>
+              pipe(
+                current,
+                Struct.assign({
+                  prompt: Option.some({
+                    id,
+                    status: parts.status,
+                    cancel: settle(Option.none()),
+                  }),
+                }),
+              ),
+            );
 
             yield* Effect.addFinalizer(() =>
               patch((current) =>
                 Option.isSome(current.prompt) && current.prompt.value.id === id
-                  ? {
-                      ...current,
-                      transient: Option.none(),
-                      prompt: Option.none(),
-                    }
+                  ? pipe(
+                      current,
+                      Struct.assign({ transient: Option.none(), prompt: Option.none() }),
+                    )
                   : current,
               ),
             );

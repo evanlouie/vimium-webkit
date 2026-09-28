@@ -8,7 +8,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option, Schema } from "effect";
+import { Effect, Option, Schema, pipe, Struct } from "effect";
 import {
   compareDescriptors,
   DEFAULT_EXCLUSION,
@@ -195,7 +195,7 @@ describe("FrameMessage", () => {
 
   it.effect("lets the handshake through with no nonce", () =>
     Effect.sync(() => {
-      const hello = { ...ENVELOPE, kind: "HELLO" };
+      const hello = pipe(ENVELOPE, Struct.assign({ kind: "HELLO" }));
       const parsed = parseWindowToTop(hello);
       assert.isTrue(Option.isSome(parsed));
       if (Option.isNone(parsed)) return;
@@ -205,13 +205,15 @@ describe("FrameMessage", () => {
 
   it.effect("refuses a JOIN that carries no proof", () =>
     Effect.sync(() => {
-      const join = {
-        ...ENVELOPE,
-        kind: "JOIN",
-        token: "0123456789abcdef",
-        helloId: "fedcba9876543210",
-        frameId: "1111111111111111",
-      };
+      const join = pipe(
+        ENVELOPE,
+        Struct.assign({
+          kind: "JOIN",
+          token: "0123456789abcdef",
+          helloId: "fedcba9876543210",
+          frameId: "1111111111111111",
+        }),
+      );
       assert.isTrue(Option.isNone(parseWindowToTop(join)));
     }),
   );
@@ -221,14 +223,17 @@ describe("FrameMessage", () => {
       // The alphabet is a security control. `linkKeyPayload` joins the same
       // three values with the same separator, so a value that could hold a
       // separator or a letter would let one payload spell out the other.
-      const join = (token: string) => ({
-        ...ENVELOPE,
-        kind: "JOIN",
-        token,
-        helloId: "fedcba9876543210",
-        frameId: "1111111111111111",
-        proof: "cHJvb2Y",
-      });
+      const join = (token: string) =>
+        pipe(
+          ENVELOPE,
+          Struct.assign({
+            kind: "JOIN",
+            token,
+            helloId: "fedcba9876543210",
+            frameId: "1111111111111111",
+            proof: "cHJvb2Y",
+          }),
+        );
       assert.isTrue(Option.isSome(parseWindowToTop(join("0123456789abcdef"))));
       for (const token of [
         "guessed",
@@ -240,11 +245,10 @@ describe("FrameMessage", () => {
         assert.isTrue(Option.isNone(parseWindowToTop(join(token))), `${token} was accepted`);
       }
 
-      const challenge = {
-        ...ENVELOPE,
-        kind: "CHALLENGE",
-        token: "not hexadecimal",
-      };
+      const challenge = pipe(
+        ENVELOPE,
+        Struct.assign({ kind: "CHALLENGE", token: "not hexadecimal" }),
+      );
       assert.isTrue(Option.isNone(parseWindowToTop(challenge)));
     }),
   );
@@ -281,19 +285,19 @@ describe("FrameMessage", () => {
 
   it.effect("parses a sealed envelope and refuses a broken one", () =>
     Effect.sync(() => {
-      const sealed = { ...ENVELOPE, kind: "SEALED", seq: 0, data: "AAAA" };
+      const sealed = pipe(ENVELOPE, Struct.assign({ kind: "SEALED", seq: 0, data: "AAAA" }));
       const parsed = parseSealed(sealed);
       assert.isTrue(Option.isSome(parsed));
       if (Option.isNone(parsed)) return;
       assert.strictEqual(parsed.value.seq, 0);
 
       for (const broken of [
-        { ...sealed, seq: -1 },
-        { ...sealed, seq: MAX_SEAL_SEQUENCE + 1 },
-        { ...sealed, seq: 1.5 },
-        { ...sealed, data: 42 },
-        { ...sealed, kind: "WELCOME" },
-        { ...ENVELOPE, kind: "SEALED", seq: 0 },
+        pipe(sealed, Struct.assign({ seq: -1 })),
+        pipe(sealed, Struct.assign({ seq: MAX_SEAL_SEQUENCE + 1 })),
+        pipe(sealed, Struct.assign({ seq: 1.5 })),
+        pipe(sealed, Struct.assign({ data: 42 })),
+        pipe(sealed, Struct.assign({ kind: "WELCOME" })),
+        pipe(ENVELOPE, Struct.assign({ kind: "SEALED", seq: 0 })),
         { magic: "somebody-else", v: PROTOCOL_VERSION, kind: "SEALED" },
       ]) {
         assert.isTrue(Option.isNone(parseSealed(broken)), `${JSON.stringify(broken)} was accepted`);
@@ -305,14 +309,18 @@ describe("FrameMessage", () => {
     Effect.sync(() => {
       assert.isTrue(Option.isNone(parseWelcome(wire({ kind: "GOODBYE" }))));
 
-      const welcome = Schema.encodeUnknownSync(welcomeSchema)({
-        ...ENVELOPE,
-        kind: "WELCOME",
-        nonce: NONCE,
-        frameId: "1111111111111111",
-        helloId: "fedcba9876543210",
-        frames: ["1111111111111111"],
-      });
+      const welcome = Schema.encodeUnknownSync(welcomeSchema)(
+        pipe(
+          ENVELOPE,
+          Struct.assign({
+            kind: "WELCOME",
+            nonce: NONCE,
+            frameId: "1111111111111111",
+            helloId: "fedcba9876543210",
+            frames: ["1111111111111111"],
+          }),
+        ),
+      );
       assert.isTrue(Option.isSome(parseWelcome(welcome)));
     }),
   );
@@ -512,10 +520,12 @@ describe("the descriptors of a round", () => {
 
   it.effect("keeps multibyte and escaped labels inside the sealed limit", () =>
     Effect.sync(() => {
-      const costly = Array.from({ length: MAX_SESSION_DESCRIPTORS }, (_, index) => ({
-        ...descriptor("1111111111111111", index),
-        linkText: index % 2 === 0 ? "😀".repeat(128) : "\\\n\t".repeat(64),
-      }));
+      const costly = Array.from({ length: MAX_SESSION_DESCRIPTORS }, (_, index) =>
+        pipe(
+          descriptor("1111111111111111", index),
+          Struct.assign({ linkText: index % 2 === 0 ? "😀".repeat(128) : "\\\n\t".repeat(64) }),
+        ),
+      );
       const kept = limitDescriptors(costly, MAX_SESSION_DESCRIPTORS, MAX_DESCRIPTOR_PAYLOAD_BYTES);
       assert.isBelow(kept.length, costly.length);
 
@@ -530,12 +540,12 @@ describe("the descriptors of a round", () => {
       assert.isAtMost(sealedLength, MAX_SEALED_LENGTH);
       assert.isTrue(
         Option.isSome(
-          parseSealed({
-            ...ENVELOPE,
-            kind: "SEALED",
-            seq: 0,
-            data: "A".repeat(sealedLength),
-          }),
+          parseSealed(
+            pipe(
+              ENVELOPE,
+              Struct.assign({ kind: "SEALED", seq: 0, data: "A".repeat(sealedLength) }),
+            ),
+          ),
         ),
       );
       assert.isTrue(Option.isSome(parseWire(message, Option.some(NONCE))));

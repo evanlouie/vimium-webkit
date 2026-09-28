@@ -75,7 +75,7 @@
  *   not the frame that sent it.
  */
 
-import { Option, Schema } from "effect";
+import { Option, Schema, pipe, Struct } from "effect";
 import { FULLY_ENABLED } from "~/domain/Exclusion.ts";
 
 /** The first, cheap test against the other `postMessage` traffic of a page. */
@@ -420,10 +420,9 @@ const envelopeShape = () => ({
  * that is addressed to the window that announced itself. The port moves in the
  * `JOIN` only.
  */
-export const helloSchema = Schema.Struct({
-  ...envelopeShape(),
-  kind: Schema.Literal("HELLO"),
-});
+export const helloSchema = Schema.Struct(
+  pipe(envelopeShape(), Struct.assign({ kind: Schema.Literal("HELLO") })),
+);
 
 /**
  * Top to child, over `window.postMessage`, addressed to one window.
@@ -432,11 +431,12 @@ export const helloSchema = Schema.Struct({
  * It is not the session nonce. To read it is not enough, because a `JOIN` must
  * also prove possession of the manager-private credential.
  */
-export const challengeSchema = Schema.Struct({
-  ...envelopeShape(),
-  kind: Schema.Literal("CHALLENGE"),
-  token: handshakeIdSchema,
-});
+export const challengeSchema = Schema.Struct(
+  pipe(
+    envelopeShape(),
+    Struct.assign({ kind: Schema.Literal("CHALLENGE"), token: handshakeIdSchema }),
+  ),
+);
 
 /**
  * Child to top, over `window.postMessage`, with `port2` transferred.
@@ -449,15 +449,19 @@ export const challengeSchema = Schema.Struct({
  * `frameId` is the identity that this frame will use on the wire. The proof
  * covers it, so a frame that holds no credential cannot claim an identity.
  */
-export const joinSchema = Schema.Struct({
-  ...envelopeShape(),
-  kind: Schema.Literal("JOIN"),
-  token: handshakeIdSchema,
-  helloId: handshakeIdSchema,
-  frameId: handshakeIdSchema,
-  /** The HMAC over the token, the hello id and the frame id. */
-  proof: idSchema,
-});
+export const joinSchema = Schema.Struct(
+  pipe(
+    envelopeShape(),
+    Struct.assign({
+      kind: Schema.Literal("JOIN"),
+      token: handshakeIdSchema,
+      helloId: handshakeIdSchema,
+      frameId: handshakeIdSchema,
+      /** The HMAC over the token, the hello id and the frame id. */
+      proof: idSchema,
+    }),
+  ),
+);
 
 /**
  * Top to child, inside a sealed message on the port. It admits the frame.
@@ -469,16 +473,20 @@ export const joinSchema = Schema.Struct({
  * It is the first message of the link, so it proves that the other end holds
  * the credential. A page that copied the port cannot make one.
  */
-export const welcomeSchema = Schema.Struct({
-  ...envelopeShape(),
-  kind: Schema.Literal("WELCOME"),
-  nonce: handshakeIdSchema,
-  /** The identity that the coordinator recorded, which the `JOIN` claimed. */
-  frameId: handshakeIdSchema,
-  /** It gives back the `JOIN` that earned it. Anything else is a race or a spoof. */
-  helloId: handshakeIdSchema,
-  frames: Schema.Array(handshakeIdSchema).check(Schema.isMaxLength(MAX_FRAMES)),
-});
+export const welcomeSchema = Schema.Struct(
+  pipe(
+    envelopeShape(),
+    Struct.assign({
+      kind: Schema.Literal("WELCOME"),
+      nonce: handshakeIdSchema,
+      /** The identity that the coordinator recorded, which the `JOIN` claimed. */
+      frameId: handshakeIdSchema,
+      /** It gives back the `JOIN` that earned it. Anything else is a race or a spoof. */
+      helloId: handshakeIdSchema,
+      frames: Schema.Array(handshakeIdSchema).check(Schema.isMaxLength(MAX_FRAMES)),
+    }),
+  ),
+);
 
 export type HelloMessage = typeof helloSchema.Type;
 export type ChallengeMessage = typeof challengeSchema.Type;
@@ -526,13 +534,17 @@ export type SealDirection = typeof SealDirection.Type;
  * initialisation vector and to refuse a message that it has already seen. The
  * counter is also in the associated data, so a peer cannot change it.
  */
-export const sealedSchema = Schema.Struct({
-  ...envelopeShape(),
-  kind: Schema.Literal("SEALED"),
-  seq: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: MAX_SEAL_SEQUENCE })),
-  /** The ciphertext and its tag, in base64 for a URL, with no padding. */
-  data: Schema.String.check(Schema.isMaxLength(MAX_SEALED_LENGTH)),
-});
+export const sealedSchema = Schema.Struct(
+  pipe(
+    envelopeShape(),
+    Struct.assign({
+      kind: Schema.Literal("SEALED"),
+      seq: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: MAX_SEAL_SEQUENCE })),
+      /** The ciphertext and its tag, in base64 for a URL, with no padding. */
+      data: Schema.String.check(Schema.isMaxLength(MAX_SEALED_LENGTH)),
+    }),
+  ),
+);
 
 export type SealedMessage = typeof sealedSchema.Type;
 
@@ -571,17 +583,15 @@ export const sealedAad = (link: string, direction: SealDirection, seq: number): 
  * `WIRE_TARGET_TOP`, `WIRE_TARGET_ALL` or a frame id. `requestId` correlates a
  * reply with its request, and it is `NO_REQUEST_ID` when there is none.
  */
-const routedShape = () => ({
-  ...envelopeShape(),
-  nonce: idSchema,
-  from: idSchema,
-  to: idSchema,
-  requestId: idSchema,
-});
+const routedShape = () =>
+  pipe(
+    envelopeShape(),
+    Struct.assign({ nonce: idSchema, from: idSchema, to: idSchema, requestId: idSchema }),
+  );
 
 const define = <F extends Schema.Struct.Fields>(fields: F) => ({
   payload: Schema.Struct(fields),
-  wire: Schema.Struct({ ...routedShape(), ...fields }),
+  wire: Schema.Struct(pipe(routedShape(), Struct.assign(fields))),
 });
 
 /**

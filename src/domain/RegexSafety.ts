@@ -81,7 +81,7 @@
  * Everything here is a pure function of the pattern text. Nothing throws.
  */
 
-import { Option } from "effect";
+import { Option, pipe, Struct } from "effect";
 
 // ---------------------------------------------------------------------------
 // The reasons
@@ -136,24 +136,19 @@ const EMPTY_SET: CharSet = {
   classes: new Set<ClassName>(),
 };
 
-const ANY_SET: CharSet = { ...EMPTY_SET, negated: true };
+const ANY_SET: CharSet = pipe(EMPTY_SET, Struct.assign({ negated: true }));
 
 /** `.` matches everything except the line terminators, without the `s` flag. */
-const DOT_SET: CharSet = {
-  ...EMPTY_SET,
-  negated: true,
-  chars: new Set([0x0a, 0x0d, 0x2028, 0x2029]),
-};
+const DOT_SET: CharSet = pipe(
+  EMPTY_SET,
+  Struct.assign({ negated: true, chars: new Set([0x0a, 0x0d, 0x2028, 0x2029]) }),
+);
 
-const oneChar = (code: number): CharSet => ({
-  ...EMPTY_SET,
-  chars: new Set([code]),
-});
+const oneChar = (code: number): CharSet =>
+  pipe(EMPTY_SET, Struct.assign({ chars: new Set([code]) }));
 
-const oneClass = (name: ClassName): CharSet => ({
-  ...EMPTY_SET,
-  classes: new Set([name]),
-});
+const oneClass = (name: ClassName): CharSet =>
+  pipe(EMPTY_SET, Struct.assign({ classes: new Set([name]) }));
 
 /** The characters of `\s`, as the specification lists them. */
 const WHITESPACE: ReadonlySet<number> = new Set([

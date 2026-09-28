@@ -31,7 +31,7 @@
  * `dispose` method.
  */
 
-import { Effect, FiberHandle, Option, Ref, type Scope } from "effect";
+import { Effect, FiberHandle, Option, Ref, type Scope, pipe } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 import { Ui } from "~/ui/Ui.ts";
 import type { HintRect } from "./Detect.ts";
@@ -305,8 +305,11 @@ export const makeMarkerLayer: Effect.Effect<MarkerLayer, never, Dom | Ui | Scope
     });
     const originRef = yield* Ref.make(first);
 
-    const scrollNow = Effect.flatMap(Ref.get(originRef), (origin) =>
-      dom.probeOr(() => ({ x: dom.window.scrollX, y: dom.window.scrollY }), origin),
+    const scrollNow = pipe(
+      Ref.get(originRef),
+      Effect.flatMap((origin) =>
+        dom.probeOr(() => ({ x: dom.window.scrollX, y: dom.window.scrollY }), origin),
+      ),
     );
 
     const applyOffset = Effect.gen(function* () {
@@ -332,7 +335,7 @@ export const makeMarkerLayer: Effect.Effect<MarkerLayer, never, Dom | Ui | Scope
     // exactly the back pressure that we want here.
     const frame = yield* FiberHandle.make<void, never>();
     const reposition = Effect.asVoid(
-      FiberHandle.run(frame, Effect.andThen(dom.nextFrame, applyOffset)),
+      FiberHandle.run(frame, pipe(dom.nextFrame, Effect.andThen(applyOffset))),
     );
 
     // The capture phase: a scroll does not bubble from an element that scrolls,
@@ -375,27 +378,33 @@ export const makeMarkerLayer: Effect.Effect<MarkerLayer, never, Dom | Ui | Scope
       });
 
     const render = (specs: readonly MarkerSpec[]): Effect.Effect<void> =>
-      Effect.flatMap(grow(specs.length), (elements) =>
-        Effect.sync(() => {
-          for (let index = 0; index < elements.length; index++) {
-            const marker = elements[index];
-            if (marker === undefined) continue;
-            const spec = specs[index];
-            if (spec === undefined) {
-              marker.className = "vw-hint vw-hint--hidden";
-              continue;
+      pipe(
+        grow(specs.length),
+        Effect.flatMap((elements) =>
+          Effect.sync(() => {
+            for (let index = 0; index < elements.length; index++) {
+              const marker = elements[index];
+              if (marker === undefined) continue;
+              const spec = specs[index];
+              if (spec === undefined) {
+                marker.className = "vw-hint vw-hint--hidden";
+                continue;
+              }
+              paint(document, marker, spec);
             }
-            paint(document, marker, spec);
-          }
-        }),
+          }),
+        ),
       );
 
-    const clear = Effect.flatMap(Ref.get(markers), (elements) =>
-      Effect.sync(() => {
-        for (const marker of elements) {
-          marker.className = "vw-hint vw-hint--hidden";
-        }
-      }),
+    const clear = pipe(
+      Ref.get(markers),
+      Effect.flatMap((elements) =>
+        Effect.sync(() => {
+          for (const marker of elements) {
+            marker.className = "vw-hint vw-hint--hidden";
+          }
+        }),
+      ),
     );
 
     return { render, reanchor, clear };

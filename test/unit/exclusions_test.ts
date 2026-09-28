@@ -10,7 +10,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer, Option, Stream, SubscriptionRef } from "effect";
+import { Effect, Layer, Option, Stream, SubscriptionRef, pipe, Struct } from "effect";
 import { Exclusions } from "~/core/Exclusions.ts";
 import { Settings } from "~/core/Settings.ts";
 import {
@@ -31,7 +31,7 @@ const storedSettings = (rules: readonly ExclusionRule[]): Layer.Layer<KeyValueSt
         `${STORAGE_PREFIX}settings`,
         JSON.stringify({
           schemaVersion: SETTINGS_SCHEMA_VERSION,
-          data: { ...defaultSettings(), exclusionRules: rules },
+          data: pipe(defaultSettings(), Struct.assign({ exclusionRules: rules })),
         }),
       ],
     ]);
@@ -66,7 +66,10 @@ const domAt = (url: string): Layer.Layer<Dom> =>
   Layer.provide(
     Layer.effect(
       Dom,
-      Effect.map(Dom, (dom) => Dom.of({ ...dom, href: Effect.succeed(url) })),
+      pipe(
+        Dom,
+        Effect.map((dom) => Dom.of(pipe(dom, Struct.assign({ href: Effect.succeed(url) })))),
+      ),
     ),
     Dom.layer,
   );
@@ -76,7 +79,10 @@ const realmAs = (isTop: boolean): Layer.Layer<Realm, never, Dom> =>
   Layer.provide(
     Layer.effect(
       Realm,
-      Effect.map(Realm, (realm) => Realm.of({ ...realm, isTop })),
+      pipe(
+        Realm,
+        Effect.map((realm) => Realm.of(pipe(realm, Struct.assign({ isTop })))),
+      ),
     ),
     Realm.layer,
   );
@@ -100,25 +106,29 @@ const EXCLUDED: readonly ExclusionRule[] = [
 
 describe("Exclusions", () => {
   it.effect("resolves the verdict from the URL of the top frame", () =>
-    Effect.gen(function* () {
-      const settings = yield* Settings;
-      const exclusions = yield* Exclusions;
+    pipe(
+      Effect.gen(function* () {
+        const settings = yield* Settings;
+        const exclusions = yield* Exclusions;
 
-      // The frame starts with the defaults, so the stored rules must be read
-      // before the verdict means anything.
-      yield* settings.reload;
+        // The frame starts with the defaults, so the stored rules must be read
+        // before the verdict means anything.
+        yield* settings.reload;
 
-      const local = yield* exclusions.resolveLocal;
-      assert.deepEqual(local, { enabled: false, passKeys: "" });
+        const local = yield* exclusions.resolveLocal;
+        assert.deepEqual(local, { enabled: false, passKeys: "" });
 
-      // The top frame keeps its own verdict up to date from the settings.
-      const applied = yield* Stream.runHead(
-        Stream.filter(SubscriptionRef.changes(exclusions.effective), (rule) => !rule.enabled),
-      );
-      assert.isTrue(Option.isSome(applied));
-      assert.isFalse(yield* exclusions.isEnabled);
-      assert.isFalse(exclusions.effectiveUnsafe().enabled);
-    }).pipe(
+        // The top frame keeps its own verdict up to date from the settings.
+        const applied = yield* Stream.runHead(
+          pipe(
+            SubscriptionRef.changes(exclusions.effective),
+            Stream.filter((rule) => !rule.enabled),
+          ),
+        );
+        assert.isTrue(Option.isSome(applied));
+        assert.isFalse(yield* exclusions.isEnabled);
+        assert.isFalse(exclusions.effectiveUnsafe().enabled);
+      }),
       Effect.provide(
         layerFor({
           url: "https://excluded.test/inbox",
@@ -130,20 +140,21 @@ describe("Exclusions", () => {
   );
 
   it.effect("matches any URL against the current rules", () =>
-    Effect.gen(function* () {
-      const settings = yield* Settings;
-      const exclusions = yield* Exclusions;
-      yield* settings.reload;
+    pipe(
+      Effect.gen(function* () {
+        const settings = yield* Settings;
+        const exclusions = yield* Exclusions;
+        yield* settings.reload;
 
-      assert.deepEqual(yield* exclusions.match("https://partial.test/doc"), {
-        enabled: true,
-        passKeys: "jk",
-      });
-      assert.deepEqual(yield* exclusions.match("https://other.test/"), {
-        enabled: true,
-        passKeys: "",
-      });
-    }).pipe(
+        assert.deepEqual(yield* exclusions.match("https://partial.test/doc"), {
+          enabled: true,
+          passKeys: "jk",
+        });
+        assert.deepEqual(yield* exclusions.match("https://other.test/"), {
+          enabled: true,
+          passKeys: "",
+        });
+      }),
       Effect.provide(
         layerFor({
           url: "https://other.test/",
@@ -155,25 +166,26 @@ describe("Exclusions", () => {
   );
 
   it.effect("replaces the verdict with the answer of the top frame", () =>
-    Effect.gen(function* () {
-      const exclusions = yield* Exclusions;
+    pipe(
+      Effect.gen(function* () {
+        const exclusions = yield* Exclusions;
 
-      // A child frame starts fully enabled. It must not read its own URL.
-      assert.isTrue(yield* exclusions.isEnabled);
+        // A child frame starts fully enabled. It must not read its own URL.
+        assert.isTrue(yield* exclusions.isEnabled);
 
-      yield* exclusions.adopt({ enabled: false, passKeys: "" });
-      assert.isFalse(yield* exclusions.isEnabled);
-      assert.deepEqual(yield* SubscriptionRef.get(exclusions.effective), {
-        enabled: false,
-        passKeys: "",
-      });
+        yield* exclusions.adopt({ enabled: false, passKeys: "" });
+        assert.isFalse(yield* exclusions.isEnabled);
+        assert.deepEqual(yield* SubscriptionRef.get(exclusions.effective), {
+          enabled: false,
+          passKeys: "",
+        });
 
-      yield* exclusions.adopt({ enabled: true, passKeys: "jk" });
-      assert.deepEqual(exclusions.effectiveUnsafe(), {
-        enabled: true,
-        passKeys: "jk",
-      });
-    }).pipe(
+        yield* exclusions.adopt({ enabled: true, passKeys: "jk" });
+        assert.deepEqual(exclusions.effectiveUnsafe(), {
+          enabled: true,
+          passKeys: "jk",
+        });
+      }),
       Effect.provide(
         layerFor({
           // The URL of the child frame is excluded, and it must be ignored.

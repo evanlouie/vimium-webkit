@@ -13,7 +13,7 @@
  * poisoned name must cost one API, not the whole surface.
  */
 
-import { Context, Effect, Layer, Option, Queue, Schema, Stream } from "effect";
+import { Context, Effect, Layer, Option, Queue, Schema, Stream, pipe } from "effect";
 import { Dom } from "./Dom.ts";
 import type {
   GmNamespace,
@@ -566,11 +566,13 @@ const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
   return Gm.of({
     identity: readIdentity(surface.info),
     info: surface.info,
-    values: Option.orElse(
-      // Prefer a complete synchronous surface. This changes Stay and other
-      // managers that give both forms. Storage debounces the selected kind.
+    values: pipe(
       syncValueApi(surface),
-      () => asyncValueApi(surface),
+      Option.orElse(
+        // Prefer a complete synchronous surface. This changes Stay and other
+        // managers that give both forms. Storage debounces the selected kind.
+        () => asyncValueApi(surface),
+      ),
     ),
     hasUnsafeWindow: surface.hasUnsafeWindow,
     canOpenInTab: ns?.openInTab !== undefined || surface.openInTabSync !== null,

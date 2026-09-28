@@ -13,7 +13,7 @@
  * `Result` with a `KeyNotationError`. Nothing here throws.
  */
 
-import { Option, Result, Schema } from "effect";
+import { Option, Result, Schema, pipe } from "effect";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -384,7 +384,10 @@ export const keyChar = (
 
   // An Option chord on macOS reports a glyph. The character of the layout
   // decides there, so `map <a-f> ...` still names the F key of the user.
-  const raw = Option.getOrElse(appleAltKey(event, context.applePlatform), () => event.key);
+  const raw = pipe(
+    appleAltKey(event, context.applePlatform),
+    Option.getOrElse(() => event.key),
+  );
 
   const key = normaliseAppKitKey(raw);
   if (key.length === 0 || key === "Unidentified") return Option.none();
@@ -649,7 +652,10 @@ export const parseKeySequence = (
 export const normaliseKeySequence = (
   input: string,
 ): Result.Result<readonly string[], KeyNotationError> =>
-  Result.map(parseKeySequence(input), (keys) => keys.map((key) => key.notation));
+  pipe(
+    parseKeySequence(input),
+    Result.map((keys) => keys.map((key) => key.notation)),
+  );
 
 // ---------------------------------------------------------------------------
 // Safari reserved shortcuts

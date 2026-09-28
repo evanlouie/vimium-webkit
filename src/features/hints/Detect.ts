@@ -28,7 +28,7 @@
  * comment above `ElementWalk` for the division of the work.
  */
 
-import { Effect, Option } from "effect";
+import { Effect, Option, pipe } from "effect";
 import type { CapabilityReport } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { CHUNK_BUDGET_MS, type ChunkedOptions, mapChunked } from "~/platform/Scheduler.ts";
@@ -944,7 +944,10 @@ const isHintVisible = (hint: LocalHint, options: DetectOptions): boolean => {
   const { left, top, width, height } = hint.rect;
   const near = { x: left + EDGE_NUDGE, y: top + EDGE_NUDGE };
   const far = { x: left + width - EDGE_NUDGE, y: top + height - EDGE_NUDGE };
-  const target = Option.getOrElse(hint.hitTarget, () => hint.element);
+  const target = pipe(
+    hint.hitTarget,
+    Option.getOrElse(() => hint.element),
+  );
   const hosts = shadowHostChain(target);
   const hits = (x: number, y: number): boolean => hitsAtPoint(target, hosts, x, y, options);
 

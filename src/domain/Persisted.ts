@@ -23,7 +23,7 @@
  * `*_SCHEMA_VERSION` of its group.
  */
 
-import { Effect, Schema, SchemaTransformation } from "effect";
+import { Effect, Schema, SchemaTransformation, pipe, Record } from "effect";
 import { hintCharacterCount, readHintCharacters } from "~/domain/HintString.ts";
 
 // ---------------------------------------------------------------------------
@@ -95,7 +95,8 @@ const field = <S extends Schema.Top>(schema: S, fallback: S["Type"]) => {
  * The transformation composes the value, removes invalid characters and
  * removes duplicates. Encoding keeps the repaired value.
  */
-const hintCharactersSchema = Schema.String.pipe(
+const hintCharactersSchema = pipe(
+  Schema.String,
   Schema.decode(
     SchemaTransformation.transform({
       decode: (value) => readHintCharacters(value).join(""),
@@ -294,10 +295,10 @@ export const LOCAL_MARK_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 export const pruneMarks = (marks: Marks, now: number): Marks => {
   const entries: Array<[string, Record<string, LocalMark>]> = [];
 
-  for (const [url, letters] of Object.entries(marks.local)) {
+  for (const [url, letters] of Record.toEntries(marks.local)) {
     const live: Record<string, LocalMark> = {};
     let newest = 0;
-    for (const [letter, mark] of Object.entries(letters)) {
+    for (const [letter, mark] of Record.toEntries(letters)) {
       if (now - mark.savedAt > LOCAL_MARK_TTL_MS) continue;
       live[letter] = mark;
       newest = Math.max(newest, mark.savedAt);
@@ -316,7 +317,7 @@ export const pruneMarks = (marks: Marks, now: number): Marks => {
 
 const newestSavedAt = (letters: Record<string, LocalMark>): number => {
   let newest = 0;
-  for (const mark of Object.values(letters)) {
+  for (const mark of Record.values(letters)) {
     newest = Math.max(newest, mark.savedAt);
   }
   return newest;

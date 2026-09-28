@@ -25,7 +25,7 @@
  * >    of the user, and never reads this index.
  */
 
-import { Clock, Effect, Option, Predicate, Ref, type Scope } from "effect";
+import { Clock, Effect, Option, Predicate, Ref, type Scope, pipe } from "effect";
 import { Settings } from "~/core/Settings.ts";
 import type { HistoryIndex as HistoryIndexData, Visit } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -242,12 +242,12 @@ export const detectPrivateBrowsing: Effect.Effect<PrivacyProbe, never, Dom> = Ef
 
     // `estimate()` is refused in some sandboxed frames. We then have no
     // opinion, which is `clear`.
-    const estimate = yield* Effect.orElseSucceed(
+    const estimate = yield* pipe(
       Effect.tryPromise({
         try: estimator.value,
         catch: () => undefined,
       }),
-      (): StorageEstimate => ({}),
+      Effect.orElseSucceed((): StorageEstimate => ({})),
     );
     const quota = estimate.quota;
     if (typeof quota === "number" && quota > 0 && quota < PRIVATE_QUOTA_CEILING_BYTES) {
@@ -310,7 +310,10 @@ export const makeHistoryIndex: Effect.Effect<
 
   const privacy = yield* Ref.make(Option.none<PrivacyProbe>());
   yield* Effect.forkScoped(
-    Effect.flatMap(detectPrivateBrowsing, (result) => Ref.set(privacy, Option.some(result))),
+    pipe(
+      detectPrivateBrowsing,
+      Effect.flatMap((result) => Ref.set(privacy, Option.some(result))),
+    ),
   );
 
   const blockedBy = Effect.fn("HistoryIndex.blockedBy")(function* () {
@@ -371,7 +374,10 @@ export const makeHistoryIndex: Effect.Effect<
 
   return {
     record: record(),
-    visits: Effect.map(storage.history.current, (index) => index.visits),
+    visits: pipe(
+      storage.history.current,
+      Effect.map((index) => index.visits),
+    ),
     // `reset`, and not a write of an empty array: "erase my history" must not
     // leave a hole in the shape of this script in the storage list of the
     // manager either.

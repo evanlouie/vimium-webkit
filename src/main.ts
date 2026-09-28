@@ -17,7 +17,7 @@
  * receives a key builds the guard, and nothing else.
  */
 
-import { Cause, Effect, Layer, Logger, ManagedRuntime, References, Schema } from "effect";
+import { Cause, Effect, Layer, Logger, ManagedRuntime, References, Schema, pipe } from "effect";
 import { AppLayer } from "~/App.ts";
 import { Boot, BootstrapLayer, makeOwnedRuntime } from "~/boot/Bootstrap.ts";
 import { awaitActivation, claimRealm } from "~/boot/Guard.ts";
@@ -31,11 +31,14 @@ import { Realm } from "~/platform/Realm.ts";
  * spend the cost in every frame, which is the one thing that this design
  * refuses to do.
  */
-const GuardLayer = Layer.mergeAll(
-  Realm.layer,
-  Logger.layer([Logger.consolePrettyBrowser()]),
-  Layer.succeed(References.MinimumLogLevel, "Warn"),
-).pipe(Layer.provideMerge(Dom.layer));
+const GuardLayer = pipe(
+  Layer.mergeAll(
+    Realm.layer,
+    Logger.layer([Logger.consolePrettyBrowser()]),
+    Layer.succeed(References.MinimumLogLevel, "Warn"),
+  ),
+  Layer.provideMerge(Dom.layer),
+);
 
 /**
  * The application could not be built.
@@ -73,7 +76,8 @@ const start = Effect.gen(function* () {
        */
       const { runtime, release } = makeOwnedRuntime((owner) =>
         ManagedRuntime.make(
-          BootstrapLayer.pipe(
+          pipe(
+            BootstrapLayer,
             Layer.provide(AppLayer),
             Layer.provide(Boot.layerFrom(signal)),
             Layer.provide(owner),
@@ -83,14 +87,15 @@ const start = Effect.gen(function* () {
 
       // A failure to start must never break the page. Report it once, and stay
       // out of the way. The guard's own listeners are harmless.
-      yield* Effect.tryPromise({
-        try: () => runtime.runPromise(Effect.void),
-        catch: (cause) =>
-          new StartupFailed({
-            detail: cause instanceof Error ? cause.message : String(cause),
-            cause,
-          }),
-      }).pipe(
+      yield* pipe(
+        Effect.tryPromise({
+          try: () => runtime.runPromise(Effect.void),
+          catch: (cause) =>
+            new StartupFailed({
+              detail: cause instanceof Error ? cause.message : String(cause),
+              cause,
+            }),
+        }),
         Effect.catchCause((cause) =>
           Effect.gen(function* () {
             console.error("[vimium-webkit] failed to start", Cause.pretty(cause));

@@ -11,7 +11,7 @@
  * so nothing has to remember to recompile.
  */
 
-import { Context, Effect, Layer, Stream, SubscriptionRef } from "effect";
+import { Context, Effect, Layer, Stream, SubscriptionRef, Record, pipe } from "effect";
 import { COMMANDS, DEFAULT_MAPPINGS } from "~/domain/Command.ts";
 import { type CompiledMappings, compileMappings } from "~/domain/Mapping.ts";
 import type { Settings as SettingsData } from "~/domain/Persisted.ts";
@@ -20,7 +20,7 @@ import { Settings } from "./Settings.ts";
 
 const DEFAULT_MAPPING_LINES = `${DEFAULT_MAPPINGS}\n`.split("\n").length - 1;
 
-const KNOWN_COMMANDS: ReadonlySet<string> = new Set(Object.keys(COMMANDS));
+const KNOWN_COMMANDS: ReadonlySet<string> = new Set(Record.keys(COMMANDS));
 
 export class Mappings extends Context.Service<
   Mappings,
@@ -57,8 +57,9 @@ export class Mappings extends Context.Service<
       const trie = yield* SubscriptionRef.make(compile(yield* settings.current));
 
       yield* Effect.forkScoped(
-        Stream.runForEach(settings.changes, (current) =>
-          SubscriptionRef.set(trie, compile(current)),
+        pipe(
+          settings.changes,
+          Stream.runForEach((current) => SubscriptionRef.set(trie, compile(current))),
         ),
       );
 

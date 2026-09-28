@@ -12,7 +12,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option } from "effect";
+import { Effect, Option, pipe } from "effect";
 import { isLinearRegex, regexSafetyError } from "~/domain/RegexSafety.ts";
 
 /**
@@ -149,7 +149,10 @@ describe("RegexSafety", () => {
         const problem = regexSafetyError(source, "");
         assert.isTrue(
           Option.isNone(problem),
-          `${source} was refused: ${Option.getOrElse(problem, () => "")}`,
+          `${source} was refused: ${pipe(
+            problem,
+            Option.getOrElse(() => ""),
+          )}`,
         );
       }
     }),
@@ -214,7 +217,10 @@ describe("RegexSafety", () => {
 
       // The reason must tell the user what to write instead. "syntax that the
       // safety check does not know" is true and useless.
-      const reason = Option.getOrElse(regexSafetyError("\\p{L}+", ""), () => "");
+      const reason = pipe(
+        regexSafetyError("\\p{L}+", ""),
+        Option.getOrElse(() => ""),
+      );
       assert.include(reason, "`u` flag");
       assert.include(reason, "[a-zA-Z]");
     }),
@@ -241,11 +247,17 @@ describe("RegexSafety", () => {
       assert.isBelow(chain.length, 512);
       assert.isFalse(isLinearRegex(chain, ""));
       assert.include(
-        Option.getOrElse(regexSafetyError(`${"(?=a)".repeat(9)}b`, ""), () => ""),
+        pipe(
+          regexSafetyError(`${"(?=a)".repeat(9)}b`, ""),
+          Option.getOrElse(() => ""),
+        ),
         "at most eight lookaheads",
       );
       assert.include(
-        Option.getOrElse(regexSafetyError("(?=(?=(?=(?=a))))", ""), () => ""),
+        pipe(
+          regexSafetyError("(?=(?=(?=(?=a))))", ""),
+          Option.getOrElse(() => ""),
+        ),
         "at most three nested assertions",
       );
       // A pattern that a user writes holds a few assertions, and passes.

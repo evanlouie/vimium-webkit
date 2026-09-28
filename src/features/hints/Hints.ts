@@ -59,6 +59,8 @@ import {
   Ref,
   Result,
   type Scope,
+  pipe,
+  Struct,
 } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { type HandlerResult, SUPPRESS_EVENT } from "~/core/HandlerStack.ts";
@@ -395,9 +397,11 @@ export const abortAfterSafety = (
   release: Effect.Effect<void>,
   delayMs: number = KEY_BUFFER_SAFETY_MS,
 ): Effect.Effect<void> =>
-  Effect.andThen(
+  pipe(
     Effect.sleep(delayMs),
-    Effect.andThen(release, Effect.asVoid(Deferred.succeed(abort, undefined))),
+    Effect.andThen(
+      pipe(release, Effect.andThen(Effect.asVoid(Deferred.succeed(abort, undefined)))),
+    ),
   );
 
 /**
@@ -410,7 +414,7 @@ export const raceUntilAbort = <A>(
   collect: Effect.Effect<Option.Option<A>>,
   abort: Deferred.Deferred<void>,
 ): Effect.Effect<Option.Option<A>> =>
-  Effect.race(collect, Effect.as(Deferred.await(abort), Option.none()));
+  Effect.race(collect, pipe(Deferred.await(abort), Effect.as(Option.none())));
 
 type SessionRole = "origin" | "participant";
 
@@ -597,15 +601,14 @@ export class Hints extends Context.Service<
        * applied here. A caller cannot forget it.
        */
       const dispatchPointerish = (element: Element, type: string, init: MouseEventInit): void => {
-        const full: MouseEventInit = { ...init, ...buttonStateFor(type) };
+        const full: MouseEventInit = pipe(init, Struct.assign(buttonStateFor(type)));
         const isPointer = type.startsWith("pointer");
         const event =
           isPointer && typeof PointerEvent === "function"
-            ? new PointerEvent(type, {
-                ...full,
-                pointerType: "mouse",
-                isPrimary: true,
-              })
+            ? new PointerEvent(
+                type,
+                pipe(full, Struct.assign({ pointerType: "mouse", isPrimary: true })),
+              )
             : new MouseEvent(type, full);
         element.dispatchEvent(event);
       };
@@ -633,7 +636,10 @@ export class Hints extends Context.Service<
        * exactly that reason.
        */
       const targetOf = (hint: LocalHint): Element =>
-        Option.getOrElse(hint.hitTarget, () => hint.element);
+        pipe(
+          hint.hitTarget,
+          Option.getOrElse(() => hint.element),
+        );
 
       /**
        * Does `ancestor` hold `node`, across an open shadow boundary?
@@ -751,7 +757,7 @@ export class Hints extends Context.Service<
        * Escape undo the hover.
        */
       const prepare = (element: Element): Effect.Effect<void> =>
-        Effect.andThen(
+        pipe(
           Effect.ignore(
             dom.attempt("Element.focus", () => {
               const name = element.localName;
@@ -762,7 +768,7 @@ export class Hints extends Context.Service<
               }
             }),
           ),
-          Ref.set(hoverRef, Option.some(new WeakRef(element))),
+          Effect.andThen(Ref.set(hoverRef, Option.some(new WeakRef(element)))),
         );
 
       /** Send one event without letting page code become our defect. */
@@ -1012,7 +1018,7 @@ export class Hints extends Context.Service<
 
       const detectLocal = Effect.fn("Hints.detect")(function* (mode: HintMode) {
         const viewport = yield* ui.viewport;
-        const result = yield* Effect.provideContext(
+        const result = yield* pipe(
           detectHints({
             window: dom.window,
             document: dom.document,
@@ -1021,7 +1027,7 @@ export class Hints extends Context.Service<
             requireHref: modeRequiresHref(mode),
             overlayHost: Option.some(ui.shadow.host),
           }),
-          browser,
+          Effect.provideContext(browser),
         );
 
         if (result.unreachableHosts > 0 && !(yield* Ref.get(warnedRef))) {
@@ -1131,7 +1137,7 @@ export class Hints extends Context.Service<
           };
           const state = yield* Ref.make(initial);
 
-          const markers = yield* Effect.provideContext(makeMarkerLayer, browser);
+          const markers = yield* pipe(makeMarkerLayer, Effect.provideContext(browser));
           const done = yield* Deferred.make<void>();
           const confirm = yield* FiberHandle.make<void, never>();
 
@@ -1150,14 +1156,20 @@ export class Hints extends Context.Service<
           const id = yield* Ref.modify(sessionSeq, (n) => [n, n + 1]);
 
           const exitSession = (reason: ExitReason): Effect.Effect<void> =>
-            Effect.flatMap(Ref.get(handleRef), (handle) =>
-              Option.isSome(handle)
-                ? handle.value.exit(reason)
-                : Effect.asVoid(Deferred.succeed(done, undefined)),
+            pipe(
+              Ref.get(handleRef),
+              Effect.flatMap((handle) =>
+                Option.isSome(handle)
+                  ? handle.value.exit(reason)
+                  : Effect.asVoid(Deferred.succeed(done, undefined)),
+              ),
             );
 
-          const isLive: Effect.Effect<boolean> = Effect.flatMap(Ref.get(handleRef), (handle) =>
-            Option.isNone(handle) ? Effect.succeed(false) : handle.value.isActive,
+          const isLive: Effect.Effect<boolean> = pipe(
+            Ref.get(handleRef),
+            Effect.flatMap((handle) =>
+              Option.isNone(handle) ? Effect.succeed(false) : handle.value.isActive,
+            ),
           );
 
           // -- rendering ---------------------------------------------------
@@ -1247,7 +1259,7 @@ export class Hints extends Context.Service<
           // than we can usefully measure and draw again.
           const layout = yield* FiberHandle.make<void, never>();
           const onLayoutChange = Effect.asVoid(
-            FiberHandle.run(layout, Effect.andThen(dom.nextFrame, refresh)),
+            FiberHandle.run(layout, pipe(dom.nextFrame, Effect.andThen(refresh))),
           );
 
           // The capture phase: a scroll does not bubble from the element that
@@ -1340,11 +1352,7 @@ export class Hints extends Context.Service<
             }
 
             const outcome = filterFor(snapshot);
-            const next: SessionState = {
-              ...snapshot,
-              outcome,
-              activeIndex: 0,
-            };
+            const next: SessionState = pipe(snapshot, Struct.assign({ outcome, activeIndex: 0 }));
             yield* Ref.set(state, next);
             yield* render;
 
@@ -1371,9 +1379,9 @@ export class Hints extends Context.Service<
             yield* Effect.asVoid(
               FiberHandle.run(
                 confirm,
-                Effect.andThen(
+                pipe(
                   Effect.sleep(FILTER_CONFIRM_DELAY_MS),
-                  activateIndex(exact.value.index),
+                  Effect.andThen(activateIndex(exact.value.index)),
                 ),
               ),
             );
@@ -1386,18 +1394,17 @@ export class Hints extends Context.Service<
               if (filtering) {
                 yield* Ref.update(state, (snapshot) =>
                   numbers.includes(char)
-                    ? { ...snapshot, digits: snapshot.digits + char }
-                    : { ...snapshot, text: snapshot.text + char },
+                    ? pipe(snapshot, Struct.assign({ digits: snapshot.digits + char }))
+                    : pipe(snapshot, Struct.assign({ text: snapshot.text + char })),
                 );
                 yield* update;
                 return;
               }
               const lower = char.toLowerCase();
               if (!alphabet.includes(lower)) return;
-              yield* Ref.update(state, (snapshot) => ({
-                ...snapshot,
-                typed: snapshot.typed + lower,
-              }));
+              yield* Ref.update(state, (snapshot) =>
+                pipe(snapshot, Struct.assign({ typed: snapshot.typed + lower })),
+              );
               yield* update;
             });
 
@@ -1405,15 +1412,15 @@ export class Hints extends Context.Service<
             const snapshot = yield* Ref.get(state);
             if (filtering) {
               if (snapshot.digits.length > 0) {
-                yield* Ref.set(state, {
-                  ...snapshot,
-                  digits: snapshot.digits.slice(0, -1),
-                });
+                yield* Ref.set(
+                  state,
+                  pipe(snapshot, Struct.assign({ digits: snapshot.digits.slice(0, -1) })),
+                );
               } else if (snapshot.text.length > 0) {
-                yield* Ref.set(state, {
-                  ...snapshot,
-                  text: snapshot.text.slice(0, -1),
-                });
+                yield* Ref.set(
+                  state,
+                  pipe(snapshot, Struct.assign({ text: snapshot.text.slice(0, -1) })),
+                );
               } else {
                 yield* exitSession("escape");
                 return;
@@ -1426,10 +1433,10 @@ export class Hints extends Context.Service<
               yield* exitSession("escape");
               return;
             }
-            yield* Ref.set(state, {
-              ...snapshot,
-              typed: snapshot.typed.slice(0, -1),
-            });
+            yield* Ref.set(
+              state,
+              pipe(snapshot, Struct.assign({ typed: snapshot.typed.slice(0, -1) })),
+            );
             yield* update;
           });
 
@@ -1438,10 +1445,15 @@ export class Hints extends Context.Service<
               const snapshot = yield* Ref.get(state);
               const count = snapshot.outcome.candidates.length;
               if (count === 0) return;
-              yield* Ref.set(state, {
-                ...snapshot,
-                activeIndex: (snapshot.activeIndex + direction + count) % count,
-              });
+              yield* Ref.set(
+                state,
+                pipe(
+                  snapshot,
+                  Struct.assign({
+                    activeIndex: (snapshot.activeIndex + direction + count) % count,
+                  }),
+                ),
+              );
               // Tab is an explicit "not that one". Take away any activation
               // that waits.
               yield* cancelConfirm;
@@ -1557,10 +1569,13 @@ export class Hints extends Context.Service<
           // body of the mode runs inside a `keydown`, where nothing may
           // suspend. A finaliser runs in the fiber of the session.
           yield* Effect.addFinalizer(() =>
-            Effect.flatMap(Ref.get(pendingActivationRef), (pending) =>
-              isOrigin && Option.isSome(pending) && pending.value.roundId === config.roundId
-                ? Effect.void
-                : hud.hide,
+            pipe(
+              Ref.get(pendingActivationRef),
+              Effect.flatMap((pending) =>
+                isOrigin && Option.isSome(pending) && pending.value.roundId === config.roundId
+                  ? Effect.void
+                  : hud.hide,
+              ),
             ),
           );
 
@@ -1651,9 +1666,9 @@ export class Hints extends Context.Service<
           yield* Effect.forkScoped(
             abortAfterSafety(
               abort,
-              Effect.andThen(
+              pipe(
                 handle.exit("explicit"),
-                hud.show("Hints stopped: the page did not answer in time."),
+                Effect.andThen(hud.show("Hints stopped: the page did not answer in time.")),
               ),
             ),
           );
@@ -1824,7 +1839,7 @@ export class Hints extends Context.Service<
       ) {
         const peers = yield* bus.peers;
         return yield* collectFrameDescriptors(peers, (frameId) =>
-          Effect.orElseSucceed(
+          pipe(
             bus.request(
               toFrame(frameId),
               {
@@ -1836,7 +1851,7 @@ export class Hints extends Context.Service<
               readHints(roundId, frameId),
               REQUEST_DEADLINE,
             ),
-            () => [] as readonly HintDescriptor[],
+            Effect.orElseSucceed(() => [] as readonly HintDescriptor[]),
           ),
         );
       });
@@ -2045,7 +2060,10 @@ export class Hints extends Context.Service<
             bus.broadcast({
               kind: "ACTIVATION_RESULT",
               roundId: payload.roundId,
-              detail: Option.getOrElse(refusal, () => ""),
+              detail: pipe(
+                refusal,
+                Option.getOrElse(() => ""),
+              ),
             }),
           );
           return Option.none();

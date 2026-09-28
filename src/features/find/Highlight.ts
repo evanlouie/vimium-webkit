@@ -19,7 +19,7 @@
  * `dispose` method.
  */
 
-import { Effect, FiberHandle, Option, Ref, Scope } from "effect";
+import { Effect, FiberHandle, Option, Ref, Scope, pipe } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 import { Ui } from "~/ui/Ui.ts";
 import type { FindMatch } from "./Engine.ts";
@@ -319,7 +319,7 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
      * frame is dropped instead of starting the wait again.
      */
     const reposition = Effect.asVoid(
-      FiberHandle.run(repositionFiber, Effect.andThen(dom.nextFrame, applyOffset()), {
+      FiberHandle.run(repositionFiber, pipe(dom.nextFrame, Effect.andThen(applyOffset())), {
         onlyIfMissing: true,
       }),
     );

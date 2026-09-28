@@ -62,6 +62,7 @@ import {
   Schedule,
   type Scope,
   Stream,
+  pipe,
 } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 
@@ -181,14 +182,17 @@ export class Lifecycle extends Context.Service<
        * instead of work.
        */
       const startExitHooks = (exit: PageExit): Effect.Effect<void> =>
-        Effect.flatMap(Ref.get(exitHooks), (entries) =>
-          Effect.forEach(
-            entries,
-            (entry) =>
-              Effect.forkDetach(entry.hook(exit), {
-                startImmediately: true,
-              }),
-            { discard: true },
+        pipe(
+          Ref.get(exitHooks),
+          Effect.flatMap((entries) =>
+            Effect.forEach(
+              entries,
+              (entry) =>
+                Effect.forkDetach(entry.hook(exit), {
+                  startImmediately: true,
+                }),
+              { discard: true },
+            ),
           ),
         );
 
@@ -202,7 +206,9 @@ export class Lifecycle extends Context.Service<
         "click",
         () =>
           Effect.asVoid(
-            Effect.forkDetach(Effect.andThen(Effect.sleep(`${CLICK_SETTLE_MS} millis`), check)),
+            Effect.forkDetach(
+              pipe(Effect.sleep(`${CLICK_SETTLE_MS} millis`), Effect.andThen(check)),
+            ),
           ),
         { capture: true, passive: true },
       );

@@ -25,7 +25,7 @@
  *    where `navigator.clipboard` is `undefined`.
  */
 
-import { Context, Effect, Layer, Predicate, Schema } from "effect";
+import { Context, Effect, Layer, Predicate, Schema, pipe } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 import { Gm } from "~/platform/Gm.ts";
 
@@ -206,16 +206,20 @@ export class Clipboard extends Context.Service<
             );
           }
           const started = writer(text);
-          return Effect.tryPromise({
-            try: () => started,
-            catch: (cause) => clipboardError("denied", describe(cause), cause),
-          }).pipe(Effect.asVoid);
+          return pipe(
+            Effect.tryPromise({
+              try: () => started,
+              catch: (cause) => clipboardError("denied", describe(cause), cause),
+            }),
+            Effect.asVoid,
+          );
         });
 
       const write = (text: string): Effect.Effect<void, ClipboardError> =>
         // The manager write is first, and nothing goes in front of it. It is
         // `Effect.try`, it does not suspend, and it needs no activation.
-        gm.setClipboard(text).pipe(
+        pipe(
+          gm.setClipboard(text),
           Effect.mapError((cause) =>
             clipboardError(
               cause.reason === "unavailable" ? "unavailable" : "failed",
@@ -229,7 +233,12 @@ export class Clipboard extends Context.Service<
           // where the asynchronous API is absent and nothing suspended. The
           // reported error stays the one from the asynchronous write, because
           // that path is the only one that gives a true reason.
-          Effect.catch((denied) => Effect.mapError(execCommandCopy(text), () => denied)),
+          Effect.catch((denied) =>
+            pipe(
+              execCommandCopy(text),
+              Effect.mapError(() => denied),
+            ),
+          ),
         );
 
       const read: Effect.Effect<string, ClipboardError> = Effect.suspend(() => {

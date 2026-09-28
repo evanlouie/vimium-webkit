@@ -59,6 +59,7 @@ import {
   Schema,
   Scope,
   Stream,
+  pipe,
 } from "effect";
 import { Settings } from "~/core/Settings.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
@@ -656,7 +657,7 @@ export class Ui extends Context.Service<
           "the overlay guard could not read the host style; " + "it now compares every property",
         );
       }
-      const guardedProperties = Option.getOrElse(derivedProperties, allHostProperties);
+      const guardedProperties = pipe(derivedProperties, Option.getOrElse(allHostProperties));
 
       // The values that the visual-viewport sync last wrote. The guard
       // compares against these, and the repair writes them again, so a
@@ -685,9 +686,9 @@ export class Ui extends Context.Service<
       // There is no smaller unit to lose, so this is a defect and not a
       // failure that a caller could handle.
       const shadow = yield* Effect.orDie(
-        Effect.mapError(
+        pipe(
           dom.attempt("Element.attachShadow", () => host.attachShadow({ mode: "closed" })),
-          (error) => new UiError({ reason: "unavailable", detail: error.detail }),
+          Effect.mapError((error) => new UiError({ reason: "unavailable", detail: error.detail })),
         ),
       );
 
@@ -725,14 +726,14 @@ export class Ui extends Context.Service<
           const sheet = made.value;
           yield* scoped(
             Effect.acquireRelease(
-              Effect.andThen(
+              pipe(
                 Ref.update(adopted, (current) => [...current, sheet]),
-                applyAdopted,
+                Effect.andThen(applyAdopted),
               ),
               () =>
-                Effect.andThen(
+                pipe(
                   Ref.update(adopted, (current) => current.filter((one) => one !== sheet)),
-                  applyAdopted,
+                  Effect.andThen(applyAdopted),
                 ),
             ),
           );
@@ -921,10 +922,7 @@ export class Ui extends Context.Service<
 
       // A visible action must measure again. This drops an old correction
       // when an honest page removes `will-change` after its animation.
-      const ensureAttached = Effect.andThen(
-        repairHost,
-        Effect.suspend(() => alignHost),
-      );
+      const ensureAttached = pipe(repairHost, Effect.andThen(Effect.suspend(() => alignHost)));
 
       // Attached once here, so that the overlay exists before any feature
       // asks for a layer.
@@ -985,7 +983,7 @@ export class Ui extends Context.Service<
       const armReset = Effect.asVoid(
         FiberHandle.run(
           reattachReset,
-          Effect.andThen(Effect.sleep(REATTACH_RESET_MS), resumeGuard),
+          pipe(Effect.sleep(REATTACH_RESET_MS), Effect.andThen(resumeGuard)),
         ),
       );
 
@@ -1184,9 +1182,14 @@ export class Ui extends Context.Service<
       // The setting is live. Rebuilding the overlay to read it again would
       // cost far more than one fiber that watches for the change.
       yield* Effect.forkScoped(
-        Stream.runForEach(
-          Stream.changes(Stream.map(settings.changes, (current) => current.followPageColorScheme)),
-          () => syncColorScheme,
+        pipe(
+          Stream.changes(
+            pipe(
+              settings.changes,
+              Stream.map((current) => current.followPageColorScheme),
+            ),
+          ),
+          Stream.runForEach(() => syncColorScheme),
         ),
       );
 
@@ -1311,9 +1314,13 @@ export class Ui extends Context.Service<
       const scheduleSync = Effect.asVoid(
         FiberHandle.run(
           viewportFiber,
-          Effect.andThen(
+          pipe(
             dom.nextFrame,
-            Option.isSome(visualViewport) ? Effect.andThen(applyOwned, alignHost) : alignHost,
+            Effect.andThen(
+              Option.isSome(visualViewport)
+                ? pipe(applyOwned, Effect.andThen(alignHost))
+                : alignHost,
+            ),
           ),
         ),
       );

@@ -25,7 +25,7 @@
  * and the fiber starts only after that.
  */
 
-import { Context, Effect, FiberHandle, Layer, Option, Ref } from "effect";
+import { Context, Effect, FiberHandle, Layer, Option, Ref, pipe, Struct } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
@@ -220,13 +220,16 @@ interface Outcome {
  * next step then aims at zero total distance and jumps backwards by everything
  * covered so far.
  */
-const merge = (animation: Animation, amount: number): Animation => ({
-  ...animation,
-  origin: animation.applied,
-  amount: animation.amount + amount,
-  duration: durationFor(Math.abs(animation.amount + amount - animation.applied)),
-  elapsed: 0,
-});
+const merge = (animation: Animation, amount: number): Animation =>
+  pipe(
+    animation,
+    Struct.assign({
+      origin: animation.applied,
+      amount: animation.amount + amount,
+      duration: durationFor(Math.abs(animation.amount + amount - animation.applied)),
+      elapsed: 0,
+    }),
+  );
 
 /**
  * Move the calibration towards about 150px per frame.
@@ -380,9 +383,9 @@ export class Scroller extends Context.Service<
               (state): [Option.Option<Frame>, Option.Option<Animation>] => {
                 if (Option.isNone(state)) return [Option.none(), state];
                 const animation = state.value;
-                const previous = Option.getOrElse(
+                const previous = pipe(
                   animation.lastTimestamp,
-                  () => timestamp - NOMINAL_FRAME_MS,
+                  Option.getOrElse(() => timestamp - NOMINAL_FRAME_MS),
                 );
                 const delta = Math.min(Math.max(0, timestamp - previous), MAX_FRAME_MS);
                 const elapsed = animation.elapsed + delta;
@@ -399,12 +402,16 @@ export class Scroller extends Context.Service<
                     frameDelta: Math.trunc(goal - animation.applied),
                     progress,
                   }),
-                  Option.some({
-                    ...animation,
-                    elapsed,
-                    frames: animation.frames + 1,
-                    lastTimestamp: Option.some(timestamp),
-                  }),
+                  Option.some(
+                    pipe(
+                      animation,
+                      Struct.assign({
+                        elapsed,
+                        frames: animation.frames + 1,
+                        lastTimestamp: Option.some(timestamp),
+                      }),
+                    ),
+                  ),
                 ];
               },
             );
@@ -441,10 +448,10 @@ export class Scroller extends Context.Service<
                 if (Option.isNone(state)) {
                   return [{ running: false, rate }, state];
                 }
-                const animation: Animation = {
-                  ...state.value,
-                  applied: state.value.applied + moved,
-                };
+                const animation: Animation = pipe(
+                  state.value,
+                  Struct.assign({ applied: state.value.applied + moved }),
+                );
                 const next = recalibrate(rate, animation);
                 const stillHeld = Option.isSome(animation.code) && held.has(animation.code.value);
 
@@ -456,13 +463,18 @@ export class Scroller extends Context.Service<
                   // a held key gives one continuous glide and not a staircase.
                   return [
                     { running: true, rate: next },
-                    Option.some({
-                      ...animation,
-                      origin: animation.applied,
-                      amount: animation.amount + Math.sign(animation.amount) * Math.abs(stepSize),
-                      duration: durationFor(Math.abs(stepSize)),
-                      elapsed: 0,
-                    }),
+                    Option.some(
+                      pipe(
+                        animation,
+                        Struct.assign({
+                          origin: animation.applied,
+                          amount:
+                            animation.amount + Math.sign(animation.amount) * Math.abs(stepSize),
+                          duration: durationFor(Math.abs(stepSize)),
+                          elapsed: 0,
+                        }),
+                      ),
+                    ),
                   ];
                 }
                 return [{ running: true, rate: next }, Option.some(animation)];
@@ -484,11 +496,14 @@ export class Scroller extends Context.Service<
 
         /** A defect in the animation leaves the page stuck. The user must know. */
         const animate = (axis: ScrollAxis): Effect.Effect<void> =>
-          Effect.catchDefect(loop(axis), (defect) =>
-            Effect.gen(function* () {
-              yield* Effect.logError("the scroll animation failed", defect);
-              yield* report.error("Scrolling stopped after an internal failure");
-            }),
+          pipe(
+            loop(axis),
+            Effect.catchDefect((defect) =>
+              Effect.gen(function* () {
+                yield* Effect.logError("the scroll animation failed", defect);
+                yield* report.error("Scrolling stopped after an internal failure");
+              }),
+            ),
           );
 
         const start = Effect.fn("Scroller.start")(function* (
@@ -533,8 +548,11 @@ export class Scroller extends Context.Service<
 
           // An empty `code` is not a physical key that we can watch, so it is
           // absent and not a value.
-          const code = Option.flatMap(event, (value) =>
-            value.code === "" ? Option.none() : Option.some(value.code),
+          const code = pipe(
+            event,
+            Option.flatMap((value) =>
+              value.code === "" ? Option.none() : Option.some(value.code),
+            ),
           );
           const existing = yield* Ref.get(animations[axis]);
           if (Option.isSome(existing) && existing.value.element === element) {
@@ -544,11 +562,15 @@ export class Scroller extends Context.Service<
             // first press had not yet applied.
             yield* Ref.set(
               animations[axis],
-              Option.some({
-                ...merge(existing.value, amount),
-                code: Option.isSome(code) ? code : existing.value.code,
-                generation: yield* Ref.get(generation),
-              }),
+              Option.some(
+                pipe(
+                  merge(existing.value, amount),
+                  Struct.assign({
+                    code: Option.isSome(code) ? code : existing.value.code,
+                    generation: yield* Ref.get(generation),
+                  }),
+                ),
+              ),
             );
             return;
           }

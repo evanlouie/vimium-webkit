@@ -12,7 +12,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, Record, pipe, Struct } from "effect";
 import { defaultSettings } from "~/domain/Persisted.ts";
 import {
   adjustedFields,
@@ -22,7 +22,7 @@ import {
   SETTINGS_FIELDS,
 } from "~/ui/Dialog.ts";
 
-const settingKeys = (): readonly string[] => Object.keys(defaultSettings()).toSorted();
+const settingKeys = (): readonly string[] => Record.keys(defaultSettings()).toSorted();
 
 const fieldKeys = (): readonly string[] =>
   SETTINGS_FIELDS.map((field) => String(field.key)).toSorted();
@@ -87,7 +87,7 @@ describe("the settings form", () => {
   it.effect("names the fields that storage changed", () =>
     Effect.sync(() => {
       const base = defaultSettings();
-      const offered = { ...base, hideHud: !base.hideHud, newTabUrl: "x" };
+      const offered = pipe(base, Struct.assign({ hideHud: !base.hideHud, newTabUrl: "x" }));
       const changed = adjustedFields(offered, base);
       assert.deepEqual(
         [...changed].toSorted(),

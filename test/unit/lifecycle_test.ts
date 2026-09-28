@@ -11,7 +11,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Exit, Layer, Ref, Scope } from "effect";
+import { Effect, Exit, Layer, Ref, Scope, pipe, Struct } from "effect";
 import { type ExitHook, Lifecycle, type PageExit } from "~/boot/Lifecycle.ts";
 import { Dom } from "~/platform/Dom.ts";
 
@@ -33,27 +33,37 @@ const recordingDom = (
   attached: Ref.Ref<ReadonlyArray<Attached>>,
   document: FakeDocument,
 ): Layer.Layer<Dom> =>
-  Layer.effect(
-    Dom,
-    Effect.map(Dom, (dom) =>
-      Dom.of({
-        ...dom,
-        document: document as unknown as Document,
-        href: Effect.succeed("https://example.test/one"),
-        // The cast says what the stub already is: every listener of the
-        // lifecycle needs no service, so a recorded body is an `Effect<void>`.
-        listen: ((
-          _target: unknown,
-          type: unknown,
-          handler: (event: Event) => Effect.Effect<void>,
-        ) =>
-          Ref.update(attached, (current) => [
-            ...current,
-            { type: String(type), run: handler },
-          ])) as unknown as Dom["Service"]["listen"],
-      }),
+  pipe(
+    Layer.effect(
+      Dom,
+      pipe(
+        Dom,
+        Effect.map((dom) =>
+          Dom.of(
+            pipe(
+              dom,
+              Struct.assign({
+                document: document as unknown as Document,
+                href: Effect.succeed("https://example.test/one"),
+                // The cast says what the stub already is: every listener of the
+                // lifecycle needs no service, so a recorded body is an `Effect<void>`.
+                listen: ((
+                  _target: unknown,
+                  type: unknown,
+                  handler: (event: Event) => Effect.Effect<void>,
+                ) =>
+                  Ref.update(attached, (current) => [
+                    ...current,
+                    { type: String(type), run: handler },
+                  ])) as unknown as Dom["Service"]["listen"],
+              }),
+            ),
+          ),
+        ),
+      ),
     ),
-  ).pipe(Layer.provide(Dom.layer));
+    Layer.provide(Dom.layer),
+  );
 
 /** A `pagehide` event, with the one field that the code reads. */
 const pageHide = (persisted: boolean): Event =>
@@ -129,7 +139,7 @@ const withLifecycle = (
           });
         }),
       ),
-      Lifecycle.layer.pipe(Layer.provide(recordingDom(attached, document))),
+      pipe(Lifecycle.layer, Layer.provide(recordingDom(attached, document))),
     );
   });
 

@@ -24,7 +24,7 @@
  * reach the bindings of the page.
  */
 
-import { Clock, Context, Effect, Exit, Layer, Option, Ref, Scope } from "effect";
+import { Clock, Context, Effect, Exit, Layer, Option, Ref, Scope, pipe, Struct } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import {
   CONTINUE_BUBBLING,
@@ -364,26 +364,33 @@ export class Omnibar extends Context.Service<
       ) {
         const now = yield* Clock.currentTimeMillis;
         yield* Effect.ignore(
-          storage.session.update((current): SessionState => ({
-            ...current,
-            knownTabs: [
-              { url, title, heartbeat: now },
-              ...liveTabs(current.knownTabs, now).filter((tab) => tab.url !== url),
-            ],
-          })),
+          storage.session.update((current): SessionState =>
+            pipe(
+              current,
+              Struct.assign({
+                knownTabs: [
+                  { url, title, heartbeat: now },
+                  ...liveTabs(current.knownTabs, now).filter((tab) => tab.url !== url),
+                ],
+              }),
+            ),
+          ),
         );
       });
 
       const openInNewTab = Effect.fn("Omnibar.openInNewTab")(function* (url: string) {
-        yield* Effect.matchEffect(tabs.open(url, { active: true }), {
-          onSuccess: (outcome) => registerOpenedTab(outcome.url, ""),
-          onFailure: (error) =>
-            report.error(
-              error.nativeAlternative === undefined
-                ? error.detail
-                : `${error.detail} (${error.nativeAlternative})`,
-            ),
-        });
+        yield* pipe(
+          tabs.open(url, { active: true }),
+          Effect.matchEffect({
+            onSuccess: (outcome) => registerOpenedTab(outcome.url, ""),
+            onFailure: (error) =>
+              report.error(
+                error.nativeAlternative === undefined
+                  ? error.detail
+                  : `${error.detail} (${error.nativeAlternative})`,
+              ),
+          }),
+        );
       });
 
       const activate = Effect.fn("Omnibar.activate")(function* (index: number, newTab: boolean) {
@@ -473,12 +480,14 @@ export class Omnibar extends Context.Service<
           case "next":
             return move(current, 1);
           case "accept":
-            return Effect.flatMap(Ref.get(current.selected), (index) =>
-              startActivation(index, false),
+            return pipe(
+              Ref.get(current.selected),
+              Effect.flatMap((index) => startActivation(index, false)),
             );
           case "accept-new-tab":
-            return Effect.flatMap(Ref.get(current.selected), (index) =>
-              startActivation(index, true),
+            return pipe(
+              Ref.get(current.selected),
+              Effect.flatMap((index) => startActivation(index, true)),
             );
           case "cancel":
             return startClose;
@@ -545,7 +554,7 @@ export class Omnibar extends Context.Service<
         });
 
         const view = yield* inScope(
-          Effect.provideContext(
+          pipe(
             makeOmnibarView({
               placeholder: PLACEHOLDERS[source],
               onInput: () =>
@@ -560,7 +569,7 @@ export class Omnibar extends Context.Service<
               onActivate: startActivation,
               onDismiss: close,
             }),
-            services,
+            Effect.provideContext(services),
           ),
         );
 
@@ -636,26 +645,34 @@ export class Omnibar extends Context.Service<
         const title = yield* dom.probeOr(() => dom.document.title, "");
         const now = yield* Clock.currentTimeMillis;
         yield* Effect.ignore(
-          storage.session.update((current): SessionState => ({
-            ...current,
-            knownTabs: liveTabs(current.knownTabs, now).map((tab) =>
-              tab.url === href ? { url: href, title, heartbeat: now } : tab,
+          storage.session.update((current): SessionState =>
+            pipe(
+              current,
+              Struct.assign({
+                knownTabs: liveTabs(current.knownTabs, now).map((tab) =>
+                  tab.url === href ? { url: href, title, heartbeat: now } : tab,
+                ),
+              }),
             ),
-          })),
+          ),
         );
       });
 
       const clearHistory = Effect.fn("Omnibar.clearHistory")(function* () {
-        yield* Effect.matchEffect(history.clear, {
-          onFailure: (error) => report.error(`Could not erase the history index: ${error.detail}`),
-          onSuccess: () => report.info("Local history index erased"),
-        });
+        yield* pipe(
+          history.clear,
+          Effect.matchEffect({
+            onFailure: (error) =>
+              report.error(`Could not erase the history index: ${error.detail}`),
+            onSuccess: () => report.info("Local history index erased"),
+          }),
+        );
       });
 
       const service = Omnibar.of({
         open,
         close,
-        noteVisit: Effect.andThen(history.record, heartbeat()),
+        noteVisit: pipe(history.record, Effect.andThen(heartbeat())),
         clearHistory: clearHistory(),
       });
 

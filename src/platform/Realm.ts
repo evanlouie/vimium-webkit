@@ -11,11 +11,11 @@
  * Absence cannot satisfy that test.
  */
 
-import { Context, Effect, Layer, Schema } from "effect";
+import { Context, Effect, Layer, Schema, pipe } from "effect";
 import { Dom } from "./Dom.ts";
 
 /** A frame identity. Random, per frame, and never reused. */
-export const FrameId = Schema.String.pipe(Schema.brand("FrameId"));
+export const FrameId = pipe(Schema.String, Schema.brand("FrameId"));
 export type FrameId = typeof FrameId.Type;
 
 export class RealmError extends Schema.TaggedError<RealmError>()("RealmError", {

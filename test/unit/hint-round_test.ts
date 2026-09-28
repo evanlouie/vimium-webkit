@@ -9,7 +9,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Deferred, Effect, Fiber, Option, Ref } from "effect";
+import { Deferred, Effect, Fiber, Option, Ref, pipe } from "effect";
 import { TestClock } from "effect/testing";
 import { type HintDescriptor, MAX_SESSION_DESCRIPTORS } from "~/domain/FrameMessage.ts";
 import {
@@ -40,12 +40,10 @@ describe("the hint round", () => {
       const stopped = yield* Ref.make(false);
 
       // One frame answers long after the timeout.
-      const collect = Effect.onInterrupt(
-        Effect.andThen(
-          Effect.sleep(5000),
-          Effect.as(Ref.set(answered, true), Option.some("hints")),
-        ),
-        () => Ref.set(stopped, true),
+      const collect = pipe(
+        Effect.sleep(5000),
+        Effect.andThen(pipe(Ref.set(answered, true), Effect.as(Option.some("hints")))),
+        Effect.onInterrupt(() => Ref.set(stopped, true)),
       );
 
       yield* Effect.forkScoped(abortAfterSafety(abort, Ref.set(released, true), SAFETY_MS));
@@ -67,7 +65,7 @@ describe("the hint round", () => {
       const abort = yield* Deferred.make<void>();
       const released = yield* Ref.make(false);
 
-      const collect = Effect.andThen(Effect.sleep(100), Effect.succeed(Option.some("hints")));
+      const collect = pipe(Effect.sleep(100), Effect.andThen(Effect.succeed(Option.some("hints"))));
 
       yield* Effect.forkScoped(abortAfterSafety(abort, Ref.set(released, true), SAFETY_MS));
       const round = yield* Effect.forkChild(raceUntilAbort(collect, abort));
@@ -99,7 +97,10 @@ describe("the hint round", () => {
   it.effect("ends the round when the user presses Escape", () =>
     Effect.gen(function* () {
       const abort = yield* Deferred.make<void>();
-      const collect = Effect.andThen(Effect.sleep(5000), Effect.succeed(Option.some("hints")));
+      const collect = pipe(
+        Effect.sleep(5000),
+        Effect.andThen(Effect.succeed(Option.some("hints"))),
+      );
       const round = yield* Effect.forkChild(raceUntilAbort(collect, abort));
 
       yield* Deferred.succeed(abort, undefined);

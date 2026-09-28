@@ -3,12 +3,12 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option } from "effect";
+import { Effect, Option, Record } from "effect";
 import { COMMANDS, DEFAULT_MAPPINGS } from "~/domain/Command.ts";
 import { type KeyEventLike, keyNotation } from "~/domain/Key.ts";
 import { compileMappings } from "~/domain/Mapping.ts";
 
-const names: ReadonlySet<string> = new Set(Object.keys(COMMANDS));
+const names: ReadonlySet<string> = new Set(Record.keys(COMMANDS));
 
 describe("Command", () => {
   /**

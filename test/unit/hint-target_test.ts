@@ -10,7 +10,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Effect, pipe, Struct } from "effect";
 import {
   hintHasMoved,
   type HintShift,
@@ -67,7 +67,7 @@ describe("hintHasMoved", () => {
   it.effect("refuses five pixels of drift on a wide target", () =>
     Effect.sync(() => {
       const wide = { left: 10, top: 20, width: 400, height: 40 };
-      const moved = { ...wide, left: 15 };
+      const moved = pipe(wide, Struct.assign({ left: 15 }));
       assert.isTrue(hintHasMoved(wide, moved, NO_SHIFT));
     }),
   );

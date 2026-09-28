@@ -7,7 +7,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option } from "effect";
+import { Effect, Option, Record } from "effect";
 import { COMMANDS, DEFAULT_MAPPINGS } from "~/domain/Command.ts";
 import {
   type BranchCursor,
@@ -49,7 +49,7 @@ const command = (trie: TrieNode, keys: readonly string[]): string | null => {
   return Option.isSome(node.binding) ? node.binding.value.command : null;
 };
 
-const allCommandNames: ReadonlySet<string> = new Set(Object.keys(COMMANDS));
+const allCommandNames: ReadonlySet<string> = new Set(Record.keys(COMMANDS));
 
 const compileDefaults = () =>
   compileMappings(DEFAULT_MAPPINGS, {

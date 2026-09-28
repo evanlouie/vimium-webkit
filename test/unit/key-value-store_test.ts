@@ -11,7 +11,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer, Option, Stream } from "effect";
+import { Effect, Layer, Option, Stream, pipe } from "effect";
 import { Gm, GmError, type GmValueApi } from "~/platform/Gm.ts";
 import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 
@@ -73,7 +73,7 @@ describe("KeyValueStore", () => {
     Effect.gen(function* () {
       const kv = yield* Effect.provide(
         KeyValueStore,
-        KeyValueStore.layer.pipe(Layer.provide(gmLayer(Option.none()))),
+        pipe(KeyValueStore.layer, Layer.provide(gmLayer(Option.none()))),
       );
 
       assert.strictEqual(kv.kind, "memory");
@@ -94,7 +94,7 @@ describe("KeyValueStore", () => {
     Effect.gen(function* () {
       const kv = yield* Effect.provide(
         KeyValueStore,
-        KeyValueStore.layer.pipe(Layer.provide(gmLayer(Option.some(valueApi())))),
+        pipe(KeyValueStore.layer, Layer.provide(gmLayer(Option.some(valueApi())))),
       );
 
       assert.strictEqual(kv.kind, "gm-sync");

@@ -1,7 +1,7 @@
 /** The userscript manager capability selection. */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option } from "effect";
+import { Effect, Option, pipe } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 import { Gm, type GmSurface } from "~/platform/Gm.ts";
 
@@ -46,20 +46,24 @@ describe("Gm value API selection", () => {
         windowClose: null,
       };
 
-      yield* Effect.gen(function* () {
-        const gm = yield* Gm;
-        assert.isTrue(Option.isSome(gm.values));
-        if (Option.isNone(gm.values)) return;
+      yield* pipe(
+        Effect.gen(function* () {
+          const gm = yield* Gm;
+          assert.isTrue(Option.isSome(gm.values));
+          if (Option.isNone(gm.values)) return;
 
-        const values = gm.values.value;
-        assert.strictEqual(values.kind, "gm-sync");
-        assert.deepEqual(yield* values.get("one"), Option.some("sync"));
-        yield* values.set("two", "value");
-        yield* values.remove("three");
+          const values = gm.values.value;
+          assert.strictEqual(values.kind, "gm-sync");
+          assert.deepEqual(yield* values.get("one"), Option.some("sync"));
+          yield* values.set("two", "value");
+          yield* values.remove("three");
 
-        assert.deepEqual(syncCalls, ["get:one", "set:two:value", "delete:three"]);
-        assert.deepEqual(asyncCalls, []);
-      }).pipe(Effect.provide(Gm.layerFrom(surface)), Effect.provide(Dom.layer));
+          assert.deepEqual(syncCalls, ["get:one", "set:two:value", "delete:three"]);
+          assert.deepEqual(asyncCalls, []);
+        }),
+        Effect.provide(Gm.layerFrom(surface)),
+        Effect.provide(Dom.layer),
+      );
     }),
   );
 });

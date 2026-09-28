@@ -24,7 +24,18 @@
  *    position back. There is no "cancel" flag to keep in step.
  */
 
-import { Context, Deferred, Effect, Exit, FiberHandle, Layer, Option, Ref, Scope } from "effect";
+import {
+  Context,
+  Deferred,
+  Effect,
+  Exit,
+  FiberHandle,
+  Layer,
+  Option,
+  Ref,
+  Scope,
+  pipe,
+} from "effect";
 import { Commands } from "~/core/Commands.ts";
 import {
   CONTINUE_BUBBLING,
@@ -248,7 +259,7 @@ export class Find extends Context.Service<
         yield* ensureStyles;
         const scope = yield* Scope.make();
         const highlighter = yield* Effect.provideService(
-          Effect.provideContext(makeHighlighter, overlayServices),
+          pipe(makeHighlighter, Effect.provideContext(overlayServices)),
           Scope.Scope,
           scope,
         );
@@ -364,7 +375,10 @@ export class Find extends Context.Service<
           found.length === 0
             ? -1
             : clampIndex(
-                Option.getOrElse(anchor, () => firstMatchInView(found)),
+                pipe(
+                  anchor,
+                  Option.getOrElse(() => firstMatchInView(found)),
+                ),
                 found.length,
               ),
         );
@@ -561,7 +575,7 @@ export class Find extends Context.Service<
         // stored first, because `onExit` runs its body at once when the mode
         // already exited.
         yield* Ref.set(postScope, Option.some(scope));
-        yield* handle.onExit(() => Effect.andThen(clearState, closePost));
+        yield* handle.onExit(() => pipe(clearState, Effect.andThen(closePost)));
       });
 
       /** Open the mode again when nothing holds the highlights. */
@@ -745,7 +759,7 @@ export class Find extends Context.Service<
 
         const answer = yield* Effect.race(
           hud.prompt(options),
-          Effect.as(Deferred.await(abandoned), Option.none<string>()),
+          pipe(Deferred.await(abandoned), Effect.as(Option.none<string>())),
         );
 
         if (Option.isSome(answer)) yield* Ref.set(committed, true);

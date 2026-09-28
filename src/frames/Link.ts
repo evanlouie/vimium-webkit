@@ -27,7 +27,7 @@
  * `FrameBus.serve`. This file must not import anything from `src/features/`.
  */
 
-import { Context, Effect, Layer, Option, Ref, Stream, SubscriptionRef } from "effect";
+import { Context, Effect, Layer, Option, Ref, Stream, SubscriptionRef, pipe } from "effect";
 import type { EffectiveRule } from "~/domain/Exclusion.ts";
 import { DEFAULT_EXCLUSION } from "~/domain/FrameMessage.ts";
 import { Exclusions } from "~/core/Exclusions.ts";
@@ -95,7 +95,10 @@ export class FrameLink extends Context.Service<
       const focusedRef = yield* Ref.make(Option.none<FrameId>());
 
       /** The verdict for the URL of the top frame. The top frame only. */
-      const topVerdict: Effect.Effect<EffectiveRule> = Effect.flatMap(dom.href, exclusions.match);
+      const topVerdict: Effect.Effect<EffectiveRule> = pipe(
+        dom.href,
+        Effect.flatMap(exclusions.match),
+      );
 
       const pushSettings: Effect.Effect<void> = bus.isTop
         ? Effect.gen(function* () {
@@ -109,9 +112,9 @@ export class FrameLink extends Context.Service<
           })
         : Effect.void;
 
-      const askTop: Effect.Effect<EffectiveRule, FrameError> = Effect.tap(
+      const askTop: Effect.Effect<EffectiveRule, FrameError> = pipe(
         bus.request(toTop, { kind: "EXCLUSION_REQUEST" }, readExclusion, REQUEST_DEADLINE),
-        (rule) => exclusions.adopt(rule),
+        Effect.tap((rule) => exclusions.adopt(rule)),
       );
 
       const effectiveExclusion: Effect.Effect<EffectiveRule, FrameError> = bus.isTop
@@ -154,46 +157,52 @@ export class FrameLink extends Context.Service<
       // The messages that this service answers
       // ---------------------------------------------------------------------
 
-      yield* bus.serve("TAKE_FOCUS", () => Effect.as(takeFocus(), Option.none()));
+      yield* bus.serve("TAKE_FOCUS", () => pipe(takeFocus(), Effect.as(Option.none())));
 
       if (bus.isTop) {
         // The URL of the top frame is the URL that decides the verdict, and a
         // child frame cannot read it across origins.
         yield* bus.serve("EXCLUSION_REQUEST", () =>
-          Effect.map(topVerdict, (rule) =>
-            Option.some({
-              kind: "EXCLUSION_RESULT" as const,
-              exclusion: { enabled: rule.enabled, passKeys: rule.passKeys },
-            }),
+          pipe(
+            topVerdict,
+            Effect.map((rule) =>
+              Option.some({
+                kind: "EXCLUSION_RESULT" as const,
+                exclusion: { enabled: rule.enabled, passKeys: rule.passKeys },
+              }),
+            ),
           ),
         );
 
         yield* bus.serve("FOCUS_FRAME", (message) =>
           message.message.kind === "FOCUS_FRAME"
-            ? Effect.as(elect(message.message.direction), Option.none())
+            ? pipe(elect(message.message.direction), Effect.as(Option.none()))
             : Effect.succeedNone,
         );
 
         yield* bus.serve("FOCUSED", (message) =>
-          Effect.as(Ref.set(focusedRef, Option.some(message.from)), Option.none()),
+          pipe(Ref.set(focusedRef, Option.some(message.from)), Effect.as(Option.none())),
         );
 
         // The top frame owns the verdict, so every change of it goes out to the
         // frames. `Exclusions` recomputes the verdict when the settings change.
         yield* Effect.forkScoped(
-          Stream.runForEach(SubscriptionRef.changes(exclusions.effective), () => pushSettings),
+          pipe(
+            SubscriptionRef.changes(exclusions.effective),
+            Stream.runForEach(() => pushSettings),
+          ),
         );
       } else {
         yield* bus.serve("SETTINGS", (message) =>
           message.message.kind === "SETTINGS"
-            ? Effect.as(
+            ? pipe(
+                Effect.ignore(settings.reload),
                 Effect.andThen(
                   // A prompt to read our own storage again, and never a value to
                   // take. Only the verdict travels.
-                  Effect.ignore(settings.reload),
                   exclusions.adopt(message.message.exclusion),
                 ),
-                Option.none(),
+                Effect.as(Option.none()),
               )
             : Effect.succeedNone,
         );
@@ -202,8 +211,11 @@ export class FrameLink extends Context.Service<
         // before its welcome would otherwise stay fully enabled, for the life
         // of the document, on a page that the user excluded.
         yield* Effect.forkScoped(
-          Effect.flatMap(bus.ready, (admitted) =>
-            admitted ? Effect.ignore(askTop) : exclusions.adopt(DEFAULT_EXCLUSION),
+          pipe(
+            bus.ready,
+            Effect.flatMap((admitted) =>
+              admitted ? Effect.ignore(askTop) : exclusions.adopt(DEFAULT_EXCLUSION),
+            ),
           ),
         );
       }

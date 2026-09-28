@@ -14,7 +14,7 @@
  * `error`, and the HUD shows it while the user still types.
  */
 
-import { Option } from "effect";
+import { Option, pipe } from "effect";
 import { regexSafetyError } from "~/domain/RegexSafety.ts";
 
 // ---------------------------------------------------------------------------
@@ -218,7 +218,10 @@ export const parseFindQuery = (raw: string, options: FindQueryOptions): ParsedFi
       };
 
   const pattern = directives.text;
-  const kind: FindQueryKind = Option.getOrElse(directives.isRegex, () => options.regexFindMode)
+  const kind: FindQueryKind = pipe(
+    directives.isRegex,
+    Option.getOrElse(() => options.regexFindMode),
+  )
     ? "regex"
     : "literal";
 
@@ -226,9 +229,15 @@ export const parseFindQuery = (raw: string, options: FindQueryOptions): ParsedFi
     Option.isSome(literal) && literal.value.flags.includes("i")
       ? Option.some(true)
       : Option.none<boolean>();
-  const explicitIgnoreCase = Option.orElse(directives.ignoreCase, () => literalIgnoreCase);
+  const explicitIgnoreCase = pipe(
+    directives.ignoreCase,
+    Option.orElse(() => literalIgnoreCase),
+  );
   const smartcase = Option.isNone(explicitIgnoreCase);
-  const ignoreCase = Option.getOrElse(explicitIgnoreCase, () => !hasUpperCase(pattern));
+  const ignoreCase = pipe(
+    explicitIgnoreCase,
+    Option.getOrElse(() => !hasUpperCase(pattern)),
+  );
 
   const extraFlags = Option.isNone(literal) ? "" : literal.value.flags.replace("i", "");
   const flags = `${BASE_FLAGS}${ignoreCase ? "i" : ""}${extraFlags}`;
@@ -288,7 +297,10 @@ const compileError = (source: string, flags: string): Option.Option<string> => {
   // promise a linear match, so `~/features/find/Engine.ts` reads the page text
   // in measured windows and stops at a deadline. That budget is the second
   // limit on the same pattern.
-  return Option.map(regexSafetyError(source, flags), (reason) => `${reason}; try a simpler one`);
+  return pipe(
+    regexSafetyError(source, flags),
+    Option.map((reason) => `${reason}; try a simpler one`),
+  );
 };
 
 /**

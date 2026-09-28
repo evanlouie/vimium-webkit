@@ -11,7 +11,19 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Deferred, Effect, Exit, Fiber, Layer, Option, Queue, Result, Stream } from "effect";
+import {
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Option,
+  Queue,
+  Result,
+  Stream,
+  pipe,
+  Struct,
+} from "effect";
 import { TestClock } from "effect/testing";
 import { defaultSettings } from "~/domain/Persisted.ts";
 import { GmError } from "~/platform/Gm.ts";
@@ -164,7 +176,7 @@ const advanceUntilDone = <A, E>(
     const settled = fiber.pollUnsafe();
     if (settled !== undefined) return Effect.succeed(settled);
     if (steps <= 0) return Effect.die(new Error("the fiber never settled"));
-    return Effect.andThen(TestClock.adjust("100 millis"), advanceUntilDone(fiber, steps - 1));
+    return pipe(TestClock.adjust("100 millis"), Effect.andThen(advanceUntilDone(fiber, steps - 1)));
   });
 
 /** The envelope that the store writes around a group value. */
@@ -181,7 +193,7 @@ const yieldUntil = (ready: () => boolean, steps = 50): Effect.Effect<void> =>
   Effect.suspend(() => {
     if (ready()) return Effect.void;
     if (steps <= 0) return Effect.die(new Error("the condition never held"));
-    return Effect.andThen(Effect.yieldNow, yieldUntil(ready, steps - 1));
+    return pipe(Effect.yieldNow, Effect.andThen(yieldUntil(ready, steps - 1)));
   });
 
 /**
@@ -197,7 +209,7 @@ const leavePending = (
 ): Effect.Effect<Fiber.Fiber<void, StorageError>> =>
   Effect.gen(function* () {
     const writing = yield* Effect.forkChild(
-      storage.settings.write({ ...defaultSettings(), scrollStepSize }),
+      storage.settings.write(pipe(defaultSettings(), Struct.assign({ scrollStepSize }))),
       { startImmediately: true },
     );
     yield* yieldUntil(() => storage.settings.currentUnsafe().scrollStepSize === scrollStepSize);
@@ -206,8 +218,9 @@ const leavePending = (
 
 /** The first issue that storage reports, without waiting for a second. */
 const firstIssue = (storage: Storage["Service"]): Effect.Effect<Option.Option<StorageError>> =>
-  Effect.map(Stream.runCollect(Stream.take(storage.issues, 1)), (issues) =>
-    Option.fromNullishOr(issues[0] ?? null),
+  pipe(
+    Stream.runCollect(pipe(storage.issues, Stream.take(1))),
+    Effect.map((issues) => Option.fromNullishOr(issues[0] ?? null)),
   );
 
 describe("Storage", () => {
@@ -215,20 +228,24 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        yield* backend.seed(SETTINGS_KEY, "{not json");
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          yield* backend.seed(SETTINGS_KEY, "{not json");
 
-        const value = yield* storage.settings.hydrate;
-        assert.deepEqual(value, defaultSettings());
+          const value = yield* storage.settings.hydrate;
+          assert.deepEqual(value, defaultSettings());
 
-        const issue = yield* firstIssue(storage);
-        assert.isTrue(Option.isSome(issue));
-        if (Option.isNone(issue)) return;
-        assert.strictEqual(issue.value.reason, "malformed");
-        assert.strictEqual(issue.value.direction, "read");
-        assert.strictEqual(issue.value.group, "settings");
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          const issue = yield* firstIssue(storage);
+          assert.isTrue(Option.isSome(issue));
+          if (Option.isNone(issue)) return;
+          assert.strictEqual(issue.value.reason, "malformed");
+          assert.strictEqual(issue.value.direction, "read");
+          assert.strictEqual(issue.value.group, "settings");
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -236,28 +253,32 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        // A newer build in another tab wrote this. Do not go backwards, and do
-        // not overwrite it.
-        yield* backend.seed(
-          SETTINGS_KEY,
-          envelope(99, { ...defaultSettings(), scrollStepSize: 120 }),
-        );
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          // A newer build in another tab wrote this. Do not go backwards, and do
+          // not overwrite it.
+          yield* backend.seed(
+            SETTINGS_KEY,
+            envelope(99, pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }))),
+          );
 
-        const value = yield* storage.settings.hydrate;
-        assert.deepEqual(value, defaultSettings());
+          const value = yield* storage.settings.hydrate;
+          assert.deepEqual(value, defaultSettings());
 
-        const issue = yield* firstIssue(storage);
-        assert.isTrue(Option.isSome(issue));
-        if (Option.isNone(issue)) return;
-        assert.strictEqual(issue.value.reason, "invalid");
-        assert.include(issue.value.detail, "99");
+          const issue = yield* firstIssue(storage);
+          assert.isTrue(Option.isSome(issue));
+          if (Option.isNone(issue)) return;
+          assert.strictEqual(issue.value.reason, "invalid");
+          assert.include(issue.value.detail, "99");
 
-        // The stored value is left alone.
-        const raw = yield* backend.read(SETTINGS_KEY);
-        assert.isTrue(Option.isSome(raw));
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          // The stored value is left alone.
+          const raw = yield* backend.read(SETTINGS_KEY);
+          assert.isTrue(Option.isSome(raw));
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -265,22 +286,26 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        // `marks` has no per-field fallback, so the whole group falls back.
-        yield* backend.seed(
-          `${STORAGE_PREFIX}marks`,
-          envelope(1, { local: "not a record", global: {} }),
-        );
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          // `marks` has no per-field fallback, so the whole group falls back.
+          yield* backend.seed(
+            `${STORAGE_PREFIX}marks`,
+            envelope(1, { local: "not a record", global: {} }),
+          );
 
-        const value = yield* storage.marks.hydrate;
-        assert.deepEqual(value, { local: {}, global: {} });
+          const value = yield* storage.marks.hydrate;
+          assert.deepEqual(value, { local: {}, global: {} });
 
-        const issue = yield* firstIssue(storage);
-        assert.isTrue(Option.isSome(issue));
-        if (Option.isNone(issue)) return;
-        assert.strictEqual(issue.value.reason, "invalid");
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          const issue = yield* firstIssue(storage);
+          assert.isTrue(Option.isSome(issue));
+          if (Option.isNone(issue)) return;
+          assert.strictEqual(issue.value.reason, "invalid");
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -288,29 +313,33 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        const next = { ...defaultSettings(), scrollStepSize: 120 };
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          const next = pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }));
 
-        const writing = yield* Effect.forkChild(storage.settings.write(next), {
-          startImmediately: true,
-        });
+          const writing = yield* Effect.forkChild(storage.settings.write(next), {
+            startImmediately: true,
+          });
 
-        // The settings group joins writes for 250 ms, so nothing has reached
-        // the backend and the caller is still waiting.
-        assert.isUndefined(writing.pollUnsafe());
-        assert.deepEqual(yield* backend.writes, []);
-        assert.isTrue(Option.isNone(yield* backend.read(SETTINGS_KEY)));
+          // The settings group joins writes for 250 ms, so nothing has reached
+          // the backend and the caller is still waiting.
+          assert.isUndefined(writing.pollUnsafe());
+          assert.deepEqual(yield* backend.writes, []);
+          assert.isTrue(Option.isNone(yield* backend.read(SETTINGS_KEY)));
 
-        const outcome = yield* advanceUntilDone(writing);
-        assert.isTrue(Exit.isSuccess(outcome));
-        assert.strictEqual((yield* storage.settings.current).scrollStepSize, 120);
+          const outcome = yield* advanceUntilDone(writing);
+          assert.isTrue(Exit.isSuccess(outcome));
+          assert.strictEqual((yield* storage.settings.current).scrollStepSize, 120);
 
-        const raw = yield* backend.read(SETTINGS_KEY);
-        assert.isTrue(Option.isSome(raw));
-        if (Option.isNone(raw)) return;
-        assert.include(raw.value, '"scrollStepSize":120');
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          const raw = yield* backend.read(SETTINGS_KEY);
+          assert.isTrue(Option.isSome(raw));
+          if (Option.isNone(raw)) return;
+          assert.include(raw.value, '"scrollStepSize":120');
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -318,20 +347,21 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackendFor("gm-async");
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        const writing = yield* Effect.forkChild(
-          storage.settings.write({
-            ...defaultSettings(),
-            scrollStepSize: 120,
-          }),
-          { startImmediately: true },
-        );
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          const writing = yield* Effect.forkChild(
+            storage.settings.write(pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }))),
+            { startImmediately: true },
+          );
 
-        yield* yieldUntil(() => backend.startedNow() === 1);
-        yield* Fiber.join(writing);
-        assert.lengthOf(backend.writesNow(), 1);
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          yield* yieldUntil(() => backend.startedNow() === 1);
+          yield* Fiber.join(writing);
+          assert.lengthOf(backend.writesNow(), 1);
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -339,33 +369,37 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackendFor("gm-async");
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        const base = yield* storage.session.current;
-        yield* backend.holdWrites;
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          const base = yield* storage.session.current;
+          yield* backend.holdWrites;
 
-        const first = yield* Effect.forkChild(
-          storage.session.write({ ...base, acknowledged: ["first"] }),
-          { startImmediately: true },
-        );
-        yield* yieldUntil(() => backend.startedNow() === 1);
+          const first = yield* Effect.forkChild(
+            storage.session.write(pipe(base, Struct.assign({ acknowledged: ["first"] }))),
+            { startImmediately: true },
+          );
+          yield* yieldUntil(() => backend.startedNow() === 1);
 
-        const second = yield* Effect.forkChild(
-          storage.session.write({ ...base, acknowledged: ["second"] }),
-          { startImmediately: true },
-        );
-        for (let turn = 0; turn < 10; turn += 1) yield* Effect.yieldNow;
+          const second = yield* Effect.forkChild(
+            storage.session.write(pipe(base, Struct.assign({ acknowledged: ["second"] }))),
+            { startImmediately: true },
+          );
+          for (let turn = 0; turn < 10; turn += 1) yield* Effect.yieldNow;
 
-        assert.strictEqual(backend.startedNow(), 1);
-        yield* backend.releaseWrites;
-        yield* Fiber.join(first);
-        yield* Fiber.join(second);
+          assert.strictEqual(backend.startedNow(), 1);
+          yield* backend.releaseWrites;
+          yield* Fiber.join(first);
+          yield* Fiber.join(second);
 
-        const writes = backend.writesNow();
-        assert.lengthOf(writes, 2);
-        assert.include(writes[0] ?? "", "first");
-        assert.include(writes[1] ?? "", "second");
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          const writes = backend.writesNow();
+          assert.lengthOf(writes, 2);
+          assert.include(writes[0] ?? "", "first");
+          assert.include(writes[1] ?? "", "second");
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -373,32 +407,35 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackendFor("gm-async");
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        const reported = yield* Effect.forkChild(firstIssue(storage), {
-          startImmediately: true,
-        });
-        yield* backend.breakNextActorWrite;
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          const reported = yield* Effect.forkChild(firstIssue(storage), {
+            startImmediately: true,
+          });
+          yield* backend.breakNextActorWrite;
 
-        const outcome = yield* Effect.result(
-          storage.session.write({
-            ...storage.session.currentUnsafe(),
-            acknowledged: ["rejected"],
-          }),
-        );
-        assert.isTrue(Result.isFailure(outcome));
-        if (Result.isSuccess(outcome)) return;
-        assert.strictEqual(outcome.failure.reason, "backend");
-        assert.strictEqual(outcome.failure.direction, "write");
+          const outcome = yield* Effect.result(
+            storage.session.write(
+              pipe(storage.session.currentUnsafe(), Struct.assign({ acknowledged: ["rejected"] })),
+            ),
+          );
+          assert.isTrue(Result.isFailure(outcome));
+          if (Result.isSuccess(outcome)) return;
+          assert.strictEqual(outcome.failure.reason, "backend");
+          assert.strictEqual(outcome.failure.direction, "write");
 
-        yield* yieldUntil(() => reported.pollUnsafe() !== undefined);
-        const issue = yield* Fiber.join(reported);
-        assert.isTrue(Option.isSome(issue));
-        if (Option.isNone(issue)) return;
-        assert.strictEqual(issue.value.reason, outcome.failure.reason);
-        assert.strictEqual(issue.value.direction, outcome.failure.direction);
-        assert.strictEqual(issue.value.detail, outcome.failure.detail);
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          yield* yieldUntil(() => reported.pollUnsafe() !== undefined);
+          const issue = yield* Fiber.join(reported);
+          assert.isTrue(Option.isSome(issue));
+          if (Option.isNone(issue)) return;
+          assert.strictEqual(issue.value.reason, outcome.failure.reason);
+          assert.strictEqual(issue.value.direction, outcome.failure.direction);
+          assert.strictEqual(issue.value.detail, outcome.failure.detail);
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -406,17 +443,21 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        const writing = yield* Effect.forkChild(
-          storage.settings.write({ ...defaultSettings(), scrollStepSize: 90 }),
-          { startImmediately: true },
-        );
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          const writing = yield* Effect.forkChild(
+            storage.settings.write(pipe(defaultSettings(), Struct.assign({ scrollStepSize: 90 }))),
+            { startImmediately: true },
+          );
 
-        yield* storage.settings.flush;
-        yield* Fiber.join(writing);
-        assert.lengthOf(yield* backend.writes, 1);
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          yield* storage.settings.flush;
+          yield* Fiber.join(writing);
+          assert.lengthOf(yield* backend.writes, 1);
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -424,27 +465,31 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
 
-        const writing = yield* Effect.forkChild(
-          storage.settings.write({ ...defaultSettings(), scrollStepSize: 120 }),
-          { startImmediately: true },
-        );
-        // The queue is first in, first out, so the reset runs after the write
-        // command, and before the debounce ends.
-        yield* storage.settings.reset;
+          const writing = yield* Effect.forkChild(
+            storage.settings.write(pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }))),
+            { startImmediately: true },
+          );
+          // The queue is first in, first out, so the reset runs after the write
+          // command, and before the debounce ends.
+          yield* storage.settings.reset;
 
-        const outcome = yield* Fiber.await(writing);
-        const error = Option.getOrNull(Exit.findErrorOption(outcome));
-        assert.isNotNull(error, "the waiting write must fail");
-        assert.strictEqual(error?.reason, "cancelled");
-        assert.strictEqual(error?.direction, "write");
+          const outcome = yield* Fiber.await(writing);
+          const error = Option.getOrNull(Exit.findErrorOption(outcome));
+          assert.isNotNull(error, "the waiting write must fail");
+          assert.strictEqual(error?.reason, "cancelled");
+          assert.strictEqual(error?.direction, "write");
 
-        // The write never reached the backend, and the defaults are in memory.
-        assert.deepEqual(yield* backend.writes, []);
-        assert.deepEqual(yield* storage.settings.current, defaultSettings());
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          // The write never reached the backend, and the defaults are in memory.
+          assert.deepEqual(yield* backend.writes, []);
+          assert.deepEqual(yield* storage.settings.current, defaultSettings());
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -452,26 +497,29 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        yield* backend.breakReads;
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          yield* backend.breakReads;
 
-        // The defaults are an answer for this caller, and not the state of the
-        // world. They must not be written over good data later.
-        yield* storage.settings.hydrate;
+          // The defaults are an answer for this caller, and not the state of the
+          // world. They must not be written over good data later.
+          yield* storage.settings.hydrate;
 
-        const outcome = yield* Effect.result(
-          storage.settings.update((current) => ({
-            ...current,
-            scrollStepSize: 120,
-          })),
-        );
-        assert.isTrue(Result.isFailure(outcome));
-        const error = Result.isFailure(outcome) ? outcome.failure : null;
-        assert.strictEqual(error?.reason, "backend");
-        assert.strictEqual(error?.direction, "read");
-        assert.deepEqual(yield* backend.writes, []);
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          const outcome = yield* Effect.result(
+            storage.settings.update((current) =>
+              pipe(current, Struct.assign({ scrollStepSize: 120 })),
+            ),
+          );
+          assert.isTrue(Result.isFailure(outcome));
+          const error = Result.isFailure(outcome) ? outcome.failure : null;
+          assert.strictEqual(error?.reason, "backend");
+          assert.strictEqual(error?.direction, "read");
+          assert.deepEqual(yield* backend.writes, []);
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -479,33 +527,37 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        // The session group writes at once, so each write is its own commit.
-        const base = yield* storage.session.current;
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          // The session group writes at once, so each write is its own commit.
+          const base = yield* storage.session.current;
 
-        const first = yield* Effect.forkChild(
-          storage.session.write({ ...base, acknowledged: ["first"] }),
-          { startImmediately: true },
-        );
-        const second = yield* Effect.forkChild(
-          storage.session.write({ ...base, acknowledged: ["second"] }),
-          { startImmediately: true },
-        );
+          const first = yield* Effect.forkChild(
+            storage.session.write(pipe(base, Struct.assign({ acknowledged: ["first"] }))),
+            { startImmediately: true },
+          );
+          const second = yield* Effect.forkChild(
+            storage.session.write(pipe(base, Struct.assign({ acknowledged: ["second"] }))),
+            { startImmediately: true },
+          );
 
-        yield* Fiber.join(first);
-        yield* Fiber.join(second);
+          yield* Fiber.join(first);
+          yield* Fiber.join(second);
 
-        const writes = yield* backend.writes;
-        assert.lengthOf(writes, 2);
-        assert.include(writes[0] ?? "", "first");
-        assert.include(writes[1] ?? "", "second");
+          const writes = yield* backend.writes;
+          assert.lengthOf(writes, 2);
+          assert.include(writes[0] ?? "", "first");
+          assert.include(writes[1] ?? "", "second");
 
-        const raw = yield* backend.read(SESSION_KEY);
-        assert.isTrue(Option.isSome(raw));
-        if (Option.isNone(raw)) return;
-        assert.include(raw.value, "second");
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          const raw = yield* backend.read(SESSION_KEY);
+          assert.isTrue(Option.isSome(raw));
+          if (Option.isNone(raw)) return;
+          assert.include(raw.value, "second");
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -513,18 +565,22 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        yield* storage.session.write({
-          knownTabs: [],
-          acknowledged: ["one"],
-          zoomByOrigin: {},
-        });
-        assert.deepEqual(storage.session.currentUnsafe().acknowledged, ["one"]);
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          yield* storage.session.write({
+            knownTabs: [],
+            acknowledged: ["one"],
+            zoomByOrigin: {},
+          });
+          assert.deepEqual(storage.session.currentUnsafe().acknowledged, ["one"]);
 
-        const reread = yield* storage.session.hydrate;
-        assert.deepEqual(reread.acknowledged, ["one"]);
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          const reread = yield* storage.session.hydrate;
+          assert.deepEqual(reread.acknowledged, ["one"]);
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -532,27 +588,31 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        yield* storage.session.write({
-          knownTabs: [],
-          acknowledged: ["one"],
-          zoomByOrigin: {},
-        });
-        const stored = yield* backend.read(SESSION_KEY);
-        assert.isTrue(Option.isSome(stored));
-        if (Option.isNone(stored)) return;
-        assert.include(stored.value, '"acknowledged":["one"]');
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          yield* storage.session.write({
+            knownTabs: [],
+            acknowledged: ["one"],
+            zoomByOrigin: {},
+          });
+          const stored = yield* backend.read(SESSION_KEY);
+          assert.isTrue(Option.isSome(stored));
+          if (Option.isNone(stored)) return;
+          assert.include(stored.value, '"acknowledged":["one"]');
 
-        const defaults = yield* storage.session.reset;
-        assert.deepEqual(defaults, {
-          knownTabs: [],
-          acknowledged: [],
-          zoomByOrigin: {},
-        });
-        assert.deepEqual(storage.session.currentUnsafe(), defaults);
-        assert.isTrue(Option.isNone(yield* backend.read(SESSION_KEY)));
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          const defaults = yield* storage.session.reset;
+          assert.deepEqual(defaults, {
+            knownTabs: [],
+            acknowledged: [],
+            zoomByOrigin: {},
+          });
+          assert.deepEqual(storage.session.currentUnsafe(), defaults);
+          assert.isTrue(Option.isNone(yield* backend.read(SESSION_KEY)));
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -560,24 +620,27 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        // The schema removes duplicate characters, so the stored value differs
-        // from the offered value. Memory must hold what storage holds.
-        const updating = yield* Effect.forkChild(
-          storage.settings.update((current) => ({
-            ...current,
-            linkHintCharacters: "aabb",
-          })),
-          { startImmediately: true },
-        );
-        yield* storage.settings.flush;
-        const stored = yield* Fiber.join(updating);
-        assert.strictEqual(stored.linkHintCharacters, "aabb");
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          // The schema removes duplicate characters, so the stored value differs
+          // from the offered value. Memory must hold what storage holds.
+          const updating = yield* Effect.forkChild(
+            storage.settings.update((current) =>
+              pipe(current, Struct.assign({ linkHintCharacters: "aabb" })),
+            ),
+            { startImmediately: true },
+          );
+          yield* storage.settings.flush;
+          const stored = yield* Fiber.join(updating);
+          assert.strictEqual(stored.linkHintCharacters, "aabb");
 
-        const inMemory = yield* storage.settings.current;
-        assert.strictEqual(inMemory.linkHintCharacters, "ab");
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          const inMemory = yield* storage.settings.current;
+          assert.strictEqual(inMemory.linkHintCharacters, "ab");
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -585,28 +648,30 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        const seen = yield* Queue.unbounded<number>();
-        yield* Effect.forkScoped(
-          Stream.runForEach(storage.settings.changes, (settings) =>
-            Queue.offer(seen, settings.scrollStepSize),
-          ),
-        );
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          const seen = yield* Queue.unbounded<number>();
+          yield* Effect.forkScoped(
+            pipe(
+              storage.settings.changes,
+              Stream.runForEach((settings) => Queue.offer(seen, settings.scrollStepSize)),
+            ),
+          );
 
-        assert.strictEqual(yield* Queue.take(seen), 60);
+          assert.strictEqual(yield* Queue.take(seen), 60);
 
-        const writing = yield* Effect.forkChild(
-          storage.settings.write({
-            ...defaultSettings(),
-            scrollStepSize: 120,
-          }),
-          { startImmediately: true },
-        );
-        yield* storage.settings.flush;
-        yield* Fiber.join(writing);
-        assert.strictEqual(yield* Queue.take(seen), 120);
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          const writing = yield* Effect.forkChild(
+            storage.settings.write(pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }))),
+            { startImmediately: true },
+          );
+          yield* storage.settings.flush;
+          yield* Fiber.join(writing);
+          assert.strictEqual(yield* Queue.take(seen), 120);
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -614,18 +679,25 @@ describe("Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        yield* backend.seed(
-          SETTINGS_KEY,
-          envelope(1, { ...defaultSettings(), scrollStepSize: 120 }),
-        );
-        yield* backend.seed(`${STORAGE_PREFIX}find-history`, envelope(1, { queries: ["needle"] }));
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          yield* backend.seed(
+            SETTINGS_KEY,
+            envelope(1, pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }))),
+          );
+          yield* backend.seed(
+            `${STORAGE_PREFIX}find-history`,
+            envelope(1, { queries: ["needle"] }),
+          );
 
-        yield* storage.hydrateAll;
-        assert.strictEqual((yield* storage.settings.current).scrollStepSize, 120);
-        assert.deepEqual((yield* storage.findHistory.current).queries, ["needle"]);
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          yield* storage.hydrateAll;
+          assert.strictEqual((yield* storage.settings.current).scrollStepSize, 120);
+          assert.deepEqual((yield* storage.findHistory.current).queries, ["needle"]);
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 });
@@ -643,29 +715,37 @@ describe("the exit path of Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        const writing = yield* leavePending(storage, 120);
-        assert.deepEqual(backend.writesNow(), [], "the debounce window must still hold the value");
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          const writing = yield* leavePending(storage, 120);
+          assert.deepEqual(
+            backend.writesNow(),
+            [],
+            "the debounce window must still hold the value",
+          );
 
-        // One synchronous step, exactly like a `pagehide` handler.
-        const insideDispatch = yield* Effect.sync(() => {
-          storage.flushAllUnsafe();
-          return backend.writesNow();
-        });
+          // One synchronous step, exactly like a `pagehide` handler.
+          const insideDispatch = yield* Effect.sync(() => {
+            storage.flushAllUnsafe();
+            return backend.writesNow();
+          });
 
-        assert.lengthOf(
-          insideDispatch,
-          1,
-          "the backend call must start before the dispatch returns",
-        );
-        assert.include(insideDispatch[0] ?? "", '"scrollStepSize":120');
+          assert.lengthOf(
+            insideDispatch,
+            1,
+            "the backend call must start before the dispatch returns",
+          );
+          assert.include(insideDispatch[0] ?? "", '"scrollStepSize":120');
 
-        // The actor takes its own turn afterwards, and it finds nothing to do.
-        const outcome = yield* advanceUntilDone(writing);
-        assert.isTrue(Exit.isSuccess(outcome));
-        assert.lengthOf(backend.writesNow(), 1, "the value must not be written a second time");
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          // The actor takes its own turn afterwards, and it finds nothing to do.
+          const outcome = yield* advanceUntilDone(writing);
+          assert.isTrue(Exit.isSuccess(outcome));
+          assert.lengthOf(backend.writesNow(), 1, "the value must not be written a second time");
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -673,24 +753,28 @@ describe("the exit path of Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        // Both writes are inside one debounce window, so the second replaces
-        // the first. The backend must never see the first one after it.
-        yield* leavePending(storage, 120);
-        const second = yield* leavePending(storage, 90);
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          // Both writes are inside one debounce window, so the second replaces
+          // the first. The backend must never see the first one after it.
+          yield* leavePending(storage, 120);
+          const second = yield* leavePending(storage, 90);
 
-        yield* Effect.sync(() => storage.flushAllUnsafe());
-        yield* advanceUntilDone(second);
+          yield* Effect.sync(() => storage.flushAllUnsafe());
+          yield* advanceUntilDone(second);
 
-        const third = yield* leavePending(storage, 150);
-        yield* advanceUntilDone(third);
+          const third = yield* leavePending(storage, 150);
+          yield* advanceUntilDone(third);
 
-        const writes = backend.writesNow();
-        assert.lengthOf(writes, 2);
-        assert.include(writes[0] ?? "", '"scrollStepSize":90');
-        assert.include(writes[1] ?? "", '"scrollStepSize":150');
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          const writes = backend.writesNow();
+          assert.lengthOf(writes, 2);
+          assert.include(writes[0] ?? "", '"scrollStepSize":90');
+          assert.include(writes[1] ?? "", '"scrollStepSize":150');
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -698,30 +782,34 @@ describe("the exit path of Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        yield* backend.holdWrites;
-        const writing = yield* leavePending(storage, 120);
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          yield* backend.holdWrites;
+          const writing = yield* leavePending(storage, 120);
 
-        // The actor takes the value out of the window and stops inside the
-        // backend call. Nothing is owed to the exit path any more.
-        const flushing = yield* Effect.forkChild(storage.settings.flush, {
-          startImmediately: true,
-        });
-        yield* yieldUntil(() => backend.startedNow() === 1);
+          // The actor takes the value out of the window and stops inside the
+          // backend call. Nothing is owed to the exit path any more.
+          const flushing = yield* Effect.forkChild(storage.settings.flush, {
+            startImmediately: true,
+          });
+          yield* yieldUntil(() => backend.startedNow() === 1);
 
-        yield* Effect.sync(() => storage.flushAllUnsafe());
-        assert.deepEqual(
-          backend.writesNow(),
-          [],
-          "the exit path must not write over a call that is in flight",
-        );
+          yield* Effect.sync(() => storage.flushAllUnsafe());
+          assert.deepEqual(
+            backend.writesNow(),
+            [],
+            "the exit path must not write over a call that is in flight",
+          );
 
-        yield* backend.releaseWrites;
-        yield* Fiber.join(flushing);
-        yield* Fiber.join(writing);
-        assert.lengthOf(backend.writesNow(), 1);
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          yield* backend.releaseWrites;
+          yield* Fiber.join(flushing);
+          yield* Fiber.join(writing);
+          assert.lengthOf(backend.writesNow(), 1);
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -729,35 +817,39 @@ describe("the exit path of Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        yield* backend.breakNextDirectWrite;
-        const writing = yield* leavePending(storage, 120);
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          yield* backend.breakNextDirectWrite;
+          const writing = yield* leavePending(storage, 120);
 
-        // A throw here would be swallowed by the browser, and the rest of the
-        // exit hook would never run.
-        const thrown = yield* Effect.sync(() => {
-          try {
-            storage.flushAllUnsafe();
-            return null;
-          } catch (cause) {
-            return String(cause);
-          }
-        });
-        assert.isNull(thrown, "the pagehide handler must return");
-        assert.deepEqual(backend.writesNow(), []);
+          // A throw here would be swallowed by the browser, and the rest of the
+          // exit hook would never run.
+          const thrown = yield* Effect.sync(() => {
+            try {
+              storage.flushAllUnsafe();
+              return null;
+            } catch (cause) {
+              return String(cause);
+            }
+          });
+          assert.isNull(thrown, "the pagehide handler must return");
+          assert.deepEqual(backend.writesNow(), []);
 
-        const issue = yield* firstIssue(storage);
-        assert.isTrue(Option.isSome(issue));
-        if (Option.isNone(issue)) return;
-        assert.strictEqual(issue.value.reason, "backend");
-        assert.strictEqual(issue.value.direction, "write");
+          const issue = yield* firstIssue(storage);
+          assert.isTrue(Option.isSome(issue));
+          if (Option.isNone(issue)) return;
+          assert.strictEqual(issue.value.reason, "backend");
+          assert.strictEqual(issue.value.direction, "write");
 
-        // The value is still pending, so the actor writes it on its own turn.
-        const outcome = yield* advanceUntilDone(writing);
-        assert.isTrue(Exit.isSuccess(outcome));
-        assert.lengthOf(backend.writesNow(), 1);
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          // The value is still pending, so the actor writes it on its own turn.
+          const outcome = yield* advanceUntilDone(writing);
+          assert.isTrue(Exit.isSuccess(outcome));
+          assert.lengthOf(backend.writesNow(), 1);
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
@@ -765,64 +857,76 @@ describe("the exit path of Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        const settingsWrite = yield* leavePending(storage, 120);
-        const marksWrite = yield* Effect.forkChild(
-          storage.marks.write({
-            local: {
-              "https://example.test/": {
-                a: { scrollX: 1, scrollY: 2, savedAt: 3 },
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          const settingsWrite = yield* leavePending(storage, 120);
+          const marksWrite = yield* Effect.forkChild(
+            storage.marks.write({
+              local: {
+                "https://example.test/": {
+                  a: { scrollX: 1, scrollY: 2, savedAt: 3 },
+                },
               },
-            },
-            global: {},
-          }),
-          { startImmediately: true },
-        );
-        yield* yieldUntil(
-          () => storage.marks.currentUnsafe().local["https://example.test/"] !== undefined,
-        );
-        yield* backend.breakNextDirectWrite;
+              global: {},
+            }),
+            { startImmediately: true },
+          );
+          yield* yieldUntil(
+            () => storage.marks.currentUnsafe().local["https://example.test/"] !== undefined,
+          );
+          yield* backend.breakNextDirectWrite;
 
-        yield* Effect.sync(() => storage.flushAllUnsafe());
+          yield* Effect.sync(() => storage.flushAllUnsafe());
 
-        const writes = backend.writesNow();
-        assert.lengthOf(writes, 1);
-        assert.include(writes[0] ?? "", '"a"');
+          const writes = backend.writesNow();
+          assert.lengthOf(writes, 1);
+          assert.include(writes[0] ?? "", '"a"');
 
-        yield* advanceUntilDone(settingsWrite);
-        yield* advanceUntilDone(marksWrite);
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+          yield* advanceUntilDone(settingsWrite);
+          yield* advanceUntilDone(marksWrite);
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 
   it.effect("uses identical bytes after hydration on both write paths", () =>
     Effect.gen(function* () {
       const directBackend = yield* makeBackend;
-      const directBytes = yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        yield* directBackend.seed(SETTINGS_KEY, envelope(0, { scrollStepSize: 120 }));
-        const migrated = yield* storage.settings.hydrate;
-        assert.strictEqual(migrated.scrollStepSize, 120);
+      const directBytes = yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          yield* directBackend.seed(SETTINGS_KEY, envelope(0, { scrollStepSize: 120 }));
+          const migrated = yield* storage.settings.hydrate;
+          assert.strictEqual(migrated.scrollStepSize, 120);
 
-        yield* leavePending(storage, 90);
-        yield* Effect.sync(() => storage.flushAllUnsafe());
-        return directBackend.writesNow()[0] ?? "";
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(directBackend.layer));
+          yield* leavePending(storage, 90);
+          yield* Effect.sync(() => storage.flushAllUnsafe());
+          return directBackend.writesNow()[0] ?? "";
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(directBackend.layer),
+      );
 
       const actorBackend = yield* makeBackend;
-      const actorBytes = yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        yield* actorBackend.seed(SETTINGS_KEY, envelope(0, { scrollStepSize: 120 }));
-        const migrated = yield* storage.settings.hydrate;
-        const writing = yield* Effect.forkChild(
-          storage.settings.write({ ...migrated, scrollStepSize: 90 }),
-          { startImmediately: true },
-        );
-        yield* storage.settings.flush;
-        yield* Fiber.join(writing);
-        return actorBackend.writesNow()[0] ?? "";
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(actorBackend.layer));
+      const actorBytes = yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          yield* actorBackend.seed(SETTINGS_KEY, envelope(0, { scrollStepSize: 120 }));
+          const migrated = yield* storage.settings.hydrate;
+          const writing = yield* Effect.forkChild(
+            storage.settings.write(pipe(migrated, Struct.assign({ scrollStepSize: 90 }))),
+            { startImmediately: true },
+          );
+          yield* storage.settings.flush;
+          yield* Fiber.join(writing);
+          return actorBackend.writesNow()[0] ?? "";
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(actorBackend.layer),
+      );
 
       assert.strictEqual(directBytes, actorBytes);
       assert.include(directBytes, '"schemaVersion":1');
@@ -833,11 +937,15 @@ describe("the exit path of Storage", () => {
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
-      yield* Effect.gen(function* () {
-        const storage = yield* Storage;
-        yield* Effect.sync(() => storage.flushAllUnsafe());
-        assert.deepEqual(backend.writesNow(), []);
-      }).pipe(Effect.provide(Storage.layer), Effect.provide(backend.layer));
+      yield* pipe(
+        Effect.gen(function* () {
+          const storage = yield* Storage;
+          yield* Effect.sync(() => storage.flushAllUnsafe());
+          assert.deepEqual(backend.writesNow(), []);
+        }),
+        Effect.provide(Storage.layer),
+        Effect.provide(backend.layer),
+      );
     }),
   );
 });

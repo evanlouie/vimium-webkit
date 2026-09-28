@@ -7,7 +7,7 @@
  * them tier B for that reason.
  */
 
-import { Context, Effect, FiberHandle, Layer, Ref } from "effect";
+import { Context, Effect, FiberHandle, Layer, Ref, pipe, Struct } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
@@ -132,10 +132,14 @@ export class TabControl extends Context.Service<
 
         yield* Effect.forkDetach(
           Effect.ignore(
-            storage.session.update((state) => ({
-              ...state,
-              zoomByOrigin: { ...state.zoomByOrigin, [origin]: next },
-            })),
+            storage.session.update((state) =>
+              pipe(
+                state,
+                Struct.assign({
+                  zoomByOrigin: pipe(state.zoomByOrigin, Struct.assign({ [origin]: next })),
+                }),
+              ),
+            ),
           ),
         );
 

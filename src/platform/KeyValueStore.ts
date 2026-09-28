@@ -20,7 +20,7 @@
  * when it is not durable.
  */
 
-import { Context, Effect, Layer, Option, Stream } from "effect";
+import { Context, Effect, Layer, Option, Stream, pipe } from "effect";
 import { Gm, type GmError } from "./Gm.ts";
 
 export const STORAGE_PREFIX = "vimium-webkit:";
@@ -65,27 +65,33 @@ export class KeyValueStore extends Context.Service<
     Effect.gen(function* () {
       const gm = yield* Gm;
 
-      const fromGm = Option.map(gm.values, (api) =>
-        KeyValueStore.of({
-          kind: api.kind,
-          durable: true,
-          watchable: Option.isSome(api.changes),
-          managerPrivate: true,
-          get: api.get,
-          set: api.set,
-          remove: api.remove,
-          // The API kind is the existing capability probe. Do not infer
-          // durability from a manager name or from a user agent.
-          setUnsafe: api.kind === "gm-async" ? null : api.setUnsafe,
-          changes: (key) =>
-            Option.match(api.changes, {
-              onNone: () => Stream.empty,
-              onSome: (make) => make(key),
-            }),
-        }),
+      const fromGm = pipe(
+        gm.values,
+        Option.map((api) =>
+          KeyValueStore.of({
+            kind: api.kind,
+            durable: true,
+            watchable: Option.isSome(api.changes),
+            managerPrivate: true,
+            get: api.get,
+            set: api.set,
+            remove: api.remove,
+            // The API kind is the existing capability probe. Do not infer
+            // durability from a manager name or from a user agent.
+            setUnsafe: api.kind === "gm-async" ? null : api.setUnsafe,
+            changes: (key) =>
+              pipe(
+                api.changes,
+                Option.match({
+                  onNone: () => Stream.empty,
+                  onSome: (make) => make(key),
+                }),
+              ),
+          }),
+        ),
       );
 
-      return Option.getOrElse(fromGm, memoryStore);
+      return pipe(fromGm, Option.getOrElse(memoryStore));
     }),
   );
 

@@ -6,7 +6,7 @@
  * nothing quietly.
  */
 
-import { Context, Effect, Layer, Option, Schema } from "effect";
+import { Context, Effect, Layer, Option, Schema, pipe } from "effect";
 import { Dom } from "./Dom.ts";
 import { Gm } from "./Gm.ts";
 
@@ -138,7 +138,7 @@ export class Tabs extends Context.Service<
         const absolute = new URL(url, base).href;
         const active = options.active ?? true;
 
-        const result = yield* Effect.mapError(
+        const result = yield* pipe(
           gm.openInTab(absolute, {
             active,
             insert: options.insert ?? true,
@@ -146,8 +146,9 @@ export class Tabs extends Context.Service<
             // Tampermonkey's older spelling. Others ignore it.
             loadInBackground: !active,
           }),
-          (cause) =>
+          Effect.mapError((cause) =>
             tabError(cause.reason === "unavailable" ? "unavailable" : "blocked", cause.detail),
+          ),
         );
 
         const handle = result.handle;
@@ -165,10 +166,13 @@ export class Tabs extends Context.Service<
         };
       });
 
-      const closeCurrent = Effect.mapError(gm.closeWindow, (cause) =>
-        cause.reason === "unavailable"
-          ? tabError("unavailable", "closing a tab needs Tampermonkey or Violentmonkey", "⌘W")
-          : tabError("failed", cause.detail, "⌘W"),
+      const closeCurrent = pipe(
+        gm.closeWindow,
+        Effect.mapError((cause) =>
+          cause.reason === "unavailable"
+            ? tabError("unavailable", "closing a tab needs Tampermonkey or Violentmonkey", "⌘W")
+            : tabError("failed", cause.detail, "⌘W"),
+        ),
       );
 
       const navigate = Effect.fn("Tabs.navigate")(function* (
@@ -179,12 +183,12 @@ export class Tabs extends Context.Service<
         if (!isNavigableUrl(url, base, options.trust ?? "page")) {
           return yield* tabError("unsafe-url", `refusing to go to ${url.slice(0, 60)}`);
         }
-        return yield* Effect.mapError(
+        return yield* pipe(
           dom.attempt("location.assign", () => {
             if (options.replace === true) dom.window.location.replace(url);
             else dom.window.location.assign(url);
           }),
-          (cause) => tabError("failed", cause.detail),
+          Effect.mapError((cause) => tabError("failed", cause.detail)),
         );
       });
 

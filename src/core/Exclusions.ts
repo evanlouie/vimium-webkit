@@ -11,7 +11,7 @@
  * frames, and the graph stays a tree.
  */
 
-import { Context, Effect, Layer, Ref, Stream, SubscriptionRef } from "effect";
+import { Context, Effect, Layer, Ref, Stream, SubscriptionRef, pipe } from "effect";
 import {
   type EffectiveRule,
   type ExclusionSet,
@@ -108,14 +108,20 @@ export class Exclusions extends Context.Service<
           return set.match(url);
         });
 
-      const resolveLocal = Effect.flatMap(dom.href, match);
+      const resolveLocal = pipe(dom.href, Effect.flatMap(match));
 
       // The top frame owns the verdict, so it keeps its own up to date when the
       // rules change. A child frame waits to be told.
       if (realm.isTop) {
         yield* Effect.forkScoped(
-          Stream.runForEach(settings.changes, () =>
-            Effect.flatMap(resolveLocal, (rule) => SubscriptionRef.set(effective, rule)),
+          pipe(
+            settings.changes,
+            Stream.runForEach(() =>
+              pipe(
+                resolveLocal,
+                Effect.flatMap((rule) => SubscriptionRef.set(effective, rule)),
+              ),
+            ),
           ),
         );
       }
@@ -126,7 +132,10 @@ export class Exclusions extends Context.Service<
         resolveLocal,
         match,
         adopt: (rule) => SubscriptionRef.set(effective, rule),
-        isEnabled: Effect.map(SubscriptionRef.get(effective), (rule) => rule.enabled),
+        isEnabled: pipe(
+          SubscriptionRef.get(effective),
+          Effect.map((rule) => rule.enabled),
+        ),
       });
     }),
   );
