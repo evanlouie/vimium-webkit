@@ -1,7 +1,7 @@
 /**
  * The one gate to the userscript manager.
  *
- * No other file may name a `GM` or `GM_*` identifier. The build enforces that.
+ * No other file may name a `GM` or `GM_*` identifier.
  * Everything here is feature-probed, never chosen by manager name, and every
  * operation that can fail gives an `Effect` whose error names the failure. A
  * caller is therefore forced to have an answer for the user, instead of an

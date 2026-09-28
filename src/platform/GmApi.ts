@@ -11,8 +11,7 @@
  * if (typeof GM_setValue === "function") { ... }
  * ```
  *
- * All consumers must go through `platform/gm.ts`; see the CI invariant in
- * item 6.
+ * All consumers must go through `platform/gm.ts`.
  */
 
 export type GmValue = string | number | boolean | null;

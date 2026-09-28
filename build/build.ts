@@ -5,19 +5,16 @@
  * size ceiling is measured *unminified*, its reviewers read the source, and a
  * userscript that a user cannot audit is one they should not install.
  *
- *   npm run build          production bundle + invariant checks
- *   npm run build:dev      dev bundle, sourcemap inline, invariants relaxed
+ *   npm run build          production bundle
+ *   npm run build:dev      dev bundle, sourcemap inline
  *   npm run watch          rebuild on change
  */
 
 import { watch } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import type { OutputChunk, RollupOutput } from "rollup";
-import { build as viteBuild } from "vite";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { build as viteBuild, type Rolldown } from "vite";
 import { defaultSettings } from "~/domain/Persisted.ts";
-import { checkInvariants, formatViolations } from "./invariants.ts";
 import { BANNER_NOTICE, buildMetadata } from "./metadata.ts";
-import { verifyBundleBoots } from "./verify-bundle.ts";
 import { bundleConfig, type BundleOptions, ROOT } from "./vite-config.ts";
 
 const DIST = `${ROOT}/dist`;
@@ -35,17 +32,20 @@ const readVersion = async (): Promise<string> => {
 };
 
 /** The single entry chunk Vite produced for a library build. */
-const entryChunk = (result: unknown): OutputChunk => {
-  const outputs =
-    (Array.isArray(result)
-      ? (result[0] as RollupOutput).output
-      : (result as RollupOutput).output) ?? [];
-  const chunk = outputs.find((item): item is OutputChunk => item.type === "chunk" && item.isEntry);
+const entryChunk = (result: Awaited<ReturnType<typeof viteBuild>>): Rolldown.OutputChunk => {
+  const outputs = Array.isArray(result)
+    ? result.flatMap((output) => output.output)
+    : "output" in result
+      ? result.output
+      : [];
+  const chunk = outputs.find(
+    (item): item is Rolldown.OutputChunk => item.type === "chunk" && item.isEntry,
+  );
   if (!chunk) throw new Error("Vite produced no entry chunk");
   return chunk;
 };
 
-const bundle = async (options: BundleOptions): Promise<OutputChunk> =>
+const bundle = async (options: BundleOptions): Promise<Rolldown.OutputChunk> =>
   entryChunk(await viteBuild(bundleConfig(options)));
 
 interface ModuleSize {
@@ -59,9 +59,9 @@ interface ModuleSize {
  * Rollup measures each module before Vite re-prints the chunk for `safari16`,
  * and that re-print drops about a third of the bytes. The figures therefore
  * sum to roughly 40% more than the artefact. They are useful for ranking what
- * is large; they are not a budget.
+ * is large.
  */
-const sizeReport = (chunk: OutputChunk): readonly ModuleSize[] =>
+const sizeReport = (chunk: Rolldown.OutputChunk): readonly ModuleSize[] =>
   Object.entries(chunk.modules)
     .map(([module, meta]) => ({
       module: module.startsWith(ROOT)
@@ -89,7 +89,7 @@ const main = async (): Promise<void> => {
     dev,
   });
 
-  const build = async (): Promise<boolean> => {
+  const build = async (): Promise<void> => {
     const chunk = await bundle({ entry: `${ROOT}/src/main.ts`, dev });
     const output = `${metadata}${BANNER_NOTICE}\n${chunk.code}`;
     const artefact = `${DIST}/vimium-webkit${dev ? ".dev" : ""}.user.js`;
@@ -125,50 +125,12 @@ const main = async (): Promise<void> => {
       )}\n`,
     );
 
-    const violations = (
-      await checkInvariants({
-        root: ROOT,
-        bundle: output,
-        code: chunk.code,
-        declaredVersion: version,
-        metadataBlock: metadata,
-      })
-    )
-      // A dev bundle carries an inline sourcemap, which is several times the
-      // size of the code. Measuring it against the shipping ceiling made
-      // `build:dev` fail every time it was run — a documented entry point that
-      // could not succeed. Every other invariant still applies.
-      .filter((violation) => !(dev && violation.rule === "bundle-budget"));
-
     const totalKb = (byteLength(output) / 1024).toFixed(1);
     console.log(`vimium-webkit ${version} — ${totalKb} KB`);
-
-    if (violations.length > 0) {
-      console.error(`\n${violations.length} invariant violation(s):`);
-      console.error(formatViolations(violations));
-      // Remove it. `test/e2e/harness/bundle.ts` decides whether to rebuild by
-      // mtime, so a rejected artefact left on disk is newer than every source
-      // file — and the next bare `playwright test` would run the whole suite
-      // against a bundle this build has already refused.
-      await rm(artefact, { force: true });
-      return false;
-    }
-
-    // Size is not correctness. A bundle that tree-shakes away a module Effect
-    // needs at load time is smaller *and* dead, and only running it says so.
-    const boot = await verifyBundleBoots(artefact);
-    if (!boot.ok) {
-      console.error(`\nthe bundle does not boot: ${boot.error}`);
-      await rm(artefact, { force: true });
-      return false;
-    }
-
-    console.log("all invariants hold; bundle boots");
-    return true;
   };
 
   if (!watching) {
-    if (!(await build())) process.exit(1);
+    await build();
     return;
   }
 

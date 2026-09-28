@@ -147,6 +147,3 @@ is not.
   top frame parse a payload.
 - No settings ever cross a frame boundary. Only the exclusion decision does, and
   it is two booleans' worth of information.
-- `build/invariants.ts` enforces the disciplines that are easy to regress: no
-  dynamic code evaluation, no HTML sinks, no `<style>` elements, all manager
-  access through the capability shim.

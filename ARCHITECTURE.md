@@ -95,8 +95,7 @@ feature, and `Keyboard` never imports a feature. A feature that needs what
 another feature does asks the registry by name, with `Commands.run`.
 
 The split has one cost: a command can exist in the catalogue with no body, and
-answer "unavailable" to the user. The `command-bodies` invariant in
-`build/invariants.ts` refuses that, for every tier A and tier B command.
+answer "unavailable" to the user.
 
 ## 3. The keyboard path is synchronous
 
@@ -115,9 +114,6 @@ This is a correctness limit, not a performance preference.
 It is total: a defect becomes an `Exit`, not a throw inside a DOM listener.
 
 Slow work leaves the path with `Effect.forkDetach` or `runtime.runFork`.
-
-`build/invariants.ts` checks the rule against the modules that the key path
-reaches.
 
 ## 4. State
 

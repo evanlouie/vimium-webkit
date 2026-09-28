@@ -87,7 +87,6 @@ validates the settings and the cross-frame message protocol, and `Layer` and
 
 - [Vite](https://github.com/vitejs/vite) — MIT © 2019 Evan You & Vite
   contributors
-- [Rollup](https://github.com/rollup/rollup) — MIT © 2017 these people
 - [esbuild](https://github.com/evanw/esbuild) — MIT © 2020 Evan Wallace
 - [TypeScript](https://github.com/microsoft/TypeScript) — Apache-2.0
 - [Vitest](https://github.com/vitest-dev/vitest) — MIT

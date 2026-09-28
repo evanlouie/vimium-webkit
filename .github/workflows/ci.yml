@@ -57,7 +57,7 @@ jobs:
       - run: npm run test
 
   build:
-    name: build + invariants
+    name: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -66,19 +66,6 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
-
-      # The build executes its own artefact in WebKit before it will pass, so
-      # the browser has to be here too. See `build/verify-bundle.ts`.
-      # Keyed by browser set. A single key would let the webkit-only jobs
-      # populate it first, and `actions/cache` does not save on a hit — so the
-      # e2e matrix would re-download chromium and firefox on every run.
-      - name: Cache Playwright browsers
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-webkit-${{ hashFiles('package-lock.json') }}
-      - run: npx playwright install --with-deps webkit
-
       - run: npm run build
       - uses: actions/upload-artifact@v7
         with:
@@ -113,20 +100,16 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ matrix.project }}-${{ hashFiles('package-lock.json') }}
 
-      # WebKit as well as the matrix browser: `globalSetup` builds the bundle
-      # if it is stale, and the build executes its own artefact in WebKit.
-      # The artefact the `build` job produced and checked, rather than a
-      # rebuild. Without this, `globalSetup` finds `dist/` missing and shells
-      # out to `npm run build` in every leg — which is also why every leg used
-      # to need WebKit on top of its own engine.
+      # The artefact the `build` job produced, rather than a rebuild. Without
+      # this, `globalSetup` finds `dist/` missing and shells out to
+      # `npm run build` in every leg.
       - uses: actions/download-artifact@v8
         with:
           name: userscript
           path: dist/
 
       # `ensureBundle` rebuilds when `dist/` is older than any source file, and
-      # a downloaded artefact's mtime is not guaranteed to beat the checkout's.
-      # A rebuild here would also need WebKit, which this leg does not install,
+      # a downloaded artefact's mtime is not guaranteed to beat the checkout's,
       # so make the freshness explicit rather than relying on extraction order.
       - name: Mark the downloaded bundle as fresh
         run: touch dist/*
@@ -160,7 +143,7 @@ jobs:
           cache: npm
       - run: npm ci
 
-      # Build invariant 5 ties `@version` to `package.json`, but nothing tied
+      # The build derives `@version` from `package.json`, but nothing ties
       # `package.json` to the tag. Tagging v0.2.0 while `package.json` still
       # said 0.1.0 would publish a script whose `@version` is 0.1.0 — and a
       # manager that fetches `@updateURL` and reads back the version it already

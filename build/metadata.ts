@@ -2,8 +2,8 @@
  * The userscript metadata block.
  *
  * Generated rather than hand-maintained so that `@version` can be derived from
- * `package.json` (CI invariant 5) and so the `@grant` list cannot drift away from
- * what `platform/Gm.ts` probes for.
+ * `package.json` and so the `@grant` list cannot drift away from what
+ * `platform/Gm.ts` probes for.
  */
 
 import { SUGGEST_HOSTS } from "~/domain/SearchSuggest.ts";

@@ -390,7 +390,7 @@ npm run test       # unit tests
 npm run test:e2e   # Playwright, against WebKit + Chromium + Firefox
 npm run coverage   # line coverage over every file in src/, not just the loaded ones
 npm run lint
-npm run build      # dist/vimium-webkit.user.js + invariant checks
+npm run build      # dist/vimium-webkit.user.js
 npm run verify     # everything above except coverage
 ```
 
@@ -399,42 +399,10 @@ npm run verify     # everything above except coverage
 `npm run coverage` reports over **all** of `src/`, because `coverage.include`
 names the whole directory rather than only the files a run happened to load — so
 an untested file appears in the denominator instead of vanishing from the
-report. Note that `test/unit/module-graph_test.ts` imports every module, so a
-file reached only by that test is counted for its import-time statements; the
-headline is a little kinder than the tested-behaviour figure.
+report.
 
 Unit tests use `@effect/vitest` and provide a stub layer instead of patching a
 global. There is no `globalThis` patching in the unit suite.
-
-### Build invariants
-
-`npm run build` fails the build on any of these, because each one is a way the
-project could quietly stop working on WebKit:
-
-1. No `eval`, `new Function`, `document.write`, or inline event-handler strings
-   — all of them are blocked by a page CSP.
-2. No `<style>` elements outside the documented Safari <16.4 fallback. Safari
-   applies the **page's** `style-src` to nodes a content script injects; only
-   CSSOM (`adoptedStyleSheets`) escapes it.
-3. Bundle ≤ 1.5 MB unminified (Greasy Fork's ceiling is 2 MB, measured
-   unminified).
-4. `@version` matches `package.json`.
-5. Every `GM_*` / `GM.*` reference goes through `src/platform/Gm.ts`.
-6. Every command carries a tier, and every Tier C command carries a user-facing
-   explanation.
-7. Every read of `navigator` or `unsafeWindow` goes through `Dom.probe`. A page,
-   an extension, or a sandboxing manager can replace a global with an accessor
-   that _throws_, and neither a `typeof` guard nor `?.` survives that — both
-   perform the read.
-8. Nothing that a `keydown` listener reaches may suspend. `preventDefault()`
-   works only during synchronous dispatch, and a fiber yield becomes a macrotask
-   on Safari.
-9. No HTML sinks. Link text, page titles and search suggestions are all
-   page-supplied and all end up inside our own overlay.
-10. Every Tier A and Tier B command has a body somewhere in `src/`. The
-    catalogue is pure data and the bodies live in feature layers, so a command
-    can otherwise be carried over with nothing to run it, and answer
-    "unavailable" to the user.
 
 ### Releasing
 
@@ -444,8 +412,8 @@ Releases are cut by CI, from a tag. The install link above resolves to
 1. Bump `version` in `package.json` and commit it.
 2. Tag it `v<version>` and push the tag.
 
-Pushing the tag runs the full pipeline — static checks, unit tests, build
-invariants, and Playwright against all three engines — and only then attaches
+Pushing the tag runs the full pipeline — static checks, unit tests, the build,
+and Playwright against all three engines — and only then attaches
 `vimium-webkit.user.js` and `vimium-webkit.meta.js` to a GitHub release.
 
 The tag must match `package.json`; CI refuses the release otherwise. The

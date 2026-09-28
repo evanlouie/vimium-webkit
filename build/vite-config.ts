@@ -47,11 +47,8 @@ export const bundleConfig = (options: BundleOptions): InlineConfig => ({
     // Node and not harmless here: a page or a sandboxing manager can make
     // `process` an accessor that *throws*, and this artefact is one IIFE
     // evaluated at `document-start`, so a throw there takes the whole
-    // extension with it, before a single key is pressed.
-    //
-    // `build/invariants.ts` bans exactly this pattern in `src/` for
-    // `navigator` and `unsafeWindow`, and rule 11 bans `process` in the
-    // artefact. The substitution leaves nothing to evaluate.
+    // extension with it, before a single key is pressed. The substitution
+    // leaves nothing to evaluate.
     "globalThis.process": "undefined",
   },
   build: {
@@ -77,7 +74,7 @@ export const bundleConfig = (options: BundleOptions): InlineConfig => ({
         // `inlineDynamicImports` option is redundant and produces a warning.
         // Effect relies on module-level initialisation, so `moduleSideEffects`
         // must stay at its default. Forcing it to `false` produced a bundle 60%
-        // smaller that threw on load. See `build/verify-bundle.ts`.
+        // smaller that threw on load.
         generatedCode: { preset: "es2015", symbols: false },
       },
     },
