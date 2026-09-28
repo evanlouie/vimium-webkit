@@ -73,6 +73,7 @@ import {
   Stream,
   pipe,
 } from "effect";
+import { describeThrown } from "~/domain/Failure.ts";
 import {
   type ChallengeMessage,
   challengeMessage,
@@ -239,14 +240,6 @@ const isInboundOf =
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-const describe = (cause: unknown): string =>
-  pipe(
-    Match.value(cause),
-    Match.when(Predicate.isError, (error) => error.message),
-    Match.when(Predicate.isString, (text) => text),
-    Match.orElse((other) => String(other)),
-  );
-
 /**
  * The origin to post to.
  *
@@ -365,17 +358,6 @@ const opposite = (direction: SealDirection): SealDirection =>
     Match.when("down", () => "up"),
     Match.exhaustive,
   );
-
-/**
- * The payload of a `message` event on a port.
- *
- * `listenOn` gives a plain `Event`. A read of the property says what it holds,
- * and it does not ask which realm made the event.
- */
-const messageData: (event: Event) => Option.Option<unknown> = flow(
-  Option.liftPredicate(Predicate.hasProperty("data")),
-  Option.map(({ data }) => data),
-);
 
 /** The `to` field of a message for one target. */
 const wireTarget: (target: FrameTarget) => string = FrameTarget.$match({
@@ -613,7 +595,7 @@ const postTo = (port: MessagePort, message: SealedMessage): Effect.Effect<void, 
     catch: (cause) =>
       new FrameError({
         reason: "failed",
-        detail: `the port refused the message: ${describe(cause)}`,
+        detail: `the port refused the message: ${describeThrown(cause)}`,
       }),
   });
 
@@ -743,11 +725,7 @@ export const makeSealedLink = Effect.fn("FrameBus.link")(function* (
 
   yield* host.listenOn(port, "message", (event) =>
     Effect.suspend(() =>
-      pipe(
-        messageData(event),
-        Option.flatMap(parseSealed),
-        Option.match({ onNone: () => Effect.void, onSome: deliver }),
-      ),
+      pipe(event.data, parseSealed, Option.match({ onNone: () => Effect.void, onSome: deliver })),
     ),
   );
 
@@ -854,7 +832,7 @@ export class FrameBus extends Context.Service<
        * fails and every routed message is dropped, because a guessable nonce is
        * worse than no session at all.
        */
-      const randomId = dom.probeOr(() => {
+      const randomId = dom.probeOrElse(() => {
         const bytes = new Uint8Array(16);
         crypto.getRandomValues(bytes);
         return pipe(
@@ -864,7 +842,7 @@ export class FrameBus extends Context.Service<
           Array.join(""),
           Option.some,
         );
-      }, Option.none<string>());
+      }, Option.none);
 
       const freshId: Effect.Effect<string, FrameError> = pipe(
         randomId,
@@ -1105,7 +1083,7 @@ export class FrameBus extends Context.Service<
        * coordinator itself.
        */
       const knownWindow = (source: unknown): Effect.Effect<Option.Option<Window>> =>
-        dom.probeOr(
+        dom.probeOrElse(
           () =>
             pipe(
               source,
@@ -1117,7 +1095,7 @@ export class FrameBus extends Context.Service<
                 ),
               ),
             ),
-          Option.none<Window>(),
+          Option.none,
         );
 
       const expireChallenges = Effect.gen(function* () {
@@ -1468,7 +1446,7 @@ export class FrameBus extends Context.Service<
       // The child: the handshake
       // ---------------------------------------------------------------------
 
-      const topWindow: Effect.Effect<Option.Option<Window>> = dom.probeOr(
+      const topWindow: Effect.Effect<Option.Option<Window>> = dom.probeOrElse(
         () =>
           pipe(
             dom.window.top,
@@ -1478,7 +1456,7 @@ export class FrameBus extends Context.Service<
             // a port to.
             Option.filter((view) => view !== dom.window),
           ),
-        Option.none<Window>(),
+        Option.none,
       );
 
       const postHello = (top: Window): Effect.Effect<void> =>

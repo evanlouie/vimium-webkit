@@ -25,6 +25,7 @@ import { Keyboard } from "~/core/Keyboard.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
+import { describeThrown } from "~/domain/Failure.ts";
 import { FrameBus } from "~/frames/Bus.ts";
 import { FrameLink } from "~/frames/Link.ts";
 import { Capabilities, degradationWarnings } from "~/platform/Capabilities.ts";
@@ -122,10 +123,11 @@ export interface OwnedRuntime<R, ER> {
  * Say that a runtime failed to close.
  *
  * `console.error`, because the runtime that would log it is the one that is
- * closing, and a userscript shares its console with the page.
+ * closing, and a userscript shares its console with the page. The console
+ * therefore gets the text of the failure, and not the value itself.
  */
 const reportReleaseFailure = (cause: unknown): void => {
-  console.error("[vimium-webkit] failed to release", cause);
+  console.error("[vimium-webkit] failed to release", describeThrown(cause));
 };
 
 /** Close one runtime. `dispose` gives a promise, so this is the one edge for it. */

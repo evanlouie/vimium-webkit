@@ -17,19 +17,7 @@
  * receives a key builds the guard, and nothing else.
  */
 
-import {
-  Cause,
-  Effect,
-  Layer,
-  Logger,
-  ManagedRuntime,
-  Match,
-  Predicate,
-  References,
-  Schema,
-  flow,
-  pipe,
-} from "effect";
+import { Effect, Layer, Logger, ManagedRuntime, References, Schema, flow, pipe } from "effect";
 import { AppLayer } from "~/App.ts";
 import {
   Boot,
@@ -39,6 +27,7 @@ import {
   type RuntimeOwner,
 } from "~/boot/Bootstrap.ts";
 import { awaitActivation, type BootSignal, claimRealm } from "~/boot/Guard.ts";
+import { describeCause, describeThrown } from "~/domain/Failure.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Realm } from "~/platform/Realm.ts";
 
@@ -70,14 +59,6 @@ class StartupFailed extends Schema.TaggedError<StartupFailed>()("StartupFailed",
   cause: Schema.optional(Schema.Defect()),
 }) {}
 
-/** What a thrown value says. */
-const describe = (cause: unknown): string =>
-  pipe(
-    Match.value(cause),
-    Match.when(Predicate.isError, (error) => error.message),
-    Match.orElse((other) => String(other)),
-  );
-
 /** The whole application for one activation, over the owner of its runtime. */
 const applicationLayer =
   (signal: BootSignal) =>
@@ -92,19 +73,20 @@ const applicationLayer =
 /**
  * Build the application in its own runtime.
  *
- * A failure to start must never break the page. Report it once, and stay out
- * of the way. The guard's own listeners are harmless.
+ * A failure to start must never break the page. Report it once, with the text
+ * of the first failure, and stay out of the way. The guard's own listeners are
+ * harmless.
  */
 const buildApplication = ({ runtime, release }: OwnedRuntime<never, never>): Effect.Effect<void> =>
   pipe(
     Effect.tryPromise({
       try: () => runtime.runPromise(Effect.void),
-      catch: (cause) => new StartupFailed({ detail: describe(cause), cause }),
+      catch: (cause) => new StartupFailed({ detail: describeThrown(cause), cause }),
     }),
     Effect.catchCause((cause) =>
       pipe(
         Effect.sync(() => {
-          console.error("[vimium-webkit] failed to start", Cause.pretty(cause));
+          console.error("[vimium-webkit] failed to start", describeCause(cause));
         }),
         // A part of the graph may have been built before the failure, and
         // that part holds listeners of this page. Nothing else will release

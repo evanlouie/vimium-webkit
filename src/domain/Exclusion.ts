@@ -11,20 +11,9 @@
  * The rule set is a record of pure functions, and not a class.
  */
 
-import {
-  Array,
-  Boolean,
-  Data,
-  Match,
-  Option,
-  Predicate,
-  Result,
-  Schema,
-  String as Str,
-  flow,
-  pipe,
-} from "effect";
+import { Array, Boolean, Data, Option, Result, Schema, String as Str, flow, pipe } from "effect";
 import { constFalse } from "effect/Function";
+import { describeThrown } from "~/domain/Failure.ts";
 import { exclusionRuleSchema } from "~/domain/Persisted.ts";
 import type { ExclusionRule } from "~/domain/Persisted.ts";
 import { regexSafetyError } from "~/domain/RegexSafety.ts";
@@ -229,21 +218,13 @@ type SafePattern = Data.TaggedEnum<{
 
 const SafePattern = Data.taggedEnum<SafePattern>();
 
-/** What a thrown value says. A `RegExp` that does not compile throws a `SyntaxError`. */
-const describeCause = (cause: unknown): string =>
-  pipe(
-    Match.value(cause),
-    Match.when(Predicate.isError, (error) => error.message),
-    Match.orElse((other) => String(other)),
-  );
-
 /** Compile a raw expression and check it, or say why we drop it. */
 const readExpression = (body: string): Result.Result<SafePattern, string> =>
   Result.gen(function* () {
     const source = `^${body}$`;
     const regexp = yield* Result.try({
       try: () => new RegExp(source),
-      catch: (cause) => `the expression does not compile: ${describeCause(cause)}`,
+      catch: (cause) => `the expression does not compile: ${describeThrown(cause)}`,
     });
     // The page chooses the URL, and the rules run on every navigation. An
     // expression that backtracks turns one crafted URL into a tab that does

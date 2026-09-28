@@ -20,7 +20,7 @@ import {
   SETTINGS_SCHEMA_VERSION,
 } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
+import { KeyValueStore, STORAGE_PREFIX, StoreKind } from "~/platform/KeyValueStore.ts";
 import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
 
@@ -37,10 +37,7 @@ const storedSettings = (rules: readonly ExclusionRule[]): Layer.Layer<KeyValueSt
       ],
     ]);
     return KeyValueStore.of({
-      kind: "memory",
-      durable: false,
-      watchable: false,
-      managerPrivate: false,
+      kind: StoreKind.Memory(),
       get: (key) => Effect.sync(() => Option.fromNullishOr(map.get(key))),
       set: (key, value) =>
         Effect.sync(() => {
@@ -50,9 +47,9 @@ const storedSettings = (rules: readonly ExclusionRule[]): Layer.Layer<KeyValueSt
         Effect.sync(() => {
           map.delete(key);
         }),
-      setUnsafe: (key, value) => {
+      setUnsafe: Option.some((key, value) => {
         map.set(key, value);
-      },
+      }),
       changes: () => Stream.empty,
     });
   });

@@ -9,7 +9,7 @@
  *    behaviour, the first attempt must give a HUD message.
  * 3. **No probe may throw.** A userscript does not own its globals, and this
  *    service is built early. One hostile accessor must cost one capability,
- *    and not the whole start. Every read below is inside `dom.probeOr`.
+ *    and not the whole start. Every read below is inside `dom.probeOrElse`.
  *
  * The old module built the manager surface and chose the value backend itself.
  * It does not do that now. It reads `Gm`, `KeyValueStore` and `Dom`, which are
@@ -17,10 +17,11 @@
  */
 
 import { Array, Context, Effect, Layer, Match, Option, Predicate, Record, pipe } from "effect";
+import { constFalse } from "effect/Function";
 import { clipboardReader, clipboardWriter } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Gm } from "~/platform/Gm.ts";
-import { type KeyValueKind, KeyValueStore } from "~/platform/KeyValueStore.ts";
+import { type KeyValueKind, kindName, KeyValueStore, StoreKind } from "~/platform/KeyValueStore.ts";
 import { hasNativeIdleCallback } from "~/platform/Scheduler.ts";
 
 export type ManagerName =
@@ -183,7 +184,7 @@ const isWebKitAgent = (ua: string): boolean =>
 /**
  * Read the report.
  *
- * Every browser read is inside `dom.probeOr`, so a poisoned global gives
+ * Every browser read is inside `dom.probeOrElse`, so a poisoned global gives
  * `false` and not a defect.
  */
 export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyValueStore | Dom> =
@@ -194,7 +195,7 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
     const win = dom.window;
     const doc = dom.document;
 
-    const flag = (read: () => boolean): Effect.Effect<boolean> => dom.probeOr(read, false);
+    const flag = (read: () => boolean): Effect.Effect<boolean> => dom.probeOrElse(read, constFalse);
 
     /**
      * Constructable stylesheets, and a shadow root that accepts them.
@@ -260,8 +261,15 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
       // Asked of the selected store, and not derived again. Separate predicates
       // can make the warning disagree with the selected backend. One source of
       // truth prevents that defect.
-      value: kv.kind,
-      valueChangeListener: kv.watchable,
+      value: kindName(kv.kind),
+      valueChangeListener: pipe(
+        kv.kind,
+        StoreKind.$match({
+          GmAsync: constFalse,
+          GmSync: ({ watchable }) => watchable,
+          Memory: constFalse,
+        }),
+      ),
       openInTab: gm.canOpenInTab,
       // No manager in the matrix refuses `{ active: false }`, but quoid ignores
       // it. Reported as available, and checked by hand.

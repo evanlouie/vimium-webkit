@@ -13,7 +13,7 @@
 
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Option, pipe } from "effect";
-import { isLinearRegex, regexSafetyError } from "~/domain/RegexSafety.ts";
+import { regexSafetyError } from "~/domain/RegexSafety.ts";
 
 /**
  * The patterns that a user writes, and that must keep working.
@@ -76,6 +76,10 @@ const LINEAR: readonly string[] = [
   // cost of `[a-z]*x` twice: 1.66 ms against 1024 characters.
   "a(?=[a-z]*x)(?=[a-z]*y)b*",
 ];
+
+/** Does the check accept `source` with `flags`? It accepts a pattern when it gives no reason. */
+const accepts = (source: string, flags: string): boolean =>
+  pipe(regexSafetyError(source, flags), Option.isNone);
 
 /** The reason that the check gives for `source`, or `""` when it gives none. */
 const reasonFor = (source: string): string =>
@@ -165,7 +169,7 @@ describe("RegexSafety", () => {
   describe("refuses every pattern that grows with a power", () => {
     it.effect.each(SUPER_LINEAR)("%s", (source) =>
       Effect.sync(() => {
-        assert.isFalse(isLinearRegex(source, ""), `${source} passed the check`);
+        assert.isFalse(accepts(source, ""), `${source} passed the check`);
       }),
     );
   });
@@ -173,7 +177,7 @@ describe("RegexSafety", () => {
   it.effect("refuses eight nested fixed loops over assertions", () =>
     Effect.sync(() => {
       assert.strictEqual(NESTED_FIXED_ASSERTIONS.length, 103);
-      assert.isFalse(isLinearRegex(NESTED_FIXED_ASSERTIONS, ""));
+      assert.isFalse(accepts(NESTED_FIXED_ASSERTIONS, ""));
     }),
   );
 
@@ -203,7 +207,7 @@ describe("RegexSafety", () => {
     // refused, because an unread pattern cannot be called safe.
     it.effect.each(["[unclosed", "(unclosed", "a)b"])("%s", (source) =>
       Effect.sync(() => {
-        assert.isFalse(isLinearRegex(source, ""), `${source} passed`);
+        assert.isFalse(accepts(source, ""), `${source} passed`);
       }),
     );
   });
@@ -214,10 +218,10 @@ describe("RegexSafety", () => {
       // characters `p{L}`. The old model read one character, so the model and
       // the engine did not agree. Refuse instead, and accept the escape only
       // where it means what the model says.
-      assert.isFalse(isLinearRegex("\\p{L}", ""));
-      assert.isFalse(isLinearRegex("\\u{41}", ""));
-      assert.isTrue(isLinearRegex("\\p{L}", "u"));
-      assert.isTrue(isLinearRegex("\\u{41}", "u"));
+      assert.isFalse(accepts("\\p{L}", ""));
+      assert.isFalse(accepts("\\u{41}", ""));
+      assert.isTrue(accepts("\\p{L}", "u"));
+      assert.isTrue(accepts("\\u{41}", "u"));
 
       // The reason must tell the user what to write instead. "syntax that the
       // safety check does not know" is true and useless.
@@ -233,9 +237,9 @@ describe("RegexSafety", () => {
       // repeats one character. The model read two code units, so it saw a
       // repeat of a low surrogate, and `\u{1F600}+\u{1F600}+x` looked safe.
       // It is the shape of `x+x+y`, which the check refuses.
-      assert.isFalse(isLinearRegex("\u{1F600}+\u{1F600}+x", "u"));
-      assert.isTrue(isLinearRegex("\u{1F600}+x", "u"));
-      assert.isTrue(isLinearRegex("[\\u{1F600}-\\u{1F64F}]+x", "u"));
+      assert.isFalse(accepts("\u{1F600}+\u{1F600}+x", "u"));
+      assert.isTrue(accepts("\u{1F600}+x", "u"));
+      assert.isTrue(accepts("[\\u{1F600}-\\u{1F64F}]+x", "u"));
     }),
   );
 
@@ -246,18 +250,18 @@ describe("RegexSafety", () => {
       // of find, and one 1024-character window of them cost 6.3 s.
       const chain = `${"(?=(?:(?=[a-z]{0,9999}a)a){1,9999})".repeat(14)}(?!)`;
       assert.isBelow(chain.length, 512);
-      assert.isFalse(isLinearRegex(chain, ""));
+      assert.isFalse(accepts(chain, ""));
       assert.include(reasonFor(`${"(?=a)".repeat(9)}b`), "at most eight lookaheads");
       assert.include(reasonFor("(?=(?=(?=(?=a))))"), "at most three nested assertions");
       // A pattern that a user writes holds a few assertions, and passes.
-      assert.isTrue(isLinearRegex("^(?=.*foo)(?=.*bar)(?=.*baz)", ""));
+      assert.isTrue(accepts("^(?=.*foo)(?=.*bar)(?=.*baz)", ""));
     }),
   );
 
   it.effect("refuses a pattern that is too long to read", () =>
     Effect.sync(() => {
-      assert.isFalse(isLinearRegex("a".repeat(4096), ""));
-      assert.isTrue(isLinearRegex("a".repeat(64), ""));
+      assert.isFalse(accepts("a".repeat(4096), ""));
+      assert.isTrue(accepts("a".repeat(64), ""));
     }),
   );
 
@@ -265,13 +269,13 @@ describe("RegexSafety", () => {
     Effect.sync(() => {
       // Without `i` the two alternatives cannot match one text, and with `i`
       // they can.
-      assert.isTrue(isLinearRegex("(?:ab|Ab)+", ""));
-      assert.isFalse(isLinearRegex("(?:ab|Ab)+", "i"));
+      assert.isTrue(accepts("(?:ab|Ab)+", ""));
+      assert.isFalse(accepts("(?:ab|Ab)+", "i"));
 
       // `.` excludes the line terminators, so `.*\n*` competes for nothing.
-      assert.isTrue(isLinearRegex(".*\\n*", ""));
+      assert.isTrue(accepts(".*\\n*", ""));
       // With `s` the dot holds the line terminators too.
-      assert.isFalse(isLinearRegex(".*\\n*", "s"));
+      assert.isFalse(accepts(".*\\n*", "s"));
     }),
   );
 });

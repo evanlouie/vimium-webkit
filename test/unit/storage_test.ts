@@ -31,7 +31,7 @@ import {
 import { TestClock } from "effect/testing";
 import { defaultSettings } from "~/domain/Persisted.ts";
 import { GmError } from "~/platform/Gm.ts";
-import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
+import { KeyValueStore, STORAGE_PREFIX, StoreKind } from "~/platform/KeyValueStore.ts";
 import { Storage, type StorageError } from "~/platform/Storage.ts";
 
 const SETTINGS_KEY = `${STORAGE_PREFIX}settings`;
@@ -67,7 +67,7 @@ interface Backend {
  * The exit path writes with a direct call, and a test must read what it wrote
  * without taking a turn of its own. A `Ref` would need an effect for that.
  */
-const makeBackendFor = (kind: KeyValueStore["Service"]["kind"]): Effect.Effect<Backend> =>
+const makeBackendFor = (kind: StoreKind): Effect.Effect<Backend> =>
   Effect.gen(function* () {
     const stored = MutableRef.make<Record.ReadonlyRecord<string, string>>({});
     const writes = MutableRef.make<readonly string[]>([]);
@@ -117,9 +117,6 @@ const makeBackendFor = (kind: KeyValueStore["Service"]["kind"]): Effect.Effect<B
 
     const service = KeyValueStore.of({
       kind,
-      durable: false,
-      watchable: false,
-      managerPrivate: true,
       get: (key) =>
         Effect.suspend(() =>
           pipe(
@@ -163,10 +160,11 @@ const makeBackendFor = (kind: KeyValueStore["Service"]["kind"]): Effect.Effect<B
           pipe(stored, MutableRef.update(Record.remove(key)));
         }),
       setUnsafe: pipe(
-        kind === "gm-async",
-        Boolean.match({
-          onFalse: () => directWrite,
-          onTrue: () => null,
+        kind,
+        StoreKind.$match({
+          GmAsync: () => Option.none(),
+          GmSync: () => Option.some(directWrite),
+          Memory: () => Option.some(directWrite),
         }),
       ),
       changes: () => Stream.empty,
@@ -199,7 +197,7 @@ const makeBackendFor = (kind: KeyValueStore["Service"]["kind"]): Effect.Effect<B
     };
   });
 
-const makeBackend = makeBackendFor("memory");
+const makeBackend = makeBackendFor(StoreKind.Memory());
 
 /**
  * Take `step` until `settled` gives a value.
@@ -447,7 +445,7 @@ describe("Storage", () => {
 
   it.effect("does not debounce a promise-backed manager", () =>
     Effect.gen(function* () {
-      const backend = yield* makeBackendFor("gm-async");
+      const backend = yield* makeBackendFor(StoreKind.GmAsync());
 
       yield* pipe(
         Effect.gen(function* () {
@@ -471,7 +469,7 @@ describe("Storage", () => {
 
   it.effect("waits for a manager promise before it starts the next write", () =>
     Effect.gen(function* () {
-      const backend = yield* makeBackendFor("gm-async");
+      const backend = yield* makeBackendFor(StoreKind.GmAsync());
 
       yield* pipe(
         Effect.gen(function* () {
@@ -513,7 +511,7 @@ describe("Storage", () => {
 
   it.effect("reports a rejected manager promise and fails the caller", () =>
     Effect.gen(function* () {
-      const backend = yield* makeBackendFor("gm-async");
+      const backend = yield* makeBackendFor(StoreKind.GmAsync());
 
       yield* pipe(
         Effect.gen(function* () {

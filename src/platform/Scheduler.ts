@@ -35,7 +35,7 @@ const DEFAULT_CHECK_EVERY = 32;
  * `false` on the browser that this application targets first.
  *
  * The read can throw, because a userscript does not own its globals. Call this
- * inside `Dom.probeOr`.
+ * inside `Dom.probeOrElse`.
  */
 export const hasNativeIdleCallback = (window: Window & typeof globalThis): boolean =>
   Predicate.isFunction(window.requestIdleCallback);

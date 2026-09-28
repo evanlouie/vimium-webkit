@@ -26,6 +26,7 @@ import {
   flow,
   pipe,
 } from "effect";
+import { constFalse } from "effect/Function";
 import { FrameId } from "~/domain/FrameId.ts";
 import { Dom } from "./Dom.ts";
 
@@ -194,12 +195,12 @@ export class Realm extends Context.Service<
     Effect.gen(function* () {
       const dom = yield* Dom;
 
-      const isLive = dom.probeOr(
+      const isLive = dom.probeOrElse(
         () => dom.window.navigator !== undefined && dom.window.document !== undefined,
-        false,
+        constFalse,
       );
 
-      const role = yield* dom.probeOr(
+      const role = yield* dom.probeOrElse(
         () =>
           pipe(
             dom.window.top,
@@ -210,21 +211,21 @@ export class Realm extends Context.Service<
               onSome: () => FrameRole.Top(),
             }),
           ),
-        FrameRole.Child(),
+        () => FrameRole.Child(),
       );
 
       const postToDescendants = (message: unknown): Effect.Effect<void> =>
         Effect.sync(() => pipe(descendantFrames(dom.window, 0), Array.forEach(postTo(message))));
 
       const isAncestor = (source: unknown): Effect.Effect<boolean> =>
-        dom.probeOr(
+        dom.probeOrElse(
           () =>
             pipe(
               source,
               Option.fromNullishOr,
               Option.exists((frame) => frame === dom.window.parent || frame === dom.window.top),
             ),
-          false,
+          constFalse,
         );
 
       return Realm.of({
