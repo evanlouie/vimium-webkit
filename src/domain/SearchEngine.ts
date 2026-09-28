@@ -16,7 +16,8 @@
  * no other line, which is why the parser gives diagnostics and does not fail.
  */
 
-import { Option } from "effect";
+import { Array, Data, Match, Option, pipe, Predicate, Result, String } from "effect";
+import { flow } from "effect/Function";
 
 export interface SearchEngine {
   /** The token before the query, for example `w`. Case matters, as upstream. */
@@ -51,86 +52,125 @@ const ENGINE_LINE = /^([^\s:]+)\s*:\s*(\S+)(?:\s+(.*))?$/u;
 
 const COMMENT = /^\s*#/u;
 
-export const parseSearchEngines = (source: string): ParsedSearchEngines => {
-  const engines: SearchEngine[] = [];
-  const diagnostics: EngineDiagnostic[] = [];
-  /** Keyword to index in `engines`, so a second definition replaces the first. */
-  const seen = new Map<string, number>();
+const matches =
+  (pattern: RegExp) =>
+  (text: string): boolean =>
+    pattern.test(text);
 
+/** A line of the configuration that holds something. */
+interface SourceLine {
+  readonly line: number;
+  readonly text: string;
+}
+
+/** The trimmed lines, numbered from 1, without the blank lines and the comments. */
+const sourceLines = flow(
   // `\r` is removed, and is not an end of line. A configuration that comes
   // from an editor on Windows is usual, and it must not make every line fail.
-  const lines = source.replace(/\r/gu, "").split("\n");
+  String.replace(/\r/gu, ""),
+  String.split("\n"),
+  Array.map((raw, index): SourceLine => ({ line: index + 1, text: raw.trim() })),
+  Array.filter(({ text }) => text.length > 0 && !COMMENT.test(text)),
+);
 
-  for (let index = 0; index < lines.length; index++) {
-    const raw = lines[index];
-    if (raw === undefined) continue;
+/** One line as an engine, or the message that says why it is not one. */
+const readEngine = flow(
+  String.match(ENGINE_LINE),
+  Result.fromOption(() => "expected `keyword: url-with-%s Description`"),
+  Result.map(([, keyword = "", url = "", description = ""]): SearchEngine => ({
+    keyword,
+    url,
+    description: pipe(
+      description.trim(),
+      Option.liftPredicate(String.isNonEmpty),
+      Option.getOrElse(() => keyword),
+    ),
+  })),
+  // The line is refused, and not accepted and ignored. An engine without the
+  // placeholder throws away everything that the user typed. A message is
+  // better.
+  Result.filterOrFail(
+    ({ url }) => url.includes("%s"),
+    () => "the URL must contain %s, which is replaced by the query",
+  ),
+  // A `javascript:` template is a correct engine line, and then every search
+  // through that keyword runs text from an attacker, or from a typing error,
+  // in the current origin. The check belongs here, and not in
+  // `buildSearchUrl`. The user is told at the place where they can correct
+  // it.
+  Result.filterOrFail(
+    ({ url }) => isSafeTemplate(url),
+    () => "the URL must be http:// or https://",
+  ),
+);
 
-    const text = raw.trim();
-    const line = index + 1;
-    if (text.length === 0 || COMMENT.test(text)) continue;
+/** The engines with `engine` in the place of an earlier line for its keyword. */
+const redefined = (
+  engines: readonly SearchEngine[],
+  engine: SearchEngine,
+): Option.Option<readonly SearchEngine[]> =>
+  pipe(
+    engines,
+    Array.findFirstIndex((known) => known.keyword === engine.keyword),
+    Option.flatMap((index) => pipe(engines, Array.replace(index, engine))),
+  );
 
-    const match = ENGINE_LINE.exec(text);
-    if (match === null) {
-      diagnostics.push({
-        line,
-        text,
-        message: "expected `keyword: url-with-%s Description`",
-      });
-      continue;
-    }
+/** Add an engine. A second definition of a keyword replaces the first, and says so. */
+const define = (
+  parsed: ParsedSearchEngines,
+  { line, text }: SourceLine,
+  engine: SearchEngine,
+): ParsedSearchEngines =>
+  pipe(
+    redefined(parsed.engines, engine),
+    Option.match({
+      onNone: () => ({
+        engines: pipe(parsed.engines, Array.append(engine)),
+        diagnostics: parsed.diagnostics,
+      }),
+      onSome: (engines) => ({
+        engines,
+        diagnostics: pipe(
+          parsed.diagnostics,
+          Array.append({
+            line,
+            text,
+            message: `duplicate keyword "${engine.keyword}"; this line wins`,
+          }),
+        ),
+      }),
+    }),
+  );
 
-    const keyword = match[1] ?? "";
-    const url = match[2] ?? "";
-    const description = (match[3] ?? "").trim();
+const reject = (
+  parsed: ParsedSearchEngines,
+  diagnostic: EngineDiagnostic,
+): ParsedSearchEngines => ({
+  engines: parsed.engines,
+  diagnostics: pipe(parsed.diagnostics, Array.append(diagnostic)),
+});
 
-    if (!url.includes("%s")) {
-      // The line is refused, and not accepted and ignored. An engine without
-      // the placeholder throws away everything that the user typed. A message
-      // is better.
-      diagnostics.push({
-        line,
-        text,
-        message: "the URL must contain %s, which is replaced by the query",
-      });
-      continue;
-    }
+const NO_ENGINES: ParsedSearchEngines = { engines: [], diagnostics: [] };
 
-    if (!isSafeTemplate(url)) {
-      // A `javascript:` template is a correct engine line, and then every
-      // search through that keyword runs text from an attacker, or from a
-      // typing error, in the current origin. The check belongs here, and not
-      // in `buildSearchUrl`. The user is told at the place where they can
-      // correct it.
-      diagnostics.push({
-        line,
-        text,
-        message: "the URL must be http:// or https://",
-      });
-      continue;
-    }
+/** Fold one line into the engines and the diagnostics. */
+const addLine = (parsed: ParsedSearchEngines, sourceLine: SourceLine): ParsedSearchEngines =>
+  pipe(
+    sourceLine.text,
+    readEngine,
+    Result.match({
+      onFailure: (message) =>
+        reject(parsed, { line: sourceLine.line, text: sourceLine.text, message }),
+      onSuccess: (engine) => define(parsed, sourceLine, engine),
+    }),
+  );
 
-    const engine: SearchEngine = {
-      keyword,
-      url,
-      description: description.length === 0 ? keyword : description,
-    };
+export const parseSearchEngines: (source: string) => ParsedSearchEngines = flow(
+  sourceLines,
+  Array.reduce(NO_ENGINES, addLine),
+);
 
-    const previous = seen.get(keyword);
-    if (previous === undefined) {
-      seen.set(keyword, engines.length);
-      engines.push(engine);
-    } else {
-      diagnostics.push({
-        line,
-        text,
-        message: `duplicate keyword "${keyword}"; this line wins`,
-      });
-      engines[previous] = engine;
-    }
-  }
-
-  return { engines, diagnostics };
-};
+/** A scheme of `http` or `https`, in any case. */
+const SAFE_SCHEME = /^https?:/iu;
 
 /**
  * Is this a template that we agree to open?
@@ -139,12 +179,7 @@ export const parseSearchEngines = (source: string): ParsedSearchEngines => {
  * query is percent-encoded into the template, so a scheme that is safe before
  * the substitution is safe after it.
  */
-export const isSafeTemplate = (template: string): boolean => {
-  const scheme = /^([a-z][a-z0-9+.-]*):/iu.exec(template.trim());
-  if (scheme === null) return false;
-  const protocol = (scheme[1] ?? "").toLowerCase();
-  return protocol === "http" || protocol === "https";
-};
+export const isSafeTemplate = (template: string): boolean => SAFE_SCHEME.test(template.trim());
 
 /**
  * Put the query into a `%s` template.
@@ -165,6 +200,9 @@ export interface KeywordSplit {
   readonly rest: string;
 }
 
+/** The first word after any leading whitespace, and the text after the whitespace that ends it. */
+const KEYWORD_SPLIT = /^\s*(\S+)(?:\s([\s\S]*))?$/u;
+
 /**
  * Take an engine keyword off the front of the query.
  *
@@ -175,29 +213,28 @@ export interface KeywordSplit {
 export const splitKeyword = (
   query: string,
   engines: readonly SearchEngine[],
-): Option.Option<KeywordSplit> => {
-  const trimmed = query.replace(/^\s+/u, "");
-  const boundary = trimmed.search(/\s/u);
-  const head = boundary === -1 ? trimmed : trimmed.slice(0, boundary);
-  if (head.length === 0) return Option.none();
-
-  const engine = engines.find((candidate) => candidate.keyword === head);
-  if (engine === undefined) return Option.none();
-
-  return Option.some({
-    engine,
-    rest: boundary === -1 ? "" : trimmed.slice(boundary + 1).trim(),
-  });
-};
+): Option.Option<KeywordSplit> =>
+  pipe(
+    query,
+    String.match(KEYWORD_SPLIT),
+    Option.flatMap(([, head = "", rest = ""]) =>
+      pipe(
+        engines,
+        Array.findFirst((candidate) => candidate.keyword === head),
+        Option.map((engine) => ({ engine, rest: rest.trim() })),
+      ),
+    ),
+  );
 
 /** The engines whose keyword starts with `prefix`, for the completion list. */
 export const enginesMatchingPrefix = (
   engines: readonly SearchEngine[],
   prefix: string,
-): readonly SearchEngine[] => {
-  if (prefix.length === 0) return engines;
-  return engines.filter((engine) => engine.keyword.startsWith(prefix));
-};
+): readonly SearchEngine[] =>
+  pipe(
+    engines,
+    Array.filter((engine) => engine.keyword.startsWith(prefix)),
+  );
 
 export type QueryKind = "url" | "search";
 
@@ -210,7 +247,7 @@ export type QueryKind = "url" | "search";
  * a dot is a host, unless its last label is one of a few document extensions
  * that leave no doubt. `notes.txt` searches. `example.dev` navigates.
  */
-const NON_TLD_EXTENSIONS: ReadonlySet<string> = new Set([
+const NON_TLD_EXTENSIONS: ReadonlyArray<string> = [
   "txt",
   "md",
   "pdf",
@@ -239,7 +276,7 @@ const NON_TLD_EXTENSIONS: ReadonlySet<string> = new Set([
   "mp3",
   "mp4",
   "mov",
-]);
+];
 
 /** One or more labels, a possible top-level domain, then a port and a path. */
 const HOST_LIKE = /^([^\s/?#@]+)\.([a-z]{2,63})\.?(?::\d+)?(?:[/?#][\s\S]*)?$/iu;
@@ -249,13 +286,40 @@ const IPV6_LIKE = /^\[[0-9a-f:.]+(?:%25[^\]]+)?\](?::\d+)?(?:[/?#][\s\S]*)?$/iu;
 
 const IPV4_LIKE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?::\d+)?(?:[/?#][\s\S]*)?$/u;
 
-const isIpv4 = (trimmed: string): boolean => {
-  const match = IPV4_LIKE.exec(trimmed);
-  if (match === null) return false;
+const LOCALHOST = /^localhost(?::\d+)?(?:[/?#][\s\S]*)?$/iu;
+
+const WITH_AUTHORITY = /^[a-z][a-z0-9+.-]*:\/\//iu;
+
+const WITHOUT_AUTHORITY = /^(?:about|view-source|file|data|javascript):/iu;
+
+/** An `@` before the first `/`. */
+const USER_INFO = /^[^/]*@/u;
+
+const isIpv4 = flow(
+  String.match(IPV4_LIKE),
   // `\d{1,3}` alone accepts `999.999.999.999`, which is not an address. Such a
   // text must be searched for, and not opened.
-  return match.slice(1, 5).every((octet) => Number(octet) <= 255);
-};
+  Option.exists(
+    flow(
+      Array.drop(1),
+      Array.every((octet) => Number(octet) <= 255),
+    ),
+  ),
+);
+
+const isFileExtension = (label: string): boolean => pipe(NON_TLD_EXTENSIONS, Array.contains(label));
+
+/**
+ * A plain host with a dot is a URL only when the last label looks like a
+ * top-level domain, and not like a file extension.
+ */
+const hostKind = flow(
+  String.match(HOST_LIKE),
+  Option.flatMap(Array.get(2)),
+  Option.map(String.toLowerCase),
+  Option.filter(Predicate.not(isFileExtension)),
+  Option.match({ onNone: (): QueryKind => "search", onSome: (): QueryKind => "url" }),
+);
 
 /**
  * Decide whether the user typed a destination or a question.
@@ -266,40 +330,84 @@ const isIpv4 = (trimmed: string): boolean => {
  * when the last label looks like a top-level domain, and not like a file
  * extension.
  */
-export const classifyQuery = (query: string): QueryKind => {
-  const trimmed = query.trim();
-  if (trimmed.length === 0) return "search";
-  if (/\s/u.test(trimmed)) return "search";
-
-  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed)) return "url";
-  if (/^(?:about|view-source|file|data|javascript):/iu.test(trimmed)) {
+export const classifyQuery = (query: string): QueryKind =>
+  pipe(
+    Match.value(query.trim()),
+    Match.withReturnType<QueryKind>(),
+    Match.when(String.isEmpty, () => "search"),
+    Match.when(matches(/\s/u), () => "search"),
+    Match.when(matches(WITH_AUTHORITY), () => "url"),
     // This is still a URL, so that the tabs service gets the chance to refuse
     // `javascript:` and `data:` itself. We must not search for the payload
     // without a message.
-    return "url";
-  }
+    Match.when(matches(WITHOUT_AUTHORITY), () => "url"),
+    // An `@` before the first `/` is user information. A search for it would
+    // send the password to the search engine. That is the one result here that
+    // cannot be undone.
+    Match.when(matches(USER_INFO), () => "url"),
+    Match.when(matches(IPV6_LIKE), () => "url"),
+    Match.when(matches(LOCALHOST), () => "url"),
+    Match.when(isIpv4, () => "url"),
+    Match.orElse(hostKind),
+  );
 
-  // An `@` before the first `/` is user information. A search for it would
-  // send the password to the search engine. That is the one result here that
-  // cannot be undone.
-  const firstSlash = trimmed.indexOf("/");
-  const at = trimmed.indexOf("@");
-  if (at !== -1 && (firstSlash === -1 || at < firstSlash)) return "url";
-
-  if (IPV6_LIKE.test(trimmed)) return "url";
-  if (/^localhost(?::\d+)?(?:[/?#][\s\S]*)?$/iu.test(trimmed)) return "url";
-  if (isIpv4(trimmed)) return "url";
-
-  const match = HOST_LIKE.exec(trimmed);
-  if (match === null) return "search";
-  return NON_TLD_EXTENSIONS.has((match[2] ?? "").toLowerCase()) ? "search" : "url";
-};
+const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:/iu;
 
 /** Add the scheme that a plain host does not have. It never guesses `http:`. */
-export const toNavigableUrl = (query: string): string => {
-  const trimmed = query.trim();
-  return /^[a-z][a-z0-9+.-]*:/iu.test(trimmed) ? trimmed : `https://${trimmed}`;
-};
+export const toNavigableUrl = (query: string): string =>
+  pipe(
+    Match.value(query.trim()),
+    Match.when(matches(HAS_SCHEME), (url) => url),
+    Match.orElse((host) => `https://${host}`),
+  );
+
+/** Where Enter takes the user. */
+export type Destination = Data.TaggedEnum<{
+  /** A keyword in front, and a query for that engine. */
+  EngineSearch: {
+    readonly engine: SearchEngine;
+    readonly query: string;
+    readonly url: string;
+  };
+  /** A URL, with the scheme that it may have needed. */
+  Address: { readonly url: string };
+  /** A search with the default engine. */
+  DefaultSearch: { readonly query: string; readonly url: string };
+}>;
+
+export const Destination = Data.taggedEnum<Destination>();
+
+/** A query with no keyword, or a keyword with nothing after it. */
+const plainDestination = (query: string, defaultSearchUrl: string): Destination =>
+  pipe(
+    Match.value(classifyQuery(query)),
+    Match.when("url", () => Destination.Address({ url: toNavigableUrl(query) })),
+    Match.when("search", () =>
+      Destination.DefaultSearch({ query, url: buildSearchUrl(defaultSearchUrl, query) }),
+    ),
+    Match.exhaustive,
+  );
+
+/**
+ * Decide where a raw omnibar query goes.
+ *
+ * `defaultSearchUrl` is `settings.searchUrl`. A keyword at the front replaces
+ * it, but only when something follows the keyword.
+ */
+export const destinationOf = (
+  query: string,
+  engines: readonly SearchEngine[],
+  defaultSearchUrl: string,
+): Destination =>
+  pipe(
+    splitKeyword(query, engines),
+    Option.filter(({ rest }) => rest.length > 0),
+    Option.match({
+      onNone: () => plainDestination(query.trim(), defaultSearchUrl),
+      onSome: ({ engine, rest }) =>
+        Destination.EngineSearch({ engine, query: rest, url: buildSearchUrl(engine.url, rest) }),
+    }),
+  );
 
 export interface ResolvedQuery {
   readonly url: string;
@@ -316,19 +424,12 @@ export const resolveQuery = (
   query: string,
   engines: readonly SearchEngine[],
   defaultSearchUrl: string,
-): ResolvedQuery => {
-  const split = splitKeyword(query, engines);
-  if (Option.isSome(split) && split.value.rest.length > 0) {
-    return {
-      url: buildSearchUrl(split.value.engine.url, split.value.rest),
-      kind: "search",
-    };
-  }
-  if (classifyQuery(query) === "url") {
-    return { url: toNavigableUrl(query), kind: "url" };
-  }
-  return {
-    url: buildSearchUrl(defaultSearchUrl, query.trim()),
-    kind: "search",
-  };
-};
+): ResolvedQuery =>
+  pipe(
+    destinationOf(query, engines, defaultSearchUrl),
+    Destination.$match({
+      EngineSearch: ({ url }): ResolvedQuery => ({ url, kind: "search" }),
+      Address: ({ url }): ResolvedQuery => ({ url, kind: "url" }),
+      DefaultSearch: ({ url }): ResolvedQuery => ({ url, kind: "search" }),
+    }),
+  );
