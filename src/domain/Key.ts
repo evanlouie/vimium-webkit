@@ -385,17 +385,6 @@ export const PLAIN_KEY_CONTEXT: KeyContext = {
   applePlatform: false,
 };
 
-/** Keep the old layout flag for callers that do not read platform data. */
-const readKeyContext = (context: KeyContext | boolean): KeyContext =>
-  pipe(
-    Match.value(context),
-    Match.when(Match.boolean, (ignoreKeyboardLayout) => ({
-      ignoreKeyboardLayout,
-      applePlatform: false,
-    })),
-    Match.orElse((offered) => offered),
-  );
-
 /**
  * The character of the physical position, when the layout is ignored.
  *
@@ -486,20 +475,16 @@ const namedChar = (key: string): string =>
  *
  * `Option.none()` means that the event carries no character.
  */
-export const keyChar = (
-  event: KeyEventLike,
-  offeredContext: KeyContext | boolean,
-): Option.Option<string> =>
+export const keyChar = (event: KeyEventLike, context: KeyContext): Option.Option<string> =>
   pipe(
     event,
     Option.liftPredicate((press) => !isModifierKey(press)),
-    Option.flatMap((press) => {
-      const context = readKeyContext(offeredContext);
-      return pipe(
+    Option.flatMap((press) =>
+      pipe(
         physicalChar(press, context),
         Option.orElse(() => layoutChar(press, context)),
-      );
-    }),
+      ),
+    ),
   );
 
 /**
@@ -590,7 +575,7 @@ const eventNotation = (event: KeyEventLike, char: string): string => {
  */
 export const keyNotation = (
   event: KeyEventLike,
-  context: KeyContext | boolean = PLAIN_KEY_CONTEXT,
+  context: KeyContext = PLAIN_KEY_CONTEXT,
 ): Option.Option<string> =>
   pipe(
     keyChar(event, context),
