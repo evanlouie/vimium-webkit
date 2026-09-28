@@ -170,6 +170,8 @@ const placedRects = (match: FindMatch, current: boolean, band: Band): ReadonlyAr
     })),
   );
 
+const NO_RECTS: ReadonlyArray<PlacedRect> = [];
+
 /**
  * Every rectangle to draw, up to about `MAX_RENDERED_RECTS`.
  *
@@ -186,8 +188,6 @@ const placeAll = (
     drawOrder(matches, currentIndex),
     Array.reduce(NO_RECTS, placeMatch(matches, currentIndex, band)),
   );
-
-const NO_RECTS: ReadonlyArray<PlacedRect> = [];
 
 /** Add the rectangles of match `index`, while the limit allows one more match. */
 const placeMatch =

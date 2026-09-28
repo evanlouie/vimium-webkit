@@ -42,6 +42,7 @@ import {
   Struct,
   pipe,
 } from "effect";
+import { constVoid } from "effect/Function";
 import { Commands } from "~/core/Commands.ts";
 import {
   CONTINUE_BUBBLING,
@@ -698,13 +699,15 @@ export class Find extends Context.Service<
             dom.attempt("Element.scrollIntoView", () =>
               pipe(
                 elementAt(range.startContainer),
-                Option.map((anchor) =>
-                  anchor.scrollIntoView({
-                    block: "center",
-                    inline: "nearest",
-                    behavior: "instant",
-                  }),
-                ),
+                Option.match({
+                  onNone: constVoid,
+                  onSome: (anchor) =>
+                    anchor.scrollIntoView({
+                      block: "center",
+                      inline: "nearest",
+                      behavior: "instant",
+                    }),
+                }),
               ),
             ),
             Effect.when(outOfView),
@@ -1049,7 +1052,7 @@ export class Find extends Context.Service<
       });
 
       /**
-       * Save `query` in the history.
+       * Save `text` in the history.
        *
        * Detached, because the group waits for its own debounce before the
        * write completes. The user must not wait half a second for the

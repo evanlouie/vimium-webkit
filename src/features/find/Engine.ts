@@ -217,9 +217,9 @@ export const collectSpans = (
  *
  * This is a loop with mutable state on purpose. It runs on every keystroke,
  * over the whole text of the page, against `MATCH_BUDGET_MS`. An
- * `Array.unfold` over an immutable state machine found the same spans two to
- * six times slower in JavaScriptCore: 0.33 ms against 0.97 ms over 2 MB of text
- * with no match, and 0.03 ms against 0.16 ms for 500 matches. A `Boolean.match`
+ * `Array.unfold` over an immutable state machine found the same spans three to
+ * six times slower in JavaScriptCore: 0.97 ms against 0.33 ms over 2 MB of text
+ * with no match, and 0.16 ms against 0.03 ms for 500 matches. A `Boolean.match`
  * in `now` and in `nextWindow`, which run for each window, made the whole
  * search 1.4 to 1.9 times slower, so those two stay plain conditionals too.
  */
@@ -400,10 +400,10 @@ const chunkChooser: (end: MatchEnd) => ChunkChooser = pipe(
  * binary search finds the edge.
  *
  * This is a loop on purpose. It runs for both ends of every match, on every
- * keystroke, over the chunks of the largest run. A recursive search with
- * `Boolean.match` and `Array.get` made `locateOffset` 36 to 64 times slower:
- * 0.07 ms against 4.3 ms for 500 matches over 50 000 chunks, which made a
- * whole search of a large page six times slower.
+ * keystroke, over the chunks of the largest run. With a recursive search built
+ * from `Boolean.match` and `Array.get`, `locateOffset` took 4.3 ms for 500
+ * matches over 50 000 chunks, against 0.66 ms with this loop, and a whole
+ * search of a large page in Chrome was six times slower.
  */
 const lastIndexWhere = (
   sorted: ReadonlyArray<number>,
@@ -989,13 +989,17 @@ export const indexAtSelection = (
   matches: ReadonlyArray<FindMatch>,
 ): Option.Option<number> =>
   pipe(
-    Option.fromNullishOr(selection.focusNode),
+    selection.focusNode,
+    Option.fromNullishOr,
     Option.flatMap((node) =>
       pipe(matches, Array.findFirstIndex(holdsOrPrecedes(node, selection.focusOffset))),
     ),
   );
 
-/** Does `match` hold the point, or lie after it? A throw is no opinion. */
+/**
+ * Does `match` hold the point, or lie before it? That is what
+ * `comparePoint` answers with `0` and `1`. A throw is no opinion.
+ */
 const holdsOrPrecedes =
   (node: Node, offset: number) =>
   (match: FindMatch): boolean =>
@@ -1011,7 +1015,8 @@ export const wordUnderCursor = (selection: Selection): string =>
     Option.liftPredicate((selected) => selected.length > 0),
     Option.orElse(() =>
       pipe(
-        Option.fromNullishOr(selection.focusNode),
+        selection.focusNode,
+        Option.fromNullishOr,
         Option.filter(isText),
         Option.map((node) => wordAt(node.data, selection.focusOffset)),
       ),
