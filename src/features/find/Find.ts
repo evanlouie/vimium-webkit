@@ -67,7 +67,7 @@ import { Dom } from "~/platform/Dom.ts";
 import { elementAt } from "~/platform/Elements.ts";
 import { Storage } from "~/platform/Storage.ts";
 import type { HudPromptOptions } from "~/ui/Hud.ts";
-import { Hud, KeyClaim } from "~/ui/Hud.ts";
+import { BRIEFLY, Hud, HudDuration, KeyClaim } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
 import {
   collectTextRuns,
@@ -756,7 +756,7 @@ export class Find extends Context.Service<
       /** Select the current match, and say where it is. */
       const showMatch = Effect.fn("Find.showMatch")(function* (found: Found, prefix: string) {
         yield* selectCurrent();
-        yield* hud.show(`${prefix}${statusText(matchesOutcome(found))}`);
+        yield* hud.show(`${prefix}${statusText(matchesOutcome(found))}`, BRIEFLY);
       });
 
       // -- the mode that lives on after Enter -----------------------------
@@ -837,9 +837,9 @@ export class Find extends Context.Service<
 
       const showStatus = Effect.fn("Find.showStatus")(function* (outcome: SearchOutcome) {
         const status = statusText(outcome);
-        // A duration of zero holds the line until the next message. The count
-        // is a live status, and not an announcement.
-        const live = () => hud.show(status, 0);
+        // The line stays until the next message. The count is a live status,
+        // and not an announcement.
+        const live = () => hud.show(status, HudDuration.Sticky());
         yield* pipe(
           outcome,
           SearchOutcome.$match({
@@ -1064,7 +1064,7 @@ export class Find extends Context.Service<
         );
 
       const noMatchesFor = (text: string): Effect.Effect<void> =>
-        pipe(hud.show(`No matches for "${text}"`), Effect.andThen(clearState));
+        pipe(hud.show(`No matches for "${text}"`, BRIEFLY), Effect.andThen(clearState));
 
       /**
        * Settle on the current match.
@@ -1075,7 +1075,7 @@ export class Find extends Context.Service<
       const settle = Effect.fn("Find.settle")(function* (outcome: SearchOutcome) {
         yield* scrollToCurrent();
         yield* selectCurrent();
-        yield* hud.show(statusText(outcome));
+        yield* hud.show(statusText(outcome), BRIEFLY);
         yield* enterPost();
       });
 
@@ -1173,7 +1173,7 @@ export class Find extends Context.Service<
         yield* pipe(
           latest,
           Hits.$match({
-            None: () => hud.show(`No matches for "${last.raw}"`),
+            None: () => hud.show(`No matches for "${last.raw}"`, BRIEFLY),
             Found: (found) =>
               pipe(
                 stepBy(found, count * sign),
@@ -1202,7 +1202,7 @@ export class Find extends Context.Service<
         yield* pipe(
           last,
           Option.match({
-            onNone: () => hud.show("No previous search"),
+            onNone: () => hud.show("No previous search", BRIEFLY),
             onSome: (parsed) => stepQuery(parsed, count),
           }),
         );
@@ -1212,7 +1212,7 @@ export class Find extends Context.Service<
         direction: 1 | -1,
       ) {
         const word = yield* probeSelection(wordUnderCursor, "");
-        const noWord = () => hud.show("No word under the cursor");
+        const noWord = () => hud.show("No word under the cursor", BRIEFLY);
         yield* pipe(
           wordQuery(word),
           ParsedFindQuery.$match({

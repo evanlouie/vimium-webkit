@@ -25,6 +25,7 @@ import {
   Boolean,
   Context,
   Data,
+  Duration,
   Effect,
   Exit,
   Layer,
@@ -48,7 +49,7 @@ import { appendCountDigit, isComposing, isCountDigit, keyNotation } from "~/doma
 import { Capabilities, type CapabilityReport } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { Hud } from "~/ui/Hud.ts";
+import { BRIEFLY, Hud, HudDuration } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
 import {
   canModify,
@@ -78,7 +79,9 @@ const PASTE_EXPLANATION =
   "own paste affordance. Use ⌘V (Ctrl+V).";
 
 /** How long the explanation above stays on screen. */
-const PASTE_EXPLANATION_MS = 4000;
+const PASTE_EXPLANATION_DURATION: HudDuration = HudDuration.Transient({
+  duration: Duration.millis(4000),
+});
 
 /** `1 character`, or `2 characters`. */
 const characters = (count: number): string =>
@@ -435,7 +438,7 @@ export class Visual extends Context.Service<
           clipboard.write(text),
           Effect.catch((error) => report.error(`Copy failed: ${error.detail}`)),
           Effect.forkDetach({ startImmediately: true }),
-          Effect.andThen(hud.show(`Yanked ${characters(text.length)}`)),
+          Effect.andThen(hud.show(`Yanked ${characters(text.length)}`, BRIEFLY)),
         );
 
       /** `y`: copy the selection and leave. */
@@ -445,7 +448,7 @@ export class Visual extends Context.Service<
           text,
           Option.liftPredicate((text) => text.length > 0),
           Option.match({
-            onNone: () => hud.show("Nothing to copy"),
+            onNone: () => hud.show("Nothing to copy", BRIEFLY),
             onSome: copy,
           }),
         );
@@ -460,7 +463,7 @@ export class Visual extends Context.Service<
           Yank: () => yank(),
           SwapEnds: () => swapEnds(),
           Enter: (command) => enterKind(command.kind),
-          ExplainPaste: () => hud.show(PASTE_EXPLANATION, PASTE_EXPLANATION_MS),
+          ExplainPaste: () => hud.show(PASTE_EXPLANATION, PASTE_EXPLANATION_DURATION),
         });
 
       const handleKey = Effect.fn("Visual.handleKey")(function* (
@@ -541,7 +544,7 @@ export class Visual extends Context.Service<
           Match.when("unavailable", () =>
             report.error("Text selection is not available in this frame."),
           ),
-          Match.when("no-text", () => hud.show("No text on this page to select.")),
+          Match.when("no-text", () => hud.show("No text on this page to select.", BRIEFLY)),
           Match.when("unplaceable", () => report.error("Could not place the caret on this page.")),
           Match.exhaustive,
         );

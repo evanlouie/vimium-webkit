@@ -28,7 +28,7 @@ import { Settings, type SettingsData } from "~/core/Settings.ts";
 import { FrameLink } from "~/frames/Link.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Tabs } from "~/platform/Tabs.ts";
-import { Hud } from "~/ui/Hud.ts";
+import { BRIEFLY, Hud } from "~/ui/Hud.ts";
 
 /** Where `go` opens a URL. */
 export type Destination = "this-tab" | "new-tab";
@@ -354,7 +354,7 @@ export class Navigation extends Context.Service<
 
         passNextKey: ({ count }) =>
           pipe(
-            hud.show(`Passing the next ${keysLabel(count)} to the page`),
+            hud.show(`Passing the next ${keysLabel(count)} to the page`, BRIEFLY),
             Effect.andThen(keyboard.passNextKey(count)),
           ),
       });

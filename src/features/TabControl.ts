@@ -30,7 +30,7 @@ import type { SessionState } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Storage } from "~/platform/Storage.ts";
 import { type TabError, Tabs } from "~/platform/Tabs.ts";
-import { Hud } from "~/ui/Hud.ts";
+import { BRIEFLY, Hud } from "~/ui/Hud.ts";
 
 const MEDIA_SELECTOR = "audio, video";
 const ZOOM_MIN = 0.3;
@@ -175,7 +175,7 @@ export class TabControl extends Context.Service<
             }),
           );
 
-          yield* hud.show("Muted media elements (WebAudio is unaffected)");
+          yield* hud.show("Muted media elements (WebAudio is unaffected)", BRIEFLY);
           // Hold the scope open. The interruption below closes it.
           return yield* Effect.never;
         }),
@@ -189,7 +189,7 @@ export class TabControl extends Context.Service<
       const unmute = pipe(
         FiberHandle.clear(muteFiber),
         Effect.andThen(setAllMuted(false)),
-        Effect.andThen(hud.show("Unmuted")),
+        Effect.andThen(hud.show("Unmuted", BRIEFLY)),
       );
 
       const toggleMute = Effect.fn("TabControl.toggleMute")(function* () {
@@ -224,7 +224,7 @@ export class TabControl extends Context.Service<
           Effect.forkDetach,
         );
 
-        yield* hud.show(`Zoom ${Math.round(next * 100)}%`);
+        yield* hud.show(`Zoom ${Math.round(next * 100)}%`, BRIEFLY);
       });
 
       const zoomIfEnabled = Effect.fnUntraced(function* (factor: number) {

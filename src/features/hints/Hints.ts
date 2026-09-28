@@ -55,6 +55,7 @@ import {
   Context,
   Data,
   Deferred,
+  Duration,
   Effect,
   FiberHandle,
   flow,
@@ -108,7 +109,7 @@ import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { type FrameId, FrameRole } from "~/platform/Realm.ts";
 import { OpenInTabResult, Tabs } from "~/platform/Tabs.ts";
-import { Hud } from "~/ui/Hud.ts";
+import { BRIEFLY, Hud, HudDuration } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
 import { detectHints, type HintRect, HintTargets, isSecondary, type LocalHint } from "./Detect.ts";
 import { hintCss, makeMarkerLayer, MarkerSpec } from "./Markers.ts";
@@ -901,13 +902,16 @@ const SessionState = Data.taggedEnum<SessionState>();
 type AlphabetState = Data.TaggedEnum.Value<SessionState, "Alphabet">;
 type FilterState = Data.TaggedEnum.Value<SessionState, "Filter">;
 
+/** How long "No matching hint" stays on screen. */
+const NO_MATCH_DURATION: HudDuration = HudDuration.Transient({ duration: Duration.millis(800) });
+
 /** What a session asks its runner to do after a key. */
 type SessionCommand = Data.TaggedEnum<{
   /** Take away the confirmation that waits. */
   CancelConfirm: NoFields;
   Render: NoFields;
   /** A line for the HUD. Only the origin speaks, so the page gets one line. */
-  Say: { readonly text: string; readonly durationMs: Option.Option<number> };
+  Say: { readonly text: string; readonly duration: HudDuration };
   Exit: { readonly reason: ExitReason };
   /** Act on the entry at `index` now. */
   Activate: { readonly index: number };
@@ -993,7 +997,7 @@ const alphabetFeedback = ({ hints, typed }: AlphabetState): readonly SessionComm
     matchByPrefix(hints, typed),
     Array.match({
       onEmpty: () => [
-        SessionCommand.Say({ text: "No matching hint", durationMs: Option.some(800) }),
+        SessionCommand.Say({ text: "No matching hint", duration: NO_MATCH_DURATION }),
         SessionCommand.Exit({ reason: "explicit" }),
       ],
       onNonEmpty: (matches) =>
@@ -1077,7 +1081,7 @@ const filterFeedback = (state: FilterState): readonly SessionCommand[] =>
       onEmpty: () => [
         SessionCommand.Say({
           text: `No matches for "${filterQuery(state)}"`,
-          durationMs: Option.none(),
+          duration: BRIEFLY,
         }),
       ],
       onNonEmpty: () =>
@@ -1085,7 +1089,7 @@ const filterFeedback = (state: FilterState): readonly SessionCommand[] =>
           pipe(
             filterQuery(state),
             Option.liftPredicate(String.isNonEmpty),
-            Option.map((text) => SessionCommand.Say({ text, durationMs: Option.none() })),
+            Option.map((text) => SessionCommand.Say({ text, duration: BRIEFLY })),
           ),
           exactActivation(state),
         ]),
@@ -1817,7 +1821,7 @@ export class Hints extends Context.Service<
        * letting the user believe that the setting was honoured.
        */
       const noteForeground: (active: boolean) => Effect.Effect<void> = Boolean.match({
-        onFalse: () => hud.show("Opened in the foreground: there is no GM.openInTab."),
+        onFalse: () => hud.show("Opened in the foreground: there is no GM.openInTab.", BRIEFLY),
         onTrue: () => Effect.void,
       });
 
@@ -1845,13 +1849,16 @@ export class Hints extends Context.Service<
       const copy = Effect.fn("Hints.copy")(
         function* (text: string, label: string) {
           yield* clipboard.write(text);
-          yield* hud.show(`Copied ${label}`);
+          yield* hud.show(`Copied ${label}`, BRIEFLY);
         },
         Effect.catch((error) => report.error(`Copy failed: ${error.detail}`)),
       );
 
       const openOmnibar = Effect.fnUntraced(function* (href: Option.Option<string>) {
-        yield* pipe(href, whenSome(hud.show));
+        yield* pipe(
+          href,
+          whenSome((text) => hud.show(text, BRIEFLY)),
+        );
         yield* pipe(
           commands.run("Vomnibar.activate", {
             count: 1,
@@ -1872,7 +1879,7 @@ export class Hints extends Context.Service<
           ClickHere: () =>
             pipe(
               simulateClick(localIndex, hint),
-              Effect.andThen(hud.show("No link URL: activated in this tab.")),
+              Effect.andThen(hud.show("No link URL: activated in this tab.", BRIEFLY)),
             ),
           OpenTab: ({ url, active }) => openInNewTab(url, active),
           Hover: () => simulateHover(hint.element),
@@ -1958,7 +1965,7 @@ export class Hints extends Context.Service<
         // `document-start` that WebKit does not give a userscript. To tell the
         // user is better than a silent gap.
         yield* pipe(
-          hud.show("Some elements on this page cannot be reached (closed shadow DOM)."),
+          hud.show("Some elements on this page cannot be reached (closed shadow DOM).", BRIEFLY),
           Effect.when(firstWarning(result.unreachableHosts)),
         );
 
@@ -2157,11 +2164,11 @@ export class Hints extends Context.Service<
         // -- keys --------------------------------------------------------
 
         /** Only the origin speaks: one HUD message for the page, and not one for each frame. */
-        const say = (text: string, durationMs: Option.Option<number>): Effect.Effect<void> =>
+        const say = (text: string, duration: HudDuration): Effect.Effect<void> =>
           pipe(
             config.role,
             SessionRole.$match({
-              Origin: () => hud.show(text, Option.getOrUndefined(durationMs)),
+              Origin: () => hud.show(text, duration),
               Participant: () => Effect.void,
             }),
           );
@@ -2169,7 +2176,7 @@ export class Hints extends Context.Service<
         const run = SessionCommand.$match({
           CancelConfirm: () => cancelConfirm,
           Render: () => render,
-          Say: ({ text, durationMs }) => say(text, durationMs),
+          Say: ({ text, duration }) => say(text, duration),
           Exit: ({ reason }) => exitSession(reason),
           Activate: ({ index }) => activateIndex(index),
           Confirm: ({ index }) =>
@@ -2387,7 +2394,10 @@ export class Hints extends Context.Service<
 
         yield* handle.onExit(whenEscaped(signal(abort)));
 
-        const giveUp = pipe(handle.exit("explicit"), Effect.andThen(hud.show(HINTS_STOPPED)));
+        const giveUp = pipe(
+          handle.exit("explicit"),
+          Effect.andThen(hud.show(HINTS_STOPPED, BRIEFLY)),
+        );
         yield* pipe(abortAfterSafety(abort, giveUp), Effect.forkScoped);
       });
 
@@ -2464,7 +2474,10 @@ export class Hints extends Context.Service<
       ) {
         const entries = merge(local, remote);
         const start = Effect.gen(function* () {
-          yield* pipe(omittedNotice(dropped), whenSome(hud.show));
+          yield* pipe(
+            omittedNotice(dropped),
+            whenSome((text) => hud.show(text, BRIEFLY)),
+          );
           const keys = yield* Ref.get(buffered);
           yield* pipe(
             runSession({
@@ -2478,7 +2491,10 @@ export class Hints extends Context.Service<
         });
         yield* pipe(
           entries,
-          Array.match({ onEmpty: () => hud.show("No links to select"), onNonEmpty: () => start }),
+          Array.match({
+            onEmpty: () => hud.show("No links to select", BRIEFLY),
+            onNonEmpty: () => start,
+          }),
         );
       });
 
@@ -2510,7 +2526,8 @@ export class Hints extends Context.Service<
           collection,
           Collection.$match({
             Aborted: () => cancelRound(roundId),
-            Unanswered: () => pipe(hud.show(HINTS_STOPPED), Effect.andThen(cancelRound(roundId))),
+            Unanswered: () =>
+              pipe(hud.show(HINTS_STOPPED, BRIEFLY), Effect.andThen(cancelRound(roundId))),
             Collected: (collected) => openRound(roundId, mode, buffered, collected),
           }),
         );

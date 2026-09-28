@@ -36,7 +36,7 @@ import { pruneMarks } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Storage } from "~/platform/Storage.ts";
 import { Tabs } from "~/platform/Tabs.ts";
-import { Hud } from "~/ui/Hud.ts";
+import { BRIEFLY, Hud } from "~/ui/Hud.ts";
 import { captureNextKey } from "./CaptureKey.ts";
 import { Scroller } from "./Scroller.ts";
 
@@ -221,7 +221,7 @@ export class Marks extends Context.Service<
         yield* update((now) =>
           withGlobalMark(letter, { url: href, scrollX: x, scrollY: y, savedAt: now }),
         );
-        yield* hud.show(`Global mark "${letter}" set`);
+        yield* hud.show(`Global mark "${letter}" set`, BRIEFLY);
       });
 
       const setOnPage = Effect.fnUntraced(function* (letter: string) {
@@ -231,7 +231,7 @@ export class Marks extends Context.Service<
         yield* update((now) =>
           withLocalMark(key, letter, { scrollX: x, scrollY: y, savedAt: now }),
         );
-        yield* hud.show(`Mark "${letter}" set`);
+        yield* hud.show(`Mark "${letter}" set`, BRIEFLY);
       });
 
       const setLocal = Effect.fn("Marks.setLocal")(function* (letter: string) {
@@ -252,7 +252,10 @@ export class Marks extends Context.Service<
        * cannot know which letter brought it there.
        */
       const goToMark = Effect.fnUntraced(function* (letter: string, url: string) {
-        yield* hud.show(`Going to global mark "${letter}" (a userscript cannot focus another tab)`);
+        yield* hud.show(
+          `Going to global mark "${letter}" (a userscript cannot focus another tab)`,
+          BRIEFLY,
+        );
         // Through the tab service, which is the one place that decides what a
         // safe URL is. A refusal is final; there is no fallback.
         yield* pipe(
@@ -289,7 +292,7 @@ export class Marks extends Context.Service<
             onSome: (mark) =>
               pipe(
                 scroller.restore(mark.scrollX, mark.scrollY),
-                Effect.andThen(hud.show(`Jumped to mark "${letter}"`)),
+                Effect.andThen(hud.show(`Jumped to mark "${letter}"`, BRIEFLY)),
               ),
           }),
         );
