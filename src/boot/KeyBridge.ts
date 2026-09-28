@@ -62,7 +62,12 @@ export const attachKeyBridge: Effect.Effect<
   const stack = yield* HandlerStack;
   const keyboard = yield* Keyboard;
 
-  /** Give the event to the handler stack. The answer is for the stack alone. */
+  /**
+   * Give the event to the handler stack.
+   *
+   * The stack stops the event itself when a handler asks, so its answer is not
+   * needed here.
+   */
   const bubble =
     <K extends HandlerEventName>(name: K) =>
     (event: HandlerEventMap[K]): Effect.Effect<void> =>

@@ -438,7 +438,11 @@ const compileRule = ({
 const passedKeys = ({ passKeys }: CompiledRule): Option.Option<string> =>
   pipe(passKeys, Option.liftPredicate(Str.isNonEmpty));
 
-/** The verdict of rules that each give the page some keys: every key once, in the order that the rules first name it. */
+/**
+ * The verdict of rules that each give the page some keys.
+ *
+ * Each key appears once, in the order that the rules first name it.
+ */
 const passing = (keys: ReadonlyArray<string>): EffectiveRule => ({
   enabled: true,
   passKeys: pipe(keys, Array.flatMap(Array.fromIterable), Array.dedupe, Array.join("")),
