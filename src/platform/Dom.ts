@@ -56,11 +56,22 @@ export class DomError extends Schema.TaggedError<DomError>()("DomError", {
 /**
  * Maps a global of this frame to the events that it can give.
  *
- * Any other target uses `listenOn`, which gives a plain `Event`.
+ * Any other target uses `listenOn`.
  */
 export interface TargetEventMap {
   readonly window: WindowEventMap;
   readonly document: DocumentEventMap;
+}
+
+/**
+ * Maps the event types of a `MessagePort` to the events that it gives.
+ *
+ * The payload is `unknown`, and not the `any` of the DOM types. The page can
+ * hold a copy of a port, so a message on it can carry anything.
+ */
+export interface PortEventMap {
+  readonly message: MessageEvent<unknown>;
+  readonly messageerror: MessageEvent<unknown>;
 }
 
 export interface ListenOptions {
@@ -143,13 +154,33 @@ export class Dom extends Context.Service<
       options?: ListenOptions,
     ) => Effect.Effect<void, never, R | Scope.Scope>;
 
-    /** Listen on any other target. The event is not narrowed. */
-    readonly listenOn: <R>(
-      target: EventTarget,
-      type: string,
-      handler: Listener<Event, R>,
-      options?: ListenOptions,
-    ) => Effect.Effect<void, never, R | Scope.Scope>;
+    /**
+     * Listen on any other target, for the enclosing scope.
+     *
+     * The event map of the target narrows the event. A port gives a
+     * `MessageEvent`, and an element gives the event of its type, such as a
+     * `MouseEvent` for `mousedown`. Any other target gives a plain `Event`.
+     */
+    readonly listenOn: {
+      <T extends keyof PortEventMap, R>(
+        target: MessagePort,
+        type: T,
+        handler: Listener<PortEventMap[T], R>,
+        options?: ListenOptions,
+      ): Effect.Effect<void, never, R | Scope.Scope>;
+      <T extends keyof HTMLElementEventMap, R>(
+        target: HTMLElement,
+        type: T,
+        handler: Listener<HTMLElementEventMap[T], R>,
+        options?: ListenOptions,
+      ): Effect.Effect<void, never, R | Scope.Scope>;
+      <R>(
+        target: EventTarget,
+        type: string,
+        handler: Listener<Event, R>,
+        options?: ListenOptions,
+      ): Effect.Effect<void, never, R | Scope.Scope>;
+    };
 
     /** The same events as a stream, for work that may suspend. */
     readonly events: <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K]>(
@@ -219,15 +250,16 @@ export class Dom extends Context.Service<
         target: EventTarget,
         type: string,
         handler: Listener<E, R>,
-        options: ListenOptions | undefined,
+        options?: ListenOptions,
       ) {
         const handlerServices = yield* Effect.context<R>();
         const run = Effect.runSyncExitWith(Context.merge(services, handlerServices));
         const listen = (event: Event): void =>
           pipe(
-            // The browser gives a plain `Event`. Only the DOM types tie an
-            // event name to its event type, so the name that `listen` took is
-            // the evidence, and this assertion is where it becomes the type.
+            // The browser gives a plain `Event`. Only the DOM types tie a
+            // target and an event name to an event type, so the target and
+            // the name that `listen` or `listenOn` took are the evidence, and
+            // this assertion is where they become the type.
             event as E,
             handler,
             run,
@@ -261,7 +293,7 @@ export class Dom extends Context.Service<
         listen: (target, type, handler, options) =>
           attach(resolveTarget(target), String(type), handler, options),
 
-        listenOn: (target, type, handler, options) => attach(target, type, handler, options),
+        listenOn: attach,
 
         events: <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K]>(
           target: K,
