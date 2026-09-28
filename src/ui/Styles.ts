@@ -16,13 +16,22 @@
  * to build on.
  */
 
-import { Option } from "effect";
+import { Array, Boolean, Option, pipe, Predicate, Schema } from "effect";
 
 // ---------------------------------------------------------------------------
 // Colour scheme
 // ---------------------------------------------------------------------------
 
-export type ColorScheme = "light" | "dark";
+/** The two schemes of the overlay palette. */
+export const ColorScheme = Schema.Literals(["light", "dark"]);
+
+export type ColorScheme = typeof ColorScheme.Type;
+
+/** The scheme for a surface that reads as dark, or as light. */
+export const schemeOf: (dark: boolean) => ColorScheme = Boolean.match({
+  onFalse: () => "light",
+  onTrue: () => "dark",
+});
 
 /** Below this luminance a surface reads as dark. Halfway, on purpose. */
 const DARK_THRESHOLD = 0.4;
@@ -32,8 +41,43 @@ const OPAQUE_ENOUGH = 0.5;
 
 const channelToLinear = (value: number): number => {
   const channel = value / 255;
-  return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  return pipe(
+    channel <= 0.04045,
+    Boolean.match({
+      onFalse: () => ((channel + 0.055) / 1.055) ** 2.4,
+      onTrue: () => channel / 12.92,
+    }),
+  );
 };
+
+const RGB_COLOR = /^rgba?\(([^)]+)\)$/;
+
+/** The channels of an `rgb()` or `rgba()` colour, as the engine wrote them. */
+const colorChannels = (color: string): Option.Option<ReadonlyArray<string>> =>
+  pipe(
+    RGB_COLOR.exec(color.trim()),
+    Option.fromNullishOr,
+    Option.flatMap(Array.get(1)),
+    Option.map((body) =>
+      pipe(
+        body.split(/[\s,/]+/),
+        Array.filter((part) => part !== ""),
+      ),
+    ),
+  );
+
+/** A finite number, or `None` for text that holds none. */
+const finiteNumber = (text: string): Option.Option<number> =>
+  pipe(
+    Number(text),
+    Option.liftPredicate((value: number) => Number.isFinite(value)),
+  );
+
+/** One colour channel, by its position. */
+const channelOf =
+  (channels: ReadonlyArray<string>) =>
+  (index: number): Option.Option<number> =>
+    pipe(channels, Array.get(index), Option.flatMap(finiteNumber));
 
 /**
  * The relative luminance of a computed `background-color`.
@@ -43,27 +87,36 @@ const channelToLinear = (value: number): number => {
  * also `None` for a colour that is almost transparent, because a transparent
  * background tells us nothing about the surface behind it.
  */
-export const backgroundLuminance = (color: string): Option.Option<number> => {
-  const match = /^rgba?\(([^)]+)\)$/.exec(color.trim());
-  if (match === null) return Option.none();
-
-  const parts = match[1]?.split(/[\s,/]+/).filter((part) => part !== "") ?? [];
-  const red = Number(parts[0]);
-  const green = Number(parts[1]);
-  const blue = Number(parts[2]);
-  if (!Number.isFinite(red) || !Number.isFinite(green) || !Number.isFinite(blue)) {
-    return Option.none();
-  }
-
-  const alpha = parts.length > 3 ? Number(parts[3]) : 1;
-  if (!Number.isFinite(alpha) || alpha < OPAQUE_ENOUGH) return Option.none();
-
-  return Option.some(
-    0.2126 * channelToLinear(red) +
+export const backgroundLuminance = (color: string): Option.Option<number> =>
+  Option.gen(function* () {
+    const channels = yield* colorChannels(color);
+    const channel = channelOf(channels);
+    const red = yield* channel(0);
+    const green = yield* channel(1);
+    const blue = yield* channel(2);
+    // A colour with no alpha channel is opaque.
+    yield* pipe(
+      channels,
+      Array.get(3),
+      Option.match({ onNone: () => Option.some(1), onSome: finiteNumber }),
+      Option.filter((alpha) => alpha >= OPAQUE_ENOUGH),
+    );
+    return (
+      0.2126 * channelToLinear(red) +
       0.7152 * channelToLinear(green) +
-      0.0722 * channelToLinear(blue),
-  );
-};
+      0.0722 * channelToLinear(blue)
+    );
+  });
+
+/** The scheme of one surface of the page, read from its background. */
+const surfaceScheme =
+  (view: Window) =>
+  (surface: Element): Option.Option<ColorScheme> =>
+    pipe(
+      view.getComputedStyle(surface).backgroundColor,
+      backgroundLuminance,
+      Option.map((luminance) => schemeOf(luminance < DARK_THRESHOLD)),
+    );
 
 /**
  * The scheme of the page itself, or `None` when the page does not say.
@@ -77,33 +130,26 @@ export const backgroundLuminance = (color: string): Option.Option<number> => {
  * There are two sources, in order of authority: the declared `color-scheme`
  * property, and the luminance of the surface that paints the page background.
  * The second one matters, because most dark pages never declare
- * `color-scheme`.
+ * `color-scheme`. The body is asked before the root, and the first surface
+ * that answers decides.
  *
  * The caller must protect this call. `getComputedStyle` belongs to the page,
  * and a page can replace it with an accessor that throws. `Ui.ts` therefore
  * calls this inside `dom.probeOr`.
  */
-export const detectPageScheme = (doc: Document): Option.Option<ColorScheme> => {
-  const view = doc.defaultView;
-  if (view === null) return Option.none();
-
-  const root: Element | null = doc.documentElement;
-  if (root === null) return Option.none();
-
-  const declared = view.getComputedStyle(root).colorScheme.trim();
-  if (declared === "dark") return Option.some("dark");
-  if (declared === "light") return Option.some("light");
-
-  const surfaces: ReadonlyArray<Element | null> = [doc.body, root];
-  for (const element of surfaces) {
-    if (element === null) continue;
-    const luminance = backgroundLuminance(view.getComputedStyle(element).backgroundColor);
-    if (Option.isNone(luminance)) continue;
-    return Option.some(luminance.value < DARK_THRESHOLD ? "dark" : "light");
-  }
-
-  return Option.none();
-};
+export const detectPageScheme = (doc: Document): Option.Option<ColorScheme> =>
+  Option.gen(function* () {
+    const view = yield* Option.fromNullishOr(doc.defaultView);
+    const root = yield* Option.fromNullishOr<Element | null>(doc.documentElement);
+    const surfaces: ReadonlyArray<Element | null> = [doc.body, root];
+    return yield* pipe(
+      view.getComputedStyle(root).colorScheme.trim(),
+      Schema.decodeUnknownOption(ColorScheme),
+      Option.orElse(() =>
+        pipe(surfaces, Array.filter(Predicate.isNotNull), Array.findFirst(surfaceScheme(view))),
+      ),
+    );
+  });
 
 // ---------------------------------------------------------------------------
 // The stylesheet
