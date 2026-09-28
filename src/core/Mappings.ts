@@ -54,13 +54,16 @@ export class Mappings extends Context.Service<
 
       const compile = (current: SettingsData): CompiledMappings => compileFor(current.keyMappings);
 
-      const trie = yield* SubscriptionRef.make(compile(yield* settings.current));
+      const trie = yield* pipe(
+        settings.current,
+        Effect.map(compile),
+        Effect.flatMap(SubscriptionRef.make),
+      );
 
-      yield* Effect.forkScoped(
-        pipe(
-          settings.changes,
-          Stream.runForEach((current) => SubscriptionRef.set(trie, compile(current))),
-        ),
+      yield* pipe(
+        settings.changes,
+        Stream.runForEach((current) => pipe(trie, SubscriptionRef.set(compile(current)))),
+        Effect.forkScoped,
       );
 
       return Mappings.of({

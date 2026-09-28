@@ -15,7 +15,21 @@
  * key press gives an explanation instead of silence.
  */
 
-import { Context, Effect, Layer, Option, Ref, Schema, pipe } from "effect";
+import {
+  Array,
+  Context,
+  Effect,
+  HashMap,
+  Layer,
+  Option,
+  Record,
+  Ref,
+  Result,
+  Schema,
+  Struct,
+  flow,
+  pipe,
+} from "effect";
 import {
   type CommandDef,
   type CommandGroup,
@@ -46,7 +60,7 @@ export interface CommandInvocation {
   /** The count prefix. It is 1 when the user typed no count. */
   readonly count: number;
   /** Options from the `map` line, for example `LinkHints.activate swap=true`. */
-  readonly options: Readonly<Record<string, string | boolean>>;
+  readonly options: Record.ReadonlyRecord<string, string | boolean>;
   /** The event that started this, when there is one. The clipboard needs it. */
   readonly event: KeyboardEvent | null;
 }
@@ -70,7 +84,7 @@ export class Commands extends Context.Service<
 
     /** Give a body to several commands that share one implementation. */
     readonly registerAll: <R>(
-      bodies: Partial<Record<CommandName, CommandBody<R>>>,
+      bodies: Partial<Record.ReadonlyRecord<CommandName, CommandBody<R>>>,
     ) => Effect.Effect<void, never, R>;
 
     readonly run: (
@@ -90,7 +104,8 @@ export class Commands extends Context.Service<
   static readonly layer: Layer.Layer<Commands> = Layer.effect(
     Commands,
     Effect.gen(function* () {
-      const bodies = yield* Ref.make<ReadonlyMap<CommandName, CommandBody<never>>>(new Map());
+      // Keyed by the name of the command, which a record would widen to a string.
+      const bodies = yield* Ref.make(HashMap.empty<CommandName, CommandBody<never>>());
 
       const register = <R>(
         name: CommandName,
@@ -98,61 +113,80 @@ export class Commands extends Context.Service<
       ): Effect.Effect<void, never, R> =>
         Effect.gen(function* () {
           const services = yield* Effect.context<R>();
-          const bound: CommandBody<never> = (invocation) =>
-            pipe(body(invocation), Effect.provideContext(services));
-          yield* Ref.update(bodies, (current) => {
-            const next = new Map(current);
-            next.set(name, bound);
-            return next;
-          });
+          const bound: CommandBody<never> = flow(body, Effect.provideContext(services));
+          yield* pipe(bodies, Ref.update(HashMap.set(name, bound)));
         });
 
       const run = Effect.fn("Commands.run")(function* (
         name: string,
         invocation: CommandInvocation,
       ) {
-        const definition = definitionOf(name);
-        if (Option.isNone(definition)) {
-          return yield* new CommandError({
-            reason: "unknown",
-            command: name,
-            detail: `there is no command named ${name}`,
-          });
-        }
+        const definition = yield* pipe(
+          definitionOf(name),
+          Result.fromOption(
+            () =>
+              new CommandError({
+                reason: "unknown",
+                command: name,
+                detail: `there is no command named ${name}`,
+              }),
+          ),
+          Effect.fromResult,
+        );
 
-        const body = (yield* Ref.get(bodies)).get(definition.value.name);
-        if (body === undefined) {
-          return yield* new CommandError({
-            reason: "unavailable",
-            command: name,
-            detail: definition.value.unavailableReason ?? `${name} cannot run in this frame`,
-          });
-        }
+        const body = yield* pipe(
+          Ref.get(bodies),
+          Effect.map(HashMap.get(definition.name)),
+          Effect.flatMap(
+            flow(
+              Result.fromOption(
+                () =>
+                  new CommandError({
+                    reason: "unavailable",
+                    command: name,
+                    detail: definition.unavailableReason ?? `${name} cannot run in this frame`,
+                  }),
+              ),
+              Effect.fromResult,
+            ),
+          ),
+        );
 
-        const outcome = yield* Effect.exit(body(invocation));
-        if (outcome._tag === "Failure") {
-          return yield* new CommandError({
-            reason: "failed",
-            command: name,
-            detail: `${name} failed`,
-          });
-        }
+        yield* pipe(
+          body(invocation),
+          Effect.catchCause(() =>
+            Effect.fail(
+              new CommandError({
+                reason: "failed",
+                command: name,
+                detail: `${name} failed`,
+              }),
+            ),
+          ),
+        );
       });
 
       return Commands.of({
         register,
-        registerAll: <R>(entries: Partial<Record<CommandName, CommandBody<R>>>) =>
-          Effect.forEach(
-            Object.entries(entries) as ReadonlyArray<readonly [CommandName, CommandBody<R>]>,
-            ([name, body]) => register(name, body),
-            { discard: true },
+        registerAll: (entries) =>
+          pipe(
+            COMMAND_NAMES,
+            Effect.forEach(
+              (name) =>
+                pipe(
+                  entries,
+                  Struct.get(name),
+                  Option.fromUndefinedOr,
+                  Option.match({
+                    onNone: () => Effect.void,
+                    onSome: (body) => register(name, body),
+                  }),
+                ),
+              { discard: true },
+            ),
           ),
         run,
-        isRunnable: (name) =>
-          pipe(
-            Ref.get(bodies),
-            Effect.map((current) => current.has(name)),
-          ),
+        isRunnable: (name) => pipe(Ref.get(bodies), Effect.map(HashMap.has(name))),
         definition: definitionOf,
         all: COMMAND_LIST,
         names: COMMAND_NAMES,
@@ -162,19 +196,33 @@ export class Commands extends Context.Service<
   );
 }
 
-const COMMAND_LIST: ReadonlyArray<CommandDef> = Object.values(COMMANDS);
+/** Every command, by a name that may not be one. */
+const COMMANDS_BY_NAME: Record.ReadonlyRecord<string, CommandDef> = COMMANDS;
 
-const COMMAND_NAMES: ReadonlyArray<CommandName> = COMMAND_LIST.map((definition) => definition.name);
+const COMMAND_LIST: ReadonlyArray<CommandDef> = Record.values(COMMANDS_BY_NAME);
 
-const COMMANDS_BY_GROUP: ReadonlyMap<CommandGroup, ReadonlyArray<CommandDef>> = (() => {
-  const grouped = new Map<CommandGroup, CommandDef[]>();
-  for (const definition of COMMAND_LIST) {
-    const bucket = grouped.get(definition.group);
-    if (bucket === undefined) grouped.set(definition.group, [definition]);
-    else bucket.push(definition);
-  }
-  return grouped;
-})();
+const COMMAND_NAMES: ReadonlyArray<CommandName> = pipe(
+  COMMAND_LIST,
+  Array.map((definition) => definition.name),
+);
+
+/** Every group with its commands, in the order of the first command of each group. */
+const COMMANDS_BY_GROUP: ReadonlyMap<CommandGroup, ReadonlyArray<CommandDef>> = pipe(
+  COMMAND_LIST,
+  Array.map((definition) => definition.group),
+  Array.dedupe,
+  Array.map(
+    (group) =>
+      [
+        group,
+        pipe(
+          COMMAND_LIST,
+          Array.filter((definition) => definition.group === group),
+        ),
+      ] as const,
+  ),
+  (groups) => new Map(groups),
+);
 
 const definitionOf = (name: string): Option.Option<CommandDef> =>
-  Option.fromNullishOr((COMMANDS as Readonly<Record<string, CommandDef>>)[name] ?? null);
+  pipe(COMMANDS_BY_NAME, Record.get(name));

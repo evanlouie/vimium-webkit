@@ -11,7 +11,19 @@
  * `ARCHITECTURE.md` section 3.
  */
 
-import { Cause, Context, Effect, Layer, Option, Ref, pipe, Struct } from "effect";
+import {
+  Array,
+  Cause,
+  Context,
+  Effect,
+  Layer,
+  Match,
+  Option,
+  Ref,
+  Struct,
+  flow,
+  pipe,
+} from "effect";
 
 // ---------------------------------------------------------------------------
 // Answers
@@ -87,18 +99,106 @@ export type Handler<R = never> = {
 
 export type HandlerId = number;
 
-/** A handler whose services are already supplied. */
-type BoundHandler = Handler<never>;
+/** The body for one event, with its services already supplied. */
+type BoundBody<K extends HandlerEventName> = (
+  event: HandlerEventMap[K],
+) => Effect.Effect<HandlerResult>;
 
-interface StackEntry {
+/** The bodies of a handler whose services are already supplied, one for each event. */
+type BoundBodies = { readonly [K in HandlerEventName]: Option.Option<BoundBody<K>> };
+
+/** A handler whose services are already supplied. */
+interface BoundHandler {
+  readonly name: string;
+  readonly bodies: BoundBodies;
+  /** Tell the owner that a body failed. A handler with no `onDefect` does nothing. */
+  readonly onDefect: (cause: Cause.Cause<never>) => Effect.Effect<void>;
+}
+
+interface StackEntry extends BoundHandler {
   readonly id: HandlerId;
-  readonly handler: BoundHandler;
 }
 
 interface StackState {
   readonly entries: ReadonlyArray<StackEntry>;
   readonly nextId: HandlerId;
 }
+
+/** Where a new entry goes: on top, where it sees an event first, or at the bottom. */
+type Placement = (
+  entry: StackEntry,
+) => (entries: ReadonlyArray<StackEntry>) => ReadonlyArray<StackEntry>;
+
+const ON_TOP: Placement = Array.append;
+const AT_BOTTOM: Placement = Array.prepend;
+
+/**
+ * Supply the services of a handler once.
+ *
+ * The event bodies each take an event and answer with a result. The cleanup
+ * body takes a cause, and not an event, so it is bound on its own.
+ */
+const bound = <R>(handler: Handler<R>, services: Context.Context<R>): BoundHandler => {
+  const provided = <A>(
+    body: ((event: A) => Effect.Effect<HandlerResult, never, R>) | undefined,
+  ): Option.Option<(event: A) => Effect.Effect<HandlerResult>> =>
+    pipe(
+      body,
+      Option.fromUndefinedOr,
+      Option.map((run) => flow(run, Effect.provideContext(services))),
+    );
+  return {
+    name: handler.name,
+    bodies: {
+      keydown: provided(handler.keydown),
+      keypress: provided(handler.keypress),
+      keyup: provided(handler.keyup),
+      click: provided(handler.click),
+      mousedown: provided(handler.mousedown),
+      focus: provided(handler.focus),
+      blur: provided(handler.blur),
+      scroll: provided(handler.scroll),
+    },
+    onDefect: pipe(
+      handler.onDefect,
+      Option.fromUndefinedOr,
+      Option.match({
+        onNone: () => () => Effect.void,
+        onSome: (run) => flow(run, Effect.provideContext(services)),
+      }),
+    ),
+  };
+};
+
+/** Give a bound handler the next id, and place it on the stack. */
+const added =
+  (handler: BoundHandler, place: Placement) =>
+  ({ entries, nextId }: StackState): readonly [HandlerId, StackState] => {
+    const id = nextId + 1;
+    const entry: StackEntry = pipe(handler, Struct.assign({ id }));
+    return [id, { nextId: id, entries: pipe(entries, place(entry)) }];
+  };
+
+const without = (id: HandlerId): ((current: StackState) => StackState) =>
+  Struct.evolve({
+    entries: (entries) =>
+      pipe(
+        entries,
+        Array.filter((entry) => entry.id !== id),
+      ),
+  });
+
+/** The body that a live entry gives for this event. */
+const liveBody = <K extends HandlerEventName>(
+  entries: ReadonlyArray<StackEntry>,
+  id: HandlerId,
+  name: K,
+): Option.Option<BoundBody<K>> =>
+  pipe(
+    entries,
+    Array.findFirst((entry) => entry.id === id),
+    Option.flatMap((entry): Option.Option<BoundBody<K>> => pipe(entry.bodies, Struct.get(name))),
+  );
 
 /**
  * `stopImmediatePropagation`, and not `stopPropagation`.
@@ -152,162 +252,145 @@ export class HandlerStack extends Context.Service<
     Effect.gen(function* () {
       const state = yield* Ref.make<StackState>({ entries: [], nextId: 0 });
 
-      const bind = <R>(handler: Handler<R>): Effect.Effect<BoundHandler, never, R> =>
-        Effect.gen(function* () {
-          const services = yield* Effect.context<R>();
-          const bound: Record<string, unknown> = { name: handler.name };
-
-          // The event bodies. Each one takes an event and answers with a
-          // result, and the types below say exactly that.
-          for (const key of Object.keys(handler)) {
-            if (key === "name" || key === "onDefect") continue;
-            const body = (handler as Record<string, unknown>)[key];
-            if (typeof body !== "function") continue;
-            const run = body as (event: Event) => Effect.Effect<HandlerResult, never, R>;
-            bound[key] = (event: Event): Effect.Effect<HandlerResult> =>
-              pipe(run(event), Effect.provideContext(services));
-          }
-
-          // The cleanup body. It takes a cause, and not an event, so it is
-          // bound on its own. A member with another shape must not compile.
-          const onDefect = handler.onDefect;
-          if (onDefect !== undefined) {
-            bound["onDefect"] = (cause: Cause.Cause<never>): Effect.Effect<void> =>
-              pipe(onDefect(cause), Effect.provideContext(services));
-          }
-
-          return bound as unknown as BoundHandler;
-        });
-
-      const insert = <R>(handler: Handler<R>, onTop: boolean): Effect.Effect<HandlerId, never, R> =>
-        Effect.gen(function* () {
-          const bound = yield* bind(handler);
-          return yield* Ref.modify(state, (current) => {
-            const id = current.nextId + 1;
-            const entry: StackEntry = { id, handler: bound };
-            return [
-              id,
-              {
-                nextId: id,
-                entries: onTop ? [...current.entries, entry] : [entry, ...current.entries],
-              },
-            ];
-          });
-        });
-
-      const remove = (id: HandlerId): Effect.Effect<void> =>
-        Ref.update(state, (current) =>
-          pipe(
-            current,
-            Struct.assign({ entries: current.entries.filter((entry) => entry.id !== id) }),
+      const insert = <R>(
+        handler: Handler<R>,
+        place: Placement,
+      ): Effect.Effect<HandlerId, never, R> =>
+        pipe(
+          Effect.context<R>(),
+          Effect.flatMap((services) =>
+            pipe(state, Ref.modify(added(bound(handler, services), place))),
           ),
         );
+
+      const remove = (id: HandlerId): Effect.Effect<void> => pipe(state, Ref.update(without(id)));
 
       const has = (id: HandlerId): Effect.Effect<boolean> =>
         pipe(
           Ref.get(state),
-          Effect.map((current) => current.entries.some((entry) => entry.id === id)),
+          Effect.map((current) =>
+            pipe(
+              current.entries,
+              Array.some((entry) => entry.id === id),
+            ),
+          ),
         );
 
-      const bodyOf = (
-        handler: BoundHandler,
+      /**
+       * A real snapshot. Handlers push and pop modes while the walk is in
+       * progress, and indexing into the live array while it changes skips
+       * frames: a handler that removed itself moved every entry below it up by
+       * one, so the next step went over one of them.
+       */
+      const snapshot = pipe(
+        Ref.get(state),
+        Effect.map((current) => current.entries),
+      );
+
+      /**
+       * A handler that fails must not block the key path for the whole page.
+       * Drop the frame, tell its owner, and continue. The owner holds
+       * everything else that belongs to the frame.
+       */
+      const dropDefective = Effect.fnUntraced(function* (
+        entry: StackEntry,
         name: HandlerEventName,
-      ): Option.Option<(event: Event) => Effect.Effect<HandlerResult>> => {
-        const body = (handler as Record<string, unknown>)[name];
-        return typeof body === "function"
-          ? Option.some(body as (event: Event) => Effect.Effect<HandlerResult>)
-          : Option.none();
-      };
+        cause: Cause.Cause<never>,
+      ) {
+        yield* Effect.logError(
+          `the "${entry.name}" handler failed during ${name}`,
+          Cause.pretty(cause),
+        );
+        yield* remove(entry.id);
+        yield* pipe(
+          entry.onDefect(cause),
+          Effect.catchCause((failure) =>
+            Effect.logError(
+              `the owner of "${entry.name}" failed to clean up`,
+              Cause.pretty(failure),
+            ),
+          ),
+        );
+        return CONTINUE_BUBBLING;
+      });
 
       const bubble = <K extends HandlerEventName>(
         name: K,
         event: HandlerEventMap[K],
-      ): Effect.Effect<boolean> =>
-        Effect.gen(function* () {
-          // A real snapshot. Handlers push and pop modes while the walk is in
-          // progress, and indexing into the live array while it changes skips
-          // frames: a handler that removed itself moved every entry below it up
-          // by one, so the next step went over one of them.
-          let frames = (yield* Ref.get(state)).entries;
-          let index = frames.length - 1;
-
-          while (index >= 0) {
-            const entry = frames[index];
-            index--;
-            if (entry === undefined) continue;
-
-            // The snapshot is fixed. The stack is not. An entry that was
-            // removed after the snapshot must not still see the event.
-            if (!(yield* has(entry.id))) continue;
-
-            const body = bodyOf(entry.handler, name);
-            if (Option.isNone(body)) continue;
-
-            const outcome = yield* Effect.exit(body.value(event));
-            let result: HandlerResult;
-            if (outcome._tag === "Success") {
-              result = outcome.value;
-            } else {
-              // A handler that fails must not block the key path for the whole
-              // page. Drop the frame, tell its owner, and continue. The owner
-              // holds everything else that belongs to the frame.
-              yield* Effect.logError(
-                `the "${entry.handler.name}" handler failed during ${name}`,
-                Cause.pretty(outcome.cause),
-              );
-              yield* remove(entry.id);
-              const onDefect = entry.handler.onDefect;
-              if (onDefect !== undefined) {
-                yield* pipe(
-                  onDefect(outcome.cause),
-                  Effect.catchCause((cause) =>
-                    Effect.logError(
-                      `the owner of "${entry.handler.name}" failed to clean up`,
-                      Cause.pretty(cause),
-                    ),
+      ): Effect.Effect<boolean> => {
+        /**
+         * The answer of one entry of the snapshot.
+         *
+         * The snapshot is fixed. The stack is not. An entry that was removed
+         * after the snapshot must not still see the event.
+         */
+        const answer = (entry: StackEntry): Effect.Effect<HandlerResult> =>
+          pipe(
+            Ref.get(state),
+            Effect.map((current) => liveBody(current.entries, entry.id, name)),
+            Effect.flatMap(
+              Option.match({
+                onNone: () => Effect.succeed(CONTINUE_BUBBLING),
+                onSome: (body) =>
+                  pipe(
+                    body(event),
+                    Effect.catchCause((cause) => dropDefective(entry, name, cause)),
                   ),
-                );
-              }
-              result = CONTINUE_BUBBLING;
-            }
+              }),
+            ),
+          );
 
-            switch (result) {
-              case CONTINUE_BUBBLING:
-                continue;
-              case PASS_EVENT_TO_PAGE:
-                return true;
-              case SUPPRESS_EVENT:
-                suppressEvent(event);
-                return false;
-              case SUPPRESS_PROPAGATION:
-                suppressPropagation(event);
-                return false;
-              case RESTART_BUBBLING:
-                // Take the snapshot again. A restart exists because the handler
-                // has just pushed something that must see this event.
-                frames = (yield* Ref.get(state)).entries;
-                index = frames.length - 1;
-                continue;
-            }
-          }
+        /** Give the event to each entry, from the top, until one decides. */
+        const walk: (frames: ReadonlyArray<StackEntry>) => Effect.Effect<boolean> =
+          Array.matchRight({
+            onEmpty: () => Effect.succeed(true),
+            onNonEmpty: (below, entry) =>
+              pipe(
+                answer(entry),
+                Effect.flatMap((result) => decide(result, below)),
+              ),
+          });
 
-          return true;
-        });
+        const decide = (
+          result: HandlerResult,
+          below: ReadonlyArray<StackEntry>,
+        ): Effect.Effect<boolean> =>
+          pipe(
+            Match.value(result),
+            Match.when("continue", () => walk(below)),
+            Match.when("pass-to-page", () => Effect.succeed(true)),
+            Match.when("suppress", () =>
+              pipe(
+                Effect.sync(() => suppressEvent(event)),
+                Effect.as(false),
+              ),
+            ),
+            Match.when("suppress-propagation", () =>
+              pipe(
+                Effect.sync(() => suppressPropagation(event)),
+                Effect.as(false),
+              ),
+            ),
+            // Take the snapshot again. A restart exists because the handler
+            // has just pushed something that must see this event.
+            Match.when("restart", () => pipe(snapshot, Effect.flatMap(walk))),
+            Match.exhaustive,
+          );
+
+        return pipe(snapshot, Effect.flatMap(walk));
+      };
 
       return HandlerStack.of({
-        push: (handler) => insert(handler, true),
-        unshift: (handler) => insert(handler, false),
+        push: (handler) => insert(handler, ON_TOP),
+        unshift: (handler) => insert(handler, AT_BOTTOM),
         remove,
         has,
         bubble,
-        reset: Ref.update(state, (current) => pipe(current, Struct.assign({ entries: [] }))),
-        names: pipe(
-          Ref.get(state),
-          Effect.map((current) => current.entries.map((entry) => entry.handler.name)),
-        ),
+        reset: pipe(state, Ref.update(Struct.assign({ entries: Array.empty<StackEntry>() }))),
+        names: pipe(snapshot, Effect.map(Array.map((entry) => entry.name))),
         depth: pipe(
-          Ref.get(state),
-          Effect.map((current) => current.entries.length),
+          snapshot,
+          Effect.map((entries) => entries.length),
         ),
       });
     }),

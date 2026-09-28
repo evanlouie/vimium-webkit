@@ -9,7 +9,7 @@
  * heard is exactly the failure that this service exists to prevent.
  */
 
-import { Context, Effect, Layer, Queue, Stream } from "effect";
+import { Context, Effect, Layer, Queue, Stream, pipe } from "effect";
 
 export type MessageLevel = "info" | "error";
 
@@ -34,7 +34,7 @@ export class Report extends Context.Service<
     Effect.gen(function* () {
       const queue = yield* Queue.unbounded<UserMessage>();
       const put = (level: MessageLevel) => (text: string) =>
-        Effect.asVoid(Queue.offer(queue, { level, text }));
+        pipe(queue, Queue.offer({ level, text }), Effect.asVoid);
       return Report.of({
         error: put("error"),
         info: put("info"),

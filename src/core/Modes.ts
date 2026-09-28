@@ -12,7 +12,21 @@
  * not reset them. Both now live in this service.
  */
 
-import { Context, Effect, Layer, Option, Ref, type Scope, SubscriptionRef, pipe } from "effect";
+import {
+  Array,
+  Boolean,
+  Context,
+  Data,
+  Effect,
+  Layer,
+  Option,
+  Record,
+  Ref,
+  type Scope,
+  SubscriptionRef,
+  flow,
+  pipe,
+} from "effect";
 import {
   CONTINUE_BUBBLING,
   type Handler,
@@ -63,9 +77,10 @@ export interface ModeHandle {
   readonly onExit: (body: (reason: ExitReason) => Effect.Effect<void>) => Effect.Effect<void>;
 }
 
+/** A mode that is on the stack, and the text that the HUD shows for it. */
 interface LiveMode {
   readonly handle: ModeHandle;
-  readonly indicator: ModeIndicator;
+  readonly indicator: Option.Option<string>;
 }
 
 /**
@@ -79,8 +94,99 @@ export const isEscape = (event: KeyboardEvent): boolean =>
 
 interface ModeState {
   readonly active: ReadonlyArray<LiveMode>;
-  readonly singletons: ReadonlyMap<string, ModeHandle>;
+  /** The mode that holds each singleton group. */
+  readonly singletons: Record.ReadonlyRecord<string, ModeHandle>;
 }
+
+type ExitBody = (reason: ExitReason) => Effect.Effect<void>;
+
+/** A variant that carries no data. */
+type NoFields = Record.ReadonlyRecord<never, never>;
+
+/** The life of one mode. A mode that exited never comes back. */
+type Life = Data.TaggedEnum<{
+  /**
+   * The mode is live. It knows its frame on the stack once the stack gives it
+   * one, and it holds the bodies that its exit runs.
+   */
+  Live: { readonly handler: Option.Option<HandlerId>; readonly bodies: ReadonlyArray<ExitBody> };
+  Exited: NoFields;
+}>;
+const Life = Data.taggedEnum<Life>();
+
+const EXITED: Life = Life.Exited();
+
+/** The live mode knows its frame on the stack. */
+const attached = (id: HandlerId): ((life: Life) => Life) =>
+  Life.$match({
+    Live: ({ bodies }) => Life.Live({ handler: Option.some(id), bodies }),
+    Exited: (exited) => exited,
+  });
+
+/**
+ * Keep an exit body. A mode that already exited runs it at once instead.
+ *
+ * The answer is the effect to run now.
+ */
+const keptBody = (body: ExitBody): ((life: Life) => readonly [Effect.Effect<void>, Life]) =>
+  Life.$match({
+    Live: ({ handler, bodies }): readonly [Effect.Effect<void>, Life] => [
+      Effect.void,
+      Life.Live({ handler, bodies: pipe(bodies, Array.append(body)) }),
+    ],
+    Exited: (exited): readonly [Effect.Effect<void>, Life] => [body("explicit"), exited],
+  });
+
+/** The mode that holds a singleton group now. */
+const holderOf =
+  (group: Option.Option<string>) =>
+  ({ singletons }: ModeState): Option.Option<ModeHandle> =>
+    pipe(
+      group,
+      Option.flatMap((name) => pipe(singletons, Record.get(name))),
+    );
+
+/** Add a live mode. A mode in a singleton group takes the group. */
+const joined =
+  (mode: LiveMode, group: Option.Option<string>) =>
+  ({ active, singletons }: ModeState): ModeState => ({
+    active: pipe(active, Array.append(mode)),
+    singletons: pipe(
+      group,
+      Option.match({
+        onNone: () => singletons,
+        onSome: (name) => pipe(singletons, Record.set(name, mode.handle)),
+      }),
+    ),
+  });
+
+/** Take a mode out. It gives up its singleton group only while it holds it. */
+const left =
+  (handle: ModeHandle, group: Option.Option<string>) =>
+  (current: ModeState): ModeState => ({
+    active: pipe(
+      current.active,
+      Array.filter((mode) => mode.handle !== handle),
+    ),
+    singletons: pipe(
+      current,
+      holderOf(group),
+      Option.filter((holder) => holder === handle),
+      Option.flatMap(() => group),
+      Option.match({
+        onNone: () => current.singletons,
+        onSome: (name) => pipe(current.singletons, Record.remove(name)),
+      }),
+    ),
+  });
+
+/** The indicator of the innermost live mode that has one. */
+const innermostIndicator = ({ active }: ModeState): ModeIndicator =>
+  pipe(
+    active,
+    Array.findLast((mode) => mode.indicator),
+    Option.getOrNull,
+  );
 
 export class Modes extends Context.Service<
   Modes,
@@ -110,117 +216,120 @@ export class Modes extends Context.Service<
     Modes,
     Effect.gen(function* () {
       const stack = yield* HandlerStack;
-      const state = yield* Ref.make<ModeState>({
-        active: [],
-        singletons: new Map(),
-      });
+      const state = yield* Ref.make<ModeState>({ active: [], singletons: Record.empty() });
       const indicator = yield* SubscriptionRef.make<ModeIndicator>(null);
 
       /** Show the innermost indicator that is not `null`. */
-      const refreshIndicator = Effect.gen(function* () {
-        const { active } = yield* Ref.get(state);
-        for (let index = active.length - 1; index >= 0; index--) {
-          const mode = active[index];
-          if (mode !== undefined && mode.indicator !== null) {
-            yield* SubscriptionRef.set(indicator, mode.indicator);
-            return;
-          }
-        }
-        yield* SubscriptionRef.set(indicator, null);
-      });
+      const refreshIndicator = pipe(
+        Ref.get(state),
+        Effect.map(innermostIndicator),
+        Effect.flatMap((shown) => pipe(indicator, SubscriptionRef.set(shown))),
+      );
 
       const enter = <R>(
         options: ModeOptions,
         handlers?: Omit<Handler<R>, "name" | "onDefect">,
       ): Effect.Effect<ModeHandle, never, R | Scope.Scope> =>
         Effect.gen(function* () {
-          const exited = yield* Ref.make(false);
-          const exitBodies = yield* Ref.make<
-            ReadonlyArray<(reason: ExitReason) => Effect.Effect<void>>
-          >([]);
-          const handlerId = yield* Ref.make<Option.Option<HandlerId>>(Option.none());
+          const group = Option.fromUndefinedOr(options.singleton);
+          const life = yield* Ref.make<Life>(Life.Live({ handler: Option.none(), bodies: [] }));
+
+          const close = Effect.fnUntraced(function* (
+            handler: Option.Option<HandlerId>,
+            bodies: ReadonlyArray<ExitBody>,
+            reason: ExitReason,
+          ) {
+            yield* pipe(handler, Option.match({ onNone: () => Effect.void, onSome: stack.remove }));
+            yield* pipe(state, Ref.update(left(handle, group)));
+            yield* pipe(
+              bodies,
+              Effect.forEach(
+                (body) =>
+                  pipe(
+                    body(reason),
+                    Effect.catchCause((cause) => Effect.logError("a mode exit body failed", cause)),
+                  ),
+                { discard: true },
+              ),
+            );
+            yield* refreshIndicator;
+          });
 
           const exit = (reason: ExitReason = "explicit"): Effect.Effect<void> =>
-            Effect.gen(function* () {
-              if (yield* Ref.getAndSet(exited, true)) return;
-
-              const id = yield* Ref.getAndSet(handlerId, Option.none());
-              if (Option.isSome(id)) yield* stack.remove(id.value);
-
-              yield* Ref.update(state, (current) => ({
-                active: current.active.filter((mode) => mode.handle !== handle),
-                singletons: dropSingleton(current.singletons, options.singleton, handle),
-              }));
-
-              const bodies = yield* Ref.getAndSet(exitBodies, []);
-              for (const body of bodies) {
-                yield* pipe(
-                  body(reason),
-                  Effect.catchCause((cause) => Effect.logError("a mode exit body failed", cause)),
-                );
-              }
-              yield* refreshIndicator;
-            });
+            pipe(
+              life,
+              Ref.getAndSet(EXITED),
+              Effect.flatMap(
+                Life.$match({
+                  Live: ({ handler, bodies }) => close(handler, bodies, reason),
+                  Exited: () => Effect.void,
+                }),
+              ),
+            );
 
           const handle: ModeHandle = {
             name: options.name,
-            isActive: pipe(
-              Ref.get(exited),
-              Effect.map((value) => !value),
-            ),
+            isActive: pipe(Ref.get(life), Effect.map(Life.$is("Live"))),
             exit,
-            onExit: (body) =>
-              Effect.gen(function* () {
-                if (yield* Ref.get(exited)) {
-                  yield* body("explicit");
-                  return;
-                }
-                yield* Ref.update(exitBodies, (current) => [...current, body]);
-              }),
+            onExit: (body) => pipe(life, Ref.modify(keptBody(body)), Effect.flatten),
           };
 
           // A singleton group holds one mode. Push a second one, and the first
           // one exits.
-          if (options.singleton !== undefined) {
-            const previous = (yield* Ref.get(state)).singletons.get(options.singleton);
-            if (previous !== undefined) yield* previous.exit("singleton");
-          }
+          yield* pipe(
+            Ref.get(state),
+            Effect.map(holderOf(group)),
+            Effect.flatMap(
+              Option.match({
+                onNone: () => Effect.void,
+                onSome: (previous) => previous.exit("singleton"),
+              }),
+            ),
+          );
 
           const own = handlers ?? {};
           const services = yield* Effect.context<R>();
 
-          const provided =
-            <A extends Event>(
-              body: ((event: A) => Effect.Effect<HandlerResult, never, R>) | undefined,
-            ) =>
-            (event: A): Effect.Effect<Option.Option<HandlerResult>> =>
-              body === undefined
-                ? Effect.succeedNone
-                : pipe(Effect.asSome(body(event)), Effect.provideContext(services));
+          const provided = <A extends Event>(
+            body: ((event: A) => Effect.Effect<HandlerResult, never, R>) | undefined,
+          ): ((event: A) => Effect.Effect<Option.Option<HandlerResult>>) =>
+            pipe(
+              body,
+              Option.fromUndefinedOr,
+              Option.match({
+                onNone: () => () => Effect.succeedNone,
+                onSome: (run) => flow(run, Effect.asSome, Effect.provideContext(services)),
+              }),
+            );
 
-          const keydownBody = provided(own.keydown);
-          const keypressBody = provided(own.keypress);
-          const keyupBody = provided(own.keyup);
-          const clickBody = provided(own.click);
-          const focusBody = provided(own.focus);
-          const blurBody = provided(own.blur);
+          /** The answer when a body gives none. */
+          const answered =
+            (unanswered: HandlerResult) =>
+            <A extends Event>(body: (event: A) => Effect.Effect<Option.Option<HandlerResult>>) =>
+              flow(body, Effect.map(Option.getOrElse(() => unanswered)));
 
-          const keyboard =
-            (body: (event: KeyboardEvent) => Effect.Effect<Option.Option<HandlerResult>>) =>
-            (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-              pipe(
-                body(event),
-                Effect.map((result) =>
-                  pipe(
-                    result,
-                    Option.getOrElse(() =>
-                      options.suppressAllKeyboardEvents === true
-                        ? SUPPRESS_EVENT
-                        : CONTINUE_BUBBLING,
-                    ),
-                  ),
-                ),
-              );
+          const keyboard = pipe(
+            options.suppressAllKeyboardEvents === true,
+            Boolean.match({ onFalse: () => CONTINUE_BUBBLING, onTrue: () => SUPPRESS_EVENT }),
+            answered,
+          );
+          const other = answered(CONTINUE_BUBBLING);
+
+          /** An exit that a flag of the options asks for. */
+          const exitWhen = (flag: boolean | undefined, reason: ExitReason): Effect.Effect<void> =>
+            pipe(
+              flag === true,
+              Boolean.match({ onFalse: () => Effect.void, onTrue: () => exit(reason) }),
+            );
+
+          const keydown = keyboard(provided(own.keydown));
+          const click = other(provided(own.click));
+          const focus = other(provided(own.focus));
+          const blur = other(provided(own.blur));
+          const escapeExits = options.exitOnEscape === true;
+          const clickExit = exitWhen(options.exitOnClick, "click");
+          const focusExit = exitWhen(options.exitOnFocus, "focus");
+          const blurTarget = Option.fromNullishOr(options.exitOnBlur);
 
           const id = yield* stack.push<never>({
             name: options.name,
@@ -229,55 +338,36 @@ export class Modes extends Context.Service<
             // exit bodies that hold the overlay of a feature.
             onDefect: () => exit("defect"),
             keydown: (event) =>
-              Effect.gen(function* () {
-                if (options.exitOnEscape === true && isEscape(event)) {
-                  yield* exit("escape");
-                  // Suppressed, so that the page does not also act. This is what
-                  // upstream does, and what a user who pressed Escape to leave
-                  // our mode expects.
-                  return SUPPRESS_EVENT;
-                }
-                return yield* keyboard(keydownBody)(event);
-              }),
-            keypress: keyboard(keypressBody),
-            keyup: keyboard(keyupBody),
-            click: (event) =>
-              Effect.gen(function* () {
-                if (options.exitOnClick === true) yield* exit("click");
-                return pipe(
-                  yield* clickBody(event),
-                  Option.getOrElse(() => CONTINUE_BUBBLING),
-                );
-              }),
-            focus: (event) =>
-              Effect.gen(function* () {
-                if (options.exitOnFocus === true) yield* exit("focus");
-                return pipe(
-                  yield* focusBody(event),
-                  Option.getOrElse(() => CONTINUE_BUBBLING),
-                );
-              }),
+              pipe(
+                escapeExits && isEscape(event),
+                Boolean.match({
+                  onFalse: () => keydown(event),
+                  // Suppressed, so that the page does not also act. This is
+                  // what upstream does, and what a user who pressed Escape to
+                  // leave our mode expects.
+                  onTrue: () => pipe(exit("escape"), Effect.as(SUPPRESS_EVENT)),
+                }),
+              ),
+            keypress: keyboard(provided(own.keypress)),
+            keyup: keyboard(provided(own.keyup)),
+            click: (event) => pipe(clickExit, Effect.andThen(click(event))),
+            focus: (event) => pipe(focusExit, Effect.andThen(focus(event))),
             blur: (event) =>
-              Effect.gen(function* () {
-                const target = options.exitOnBlur;
-                if (target !== null && target !== undefined && event.target === target) {
-                  yield* exit("blur");
-                }
-                return pipe(
-                  yield* blurBody(event),
-                  Option.getOrElse(() => CONTINUE_BUBBLING),
-                );
-              }),
+              pipe(
+                blurTarget,
+                Option.filter((target) => event.target === target),
+                Option.match({ onNone: () => Effect.void, onSome: () => exit("blur") }),
+                Effect.andThen(blur(event)),
+              ),
           });
 
-          yield* Ref.set(handlerId, Option.some(id));
-          yield* Ref.update(state, (current) => ({
-            active: [...current.active, { handle, indicator: options.indicator ?? null }],
-            singletons:
-              options.singleton === undefined
-                ? current.singletons
-                : new Map(current.singletons).set(options.singleton, handle),
-          }));
+          yield* pipe(life, Ref.update(attached(id)));
+          yield* pipe(
+            state,
+            Ref.update(
+              joined({ handle, indicator: Option.fromNullishOr(options.indicator) }, group),
+            ),
+          );
           yield* refreshIndicator;
 
           // The scope owns the mode. Nothing has to remember to exit it.
@@ -287,12 +377,16 @@ export class Modes extends Context.Service<
         });
 
       const exitAll = (reason: ExitReason = "navigation"): Effect.Effect<void> =>
-        Effect.gen(function* () {
-          const { active } = yield* Ref.get(state);
-          for (const mode of [...active].reverse()) {
-            yield* mode.handle.exit(reason);
-          }
-        });
+        pipe(
+          Ref.get(state),
+          Effect.flatMap(({ active }) =>
+            pipe(
+              active,
+              Array.reverse,
+              Effect.forEach((mode) => mode.handle.exit(reason), { discard: true }),
+            ),
+          ),
+        );
 
       return Modes.of({
         enter,
@@ -300,22 +394,14 @@ export class Modes extends Context.Service<
         indicator,
         activeNames: pipe(
           Ref.get(state),
-          Effect.map((current) => current.active.map((mode) => mode.handle.name)),
+          Effect.map(({ active }) =>
+            pipe(
+              active,
+              Array.map((mode) => mode.handle.name),
+            ),
+          ),
         ),
       });
     }),
   );
 }
-
-const dropSingleton = (
-  singletons: ReadonlyMap<string, ModeHandle>,
-  group: string | undefined,
-  handle: ModeHandle,
-): ReadonlyMap<string, ModeHandle> => {
-  if (group === undefined || singletons.get(group) !== handle) {
-    return singletons;
-  }
-  const next = new Map(singletons);
-  next.delete(group);
-  return next;
-};
