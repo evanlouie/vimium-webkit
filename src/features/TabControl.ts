@@ -19,14 +19,13 @@ import {
   Option,
   Record,
   Ref,
-  Struct,
   flow,
   pipe,
 } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
-import type { SessionState } from "~/domain/Persisted.ts";
+import { withZoom } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Storage } from "~/platform/Storage.ts";
 import { type TabError, Tabs } from "~/platform/Tabs.ts";
@@ -64,14 +63,6 @@ const zoomStyle: (zoom: number) => string = flow(
   Option.liftPredicate((scale: number) => scale !== 1),
   Option.match({ onNone: () => "", onSome: (scale) => String(scale) }),
 );
-
-/** Remember the zoom of an origin. */
-const withZoom =
-  (origin: string, zoom: number) =>
-  (state: SessionState): SessionState => {
-    const zoomByOrigin = pipe(state.zoomByOrigin, Record.set(origin, zoom));
-    return pipe(state, Struct.assign({ zoomByOrigin }));
-  };
 
 /** A refusal to close the tab, and the shortcut that the browser gives instead. */
 const closeFailureText = (error: TabError): string =>

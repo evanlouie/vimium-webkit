@@ -272,7 +272,7 @@ const parseEngines = (source: string): EngineCache =>
  */
 const withOpenedTab =
   (opened: KnownTab) =>
-  (tabs: readonly KnownTab[]): KnownTab[] =>
+  (tabs: readonly KnownTab[]): readonly KnownTab[] =>
     pipe(
       liveTabs(tabs, opened.heartbeat),
       Array.filter((tab) => tab.url !== opened.url),
@@ -282,7 +282,7 @@ const withOpenedTab =
 /** A fresh signal for one tab, and every other tab that is still live at that time. */
 const withSignal =
   (signal: KnownTab) =>
-  (tabs: readonly KnownTab[]): KnownTab[] =>
+  (tabs: readonly KnownTab[]): readonly KnownTab[] =>
     pipe(
       liveTabs(tabs, signal.heartbeat),
       Array.map((tab) =>

@@ -23,7 +23,6 @@ import {
   Match,
   Option,
   Record,
-  Struct,
   flow,
   pipe,
 } from "effect";
@@ -31,8 +30,8 @@ import { Commands } from "~/core/Commands.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { PLAIN_KEY_CONTEXT } from "~/domain/Key.ts";
-import type { GlobalMark, LocalMark, Marks as MarksData } from "~/domain/Persisted.ts";
-import { pruneMarks } from "~/domain/Persisted.ts";
+import type { GlobalMark, Marks as MarksData } from "~/domain/Persisted.ts";
+import { localMark, pruneMarks, withGlobalMark, withLocalMark } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Storage } from "~/platform/Storage.ts";
 import { Tabs } from "~/platform/Tabs.ts";
@@ -97,32 +96,6 @@ const isSafeMarkUrl: (href: string) => boolean = flow(
   parseUrl,
   Option.exists((url) => pipe(SAFE_PROTOCOLS, Array.contains(url.protocol))),
 );
-
-/** Set a global mark. */
-const withGlobalMark =
-  (letter: string, mark: GlobalMark) =>
-  (marks: MarksData): MarksData => {
-    const global = pipe(marks.global, Record.set(letter, mark));
-    return pipe(marks, Struct.assign({ global }));
-  };
-
-/** Set one letter among the local marks of a page, and keep its other letters. */
-const withLocalMark =
-  (key: string, letter: string, mark: LocalMark) =>
-  (marks: MarksData): MarksData => {
-    const letters = pipe(
-      marks.local,
-      Record.get(key),
-      Option.getOrElse(() => Record.empty<string, LocalMark>()),
-      Record.set(letter, mark),
-    );
-    const local = pipe(marks.local, Record.set(key, letters));
-    return pipe(marks, Struct.assign({ local }));
-  };
-
-/** The local mark of this letter on the page with this key. */
-const localMark = (marks: MarksData, key: string, letter: string): Option.Option<LocalMark> =>
-  pipe(marks.local, Record.get(key), Option.flatMap(Record.get(letter)));
 
 /** A variant that carries no data. */
 type NoFields = Record.ReadonlyRecord<never, never>;
