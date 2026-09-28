@@ -9,9 +9,6 @@
  * every field that the key path reads. The path never asks for more than that:
  * `domain/Key.ts` declares the shape as `KeyEventLike`, and the handler stack
  * only calls `preventDefault` and `stopImmediatePropagation`.
- *
- * A key that needs a focused media player belongs to `test/e2e/media.spec.ts`,
- * because the answer comes from `instanceof HTMLElement`, which needs a DOM.
  */
 
 import { assert, describe, it } from "@effect/vitest";

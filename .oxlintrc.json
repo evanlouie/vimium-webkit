@@ -9,16 +9,7 @@
     "builtin": true,
     "node": true
   },
-  "ignorePatterns": [
-    "dist/**",
-    "repos/**",
-    "node_modules/**",
-    "test-results/**",
-    "playwright-report/**",
-    ".coverage/**",
-    "coverage/**",
-    "test/fixtures/**"
-  ],
+  "ignorePatterns": ["repos/**"],
   "options": {
     "typeAware": true,
     "denyWarnings": true,
@@ -60,12 +51,7 @@
     {
       "files": ["test/**/*.ts"],
       "rules": {
-        "no-void": "off",
-        "typescript/explicit-module-boundary-types": "off",
-        "typescript/no-base-to-string": "off",
-        "typescript/no-misused-spread": "off",
-        "typescript/strict-void-return": "off",
-        "typescript/unbound-method": "off"
+        "typescript/no-misused-spread": "off"
       }
     }
   ]

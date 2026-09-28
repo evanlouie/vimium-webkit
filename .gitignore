@@ -3,9 +3,6 @@
 
 # Dependency and tooling caches
 /node_modules/
-/test-results/
-/playwright-report/
-/.playwright/
 
 # Editor / OS noise
 .DS_Store

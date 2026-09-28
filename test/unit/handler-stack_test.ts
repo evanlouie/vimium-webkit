@@ -4,8 +4,7 @@
  * Every keystroke passes through this service, so its walk is the most
  * important loop in the application. The tests use the `scroll` handler and a
  * plain `Event`, because Node has `Event` and has no `KeyboardEvent`. The
- * behaviour of the walk does not depend on the type of the event. The keyboard
- * path itself is covered by the Playwright suite in `test/e2e/`.
+ * behaviour of the walk does not depend on the type of the event.
  */
 
 import { assert, describe, it } from "@effect/vitest";

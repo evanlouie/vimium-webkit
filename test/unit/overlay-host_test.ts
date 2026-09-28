@@ -2,8 +2,7 @@
  * The overlay host under a page that fights it.
  *
  * These are the pure parts of `ui/Ui.ts`. A unit test runs in Node with no
- * DOM, so the guard takes a reader as an argument instead of an element. The
- * behaviour that needs a browser is in `test/e2e/overlay.spec.ts`.
+ * DOM, so the guard takes a reader as an argument instead of an element.
  *
  * The reads below imitate `CSSStyleDeclaration`: a property that nobody wrote
  * gives an empty value and an empty priority, which is exactly what

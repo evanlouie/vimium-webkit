@@ -2,8 +2,7 @@
  * What assistive technology can reach, and what the HUD line says.
  *
  * These are the pure parts of `ui/Ui.ts` and `ui/Hud.ts`. A unit test runs in
- * Node with no DOM, so each function takes what it needs as an argument. The
- * behaviour that needs a browser is in `test/e2e/a11y.spec.ts`.
+ * Node with no DOM, so each function takes what it needs as an argument.
  */
 
 import { assert, describe, it } from "@effect/vitest";

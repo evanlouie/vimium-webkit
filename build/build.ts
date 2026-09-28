@@ -13,7 +13,6 @@
 import { watch } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { build as viteBuild, type Rolldown } from "vite";
-import { defaultSettings } from "~/domain/Persisted.ts";
 import { BANNER_NOTICE, buildMetadata } from "./metadata.ts";
 import { bundleConfig, type BundleOptions, ROOT } from "./vite-config.ts";
 
@@ -99,18 +98,6 @@ const main = async (): Promise<void> => {
     // dev block there would tell every installed copy that the current release
     // is called "Vimium-WebKit (dev)".
     if (!dev) await writeFile(`${DIST}/vimium-webkit.meta.js`, metadata);
-
-    // The shipped defaults, as data.
-    //
-    // The e2e harness needs them, and it runs under Playwright's own module
-    // loader, which resolves neither the `~/` alias nor the bundler's aliases.
-    // A hand-copied literal was the alternative, and the one that used to live
-    // there had already drifted to a single search engine against the five
-    // here — so the harness seeded settings that no user has.
-    await writeFile(
-      `${DIST}/default-settings.json`,
-      `${JSON.stringify(defaultSettings(), null, 2)}\n`,
-    );
 
     await writeFile(
       `${DIST}/report.json`,

@@ -6,9 +6,6 @@
  * back. The tests here press the two cases that matter. An open root puts the
  * field at the head of the path. An empty path leaves the retargeted target as
  * the only answer there is.
- *
- * The rest of insert mode needs a DOM, and `test/e2e/shadow-input.spec.ts`
- * covers it.
  */
 
 import { assert, describe, it } from "@effect/vitest";

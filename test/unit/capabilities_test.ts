@@ -6,9 +6,7 @@
  * history go when the page unloads, and the frames of the page cannot form a
  * session at all. The warning must name every one of those losses.
  *
- * `applePlatform` decides how a chord with Alt is read. Every other flag in the
- * report turns a feature off, and the probes for those need a browser, so they
- * belong in `test/e2e/`.
+ * `applePlatform` decides how a chord with Alt is read.
  */
 
 import { assert, describe, it } from "@effect/vitest";

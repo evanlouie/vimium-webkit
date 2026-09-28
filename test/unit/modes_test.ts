@@ -3,10 +3,6 @@
  *
  * A mode owns a handler-stack frame, an optional singleton group and an
  * indicator. The scope owns the mode, so nothing has to remember to exit it.
- *
- * The escape, blur, click and focus exits need a real `KeyboardEvent`, a
- * `FocusEvent` or a `MouseEvent`. Node has none of them, so the Playwright
- * suite in `test/e2e/` covers those paths.
  */
 
 import { assert, describe, it } from "@effect/vitest";

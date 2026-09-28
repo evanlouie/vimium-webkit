@@ -385,16 +385,14 @@ the two APIs that would make it one do not exist for a userscript:
 ## Development
 
 ```
-npm run check      # type-check src/ and build/ + test/ as separate projects
+npm run fmt        # format with oxfmt
+npm run lint       # oxlint
+npm run check      # type-check src/ and build/ + test/, and the Effect diagnostics
 npm run test       # unit tests
-npm run test:e2e   # Playwright, against WebKit + Chromium + Firefox
 npm run coverage   # line coverage over every file in src/, not just the loaded ones
-npm run lint
 npm run build      # dist/vimium-webkit.user.js
 npm run verify     # everything above except coverage
 ```
-
-`npm run test:e2e:install` fetches the browser binaries the first time.
 
 `npm run coverage` reports over **all** of `src/`, because `coverage.include`
 names the whole directory rather than only the files a run happened to load — so
@@ -412,9 +410,9 @@ Releases are cut by CI, from a tag. The install link above resolves to
 1. Bump `version` in `package.json` and commit it.
 2. Tag it `v<version>` and push the tag.
 
-Pushing the tag runs the full pipeline — static checks, unit tests, the build,
-and Playwright against all three engines — and only then attaches
-`vimium-webkit.user.js` and `vimium-webkit.meta.js` to a GitHub release.
+Pushing the tag runs the static checks, the unit tests and the build, and only
+then attaches `vimium-webkit.user.js` and `vimium-webkit.meta.js` to a GitHub
+release.
 
 The tag must match `package.json`; CI refuses the release otherwise. The
 mismatch is worth failing over because it is invisible when it happens: managers

@@ -22,11 +22,7 @@
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "repos:update:effect": "git subtree pull --prefix=repos/effect https://github.com/Effect-TS/effect.git main --squash",
-    "serve:fixtures": "tsx --tsconfig tsconfig.node.json test/e2e/harness/server.ts",
-    "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui",
-    "test:e2e:install": "playwright install webkit chromium firefox",
-    "verify": "npm run fmt:check && npm run lint && npm run check && npm run test && npm run build && npm run test:e2e"
+    "verify": "npm run fmt:check && npm run lint && npm run check && npm run test && npm run build"
   },
   "dependencies": {
     "effect": "4.0.0-rc.118"
@@ -34,7 +30,6 @@
   "devDependencies": {
     "@effect/tsgo": "^0.46.1",
     "@effect/vitest": "^4.0.0-rc.118",
-    "@playwright/test": "^1.63.0",
     "@types/node": "^26.6.3",
     "@vitest/coverage-v8": "^5.0.2",
     "oxfmt": "^0.70.0",

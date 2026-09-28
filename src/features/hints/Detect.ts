@@ -729,9 +729,9 @@ export interface Collected {
  * truncation, and detection writes a warning. Thus, page growth cannot keep a
  * walk alive without end.
  *
- * **The measurement.** Playwright WebKit, one machine, ten warm rounds. On
- * `test/fixtures/link-dense.html` (2,415 elements), both walks took 0–1 ms. On
- * `test/fixtures/dom-huge.html` (120,037 elements), the old walk took 7 ms.
+ * **The measurement.** WebKit, one machine, ten warm rounds. On a page of 2,415
+ * elements, both walks took 0–1 ms. On a page of 120,037 elements, the old walk
+ * took 7 ms.
  * The divided walk took 11–27 ms. Its longest slice stays near 8 ms.
  *
  * One 64-element step took less than 1 ms with one million siblings. Each step

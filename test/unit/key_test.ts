@@ -31,8 +31,7 @@ import {
 /**
  * A keyboard event as this module sees it.
  *
- * `KeyEventLike` is a plain interface on purpose, so no DOM is needed. A test
- * that needs a true `KeyboardEvent` belongs in `test/e2e/`.
+ * `KeyEventLike` is a plain interface on purpose, so no DOM is needed.
  */
 const event = (partial: Partial<KeyEventLike> & { readonly key: string }): KeyEventLike => ({
   shiftKey: false,

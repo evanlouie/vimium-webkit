@@ -5,8 +5,7 @@
  * everything outside the dialog is unavailable. The keyboard must agree with
  * that claim, so the dialog mode takes Tab and moves the focus by hand.
  *
- * This is the pure part of that trap: which control takes the focus next. The
- * behaviour in a browser is in `test/e2e/a11y.spec.ts`.
+ * This is the pure part of that trap: which control takes the focus next.
  */
 
 import { assert, describe, it } from "@effect/vitest";

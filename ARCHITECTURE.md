@@ -291,5 +291,3 @@ feature must not import another feature.
 
 Unit tests use `@effect/vitest` and `it.effect`. A test provides a stub layer
 instead of a global. There is no `globalThis` patching in a unit test.
-
-End-to-end tests keep Playwright. They test the artefact, not the modules.

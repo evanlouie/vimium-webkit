@@ -217,9 +217,7 @@ export type Settings = typeof settingsSchema.Type;
  *
  * Derived rather than declared: every field's fallback *is* its default, so
  * decoding an empty object yields exactly the shipped configuration. A second
- * hand-written literal would be a second source of truth, and the one in the
- * e2e harness had already drifted to a single search engine against the five
- * here.
+ * hand-written literal would be a second source of truth.
  *
  * `decodeSync` throws, which is correct here and only here: the input is the
  * literal `{}`, so the sole way to fail is a field added without a fallback.
