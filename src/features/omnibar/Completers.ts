@@ -21,16 +21,15 @@
  * snapshot on every keystroke.
  */
 
-import { Option } from "effect";
+import { Array, Boolean, Data, Equal, Match, Number, Option, Order, pipe, String } from "effect";
 import type { CommandDef } from "~/domain/Command.ts";
 import type { SessionState, Visit } from "~/domain/Persisted.ts";
 import {
   buildSearchUrl,
-  classifyQuery,
+  Destination,
+  destinationOf,
   enginesMatchingPrefix,
   type SearchEngine,
-  splitKeyword,
-  toNavigableUrl,
 } from "~/domain/SearchEngine.ts";
 import { historyScore, scoreCandidate, scoreText, tokenize } from "~/domain/Score.ts";
 
@@ -48,18 +47,23 @@ export type CompletionKind =
   | "suggestion"
   | "notice";
 
-export type CompletionAction =
-  | { readonly type: "navigate"; readonly url: string }
-  | { readonly type: "command"; readonly name: string }
+export type CompletionAction = Data.TaggedEnum<{
+  Navigate: { readonly url: string };
+  Command: { readonly name: string };
   /** Rewrite the input instead of acting. It adopts an engine keyword. */
-  | { readonly type: "fill"; readonly text: string }
-  | { readonly type: "none" };
+  Fill: { readonly text: string };
+  /** Nothing to do. To choose the row closes the omnibar. */
+  Dismiss: Record<never, never>;
+}>;
+
+export const CompletionAction = Data.taggedEnum<CompletionAction>();
 
 export interface Completion {
   readonly kind: CompletionKind;
   /** The short source label on the row. */
   readonly badge: string;
   readonly title: string;
+  /** Empty for a row that has nothing to add below its title. */
   readonly detail: string;
   readonly action: CompletionAction;
   readonly score: number;
@@ -99,10 +103,34 @@ export const COMMAND_PREFIX = ":";
 /** The longest URL that a row shows. */
 const DETAIL_LIMIT = 120;
 
-const byScore = (left: Completion, right: Completion): number => right.score - left.score;
+/** Highest first. A sort is stable, so a tie keeps the order that came in. */
+const descending = <A>(score: (item: A) => number): Order.Order<A> =>
+  pipe(Order.Number, Order.mapInput(score), Order.flip);
 
-const truncate = (text: string, max: number): string =>
-  text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+const byScore: Order.Order<Completion> = descending((row) => row.score);
+
+const byTitle: Order.Order<Completion> = (left, right) =>
+  Number.sign(left.title.localeCompare(right.title));
+
+/** A row with a score of zero matched nothing, and is not shown. */
+const isMatch = (row: Completion): boolean => row.score > 0;
+
+const shortUrl = (url: string): string =>
+  pipe(
+    url.length <= DETAIL_LIMIT,
+    Boolean.match({
+      onTrue: () => url,
+      onFalse: () => `${url.slice(0, DETAIL_LIMIT - 1)}…`,
+    }),
+  );
+
+/** The title of a page, or its URL when the page gave no title. */
+const pageTitle = (page: { readonly title: string; readonly url: string }): string =>
+  pipe(
+    page.title,
+    Option.liftPredicate(String.isNonEmpty),
+    Option.getOrElse(() => page.url),
+  );
 
 // ---------------------------------------------------------------------------
 // Commands
@@ -117,45 +145,77 @@ const truncate = (text: string, max: number): string =>
  */
 const TIER_C_PENALTY = 0.5;
 
-const toCommandCompletion = (
-  command: CommandDef,
-  muted: boolean,
-  relevancy: number,
-): Completion => ({
-  kind: "command",
-  badge: muted ? "Unavailable" : "Command",
-  title: command.name,
-  detail: muted ? (command.unavailableReason ?? command.description) : command.description,
-  action: { type: "command", name: command.name },
-  score: relevancy * (muted ? TIER_C_PENALTY : 1),
-  muted,
-  nativeAlternative: Option.fromNullishOr(command.nativeAlternative ?? null),
-});
+/** How a command reads in the list, by its tier. */
+interface CommandPresentation {
+  readonly badge: string;
+  readonly detail: string;
+  readonly weight: number;
+  readonly muted: boolean;
+}
+
+const presentationOf = (command: CommandDef): CommandPresentation =>
+  pipe(
+    Match.value(command.tier),
+    Match.whenOr("A", "B", (): CommandPresentation => ({
+      badge: "Command",
+      detail: command.description,
+      weight: 1,
+      muted: false,
+    })),
+    Match.when("C", (): CommandPresentation => ({
+      badge: "Unavailable",
+      detail: pipe(
+        command.unavailableReason,
+        Option.fromNullishOr,
+        Option.getOrElse(() => command.description),
+      ),
+      weight: TIER_C_PENALTY,
+      muted: true,
+    })),
+    Match.exhaustive,
+  );
+
+const commandRow = (command: CommandDef, relevancy: number): Completion =>
+  pipe(presentationOf(command), ({ badge, detail, weight, muted }): Completion => ({
+    kind: "command",
+    badge,
+    title: command.name,
+    detail,
+    action: CompletionAction.Command({ name: command.name }),
+    score: relevancy * weight,
+    muted,
+    nativeAlternative: Option.fromNullishOr(command.nativeAlternative),
+  }));
 
 export const completeCommands = (
   commands: readonly CommandDef[],
   query: string,
   limit: number = COMMAND_LIMIT,
-): readonly Completion[] => {
-  const tokens = tokenize(query);
-
-  const rows = commands.map((command) => {
-    const muted = command.tier === "C";
-    const relevancy =
-      tokens.length === 0 ? 1 : scoreText(tokens, `${command.name} ${command.description}`);
-    return toCommandCompletion(command, muted, relevancy);
-  });
-
-  const matched = tokens.length === 0 ? rows : rows.filter((row) => row.score > 0);
-
-  // With no query at all, alphabetical order beats the order of the catalogue.
-  if (tokens.length === 0) {
-    return [...matched]
-      .sort((left, right) => left.title.localeCompare(right.title))
-      .slice(0, limit);
-  }
-  return [...matched].sort(byScore).slice(0, limit);
-};
+): readonly Completion[] =>
+  pipe(
+    query,
+    tokenize,
+    Array.match({
+      // With no query at all, alphabetical order beats the order of the
+      // catalogue.
+      onEmpty: () =>
+        pipe(
+          commands,
+          Array.map((command) => commandRow(command, 1)),
+          Array.sort(byTitle),
+        ),
+      onNonEmpty: (tokens) =>
+        pipe(
+          commands,
+          Array.map((command) =>
+            commandRow(command, scoreText(tokens, `${command.name} ${command.description}`)),
+          ),
+          Array.filter(isMatch),
+          Array.sort(byScore),
+        ),
+    }),
+    Array.take(limit),
+  );
 
 // ---------------------------------------------------------------------------
 // Search engines
@@ -165,10 +225,73 @@ export const completeCommands = (
 const KEYWORD_EXACT = 12;
 const KEYWORD_PREFIX = 9;
 
+const engineRow = (engine: SearchEngine, score: number): Completion => ({
+  kind: "engine",
+  badge: "Search",
+  title: `${engine.keyword}: ${engine.description}`,
+  detail: engine.url,
+  action: CompletionAction.Fill({ text: `${engine.keyword} ` }),
+  score,
+  muted: false,
+  nativeAlternative: Option.none(),
+});
+
+/** How well an engine answers a keyword that is still being typed. */
+const keywordScore = (typed: string) => {
+  const tokens = tokenize(typed);
+  return (engine: SearchEngine): number =>
+    pipe(
+      Match.value(engine.keyword),
+      Match.when(
+        (keyword: string) => keyword === typed,
+        () => KEYWORD_EXACT,
+      ),
+      Match.when(String.startsWith(typed), () => KEYWORD_PREFIX),
+      Match.orElse(() => scoreText(tokens, `${engine.keyword} ${engine.description}`)),
+    );
+};
+
+/**
+ * The rows for a keyword that is still being typed.
+ *
+ * The keywords with that prefix, or every engine by its text when no keyword
+ * has it.
+ */
+const typedEngineRows = (
+  engines: readonly SearchEngine[],
+  typed: string,
+): ReadonlyArray<Completion> => {
+  const score = keywordScore(typed);
+  return pipe(
+    enginesMatchingPrefix(engines, typed),
+    Array.match({ onEmpty: () => engines, onNonEmpty: (matching) => matching }),
+    Array.map((engine) => engineRow(engine, score(engine))),
+  );
+};
+
+/** The rows for the whole query, before the limit. */
+const engineRows = (engines: readonly SearchEngine[], query: string): ReadonlyArray<Completion> =>
+  pipe(
+    Match.value(query.trim()),
+    Match.withReturnType<ReadonlyArray<Completion>>(),
+    // After a space the keyword is settled, and the navigate row takes over.
+    Match.when(
+      (typed: string) => /\s/u.test(typed),
+      () => [],
+    ),
+    Match.when(String.isEmpty, () =>
+      pipe(
+        engines,
+        Array.map((engine) => engineRow(engine, 1)),
+      ),
+    ),
+    Match.orElse((typed) => typedEngineRows(engines, typed)),
+  );
+
 /**
  * Offer the engine keywords while the user still types one.
  *
- * The action is `fill`, and not `navigate`. To choose `w` must put the user in
+ * The action is `Fill`, and not `Navigate`. To choose `w` must put the user in
  * Wikipedia mode with the cursor ready, and must not search Wikipedia for
  * nothing.
  */
@@ -176,37 +299,8 @@ export const completeEngines = (
   engines: readonly SearchEngine[],
   query: string,
   limit: number = ENGINE_LIMIT,
-): readonly Completion[] => {
-  const trimmed = query.trim();
-  // After a space the keyword is settled, and the navigate row takes over.
-  if (/\s/u.test(trimmed)) return [];
-
-  const tokens = tokenize(trimmed);
-  const byPrefix = enginesMatchingPrefix(engines, trimmed);
-  const pool = byPrefix.length > 0 ? byPrefix : engines;
-
-  return pool
-    .map((engine): Completion => ({
-      kind: "engine",
-      badge: "Search",
-      title: `${engine.keyword}: ${engine.description}`,
-      detail: engine.url,
-      action: { type: "fill", text: `${engine.keyword} ` },
-      score:
-        trimmed.length === 0
-          ? 1
-          : engine.keyword === trimmed
-            ? KEYWORD_EXACT
-            : engine.keyword.startsWith(trimmed)
-              ? KEYWORD_PREFIX
-              : scoreText(tokens, `${engine.keyword} ${engine.description}`),
-      muted: false,
-      nativeAlternative: Option.none(),
-    }))
-    .filter((row) => row.score > 0)
-    .sort(byScore)
-    .slice(0, limit);
-};
+): readonly Completion[] =>
+  pipe(engineRows(engines, query), Array.filter(isMatch), Array.sort(byScore), Array.take(limit));
 
 // ---------------------------------------------------------------------------
 // Our own index
@@ -215,56 +309,93 @@ export const completeEngines = (
 /** The weight of a visit in the list that an empty query gives. */
 const EMPTY_QUERY_RELEVANCY = 0.1;
 
-const toHistoryCompletion = (visit: Visit, score: number): Completion => ({
+const historyRow = (visit: Visit, score: number): Completion => ({
   kind: "history",
   badge: "Visited",
-  title: visit.title.length > 0 ? visit.title : visit.url,
-  detail: truncate(visit.url, DETAIL_LIMIT),
-  action: { type: "navigate", url: visit.url },
+  title: pageTitle(visit),
+  detail: shortUrl(visit.url),
+  action: CompletionAction.Navigate({ url: visit.url }),
   score,
   muted: false,
   nativeAlternative: Option.none(),
 });
+
+/** A visit with the text relevancy of the query. */
+interface MatchedVisit {
+  readonly visit: Visit;
+  readonly relevancy: number;
+}
 
 export const completeHistory = (
   visits: readonly Visit[],
   query: string,
   now: number,
   limit: number = HISTORY_LIMIT,
-): readonly Completion[] => {
-  const tokens = tokenize(query);
-  if (tokens.length === 0) {
-    // No query. The pages with the best frecency, which is the only order that
-    // means anything before the user has said what they want.
-    return [...visits]
-      .sort((left, right) => historyScore(1, right, now) - historyScore(1, left, now))
-      .slice(0, limit)
-      .map((visit) => toHistoryCompletion(visit, historyScore(EMPTY_QUERY_RELEVANCY, visit, now)));
-  }
-
-  return visits
-    .map((visit) => {
-      const relevancy = scoreCandidate(tokens, {
-        title: visit.title,
-        url: visit.url,
-      });
-      return {
-        visit,
-        score: relevancy === 0 ? 0 : historyScore(relevancy, visit, now),
-      };
-    })
-    .filter((entry) => entry.score > 0)
-    .sort((left, right) => right.score - left.score)
-    .slice(0, limit)
-    .map((entry) => toHistoryCompletion(entry.visit, entry.score));
-};
+): readonly Completion[] =>
+  pipe(
+    query,
+    tokenize,
+    Array.match({
+      // No query. The pages with the best frecency, which is the only order
+      // that means anything before the user has said what they want.
+      onEmpty: () =>
+        pipe(
+          visits,
+          Array.sort(descending((visit: Visit) => historyScore(1, visit, now))),
+          Array.take(limit),
+          Array.map((visit) => historyRow(visit, historyScore(EMPTY_QUERY_RELEVANCY, visit, now))),
+        ),
+      onNonEmpty: (tokens) =>
+        pipe(
+          visits,
+          Array.map((visit): MatchedVisit => ({ visit, relevancy: scoreCandidate(tokens, visit) })),
+          Array.filter(({ relevancy }) => relevancy > 0),
+          Array.map(({ visit, relevancy }) =>
+            historyRow(visit, historyScore(relevancy, visit, now)),
+          ),
+          Array.sort(byScore),
+          Array.take(limit),
+        ),
+    }),
+  );
 
 // ---------------------------------------------------------------------------
 // The tabs that we opened
 // ---------------------------------------------------------------------------
 
 export const liveTabs = (tabs: readonly KnownTab[], now: number): readonly KnownTab[] =>
-  tabs.filter((tab) => now - tab.heartbeat < TAB_LIVENESS_MS);
+  pipe(
+    tabs,
+    Array.filter((tab) => now - tab.heartbeat < TAB_LIVENESS_MS),
+  );
+
+const recentRow = (tab: KnownTab, score: number): Completion => ({
+  kind: "recent",
+  // "Recent", and never "Tabs": we see only the tabs that we opened ourselves,
+  // and a label that said otherwise would be a statement that the user acts
+  // on.
+  badge: "Recent",
+  title: pageTitle(tab),
+  detail: shortUrl(tab.url),
+  action: CompletionAction.Navigate({ url: tab.url }),
+  score,
+  muted: false,
+  nativeAlternative: Option.none(),
+});
+
+/**
+ * How well a tab matches the query.
+ *
+ * With no query every tab matches equally, and the age of the signal breaks
+ * the tie. Nothing else about a tab that we cannot inspect is a useful signal.
+ */
+const tabRelevancy =
+  (tokens: readonly string[]) =>
+  (tab: KnownTab): number =>
+    pipe(
+      tokens,
+      Array.match({ onEmpty: () => 1, onNonEmpty: (words) => scoreCandidate(words, tab) }),
+    );
 
 export const completeRecent = (
   tabs: readonly KnownTab[],
@@ -272,32 +403,15 @@ export const completeRecent = (
   now: number,
   limit: number = RECENT_LIMIT,
 ): readonly Completion[] => {
-  const tokens = tokenize(query);
-  const live = [...liveTabs(tabs, now)].sort((left, right) => right.heartbeat - left.heartbeat);
-
-  return live
-    .map((tab) => ({
-      tab,
-      // The age of the signal breaks a tie. Nothing else about a tab that we
-      // cannot inspect is a useful signal.
-      score: tokens.length === 0 ? 1 : scoreCandidate(tokens, { title: tab.title, url: tab.url }),
-    }))
-    .filter((entry) => entry.score > 0)
-    .sort((left, right) => right.score - left.score)
-    .slice(0, limit)
-    .map((entry): Completion => ({
-      kind: "recent",
-      // "Recent", and never "Tabs": we see only the tabs that we opened
-      // ourselves, and a label that said otherwise would be a statement that
-      // the user acts on.
-      badge: "Recent",
-      title: entry.tab.title.length > 0 ? entry.tab.title : entry.tab.url,
-      detail: truncate(entry.tab.url, DETAIL_LIMIT),
-      action: { type: "navigate", url: entry.tab.url },
-      score: entry.score,
-      muted: false,
-      nativeAlternative: Option.none(),
-    }));
+  const relevancy = tabRelevancy(tokenize(query));
+  return pipe(
+    liveTabs(tabs, now),
+    Array.sort(descending((tab: KnownTab) => tab.heartbeat)),
+    Array.map((tab) => recentRow(tab, relevancy(tab))),
+    Array.filter(isMatch),
+    Array.sort(byScore),
+    Array.take(limit),
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -313,26 +427,52 @@ export const completeSuggestions = (
   searchTemplate: string,
   engineName: string,
 ): readonly Completion[] =>
-  suggestions.map((suggestion, index): Completion => ({
-    kind: "suggestion",
-    badge: engineName,
-    title: suggestion,
-    detail: "",
-    action: {
-      type: "navigate",
-      url: buildSearchUrl(searchTemplate, suggestion),
-    },
-    // Descending, and below the sources that we can vouch for. A suggestion is
-    // the guess of the engine about the query, and not a page that the user
-    // has been to.
-    score: SUGGESTION_BASE_SCORE - index * SUGGESTION_STEP,
-    muted: false,
-    nativeAlternative: Option.none(),
-  }));
+  pipe(
+    suggestions,
+    Array.map((suggestion, index): Completion => ({
+      kind: "suggestion",
+      badge: engineName,
+      title: suggestion,
+      detail: "",
+      action: CompletionAction.Navigate({ url: buildSearchUrl(searchTemplate, suggestion) }),
+      // Descending, and below the sources that we can vouch for. A
+      // suggestion is the guess of the engine about the query, and not a
+      // page that the user has been to.
+      score: SUGGESTION_BASE_SCORE - index * SUGGESTION_STEP,
+      muted: false,
+      nativeAlternative: Option.none(),
+    })),
+  );
 
 // ---------------------------------------------------------------------------
 // The default row
 // ---------------------------------------------------------------------------
+
+interface DefaultRow {
+  readonly badge: string;
+  readonly title: string;
+  readonly detail: string;
+  readonly url: string;
+}
+
+const defaultRow = ({ badge, title, detail, url }: DefaultRow): Completion => ({
+  kind: "navigate",
+  badge,
+  title,
+  detail,
+  action: CompletionAction.Navigate({ url }),
+  score: Infinity,
+  muted: false,
+  nativeAlternative: Option.none(),
+});
+
+const destinationRow = Destination.$match({
+  EngineSearch: ({ engine, query, url }) =>
+    defaultRow({ badge: engine.description, title: query, detail: url, url }),
+  Address: ({ url }) => defaultRow({ badge: "Open", title: url, detail: "", url }),
+  DefaultSearch: ({ query, url }) =>
+    defaultRow({ badge: "Search", title: query, detail: url, url }),
+});
 
 /**
  * What Enter does while no row is chosen.
@@ -345,57 +485,14 @@ export const completeNavigate = (
   query: string,
   engines: readonly SearchEngine[],
   defaultSearchUrl: string,
-): readonly Completion[] => {
-  const trimmed = query.trim();
-  if (trimmed.length === 0) return [];
-
-  const split = splitKeyword(trimmed, engines);
-  if (Option.isSome(split) && split.value.rest.length > 0) {
-    const url = buildSearchUrl(split.value.engine.url, split.value.rest);
-    return [
-      {
-        kind: "navigate",
-        badge: split.value.engine.description,
-        title: split.value.rest,
-        detail: url,
-        action: { type: "navigate", url },
-        score: Number.POSITIVE_INFINITY,
-        muted: false,
-        nativeAlternative: Option.none(),
-      },
-    ];
-  }
-
-  if (classifyQuery(trimmed) === "url") {
-    const url = toNavigableUrl(trimmed);
-    return [
-      {
-        kind: "navigate",
-        badge: "Open",
-        title: url,
-        detail: "",
-        action: { type: "navigate", url },
-        score: Number.POSITIVE_INFINITY,
-        muted: false,
-        nativeAlternative: Option.none(),
-      },
-    ];
-  }
-
-  const url = buildSearchUrl(defaultSearchUrl, trimmed);
-  return [
-    {
-      kind: "navigate",
-      badge: "Search",
-      title: trimmed,
-      detail: url,
-      action: { type: "navigate", url },
-      score: Number.POSITIVE_INFINITY,
-      muted: false,
-      nativeAlternative: Option.none(),
-    },
-  ];
-};
+): readonly Completion[] =>
+  pipe(
+    query.trim(),
+    Option.liftPredicate(String.isNonEmpty),
+    Option.map((trimmed) => destinationOf(trimmed, engines, defaultSearchUrl)),
+    Option.map(destinationRow),
+    Option.toArray,
+  );
 
 /**
  * The honest answer to `b`, which opens a bookmark.
@@ -409,8 +506,8 @@ export const bookmarkNotice = (): Completion => ({
   badge: "Unavailable",
   title: "Bookmarks are not reachable from a userscript",
   detail: "There is no bookmarks API outside a browser extension.",
-  action: { type: "none" },
-  score: Number.POSITIVE_INFINITY,
+  action: CompletionAction.Dismiss(),
+  score: Infinity,
   muted: true,
   nativeAlternative: Option.some("⌥⌘B"),
 });
@@ -432,96 +529,113 @@ export interface CompletionInput {
   readonly now: number;
 }
 
-export interface CompletionState {
-  /** True in command mode, so that the view can show the `:` prefix. */
-  readonly commandMode: boolean;
-  /** The query with the `:` prefix removed. */
-  readonly effectiveQuery: string;
-  readonly rows: readonly Completion[];
-}
+/** The list, and the query that it answers. */
+export type CompletionState = Data.TaggedEnum<{
+  /** Commands and nothing else. The query has the `:` prefix removed. */
+  Commands: { readonly query: string; readonly rows: readonly Completion[] };
+  /** The places that the query can lead to, and the searches for it. */
+  Destinations: { readonly query: string; readonly rows: readonly Completion[] };
+}>;
+
+export const CompletionState = Data.taggedEnum<CompletionState>();
 
 /** A `:` prefix, or the `command` source, means commands and nothing else. */
 const isCommandMode = (source: OmnibarSource, query: string): boolean =>
   source === "command" || query.trimStart().startsWith(COMMAND_PREFIX);
 
-export const stripCommandPrefix = (query: string): string => {
-  const trimmed = query.trimStart();
-  return trimmed.startsWith(COMMAND_PREFIX)
-    ? trimmed.slice(COMMAND_PREFIX.length).trim()
-    : trimmed.trim();
-};
+export const stripCommandPrefix = (query: string): string =>
+  pipe(
+    query.trimStart(),
+    Option.liftPredicate(String.startsWith(COMMAND_PREFIX)),
+    Option.map(String.slice(COMMAND_PREFIX.length)),
+    Option.getOrElse(() => query),
+    String.trim,
+  );
 
-const actionKey = (action: CompletionAction): Option.Option<string> => {
-  switch (action.type) {
-    case "navigate":
-      return Option.some(`navigate:${action.url}`);
-    case "command":
-      return Option.some(`command:${action.name}`);
-    case "fill":
-      return Option.some(`fill:${action.text}`);
-    case "none":
-      return Option.none();
-  }
+/** The rows that a source puts before everything else. */
+const noticesFor = (source: OmnibarSource): ReadonlyArray<Completion> =>
+  pipe(
+    Match.value(source),
+    Match.withReturnType<ReadonlyArray<Completion>>(),
+    Match.when("bookmark", () => [bookmarkNotice()]),
+    Match.whenOr("url", "command", "search", () => []),
+    Match.exhaustive,
+  );
+
+/** The pages that we know of. A search session offers searches and nothing else. */
+const knownPages = (input: CompletionInput): ReadonlyArray<Completion> =>
+  pipe(
+    Match.value(input.source),
+    Match.withReturnType<ReadonlyArray<Completion>>(),
+    Match.when("search", () => []),
+    Match.whenOr("url", "command", "bookmark", () =>
+      pipe(
+        completeHistory(input.visits, input.query, input.now),
+        Array.appendAll(completeRecent(input.knownTabs, input.query, input.now)),
+      ),
+    ),
+    Match.exhaustive,
+  );
+
+/**
+ * The engines are limited once the user types. To find a keyword matters, but
+ * not enough to push the sources below it off the screen.
+ */
+const engineLimit = (query: string): number =>
+  pipe(
+    query.trim(),
+    String.isEmpty,
+    Boolean.match({ onTrue: () => ENGINE_LIMIT, onFalse: () => ENGINE_LIMIT_WHILE_TYPING }),
+  );
+
+/**
+ * Two rows that would do the same thing.
+ *
+ * The default row and a history entry for the same URL are the usual case. A
+ * row that does nothing is never a copy of another row.
+ */
+const sameAction = (row: Completion, kept: Completion): boolean =>
+  !CompletionAction.$is("Dismiss")(row.action) && Equal.equals(row.action, kept.action);
+
+const commandCompletions = (input: CompletionInput): CompletionState => {
+  const query = stripCommandPrefix(input.query);
+  return CompletionState.Commands({
+    query,
+    rows: completeCommands(input.commands, query, MAX_RESULTS),
+  });
 };
 
 /**
- * Join the rows that would do the same thing.
+ * The list outside command mode.
  *
- * The default row and a history entry for the same URL are the usual case. The
- * first one wins, because the list is already in the order of priority.
+ * The list is deliberately *not* sorted again as a whole. Each source scores
+ * on its own scale — the ladder score of a command and the frecency score of a
+ * visit are not comparable numbers — so the order of the groups is the
+ * ranking, and each group is in the order of its own scoring. Of two rows that
+ * do the same thing, the first one wins, because the list is already in the
+ * order of priority.
  */
-const dedupe = (rows: readonly Completion[]): readonly Completion[] => {
-  const seen = new Set<string>();
-  const out: Completion[] = [];
-  for (const row of rows) {
-    const key = actionKey(row.action);
-    if (Option.isSome(key)) {
-      if (seen.has(key.value)) continue;
-      seen.add(key.value);
-    }
-    out.push(row);
-  }
-  return out;
-};
-
-export const completionsFor = (input: CompletionInput): CompletionState => {
-  const commandMode = isCommandMode(input.source, input.query);
-  const effectiveQuery = commandMode ? stripCommandPrefix(input.query) : input.query;
-
-  if (commandMode) {
-    return {
-      commandMode,
-      effectiveQuery,
-      rows: completeCommands(input.commands, effectiveQuery, MAX_RESULTS),
-    };
-  }
-
-  const rows: Completion[] = [];
-  if (input.source === "bookmark") rows.push(bookmarkNotice());
-  rows.push(...completeNavigate(effectiveQuery, input.engines, input.searchUrl));
-
-  if (input.source !== "search") {
-    rows.push(...completeHistory(input.visits, effectiveQuery, input.now));
-    rows.push(...completeRecent(input.knownTabs, effectiveQuery, input.now));
-  }
-  // The engines are limited once the user types. To find a keyword matters,
-  // but not enough to push the sources below it off the screen.
-  rows.push(
-    ...completeEngines(
-      input.engines,
-      effectiveQuery,
-      effectiveQuery.trim().length === 0 ? ENGINE_LIMIT : ENGINE_LIMIT_WHILE_TYPING,
+const destinationCompletions = (input: CompletionInput): CompletionState =>
+  CompletionState.Destinations({
+    query: input.query,
+    rows: pipe(
+      noticesFor(input.source),
+      Array.appendAll(completeNavigate(input.query, input.engines, input.searchUrl)),
+      Array.appendAll(knownPages(input)),
+      Array.appendAll(completeEngines(input.engines, input.query, engineLimit(input.query))),
+      Array.appendAll(
+        completeSuggestions(input.suggestions, input.searchUrl, input.suggestionEngine),
+      ),
+      Array.dedupeWith(sameAction),
+      Array.take(MAX_RESULTS),
     ),
-  );
-  rows.push(...completeSuggestions(input.suggestions, input.searchUrl, input.suggestionEngine));
+  });
 
-  // The list is deliberately *not* sorted again as a whole. Each source scores
-  // on its own scale — the ladder score of a command and the frecency score of
-  // a visit are not comparable numbers — so the order of the groups above is
-  // the ranking, and each group is in the order of its own scoring.
-  return {
-    commandMode,
-    effectiveQuery,
-    rows: dedupe(rows).slice(0, MAX_RESULTS),
-  };
-};
+export const completionsFor = (input: CompletionInput): CompletionState =>
+  pipe(
+    isCommandMode(input.source, input.query),
+    Boolean.match({
+      onTrue: () => commandCompletions(input),
+      onFalse: () => destinationCompletions(input),
+    }),
+  );
