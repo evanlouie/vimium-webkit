@@ -25,17 +25,24 @@
  */
 
 import {
+  Array,
+  Boolean,
   Context,
+  Data,
   Deferred,
   Effect,
   Exit,
   FiberHandle,
   Layer,
+  Match,
+  Number,
   Option,
   Ref,
   Scope,
+  Struct,
   pipe,
 } from "effect";
+import { constVoid } from "effect/Function";
 import { Commands } from "~/core/Commands.ts";
 import {
   CONTINUE_BUBBLING,
@@ -57,6 +64,8 @@ import { Hud } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
 import {
   collectTextRuns,
+  DEFAULT_MAX_CHARACTERS,
+  elementAt,
   type FindMatch,
   firstMatchInView,
   indexAtSelection,
@@ -71,64 +80,290 @@ import { FIND_CSS, FIND_STYLE_KEY, type Highlighter, makeHighlighter } from "./H
 // The result of one search
 // ---------------------------------------------------------------------------
 
-export interface SearchOutcome {
-  readonly count: number;
-  /**
-   * The index of the current match, from zero.
-   *
-   * It is `-1` when there is none.
-   */
-  readonly index: number;
-  readonly empty: boolean;
-  readonly error: Option.Option<string>;
-  /**
-   * True when the search stopped before the end of the page.
-   *
-   * The time budget stops it, and so does a match that is longer than the
-   * engine can read. The counts are then the counts of the text that was read,
-   * and not of the page. The HUD says so, because a wrong `3/17` is worse than
-   * no number.
-   */
-  readonly stopped: boolean;
-}
+/** What one search found, in the terms that the HUD reports. */
+export type SearchOutcome = Data.TaggedEnum<{
+  /** The query is empty, so there is nothing to say. */
+  NoQuery: Record<never, never>;
+  /** The pattern is not a regular expression that compiles. */
+  BadPattern: { readonly message: string };
+  NoMatches: {
+    /** See `Matches.stopped`. */
+    readonly stopped: boolean;
+  };
+  Matches: {
+    readonly count: number;
+    /** The index of the current match, from zero. */
+    readonly index: number;
+    /**
+     * True when the search stopped before the end of the page.
+     *
+     * The time budget stops it, and so does a match that is longer than the
+     * engine can read. The counts are then the counts of the text that was
+     * read, and not of the page. The HUD says so, because a wrong `3/17` is
+     * worse than no number.
+     */
+    readonly stopped: boolean;
+  };
+}>;
 
-const NO_QUERY: SearchOutcome = {
-  count: 0,
-  index: -1,
-  empty: true,
-  error: Option.none(),
-  stopped: false,
-};
+export const SearchOutcome = Data.taggedEnum<SearchOutcome>();
+
+const partialNote: (stopped: boolean) => string = Boolean.match({
+  onFalse: () => "",
+  onTrue: () => "  (stopped before the end of the page)",
+});
 
 /** `"3/17"`, `"No matches"`, or the message of the bad pattern. */
-export const statusText = (outcome: SearchOutcome): string => {
-  if (Option.isSome(outcome.error)) {
-    return `Bad pattern: ${outcome.error.value}`;
-  }
-  if (outcome.empty) return "";
-  const late = outcome.stopped ? "  (stopped before the end of the page)" : "";
-  if (outcome.count === 0) return `No matches${late}`;
-  return `${outcome.index + 1}/${outcome.count}${late}`;
-};
+export const statusText: (outcome: SearchOutcome) => string = SearchOutcome.$match({
+  NoQuery: () => "",
+  BadPattern: ({ message }) => `Bad pattern: ${message}`,
+  NoMatches: ({ stopped }) => `No matches${partialNote(stopped)}`,
+  Matches: ({ count, index, stopped }) => `${index + 1}/${count}${partialNote(stopped)}`,
+});
 
 /** Newest first, without a repeat, and capped. Pure, so the cap is testable. */
-export const pushHistory = (
-  history: ReadonlyArray<string>,
-  query: string,
-): ReadonlyArray<string> => {
-  const trimmed = query.trim();
-  if (trimmed.length === 0) return history;
-  return [trimmed, ...history.filter((entry) => entry !== trimmed)].slice(0, FIND_HISTORY_LIMIT);
+export const pushHistory = (history: ReadonlyArray<string>, query: string): ReadonlyArray<string> =>
+  pipe(
+    query.trim(),
+    Option.liftPredicate((trimmed) => trimmed.length > 0),
+    Option.match({
+      onNone: () => history,
+      onSome: (trimmed) =>
+        pipe(
+          history,
+          Array.filter((entry) => entry !== trimmed),
+          Array.prepend(trimmed),
+          Array.take(FIND_HISTORY_LIMIT),
+        ),
+    }),
+  );
+
+// ---------------------------------------------------------------------------
+// The matches of the last search
+// ---------------------------------------------------------------------------
+
+/** The matches of the last search, and the one that is current. */
+type Hits = Data.TaggedEnum<{
+  None: Record<never, never>;
+  Found: {
+    readonly matches: Array.NonEmptyReadonlyArray<FindMatch>;
+    /** The index of the current match. It is always in range. */
+    readonly current: number;
+    /**
+     * Did the search that gave these matches stop before the end of the page?
+     *
+     * `n` and `N` do not search again, so they must report the stop of the
+     * search that gave them their matches. A count that is partial stays
+     * partial.
+     */
+    readonly partial: boolean;
+  };
+}>;
+
+const Hits = Data.taggedEnum<Hits>();
+
+type Found = Data.TaggedEnum.Value<Hits, "Found">;
+
+const NO_HITS: Hits = Hits.None();
+
+const NO_RUNS: ReadonlyArray<TextRun> = [];
+
+const NOTHING_FOUND: RunSearch = { matches: [], stopped: false };
+
+/**
+ * The matches of one search.
+ *
+ * `anchor` is where the caller would like to land. Without one, the search
+ * lands on the first match in view.
+ */
+const hitsOf = (search: RunSearch, anchor: Option.Option<number>): Hits =>
+  pipe(
+    search.matches,
+    Array.match({
+      onEmpty: () => NO_HITS,
+      onNonEmpty: (matches) =>
+        Hits.Found({
+          matches,
+          current: pipe(
+            anchor,
+            Option.getOrElse(() => firstMatchInView(matches)),
+            Number.clamp({ minimum: 0, maximum: matches.length - 1 }),
+          ),
+          partial: search.stopped,
+        }),
+    }),
+  );
+
+/** What a query says before any search: nothing, for a query that can run. */
+const queryOutcome = (query: ParsedFindQuery): Option.Option<SearchOutcome> =>
+  pipe(
+    query.isEmpty,
+    Boolean.match({
+      onTrue: () => Option.some(SearchOutcome.NoQuery()),
+      onFalse: () =>
+        pipe(
+          query.error,
+          Option.map((message) => SearchOutcome.BadPattern({ message })),
+        ),
+    }),
+  );
+
+const matchesOutcome = ({ matches, current, partial }: Found): SearchOutcome =>
+  SearchOutcome.Matches({ count: matches.length, index: current, stopped: partial });
+
+/** The report of a search of `query` that gave `search`, and `hits` from it. */
+const outcomeOf = (query: ParsedFindQuery, search: RunSearch, hits: Hits): SearchOutcome =>
+  pipe(
+    queryOutcome(query),
+    Option.getOrElse(() =>
+      pipe(
+        hits,
+        Hits.$match({
+          None: () => SearchOutcome.NoMatches({ stopped: search.stopped }),
+          Found: matchesOutcome,
+        }),
+      ),
+    ),
+  );
+
+/** `n` and `N`: the current match moves by `delta`, and wraps, as it does in Vim. */
+const stepped =
+  (delta: number) =>
+  (found: Found): Found => {
+    const count = found.matches.length;
+    return pipe(
+      found,
+      Struct.assign({ current: (((found.current + delta) % count) + count) % count }),
+    );
+  };
+
+/** The current match becomes the one that holds the caret, or the one just after it. */
+const anchoredAt =
+  (selection: Selection) =>
+  (found: Found): Found =>
+    pipe(
+      indexAtSelection(selection, found.matches),
+      Option.match({
+        onNone: () => found,
+        onSome: (current) => pipe(found, Struct.assign({ current })),
+      }),
+    );
+
+const currentMatchOf: (hits: Hits) => Option.Option<FindMatch> = Hits.$match({
+  None: () => Option.none(),
+  Found: ({ matches, current }) => pipe(matches, Array.get(current)),
+});
+
+/**
+ * Where a commit lands: on the match that the user was looking at, or on the
+ * first match when nothing was current.
+ */
+const commitAnchor: (hits: Hits) => number = Hits.$match({
+  None: () => 0,
+  Found: ({ current }) => current,
+});
+
+// ---------------------------------------------------------------------------
+// The prompt
+// ---------------------------------------------------------------------------
+
+/**
+ * The way that `n` moves through the matches, and the words of the prompt
+ * that sets it.
+ *
+ * `?` turns `n` around for the whole session, exactly as in Vim.
+ */
+interface Heading {
+  readonly step: 1 | -1;
+  readonly label: string;
+  /** A screen reader cannot read "/" as a name for the field. */
+  readonly ariaLabel: string;
+  readonly indicator: string;
+}
+
+const FORWARD: Heading = {
+  step: 1,
+  label: "/",
+  ariaLabel: "Find on the page",
+  indicator: "Find",
 };
 
-const clampIndex = (index: number, count: number): number =>
-  count === 0 ? -1 : Math.max(0, Math.min(index, count - 1));
-
-/** The element that holds the start of a range, for `scrollIntoView`. */
-const elementFor = (range: Range): Option.Option<Element> => {
-  const container = range.startContainer;
-  return Option.fromNullishOr(container instanceof Element ? container : container.parentElement);
+const BACKWARD: Heading = {
+  step: -1,
+  label: "?",
+  ariaLabel: "Find backwards on the page",
+  indicator: "Find (backwards)",
 };
+
+const headingOf: (backwards: boolean) => Heading = Boolean.match({
+  onFalse: () => FORWARD,
+  onTrue: () => BACKWARD,
+});
+
+/**
+ * Where history cycling stands.
+ *
+ * Slot 0 is the draft: the text that the user typed before the first step.
+ * Slot `n` is entry `n - 1` of the history, which is newest first.
+ */
+interface Browsing {
+  readonly slot: number;
+  readonly draft: string;
+}
+
+const NOT_BROWSING: Browsing = { slot: 0, draft: "" };
+
+/**
+ * One step of `delta` through `history`, from a field that holds `typed`.
+ *
+ * The draft is kept when a step leaves it, so that a step back down gives it
+ * back. A step below the draft goes nowhere, and gives no text.
+ */
+const browse =
+  (history: Array.NonEmptyReadonlyArray<string>, delta: number, typed: string) =>
+  (browsing: Browsing): readonly [Option.Option<string>, Browsing] => {
+    const draft = pipe(
+      browsing.slot === 0,
+      Boolean.match({
+        onTrue: () => typed,
+        onFalse: () => browsing.draft,
+      }),
+    );
+    return pipe(
+      browsing.slot + delta,
+      Option.liftPredicate((slot) => slot >= 0),
+      Option.map((slot) => Math.min(slot, history.length)),
+      Option.match({
+        onNone: () => [Option.none(), { slot: browsing.slot, draft }] as const,
+        onSome: (slot) =>
+          [pipe(history, Array.prepend(draft), Array.get(slot)), { slot, draft }] as const,
+      }),
+    );
+  };
+
+/**
+ * The step through the history that a key asks for.
+ *
+ * `<c-p>` and `<c-n>` are other names for the arrow keys, for the reason that
+ * readline has them: the arrow keys are far from the home row.
+ */
+const historyStep = (event: KeyboardEvent): Option.Option<number> =>
+  pipe(
+    Match.value(event),
+    Match.when({ key: "ArrowUp" }, () => 1),
+    Match.when({ key: "ArrowDown" }, () => -1),
+    Match.when({ ctrlKey: true, key: "p" }, () => 1),
+    Match.when({ ctrlKey: true, key: "n" }, () => -1),
+    Match.option,
+  );
+
+/** Our own HUD input. It lives in our realm, so `instanceof` answers for it. */
+const isInput = (target: EventTarget | null): target is HTMLInputElement =>
+  target instanceof HTMLInputElement;
+
+// ---------------------------------------------------------------------------
+// The service
+// ---------------------------------------------------------------------------
 
 interface ScrollPosition {
   readonly x: number;
@@ -141,9 +376,12 @@ interface LiveHighlight {
   readonly highlighter: Highlighter;
 }
 
-// ---------------------------------------------------------------------------
-// The service
-// ---------------------------------------------------------------------------
+/** Does any part of `rect` lie inside the viewport? */
+const isInView = (
+  rect: DOMRect,
+  viewport: { readonly width: number; readonly height: number },
+): boolean =>
+  rect.bottom >= 0 && rect.top <= viewport.height && rect.right >= 0 && rect.left <= viewport.width;
 
 export class Find extends Context.Service<
   Find,
@@ -191,23 +429,13 @@ export class Find extends Context.Service<
        * layout for every element, and a walk on every character makes an
        * incremental find unusable on a large document.
        */
-      const runs = yield* Ref.make<ReadonlyArray<TextRun>>([]);
-      const matches = yield* Ref.make<ReadonlyArray<FindMatch>>([]);
-      const current = yield* Ref.make(-1);
+      const runs = yield* Ref.make(NO_RUNS);
+      const hits = yield* Ref.make(NO_HITS);
       const query = yield* Ref.make<Option.Option<ParsedFindQuery>>(Option.none());
-      /** `?` turns `n` around for the whole session, exactly as in Vim. */
-      const backwards = yield* Ref.make(false);
+      const heading = yield* Ref.make(FORWARD);
       const highlight = yield* Ref.make<Option.Option<LiveHighlight>>(Option.none());
       /** The scope of the mode that lives on after Enter. */
       const postScope = yield* Ref.make<Option.Option<Scope.Closeable>>(Option.none());
-      /**
-       * Did the last search stop before the end of the page?
-       *
-       * `n` and `N` do not search again, so they must report the stop of the
-       * search that gave them their matches. A count that is partial stays
-       * partial.
-       */
-      const partial = yield* Ref.make(false);
       const sessionFiber = yield* FiberHandle.make<void, never>();
 
       // -- the browser ---------------------------------------------------
@@ -217,34 +445,71 @@ export class Find extends Context.Service<
         Option.none<Selection>(),
       );
 
+      /** Read the selection inside `dom.probeOr`. No selection gives `fallback`. */
+      const probeSelection = <A>(
+        read: (selection: Selection) => A,
+        fallback: A,
+      ): Effect.Effect<A> =>
+        pipe(
+          selection,
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.succeed(fallback),
+              onSome: (target) => dom.probeOr(() => read(target), fallback),
+            }),
+          ),
+        );
+
       const readScroll: Effect.Effect<ScrollPosition> = dom.probeOr(
         () => ({ x: win.scrollX, y: win.scrollY }),
         { x: 0, y: 0 },
       );
 
+      // `instant`, because a restore is a jump. The smooth scrolling of Safari
+      // cannot be cancelled, so it would fight the next command.
       const restoreScroll = (position: ScrollPosition): Effect.Effect<void> =>
-        Effect.asVoid(
-          dom.probeOr(() => {
-            // `instant`, because a restore is a jump. The smooth scrolling of
-            // Safari cannot be cancelled, so it would fight the next command.
-            win.scrollTo({
-              left: position.x,
-              top: position.y,
-              behavior: "instant",
-            });
-            return true;
-          }, false),
+        dom.probeOr(
+          () => win.scrollTo({ left: position.x, top: position.y, behavior: "instant" }),
+          undefined,
         );
 
       // -- the highlight overlay -----------------------------------------
 
       const ensureStyles = ui.setStyle(FIND_STYLE_KEY, FIND_CSS);
 
-      const closeHighlight = Effect.gen(function* () {
-        const live = yield* Ref.getAndSet(highlight, Option.none());
-        if (Option.isSome(live)) {
-          yield* Scope.close(live.value.scope, Exit.void);
-        }
+      /** Take the whole overlay away. */
+      const closeHighlight = pipe(
+        highlight,
+        Ref.getAndSet(Option.none<LiveHighlight>()),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (live) => Scope.close(live.scope, Exit.void),
+          }),
+        ),
+      );
+
+      /** Hide every rectangle, and keep the overlay for the next search. */
+      const hideHighlight = pipe(
+        Ref.get(highlight),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (live) => live.highlighter.clear,
+          }),
+        ),
+      );
+
+      const buildHighlight = Effect.gen(function* () {
+        yield* ensureStyles;
+        const scope = yield* Scope.make();
+        const highlighter = yield* pipe(
+          makeHighlighter,
+          Effect.provideContext(overlayServices),
+          Scope.provide(scope),
+        );
+        yield* pipe(highlight, Ref.set(Option.some({ scope, highlighter })));
+        return highlighter;
       });
 
       /**
@@ -255,27 +520,28 @@ export class Find extends Context.Service<
        */
       const ensureHighlight = Effect.fn("Find.ensureHighlight")(function* () {
         const live = yield* Ref.get(highlight);
-        if (Option.isSome(live)) return live.value.highlighter;
-        yield* ensureStyles;
-        const scope = yield* Scope.make();
-        const highlighter = yield* Effect.provideService(
-          pipe(makeHighlighter, Effect.provideContext(overlayServices)),
-          Scope.Scope,
-          scope,
+        return yield* pipe(
+          live,
+          Option.match({
+            onSome: (live) => Effect.succeed(live.highlighter),
+            onNone: () => buildHighlight,
+          }),
         );
-        yield* Ref.set(highlight, Option.some({ scope, highlighter }));
-        return highlighter;
       });
 
       const draw = Effect.fn("Find.draw")(function* () {
-        const found = yield* Ref.get(matches);
-        if (found.length === 0) {
-          const live = yield* Ref.get(highlight);
-          if (Option.isSome(live)) yield* live.value.highlighter.clear;
-          return;
-        }
-        const highlighter = yield* ensureHighlight();
-        yield* highlighter.render(found, yield* Ref.get(current));
+        const latest = yield* Ref.get(hits);
+        yield* pipe(
+          latest,
+          Hits.$match({
+            None: () => hideHighlight,
+            Found: ({ matches, current }) =>
+              pipe(
+                ensureHighlight(),
+                Effect.flatMap((highlighter) => highlighter.render(matches, current)),
+              ),
+          }),
+        );
       });
 
       /**
@@ -284,10 +550,8 @@ export class Find extends Context.Service<
        */
       const clearState = Effect.gen(function* () {
         yield* closeHighlight;
-        yield* Ref.set(runs, []);
-        yield* Ref.set(matches, []);
-        yield* Ref.set(current, -1);
-        yield* Ref.set(partial, false);
+        yield* pipe(runs, Ref.set(NO_RUNS));
+        yield* pipe(hits, Ref.set(NO_HITS));
       });
 
       /**
@@ -295,12 +559,11 @@ export class Find extends Context.Service<
        *
        * A match holds a live `Range`, and a `Range` pins the nodes at its two
        * boundaries. One session measured 4001 detached nodes and up to 500 live
-       * ranges, and they survived every soft navigation after it. The release
-       * step is what gives them back, so no caller has to remember a teardown
-       * call.
+       * ranges, and they survived every soft navigation after it. The finalizer
+       * is what gives them back, so no caller has to remember a teardown call.
        */
-      const holdMatches: Effect.Effect<void, never, Scope.Scope> = Effect.asVoid(
-        Effect.acquireRelease(Ref.get(matches), () => clearState),
+      const holdMatches: Effect.Effect<void, never, Scope.Scope> = Effect.addFinalizer(
+        () => clearState,
       );
 
       // -- searching -----------------------------------------------------
@@ -318,11 +581,31 @@ export class Find extends Context.Service<
               document: doc,
               capabilities,
               excludeHost: Option.some(ui.shadow.host),
+              maxCharacters: DEFAULT_MAX_CHARACTERS,
             }),
           [],
         );
-        yield* Ref.set(runs, collected);
+        yield* pipe(runs, Ref.set(collected));
       });
+
+      /**
+       * The matches of `parsed` in the runs that are already collected. A
+       * query that does not compile finds nothing.
+       */
+      const runQuery = (parsed: ParsedFindQuery): Effect.Effect<RunSearch> =>
+        pipe(
+          toRegExp(parsed),
+          Option.match({
+            onNone: () => Effect.succeed(NOTHING_FOUND),
+            onSome: (pattern) =>
+              pipe(
+                Ref.get(runs),
+                Effect.flatMap((collected) =>
+                  dom.probeOr(() => matchesInRuns(doc, collected, pattern), NOTHING_FOUND),
+                ),
+              ),
+          }),
+        );
 
       /**
        * Run `raw` against the runs that are already collected, and draw again.
@@ -340,71 +623,33 @@ export class Find extends Context.Service<
         const parsed = parseFindQuery(raw, {
           regexFindMode: settings.currentUnsafe().regexFindMode,
         });
-        yield* Ref.set(query, Option.some(parsed));
-
-        if (parsed.isEmpty || Option.isSome(parsed.error)) {
-          yield* Ref.set(matches, []);
-          yield* Ref.set(current, -1);
-          yield* Ref.set(partial, false);
-          yield* draw();
-          return parsed.isEmpty
-            ? NO_QUERY
-            : {
-                count: 0,
-                index: -1,
-                empty: false,
-                error: parsed.error,
-                stopped: false,
-              };
-        }
-
-        const pattern = toRegExp(parsed);
-        const collected = yield* Ref.get(runs);
-        const search = Option.isNone(pattern)
-          ? { matches: [] as ReadonlyArray<FindMatch>, stopped: false }
-          : yield* dom.probeOr<RunSearch>(() => matchesInRuns(doc, collected, pattern.value), {
-              matches: [],
-              stopped: false,
-            });
-        const found = search.matches;
-
-        yield* Ref.set(matches, found);
-        yield* Ref.set(partial, search.stopped);
-        yield* Ref.set(
-          current,
-          found.length === 0
-            ? -1
-            : clampIndex(
-                pipe(
-                  anchor,
-                  Option.getOrElse(() => firstMatchInView(found)),
-                ),
-                found.length,
-              ),
-        );
+        yield* pipe(query, Ref.set(Option.some(parsed)));
+        const found = yield* runQuery(parsed);
+        const latest = hitsOf(found, anchor);
+        yield* pipe(hits, Ref.set(latest));
         yield* draw();
-
-        return {
-          count: found.length,
-          index: yield* Ref.get(current),
-          empty: false,
-          error: Option.none<string>(),
-          stopped: search.stopped,
-        };
+        return outcomeOf(parsed, found, latest);
       });
 
-      /** Run the last query again against a document that is walked again. */
-      const research = Effect.fn("Find.research")(function* () {
-        const last = yield* Ref.get(query);
-        if (Option.isNone(last)) return NO_QUERY;
-        yield* refreshRuns();
-        return yield* search(last.value.raw, Option.none());
-      });
-
-      const currentMatch: Effect.Effect<Option.Option<FindMatch>> = Effect.gen(function* () {
-        const found = yield* Ref.get(matches);
-        return Option.fromNullishOr(found[yield* Ref.get(current)]);
-      });
+      /**
+       * The matches of the last search. With none, the document is walked
+       * again and searched again first, because it may have changed since.
+       */
+      const liveHits = (raw: string): Effect.Effect<Hits> =>
+        pipe(
+          Ref.get(hits),
+          Effect.flatMap(
+            Hits.$match({
+              Found: (found) => Effect.succeed<Hits>(found),
+              None: () =>
+                pipe(
+                  refreshRuns(),
+                  Effect.andThen(search(raw, Option.none())),
+                  Effect.andThen(Ref.get(hits)),
+                ),
+            }),
+          ),
+        );
 
       /**
        * Put the current match in the selection of the document.
@@ -413,19 +658,78 @@ export class Find extends Context.Service<
        * own ⌘C of the user continue from where find stopped.
        */
       const selectCurrent = Effect.fn("Find.selectCurrent")(function* () {
-        const match = yield* currentMatch;
-        if (Option.isNone(match)) return;
+        const match = yield* pipe(Ref.get(hits), Effect.map(currentMatchOf));
         const target = yield* selection;
-        if (Option.isNone(target)) return;
-        // Ignored: Safari refuses a range inside a shadow tree, and the overlay
-        // still shows the user where the match is.
-        yield* Effect.ignore(
-          dom.attempt("Selection.addRange", () => {
-            target.value.removeAllRanges();
-            target.value.addRange(match.value.range.cloneRange());
+        yield* pipe(
+          Option.all({ match, target }),
+          Option.match({
+            onNone: () => Effect.void,
+            // Ignored: Safari refuses a range inside a shadow tree, and the
+            // overlay still shows the user where the match is.
+            onSome: ({ match, target }) =>
+              pipe(
+                dom.attempt("Selection.addRange", () => {
+                  target.removeAllRanges();
+                  target.addRange(match.range.cloneRange());
+                }),
+                Effect.ignore,
+              ),
           }),
         );
       });
+
+      /**
+       * Bring `range` into view, and draw again.
+       *
+       * Each scroll runs only while the match is still out of view. A read or
+       * a scroll that throws stops the rest, and nothing is drawn.
+       */
+      const reveal = Effect.fn("Find.reveal")(
+        function* (range: Range) {
+          const viewport = yield* ui.viewport;
+          const outOfView = dom.attempt(
+            "Range.getBoundingClientRect",
+            () => !isInView(range.getBoundingClientRect(), viewport),
+          );
+
+          // `scrollIntoView` on the element that holds the match comes first.
+          // It is the only thing that understands a nested scroll container
+          // without us writing one again.
+          yield* pipe(
+            dom.attempt("Element.scrollIntoView", () =>
+              pipe(
+                elementAt(range.startContainer),
+                Option.match({
+                  onNone: constVoid,
+                  onSome: (anchor) =>
+                    anchor.scrollIntoView({
+                      block: "center",
+                      inline: "nearest",
+                      behavior: "instant",
+                    }),
+                }),
+              ),
+            ),
+            Effect.when(outOfView),
+          );
+
+          // The element can be much larger than the match, for example a whole
+          // article. Correct the rest against the rectangle of the range.
+          yield* pipe(
+            dom.attempt("Window.scrollBy", () =>
+              win.scrollBy({
+                top: range.getBoundingClientRect().top - viewport.height / 3,
+                left: 0,
+                behavior: "instant",
+              }),
+            ),
+            Effect.when(outOfView),
+          );
+
+          yield* draw();
+        },
+        Effect.catchTag("DomError", () => Effect.void),
+      );
 
       /**
        * Bring the current match into view.
@@ -435,102 +739,43 @@ export class Find extends Context.Service<
        * that they cannot stop.
        */
       const scrollToCurrent = Effect.fn("Find.scrollToCurrent")(function* () {
-        const match = yield* currentMatch;
-        if (Option.isNone(match)) return;
-        const range = match.value.range;
-        const viewport = yield* ui.viewport;
-
-        const inView = (): boolean => {
-          const rect = range.getBoundingClientRect();
-          return (
-            rect.bottom >= 0 &&
-            rect.top <= viewport.height &&
-            rect.right >= 0 &&
-            rect.left <= viewport.width
-          );
-        };
-
-        const done = yield* dom.probeOr(() => {
-          if (inView()) return true;
-
-          // `scrollIntoView` on the element that holds the match comes first.
-          // It is the only thing that understands a nested scroll container
-          // without us writing one again.
-          const anchor = elementFor(range);
-          if (Option.isSome(anchor)) {
-            anchor.value.scrollIntoView({
-              block: "center",
-              inline: "nearest",
-              behavior: "instant",
-            });
-          }
-          if (inView()) return true;
-
-          // The element can be much larger than the match, for example a whole
-          // article. Correct the rest against the rectangle of the range.
-          const rect = range.getBoundingClientRect();
-          win.scrollBy({
-            top: rect.top - viewport.height / 3,
-            left: 0,
-            behavior: "instant",
-          });
-          return true;
-        }, false);
-
-        if (done) yield* draw();
+        const match = yield* pipe(Ref.get(hits), Effect.map(currentMatchOf));
+        yield* pipe(
+          match,
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: ({ range }) => reveal(range),
+          }),
+        );
       });
 
-      /** Move to the match nearest to the selection, without stepping. */
-      const anchorToSelection = Effect.fn("Find.anchorToSelection")(function* () {
-        const target = yield* selection;
-        if (Option.isNone(target)) return;
-        const found = yield* Ref.get(matches);
-        const index = indexAtSelection(target.value, found);
-        if (Option.isSome(index)) yield* Ref.set(current, index.value);
-      });
-
-      /** `n` and `N`. The search wraps, as it does in Vim. */
-      const stepBy = Effect.fn("Find.stepBy")(function* (delta: number) {
-        if (Option.isNone(yield* Ref.get(query))) return NO_QUERY;
-        if ((yield* Ref.get(matches)).length === 0) {
-          const outcome = yield* research();
-          if (outcome.count === 0) return outcome;
-        }
-
-        const found = yield* Ref.get(matches);
-        const count = found.length;
-        if (count === 0) {
-          return {
-            count: 0,
-            index: -1,
-            empty: false,
-            error: Option.none(),
-            stopped: yield* Ref.get(partial),
-          };
-        }
-
-        const index = yield* Ref.get(current);
-        const start = index < 0 ? firstMatchInView(found) : index;
-        const next = (((start + delta) % count) + count) % count;
-        yield* Ref.set(current, next);
+      /** `n` and `N` over matches that exist. The search wraps, as it does in Vim. */
+      const stepBy = Effect.fn("Find.stepBy")(function* (found: Found, delta: number) {
+        const moved = stepped(delta)(found);
+        yield* pipe(hits, Ref.set<Hits>(moved));
         yield* draw();
         yield* scrollToCurrent();
+        return moved;
+      });
 
-        return {
-          count,
-          index: next,
-          empty: false,
-          error: Option.none(),
-          stopped: yield* Ref.get(partial),
-        };
+      /** Select the current match, and say where it is. */
+      const showMatch = Effect.fn("Find.showMatch")(function* (found: Found, prefix: string) {
+        yield* selectCurrent();
+        yield* hud.show(`${prefix}${statusText(matchesOutcome(found))}`);
       });
 
       // -- the mode that lives on after Enter -----------------------------
 
-      const closePost = Effect.gen(function* () {
-        const scope = yield* Ref.getAndSet(postScope, Option.none());
-        if (Option.isSome(scope)) yield* Scope.close(scope.value, Exit.void);
-      });
+      const closePost = pipe(
+        postScope,
+        Ref.getAndSet(Option.none<Scope.Closeable>()),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (scope) => Scope.close(scope, Exit.void),
+          }),
+        ),
+      );
 
       /**
        * The mode that lives on after Enter.
@@ -544,12 +789,12 @@ export class Find extends Context.Service<
       const enterPost = Effect.fn("Find.enterPost")(function* () {
         yield* closePost;
         const scope = yield* Scope.make();
-        const handle = yield* Effect.provideService(
-          Effect.gen(function* () {
-            // The matches belong to this scope. A `Range` for each match holds
-            // the nodes at its boundaries, and this is what gives them back.
-            yield* holdMatches;
-            return yield* modes.enter(
+        const handle = yield* pipe(
+          // The matches belong to this scope. A `Range` for each match holds
+          // the nodes at its boundaries, and this is what gives them back.
+          holdMatches,
+          Effect.andThen(
+            modes.enter(
               {
                 name: "post-find",
                 indicator: null,
@@ -559,53 +804,64 @@ export class Find extends Context.Service<
                 singleton: "find",
               },
               {
-                // Everything except Escape, which the mode itself takes, belongs
-                // to the page and to the key trie of normal mode, so that `n` and
-                // `N` keep working.
+                // Everything except Escape, which the mode itself takes,
+                // belongs to the page and to the key trie of normal mode, so
+                // that `n` and `N` keep working.
                 keydown: (): Effect.Effect<HandlerResult> => Effect.succeed(CONTINUE_BUBBLING),
               },
-            );
-          }),
-          Scope.Scope,
-          scope,
+            ),
+          ),
+          Scope.provide(scope),
         );
         // The scope owns the mode, and the mode now owns the scope. An exit
         // for any reason therefore closes the scope, and a defect exit leaves
         // no scope that only the next `closePost` would release. The scope is
         // stored first, because `onExit` runs its body at once when the mode
         // already exited.
-        yield* Ref.set(postScope, Option.some(scope));
+        yield* pipe(postScope, Ref.set(Option.some(scope)));
         yield* handle.onExit(() => pipe(clearState, Effect.andThen(closePost)));
       });
 
       /** Open the mode again when nothing holds the highlights. */
       const ensurePost = Effect.fn("Find.ensurePost")(function* () {
         const scope = yield* Ref.get(postScope);
-        if (Option.isNone(scope)) {
-          yield* enterPost();
-          return;
-        }
         const names = yield* modes.activeNames;
-        if (!names.includes("post-find")) yield* enterPost();
+        const live = pipe(
+          scope,
+          Option.exists(() => pipe(names, Array.contains("post-find"))),
+        );
+        yield* pipe(
+          live,
+          Boolean.match({
+            onTrue: () => Effect.void,
+            onFalse: () => enterPost(),
+          }),
+        );
       });
 
       // -- the prompt ----------------------------------------------------
 
       const showStatus = Effect.fn("Find.showStatus")(function* (outcome: SearchOutcome) {
-        if (Option.isSome(outcome.error)) {
-          // Rule: a failure that the user must see goes through `Report`.
-          yield* report.error(statusText(outcome));
-          return;
-        }
-        // A duration of zero holds the line until the next message. The
-        // count is a live status, and not an announcement.
-        yield* hud.show(statusText(outcome), 0);
+        const status = statusText(outcome);
+        // A duration of zero holds the line until the next message. The count
+        // is a live status, and not an announcement.
+        const live = () => hud.show(status, 0);
+        yield* pipe(
+          outcome,
+          SearchOutcome.$match({
+            // Rule: a failure that the user must see goes through `Report`.
+            BadPattern: () => report.error(status),
+            NoQuery: live,
+            NoMatches: live,
+            Matches: live,
+          }),
+        );
       });
 
       const runIncremental = Effect.fn("Find.runIncremental")(function* (value: string) {
         const outcome = yield* search(value, Option.none());
         yield* showStatus(outcome);
-        if (outcome.count > 0) yield* scrollToCurrent();
+        yield* scrollToCurrent();
       });
 
       /**
@@ -617,66 +873,74 @@ export class Find extends Context.Service<
        * is our own element inside our own closed shadow root. Widening the
        * interface of the HUD for one feature would cost more.
        */
-      const promptOptions = Effect.fn("Find.promptOptions")(function* (options: {
-        readonly backwards: boolean;
-        readonly history: ReadonlyArray<string>;
-      }) {
-        const historyIndex = yield* Ref.make(-1);
-        const draft = yield* Ref.make("");
+      const promptOptions = Effect.fn("Find.promptOptions")(function* (
+        prompt: Heading,
+        history: ReadonlyArray<string>,
+      ) {
+        const browsing = yield* Ref.make(NOT_BROWSING);
 
         const applyHistory = (
+          input: HTMLInputElement,
+          entries: Array.NonEmptyReadonlyArray<string>,
+          delta: number,
+          value: string,
+        ): Effect.Effect<void> =>
+          pipe(
+            browsing,
+            Ref.modify(browse(entries, delta, value)),
+            Effect.flatMap(
+              Option.match({
+                onNone: () => Effect.void,
+                onSome: (entry) =>
+                  pipe(
+                    Effect.sync(() => {
+                      input.value = entry;
+                    }),
+                    // The `input` listener of the HUD does not fire for a
+                    // write from a script, so the incremental search is
+                    // started by hand.
+                    Effect.andThen(runIncremental(entry)),
+                  ),
+              }),
+            ),
+          );
+
+        /** `true` takes the key. A history key is taken even with no history. */
+        const takeHistoryKey = (
           event: KeyboardEvent,
           delta: number,
           value: string,
         ): Effect.Effect<boolean> =>
-          Effect.gen(function* () {
-            const input = event.target;
-            if (!(input instanceof HTMLInputElement)) return false;
-            if (options.history.length === 0) return true;
-
-            const index = yield* Ref.get(historyIndex);
-            if (index === -1) yield* Ref.set(draft, value);
-            const next = index + delta;
-            if (next < -1) return true;
-
-            const chosen = Math.min(next, options.history.length - 1);
-            yield* Ref.set(historyIndex, chosen);
-            const stored = yield* Ref.get(draft);
-            const entry = chosen === -1 ? stored : (options.history[chosen] ?? stored);
-            yield* Effect.sync(() => {
-              input.value = entry;
-            });
-            // The `input` listener of the HUD does not fire for a write from
-            // a script, so the incremental search is started by hand.
-            yield* runIncremental(entry);
-            return true;
-          });
+          pipe(
+            event.target,
+            Option.liftPredicate(isInput),
+            Option.match({
+              onNone: () => Effect.succeed(false),
+              onSome: (input) =>
+                pipe(
+                  history,
+                  Array.match({
+                    onEmpty: () => Effect.void,
+                    onNonEmpty: (entries) => applyHistory(input, entries, delta, value),
+                  }),
+                  Effect.as(true),
+                ),
+            }),
+          );
 
         return {
-          label: options.backwards ? "?" : "/",
-          // A screen reader cannot read "/" as a name for the field.
-          ariaLabel: options.backwards ? "Find backwards on the page" : "Find on the page",
+          label: prompt.label,
+          ariaLabel: prompt.ariaLabel,
           placeholder: "search",
           onInput: runIncremental,
           onKeydown: (event: KeyboardEvent, value: string) =>
-            Effect.gen(function* () {
-              if (event.key === "ArrowUp") {
-                return yield* applyHistory(event, 1, value);
-              }
-              if (event.key === "ArrowDown") {
-                return yield* applyHistory(event, -1, value);
-              }
-              // `<c-p>` and `<c-n>` as the other names for the history, for
-              // the reason that readline has them: the arrow keys are far
-              // from the home row.
-              if (event.ctrlKey && event.key === "p") {
-                return yield* applyHistory(event, 1, value);
-              }
-              if (event.ctrlKey && event.key === "n") {
-                return yield* applyHistory(event, -1, value);
-              }
-              return false;
-            }),
+            pipe(
+              historyStep(event),
+              Option.match({
+                onNone: () => Effect.succeed(false),
+                onSome: (delta) => takeHistoryKey(event, delta, value),
+              }),
+            ),
         } satisfies HudPromptOptions;
       });
 
@@ -696,25 +960,54 @@ export class Find extends Context.Service<
        * commands.
        */
       const passIfOurs = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-        Effect.succeed(hud.ownsFocus(event.target) ? PASS_EVENT_TO_PAGE : SUPPRESS_EVENT);
+        pipe(
+          hud.ownsFocus(event.target),
+          Boolean.match({
+            onTrue: () => PASS_EVENT_TO_PAGE,
+            onFalse: () => SUPPRESS_EVENT,
+          }),
+          Effect.succeed,
+        );
 
-      const promptSession = Effect.fn("Find.promptSession")(function* (isBackwards: boolean) {
+      /**
+       * Stop insert mode, which sits below us, from reading focus on our own
+       * input as the page asking for insert mode.
+       */
+      const claimOurFocus = (event: FocusEvent): Effect.Effect<HandlerResult> =>
+        pipe(
+          hud.ownsFocus(event.target),
+          Boolean.match({
+            onTrue: () => SUPPRESS_PROPAGATION,
+            onFalse: () => CONTINUE_BUBBLING,
+          }),
+          Effect.succeed,
+        );
+
+      const promptSession = Effect.fn("Find.promptSession")(function* (prompt: Heading) {
         const committed = yield* Ref.make(false);
         const snapshot = yield* readScroll;
 
         // The one place that undoes what a cancelled search disturbed. It
         // runs for Escape, for a blur, and for an interruption from `clear`
         // or from a second `enter`.
+        const undo = pipe(
+          clearState,
+          Effect.andThen(restoreScroll(snapshot)),
+          Effect.andThen(hud.hide),
+        );
         yield* Effect.addFinalizer(() =>
-          Effect.gen(function* () {
-            if (yield* Ref.get(committed)) return;
-            yield* clearState;
-            yield* restoreScroll(snapshot);
-            yield* hud.hide;
-          }),
+          pipe(
+            Ref.get(committed),
+            Effect.flatMap(
+              Boolean.match({
+                onTrue: () => Effect.void,
+                onFalse: () => undo,
+              }),
+            ),
+          ),
         );
 
-        yield* Ref.set(backwards, isBackwards);
+        yield* pipe(heading, Ref.set(prompt));
         yield* ensureStyles;
         // The mode that lives on holds the same singleton group, and its exit
         // body clears the state. It is closed first, so that the walk below
@@ -725,7 +1018,7 @@ export class Find extends Context.Service<
         const handle = yield* modes.enter(
           {
             name: "find",
-            indicator: isBackwards ? "Find (backwards)" : "Find",
+            indicator: prompt.indicator,
             // The HUD input owns Escape: it has to settle the prompt, and an
             // exit at the level of the mode would leave the prompt open.
             exitOnEscape: false,
@@ -735,84 +1028,164 @@ export class Find extends Context.Service<
             keydown: passIfOurs,
             keypress: passIfOurs,
             keyup: passIfOurs,
-            // Stop insert mode, which sits below us, from reading focus on our
-            // own input as the page asking for insert mode.
-            focus: (event) =>
-              Effect.succeed(
-                hud.ownsFocus(event.target) ? SUPPRESS_PROPAGATION : CONTINUE_BUBBLING,
-              ),
+            focus: claimOurFocus,
           },
         );
 
         yield* refreshRuns();
 
-        const history = (yield* storage.findHistory.current).queries;
-        const options = yield* promptOptions({
-          backwards: isBackwards,
-          history,
-        });
+        const { queries } = yield* storage.findHistory.current;
+        const options = yield* promptOptions(prompt, queries);
 
         // A mode can also end without the user: `exitAll` runs on a soft
         // navigation. The prompt must not stay open and hold the keyboard.
         const abandoned = yield* Deferred.make<void>();
-        yield* handle.onExit(() => Effect.asVoid(Deferred.succeed(abandoned, undefined)));
-
-        const answer = yield* Effect.race(
-          hud.prompt(options),
-          pipe(Deferred.await(abandoned), Effect.as(Option.none<string>())),
+        yield* handle.onExit(() =>
+          pipe(abandoned, Deferred.succeed<void>(undefined), Effect.asVoid),
         );
 
-        if (Option.isSome(answer)) yield* Ref.set(committed, true);
+        const abandonment = pipe(Deferred.await(abandoned), Effect.as(Option.none<string>()));
+        const answer = yield* pipe(hud.prompt(options), Effect.race(abandonment));
+
+        yield* pipe(committed, Ref.set(Option.isSome(answer)));
         return answer;
       });
 
-      const commit = Effect.fn("Find.commit")(function* (raw: string) {
-        const trimmed = raw.trim();
-        if (trimmed.length === 0) {
-          yield* clearState;
-          yield* hud.hide;
-          return;
-        }
-
-        // Detached, because the group waits for its own debounce before the
-        // write completes. The user must not wait half a second for the
-        // highlight.
-        yield* Effect.asVoid(
-          Effect.forkDetach(
-            Effect.catch(
-              storage.findHistory.update((history) => ({
-                queries: [...pushHistory(history.queries, trimmed)],
-              })),
-              (error) => report.error(`Could not save the search: ${error.detail}`),
-            ),
-          ),
+      /**
+       * Save `text` in the history.
+       *
+       * Detached, because the group waits for its own debounce before the
+       * write completes. The user must not wait half a second for the
+       * highlight.
+       */
+      const rememberQuery = (text: string): Effect.Effect<void> =>
+        pipe(
+          storage.findHistory.update((history) => ({
+            queries: Array.copy(pushHistory(history.queries, text)),
+          })),
+          Effect.catch((error) => report.error(`Could not save the search: ${error.detail}`)),
+          Effect.forkDetach,
+          Effect.asVoid,
         );
 
-        const outcome = yield* search(trimmed, Option.some(yield* Ref.get(current)));
-        yield* hud.hide;
+      const noMatchesFor = (text: string): Effect.Effect<void> =>
+        pipe(hud.show(`No matches for "${text}"`), Effect.andThen(clearState));
 
-        if (Option.isSome(outcome.error)) {
-          yield* report.error(statusText(outcome));
-          yield* clearState;
-          return;
-        }
-        if (outcome.count === 0) {
-          yield* hud.show(`No matches for "${trimmed}"`);
-          yield* clearState;
-          return;
-        }
-
-        // The match stays selected. That is what lets `n`, `N`, `y` and visual
-        // mode all continue from where find stopped.
+      /**
+       * Settle on the current match.
+       *
+       * The match stays selected. That is what lets `n`, `N`, `y` and visual
+       * mode all continue from where find stopped.
+       */
+      const settle = Effect.fn("Find.settle")(function* (outcome: SearchOutcome) {
         yield* scrollToCurrent();
         yield* selectCurrent();
         yield* hud.show(statusText(outcome));
         yield* enterPost();
       });
 
-      const runSession = Effect.fn("Find.runSession")(function* (isBackwards: boolean) {
-        const answer = yield* Effect.scoped(promptSession(isBackwards));
-        if (Option.isSome(answer)) yield* commit(answer.value);
+      const commitQuery = Effect.fn("Find.commitQuery")(function* (text: string) {
+        yield* rememberQuery(text);
+        const anchor = yield* pipe(Ref.get(hits), Effect.map(commitAnchor));
+        const outcome = yield* search(text, Option.some(anchor));
+        yield* hud.hide;
+        yield* pipe(
+          outcome,
+          SearchOutcome.$match({
+            BadPattern: () => pipe(report.error(statusText(outcome)), Effect.andThen(clearState)),
+            NoQuery: () => noMatchesFor(text),
+            NoMatches: () => noMatchesFor(text),
+            Matches: () => settle(outcome),
+          }),
+        );
+      });
+
+      const commit = Effect.fn("Find.commit")(function* (raw: string) {
+        yield* pipe(
+          raw.trim(),
+          Option.liftPredicate((trimmed) => trimmed.length > 0),
+          Option.match({
+            onNone: () => pipe(clearState, Effect.andThen(hud.hide)),
+            onSome: commitQuery,
+          }),
+        );
+      });
+
+      const runSession = Effect.fn("Find.runSession")(function* (prompt: Heading) {
+        const answer = yield* pipe(promptSession(prompt), Effect.scoped);
+        yield* pipe(
+          answer,
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: commit,
+          }),
+        );
+      });
+
+      /** Land on the match *after* the caret, and not on the one under it. */
+      const landAfterCaret = Effect.fn("Find.landAfterCaret")(function* (
+        found: Found,
+        word: string,
+        direction: 1 | -1,
+      ) {
+        const target = yield* selection;
+        const anchored = pipe(
+          target,
+          Option.map((target) => anchoredAt(target)(found)),
+          Option.getOrElse(() => found),
+        );
+        const moved = yield* stepBy(anchored, direction);
+        yield* showMatch(moved, `${word}  `);
+        yield* enterPost();
+      });
+
+      const searchWord = Effect.fn("Find.searchWord")(function* (
+        word: string,
+        parsed: ParsedFindQuery,
+        direction: 1 | -1,
+      ) {
+        yield* ensureStyles;
+        yield* closePost;
+        yield* clearState;
+        yield* refreshRuns();
+        // `*` and `#` set the direction outright. Upstream does the same, and
+        // it is what makes a following `n` continue the way that the user
+        // just went.
+        yield* pipe(heading, Ref.set(headingOf(direction < 0)));
+        yield* search(parsed.raw, Option.none());
+        const latest = yield* Ref.get(hits);
+        yield* pipe(
+          latest,
+          Hits.$match({
+            None: () => noMatchesFor(word),
+            Found: (found) => landAfterCaret(found, word, direction),
+          }),
+        );
+      });
+
+      const stepQuery = Effect.fn("Find.stepQuery")(function* (
+        last: ParsedFindQuery,
+        count: number,
+      ) {
+        yield* ensureStyles;
+        // The highlights need an owner. Without one they would stay on screen
+        // with nothing left to take them away. The mode is opened before the
+        // step, because opening it drops a mode that already ended, and that
+        // release clears the matches.
+        yield* ensurePost();
+        const { step: sign } = yield* Ref.get(heading);
+        const latest = yield* liveHits(last.raw);
+        yield* pipe(
+          latest,
+          Hits.$match({
+            None: () => hud.show(`No matches for "${last.raw}"`),
+            Found: (found) =>
+              pipe(
+                stepBy(found, count * sign),
+                Effect.flatMap((moved) => showMatch(moved, "")),
+              ),
+          }),
+        );
       });
 
       // -- the public methods --------------------------------------------
@@ -822,70 +1195,37 @@ export class Find extends Context.Service<
         // position. Its finalizer puts the old position back, and a new
         // snapshot taken first would be that old position.
         yield* FiberHandle.clear(sessionFiber);
-        yield* Effect.asVoid(FiberHandle.run(sessionFiber, runSession(options.backwards)));
+        yield* pipe(
+          runSession(headingOf(options.backwards)),
+          FiberHandle.run(sessionFiber),
+          Effect.asVoid,
+        );
       });
 
       const step = Effect.fn("Find.step")(function* (count: number) {
         const last = yield* Ref.get(query);
-        if (Option.isNone(last)) {
-          yield* hud.show("No previous search");
-          return;
-        }
-        yield* ensureStyles;
-        // The highlights need an owner. Without one they would stay on screen
-        // with nothing left to take them away. The mode is opened before the
-        // step, because opening it drops a mode that already ended, and that
-        // release clears the matches.
-        yield* ensurePost();
-        const outcome = yield* stepBy((yield* Ref.get(backwards)) ? -count : count);
-        if (outcome.count === 0) {
-          yield* hud.show(`No matches for "${last.value.raw}"`);
-          return;
-        }
-        yield* selectCurrent();
-        yield* hud.show(statusText(outcome));
+        yield* pipe(
+          last,
+          Option.match({
+            onNone: () => hud.show("No previous search"),
+            onSome: (parsed) => stepQuery(parsed, count),
+          }),
+        );
       });
 
       const searchWordUnderCursor = Effect.fn("Find.searchWordUnderCursor")(function* (
         direction: 1 | -1,
       ) {
-        const target = yield* selection;
-        const word = Option.isNone(target)
-          ? ""
-          : yield* dom.probeOr(() => wordUnderCursor(target.value), "");
-        if (word.length === 0) {
-          yield* hud.show("No word under the cursor");
-          return;
-        }
-
-        const parsed = wordQuery(word);
-        if (Option.isNone(toRegExp(parsed))) {
-          yield* hud.show("No word under the cursor");
-          return;
-        }
-
-        yield* ensureStyles;
-        yield* closePost;
-        yield* clearState;
-        yield* refreshRuns();
-        // `*` and `#` set the direction outright. Upstream does the same, and
-        // it is what makes a following `n` continue the way that the user
-        // just went.
-        yield* Ref.set(backwards, direction < 0);
-
-        const outcome = yield* search(parsed.raw, Option.none());
-        if (outcome.count === 0) {
-          yield* hud.show(`No matches for "${word}"`);
-          yield* clearState;
-          return;
-        }
-
-        // Land on the match *after* the caret, and not on the one under it.
-        yield* anchorToSelection();
-        const stepped = yield* stepBy(direction);
-        yield* selectCurrent();
-        yield* hud.show(`${word}  ${statusText(stepped)}`);
-        yield* enterPost();
+        const word = yield* probeSelection(wordUnderCursor, "");
+        // An empty word gives an empty query, which does not compile either.
+        yield* pipe(
+          wordQuery(word),
+          Option.liftPredicate((parsed) => Option.isSome(toRegExp(parsed))),
+          Option.match({
+            onNone: () => hud.show("No word under the cursor"),
+            onSome: (parsed) => searchWord(word, parsed, direction),
+          }),
+        );
       });
 
       const clearAll = Effect.fn("Find.clear")(function* () {
@@ -897,12 +1237,7 @@ export class Find extends Context.Service<
 
       // The layer scope owns the session, the overlay and the mode that lives
       // on. Closing the runtime therefore takes every `Range` with it.
-      yield* Effect.addFinalizer(() =>
-        Effect.gen(function* () {
-          yield* closePost;
-          yield* clearState;
-        }),
-      );
+      yield* Effect.addFinalizer(() => pipe(closePost, Effect.andThen(clearState)));
 
       const service = Find.of({
         enter,

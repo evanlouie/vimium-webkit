@@ -19,7 +19,7 @@
  * `dispose` method.
  */
 
-import { Effect, FiberHandle, Option, Ref, Scope, pipe } from "effect";
+import { Array, Boolean, Effect, FiberHandle, Option, Ref, Scope, pipe } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 import { Ui } from "~/ui/Ui.ts";
 import type { FindMatch } from "./Engine.ts";
@@ -124,6 +124,103 @@ interface Origin {
   readonly y: number;
 }
 
+/** The band of the page, in viewport coordinates, whose rectangles are drawn. */
+interface Band {
+  readonly minTop: number;
+  readonly maxTop: number;
+}
+
+/**
+ * The indexes of the matches, in the order that they are drawn.
+ *
+ * The current match comes first, so that the limit can never drop it.
+ */
+const drawOrder = (
+  matches: ReadonlyArray<FindMatch>,
+  currentIndex: number,
+): ReadonlyArray<number> =>
+  pipe(
+    matches,
+    Array.map((_, index) => index),
+    Array.filter((index) => index !== currentIndex),
+    Array.prepend(currentIndex),
+  );
+
+/**
+ * The rectangles of one match that are worth drawing.
+ *
+ * A rectangle of no size draws nothing. A rectangle of another match is drawn
+ * only near the viewport, and the current match is always drawn.
+ */
+const placedRects = (match: FindMatch, current: boolean, band: Band): ReadonlyArray<PlacedRect> =>
+  pipe(
+    Array.fromIterable(match.range.getClientRects()),
+    Array.filter(
+      (rect) =>
+        rect.width !== 0 &&
+        rect.height !== 0 &&
+        (current || (rect.bottom >= band.minTop && rect.top <= band.maxTop)),
+    ),
+    Array.map((rect) => ({
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+      current,
+    })),
+  );
+
+const NO_RECTS: ReadonlyArray<PlacedRect> = [];
+
+/**
+ * Every rectangle to draw, up to about `MAX_RENDERED_RECTS`.
+ *
+ * The limit is checked before each match, and a match is drawn whole, so the
+ * last match can take the count a little past the limit. No match after the
+ * limit is measured at all.
+ */
+const placeAll = (
+  matches: ReadonlyArray<FindMatch>,
+  currentIndex: number,
+  band: Band,
+): ReadonlyArray<PlacedRect> =>
+  pipe(
+    drawOrder(matches, currentIndex),
+    Array.reduce(NO_RECTS, placeMatch(matches, currentIndex, band)),
+  );
+
+/** Add the rectangles of match `index`, while the limit allows one more match. */
+const placeMatch =
+  (matches: ReadonlyArray<FindMatch>, currentIndex: number, band: Band) =>
+  (placed: ReadonlyArray<PlacedRect>, index: number): ReadonlyArray<PlacedRect> =>
+    pipe(
+      matches,
+      Array.get(index),
+      Option.filter(() => placed.length < MAX_RENDERED_RECTS),
+      Option.map((match) => placedRects(match, index === currentIndex, band)),
+      Option.map((rects) => pipe(placed, Array.appendAll(rects))),
+      Option.getOrElse(() => placed),
+    );
+
+const rectClass: (current: boolean) => string = Boolean.match({
+  onFalse: () => "vw-find__rect",
+  onTrue: () => "vw-find__rect vw-find__rect--current",
+});
+
+const HIDDEN_RECT_CLASS = "vw-find__rect vw-find__rect--hidden";
+
+/** Put one pooled element over `rect`. */
+const place = (element: HTMLElement, rect: PlacedRect): void => {
+  element.className = rectClass(rect.current);
+  element.style.width = `${rect.width}px`;
+  element.style.height = `${rect.height}px`;
+  element.style.transform = `translate(${rect.left}px, ${rect.top}px)`;
+};
+
+const hide = (element: HTMLElement): void => {
+  element.className = HIDDEN_RECT_CLASS;
+};
+
 // ---------------------------------------------------------------------------
 // The highlighter
 // ---------------------------------------------------------------------------
@@ -157,8 +254,6 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
     // made later still belongs to it. `render` has no scope of its own, and an
     // element must live as long as the overlay.
     const scope = yield* Scope.Scope;
-    const scoped = <A, E>(effect: Effect.Effect<A, E, Scope.Scope>): Effect.Effect<A, E> =>
-      Effect.provideService(effect, Scope.Scope, scope);
 
     const findLayer = yield* ui.layer("find");
 
@@ -205,84 +300,60 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
       currentIndex: number,
     ) {
       const viewport = yield* ui.viewport;
-      const minTop = -VIEWPORT_MARGIN;
-      const maxTop = viewport.height + VIEWPORT_MARGIN;
-
-      return yield* dom.probeOr<ReadonlyArray<PlacedRect>>(() => {
-        const placed: PlacedRect[] = [];
-        // The current match comes first, so that the limit can never drop it.
-        const order = [currentIndex, ...matches.keys()];
-        const drawn = new Set<number>();
-
-        for (const index of order) {
-          if (placed.length >= MAX_RENDERED_RECTS) break;
-          if (drawn.has(index)) continue;
-          const match = matches[index];
-          if (match === undefined) continue;
-          drawn.add(index);
-
-          const current = index === currentIndex;
-          for (const rect of match.range.getClientRects()) {
-            if (rect.width === 0 || rect.height === 0) continue;
-            if (!current && (rect.bottom < minTop || rect.top > maxTop)) {
-              continue;
-            }
-            placed.push({
-              left: rect.left,
-              top: rect.top,
-              width: rect.width,
-              height: rect.height,
-              current,
-            });
-          }
-        }
-        return placed;
-      }, []);
+      const band: Band = {
+        minTop: -VIEWPORT_MARGIN,
+        maxTop: viewport.height + VIEWPORT_MARGIN,
+      };
+      return yield* dom.probeOr(() => placeAll(matches, currentIndex, band), []);
     });
 
-    /** Make sure that the pool holds at least `count` elements. */
-    const grow = Effect.fn("Highlighter.grow")(function* (count: number) {
-      let pool = yield* Ref.get(rects);
-      while (pool.length < count) {
-        const element = yield* scoped(
-          Effect.acquireRelease(
-            Effect.sync(() => {
-              const div = doc.createElement("div");
-              div.className = "vw-find__rect";
-              container.appendChild(div);
-              return div;
-            }),
-            (div) =>
-              Effect.sync(() => {
-                div.remove();
-              }),
-          ),
-        );
-        pool = [...pool, element];
-        yield* Ref.set(rects, pool);
-      }
-      return pool;
+    /** A new rectangle element, which lives as long as the overlay. */
+    const makeRect = pipe(
+      Effect.acquireRelease(
+        Effect.sync(() => {
+          const div = doc.createElement("div");
+          div.className = "vw-find__rect";
+          container.appendChild(div);
+          return div;
+        }),
+        (div) =>
+          Effect.sync(() => {
+            div.remove();
+          }),
+      ),
+      Scope.provide(scope),
+    );
+
+    /** Make sure that the pool holds an element for each of `placed`. */
+    const grow = Effect.fn("Highlighter.grow")(function* (placed: ReadonlyArray<PlacedRect>) {
+      const pool = yield* Ref.get(rects);
+      const added = yield* pipe(
+        placed,
+        Array.drop(pool.length),
+        Effect.forEach(() => makeRect),
+      );
+      const grown = pipe(pool, Array.appendAll(added));
+      yield* pipe(rects, Ref.set<ReadonlyArray<HTMLElement>>(grown));
+      return grown;
     });
 
     const paint = Effect.fn("Highlighter.paint")(function* (placed: ReadonlyArray<PlacedRect>) {
-      const pool = yield* grow(placed.length);
-      yield* Effect.sync(() => {
-        for (let index = 0; index < pool.length; index++) {
-          const element = pool[index];
-          if (element === undefined) continue;
-          const rect = placed[index];
-          if (rect === undefined) {
-            element.className = "vw-find__rect vw-find__rect--hidden";
-            continue;
-          }
-          element.className = rect.current
-            ? "vw-find__rect vw-find__rect--current"
-            : "vw-find__rect";
-          element.style.width = `${rect.width}px`;
-          element.style.height = `${rect.height}px`;
-          element.style.transform = `translate(${rect.left}px, ${rect.top}px)`;
-        }
-      });
+      const pool = yield* grow(placed);
+      yield* Effect.sync(() =>
+        pipe(
+          pool,
+          Array.forEach((element, index) =>
+            pipe(
+              placed,
+              Array.get(index),
+              Option.match({
+                onNone: () => hide(element),
+                onSome: (rect) => place(element, rect),
+              }),
+            ),
+          ),
+        ),
+      );
     });
 
     const render = Effect.fn("Highlighter.render")(function* (
@@ -291,19 +362,17 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
     ) {
       // A new measurement sets the scroll baseline again. Everything after this
       // call is a difference from here.
-      yield* Ref.set(origin, yield* readScroll);
-      yield* paint(yield* measure(matches, currentIndex));
+      const scroll = yield* readScroll;
+      yield* pipe(origin, Ref.set(scroll));
+      const placed = yield* measure(matches, currentIndex);
+      yield* paint(placed);
       yield* applyOffset();
     });
 
-    const clear = Effect.gen(function* () {
-      const pool = yield* Ref.get(rects);
-      yield* Effect.sync(() => {
-        for (const element of pool) {
-          element.className = "vw-find__rect vw-find__rect--hidden";
-        }
-      });
-    });
+    const clear = pipe(
+      Ref.get(rects),
+      Effect.flatMap((pool) => Effect.sync(() => pipe(pool, Array.forEach(hide)))),
+    );
 
     // ---------------------------------------------------------------------
     // Following the scroll
@@ -318,10 +387,11 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
      * event of a frame asks for the correction, and every later event of the same
      * frame is dropped instead of starting the wait again.
      */
-    const reposition = Effect.asVoid(
-      FiberHandle.run(repositionFiber, pipe(dom.nextFrame, Effect.andThen(applyOffset())), {
-        onlyIfMissing: true,
-      }),
+    const reposition = pipe(
+      dom.nextFrame,
+      Effect.andThen(applyOffset()),
+      FiberHandle.run(repositionFiber, { onlyIfMissing: true }),
+      Effect.asVoid,
     );
 
     // The capture phase: `scroll` does not bubble out of an element that
@@ -336,13 +406,23 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
       () => Option.fromNullishOr(win.visualViewport),
       Option.none<VisualViewport>(),
     );
-    if (Option.isSome(visualViewport)) {
-      const visual = visualViewport.value;
-      yield* dom.listenOn(visual, "resize", () => reposition, { passive: true });
-      yield* dom.listenOn(visual, "scroll", () => reposition, { passive: true });
-    }
+    yield* pipe(
+      visualViewport,
+      Option.match({
+        onNone: () => Effect.void,
+        onSome: (visual) =>
+          pipe(
+            ["resize", "scroll"],
+            Effect.forEach(
+              (type) => dom.listenOn(visual, type, () => reposition, { passive: true }),
+              { discard: true },
+            ),
+          ),
+      }),
+    );
 
-    yield* Ref.set(origin, yield* readScroll);
+    const start = yield* readScroll;
+    yield* pipe(origin, Ref.set(start));
     yield* applyOffset();
 
     return { render, clear };
