@@ -31,14 +31,19 @@ import {
   pipe,
 } from "effect";
 import {
+  CommandAvailability,
   type CommandDef,
-  type CommandGroup,
   type CommandName,
   COMMANDS,
 } from "~/domain/Command.ts";
 import { recoverEvenIfInterrupted } from "./Recovery.ts";
 
-export type { CommandDef, CommandGroup, CommandName, CommandTier } from "~/domain/Command.ts";
+export type {
+  CommandAvailability,
+  CommandDef,
+  CommandGroup,
+  CommandName,
+} from "~/domain/Command.ts";
 
 export const CommandFailureReason = Schema.Literals([
   /** No command of that name is in the catalogue. */
@@ -99,7 +104,6 @@ export class Commands extends Context.Service<
     readonly definition: (name: string) => Option.Option<CommandDef>;
     readonly all: ReadonlyArray<CommandDef>;
     readonly names: ReadonlyArray<CommandName>;
-    readonly byGroup: ReadonlyMap<CommandGroup, ReadonlyArray<CommandDef>>;
   }
 >()("vimium/core/Commands") {
   static readonly layer: Layer.Layer<Commands> = Layer.effect(
@@ -145,7 +149,13 @@ export class Commands extends Context.Service<
                   new CommandError({
                     reason: "unavailable",
                     command: name,
-                    detail: definition.unavailableReason ?? `${name} cannot run in this frame`,
+                    detail: pipe(
+                      definition.availability,
+                      CommandAvailability.$match({
+                        Available: () => `${name} cannot run in this frame`,
+                        Unavailable: ({ reason }) => reason,
+                      }),
+                    ),
                   }),
               ),
               Effect.fromResult,
@@ -193,7 +203,6 @@ export class Commands extends Context.Service<
         definition: definitionOf,
         all: COMMAND_LIST,
         names: COMMAND_NAMES,
-        byGroup: COMMANDS_BY_GROUP,
       });
     }),
   );
@@ -207,24 +216,6 @@ const COMMAND_LIST: ReadonlyArray<CommandDef> = Record.values(COMMANDS_BY_NAME);
 const COMMAND_NAMES: ReadonlyArray<CommandName> = pipe(
   COMMAND_LIST,
   Array.map((definition) => definition.name),
-);
-
-/** Every group with its commands, in the order of the first command of each group. */
-const COMMANDS_BY_GROUP: ReadonlyMap<CommandGroup, ReadonlyArray<CommandDef>> = pipe(
-  COMMAND_LIST,
-  Array.map((definition) => definition.group),
-  Array.dedupe,
-  Array.map(
-    (group) =>
-      [
-        group,
-        pipe(
-          COMMAND_LIST,
-          Array.filter((definition) => definition.group === group),
-        ),
-      ] as const,
-  ),
-  (groups) => new Map(groups),
 );
 
 const definitionOf = (name: string): Option.Option<CommandDef> =>
