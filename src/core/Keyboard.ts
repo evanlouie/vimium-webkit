@@ -423,8 +423,8 @@ const release =
 export class Keyboard extends Context.Service<
   Keyboard,
   {
-    /** The half-typed sequence, for the HUD. `null` when there is none. */
-    readonly pending: SubscriptionRef.SubscriptionRef<string | null>;
+    /** The half-typed sequence, for the HUD. `None` when there is none. */
+    readonly pending: SubscriptionRef.SubscriptionRef<Option.Option<string>>;
 
     /**
      * Enter or leave normal mode, to match the exclusion verdict now.
@@ -466,7 +466,7 @@ export class Keyboard extends Context.Service<
       const report = yield* Report;
       const settings = yield* Settings;
 
-      const pending = yield* SubscriptionRef.make<string | null>(null);
+      const pending = yield* SubscriptionRef.make(Option.none<string>());
       const state = yield* Ref.make<KeyState>(Option.none());
       const passNext = yield* Ref.make(0);
       // The `event.code` values whose `keydown` we took. A page that listens
@@ -475,11 +475,11 @@ export class Keyboard extends Context.Service<
       // between the press and the release.
       const suppressedCodes = yield* Ref.make(HashSet.empty<string>());
 
-      /** Show the half-typed sequence in the HUD. `null` shows nothing. */
-      const show = (text: string | null): Effect.Effect<void> =>
+      /** Show the half-typed sequence in the HUD. `None` shows nothing. */
+      const show = (text: Option.Option<string>): Effect.Effect<void> =>
         pipe(pending, SubscriptionRef.set(text));
 
-      const showPending = flow(Array.join(""), show);
+      const showPending = flow(Array.join(""), Option.some, show);
 
       const reset = pipe(
         state,
@@ -487,7 +487,7 @@ export class Keyboard extends Context.Service<
         Effect.flatMap(
           Option.match({
             onNone: () => Effect.void,
-            onSome: () => show(null),
+            onSome: () => show(Option.none()),
           }),
         ),
       );

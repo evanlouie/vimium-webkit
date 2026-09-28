@@ -97,7 +97,7 @@ const recordingDom = (attached: Ref.Ref<ReadonlyArray<Attached>>): Layer.Layer<D
 /** `Keyboard`, reduced to the one method that the bridge calls. */
 const stubKeyboard = (forgotten: Ref.Ref<number>): Layer.Layer<Keyboard> =>
   pipe(
-    SubscriptionRef.make<string | null>(null),
+    SubscriptionRef.make(Option.none<string>()),
     Effect.map((pending) =>
       Keyboard.of({
         pending,

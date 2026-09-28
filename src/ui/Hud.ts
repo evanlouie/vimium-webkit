@@ -506,9 +506,7 @@ export class Hud extends Context.Service<
         yield* pipe(
           keyboard.pending,
           SubscriptionRef.changes,
-          Stream.runForEach((value) =>
-            patch(Struct.assign({ pending: Option.fromNullishOr(value) })),
-          ),
+          Stream.runForEach((pending) => patch(Struct.assign({ pending }))),
           Effect.forkScoped,
         );
 

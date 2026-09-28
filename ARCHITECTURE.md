@@ -121,7 +121,7 @@ Slow work leaves the path with `Effect.forkDetach` or `runtime.runFork`.
 | --------------------- | ---------------------- | -------------------------------------------------- |
 | Settings              | `core/Settings.ts`     | `SubscriptionRef<Settings>`                        |
 | Compiled key trie     | `core/Mappings.ts`     | `SubscriptionRef`, rebuilt from `Settings.changes` |
-| Half-typed keys       | `core/Keyboard.ts`     | `SubscriptionRef<string \| null>`                  |
+| Half-typed keys       | `core/Keyboard.ts`     | `SubscriptionRef<Option<string>>`                  |
 | Messages for the user | `core/Report.ts`       | an unbounded `Queue`                               |
 | Handler stack         | `core/HandlerStack.ts` | `Ref<readonly Entry[]>`                            |
 | Mode stack            | `core/Modes.ts`        | `Ref<readonly Frame[]>`                            |
