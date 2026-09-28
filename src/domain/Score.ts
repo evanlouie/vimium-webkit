@@ -9,6 +9,9 @@
  * break without a sign.
  */
 
+import { Array, Boolean, Option, pipe, String } from "effect";
+import { flow } from "effect/Function";
+
 /**
  * The relevancy ladder.
  *
@@ -42,31 +45,85 @@ export const MISSING_TITLE_LENGTH = 100;
  */
 const NON_WORD = /[^\p{L}\p{N}]+/gu;
 
-export const tokenize = (text: string): readonly string[] => {
-  const lowered = text.toLowerCase().trim();
-  if (lowered.length === 0) return [];
-  return lowered.split(NON_WORD).filter((word) => word.length > 0);
-};
+export const tokenize: (text: string) => readonly string[] = flow(
+  String.toLowerCase,
+  String.trim,
+  String.split(NON_WORD),
+  Array.filter(String.isNonEmpty),
+);
 
-/** The best score that `token` gets against a single word of `words`. */
+/** The rungs of the ladder that a word reaches, by where the word stands. */
+interface Rungs {
+  readonly wholeWord: number;
+  readonly prefix: number;
+}
+
+const FIRST_TOKEN: Rungs = { wholeWord: WHOLE_WORD_ON_FIRST_TOKEN, prefix: PREFIX_ON_FIRST_TOKEN };
+const LATER_TOKEN: Rungs = { wholeWord: WHOLE_WORD, prefix: PREFIX };
+
+/**
+ * The best score that `token` gets against a single word of `words`.
+ *
+ * A hot loop, kept on purpose. It runs for every word of every candidate on
+ * every keystroke. A benchmark over 5000 history entries and eleven queries
+ * measured the whole score at about 5.5 ms for each keystroke with this loop,
+ * and at about 14.5 ms with the same ladder written as `Array.reduce` and
+ * `Boolean.match`.
+ */
 const bestTokenScore = (token: string, words: readonly string[]): number => {
   let best = 0;
-  for (let index = 0; index < words.length; index++) {
-    const word = words[index];
-    if (word === undefined) continue;
-    const first = index === 0;
-
-    let score = 0;
-    if (word === token) score = first ? WHOLE_WORD_ON_FIRST_TOKEN : WHOLE_WORD;
-    else if (word.startsWith(token)) {
-      score = first ? PREFIX_ON_FIRST_TOKEN : PREFIX;
-    } else if (word.includes(token)) score = SUBSTRING;
-
-    if (score > best) best = score;
+  let rungs = FIRST_TOKEN;
+  for (const word of words) {
+    if (word === token) best = Math.max(best, rungs.wholeWord);
+    else if (word.startsWith(token)) best = Math.max(best, rungs.prefix);
+    else if (word.includes(token)) best = Math.max(best, SUBSTRING);
     if (best === WHOLE_WORD_ON_FIRST_TOKEN) break;
+    rungs = LATER_TOKEN;
   }
   return best;
 };
+
+/** The best score of `token` in any group, or `None` when it matches no word at all. */
+const tokenHit =
+  (groups: ReadonlyArray<readonly string[]>) =>
+  (token: string): Option.Option<number> =>
+    pipe(
+      groups,
+      Array.reduce(0, (best, words) => Math.max(best, bestTokenScore(token, words))),
+      Option.liftPredicate((score) => score > 0),
+    );
+
+/**
+ * Add the hit of one more query word to the total.
+ *
+ * A total that is already `None` stays `None`, and the word is never scored.
+ */
+const addHit =
+  (groups: ReadonlyArray<readonly string[]>) =>
+  (total: Option.Option<number>, token: string): Option.Option<number> =>
+    pipe(
+      total,
+      Option.flatMap((sum) =>
+        pipe(
+          token,
+          tokenHit(groups),
+          Option.map((hit) => sum + hit),
+        ),
+      ),
+    );
+
+/**
+ * What the ladder total is divided by.
+ *
+ * A short title wins. Between two pages that both hold the query, the page
+ * that is *mostly* the query is almost always the page that was meant.
+ */
+const titleWeight = (title: string): number =>
+  pipe(
+    title.length === 0,
+    Boolean.match({ onTrue: () => MISSING_TITLE_LENGTH, onFalse: () => title.length }),
+    (length) => Math.log(1 + length),
+  );
 
 export interface ScoreTarget {
   readonly title: string;
@@ -86,25 +143,12 @@ export interface ScoreTarget {
  * important behaviour. The omnibar is a filter first, and a ranking second.
  */
 export const scoreCandidate = (queryTokens: readonly string[], target: ScoreTarget): number => {
-  if (queryTokens.length === 0) return 0;
-
   const groups = [tokenize(target.title), tokenize(target.url)];
-  if (groups.every((words) => words.length === 0)) return 0;
-
-  let total = 0;
-  for (const token of queryTokens) {
-    let best = 0;
-    for (const words of groups) {
-      const score = bestTokenScore(token, words);
-      if (score > best) best = score;
-    }
-    if (best === 0) return 0;
-    total += best;
-  }
-
-  // A short title wins. Between two pages that both hold the query, the page
-  // that is *mostly* the query is almost always the page that was meant.
-  return total / Math.log(1 + (target.title.length || MISSING_TITLE_LENGTH));
+  return pipe(
+    queryTokens,
+    Array.reduce(Option.some(0), addHit(groups)),
+    Option.match({ onNone: () => 0, onSome: (total) => total / titleWeight(target.title) }),
+  );
 };
 
 /** Score one string, for a candidate with no URL, such as a command or an engine. */

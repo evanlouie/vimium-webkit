@@ -23,8 +23,23 @@
  * service. The local history index is never read here, and never sent.
  */
 
-import { Clock, Duration, Effect, FiberHandle, Option, Ref, type Scope, pipe } from "effect";
+import {
+  Array,
+  Boolean,
+  Clock,
+  Duration,
+  Effect,
+  FiberHandle,
+  Match,
+  Option,
+  Record,
+  Ref,
+  type Scope,
+  pipe,
+  String,
+} from "effect";
 import { Settings } from "~/core/Settings.ts";
+import { buildSearchUrl } from "~/domain/SearchEngine.ts";
 import {
   parseSuggestResponse,
   SUGGEST_CACHE_TTL_MS,
@@ -33,7 +48,7 @@ import {
   SUGGEST_TIMEOUT_MS,
   suggestEndpointFor,
 } from "~/domain/SearchSuggest.ts";
-import type { GmXhrResponse } from "~/platform/Gm.ts";
+import type { GmError, GmXhrResponse } from "~/platform/Gm.ts";
 import { Gm } from "~/platform/Gm.ts";
 
 /** What a completed request gives back to the caller. */
@@ -60,26 +75,58 @@ export interface Suggester {
   readonly isAvailable: Effect.Effect<boolean>;
 }
 
+/** A question that may leave the device, and the engine that it goes to. */
+interface Question {
+  readonly endpoint: string;
+  /** The trimmed query. */
+  readonly text: string;
+  readonly cacheKey: string;
+}
+
+/**
+ * The question for a query, if there is one to ask.
+ *
+ * A small permitted table, and not a guess from the search URL. An unknown
+ * engine gets no suggestions.
+ */
+const questionFor = (searchUrl: string, query: string): Option.Option<Question> =>
+  Option.gen(function* () {
+    const text = yield* pipe(query.trim(), Option.liftPredicate(String.isNonEmpty));
+    const endpoint = yield* suggestEndpointFor(searchUrl);
+    return { endpoint, text, cacheKey: `${endpoint}\u0000${text}` };
+  });
+
 interface CacheEntry {
   readonly at: number;
   readonly suggestions: readonly string[];
 }
 
+type Cache = Record.ReadonlyRecord<string, CacheEntry>;
+
+/** An answer that is young enough to show again without a new request. */
+const isFresh =
+  (now: number) =>
+  ({ at }: CacheEntry): boolean =>
+    now - at < SUGGEST_CACHE_TTL_MS;
+
 const NO_SUGGESTIONS = Option.none<readonly string[]>();
 
 /**
- * Read the answer of the engine.
+ * A complete, successful answer.
  *
- * `None` for anything that is not a complete, successful answer. A failure
- * here is a non-event: the omnibar shows the rows that it already has.
+ * Anything else is a non-event: the omnibar shows the rows that it already
+ * has.
  */
-const readResponse = (response: Option.Option<GmXhrResponse>): Option.Option<readonly string[]> => {
-  if (Option.isNone(response)) return NO_SUGGESTIONS;
-  if (response.value.status !== 200) return NO_SUGGESTIONS;
-  return Option.some(
-    parseSuggestResponse(response.value.responseText ?? "").slice(0, SUGGEST_LIMIT),
+const isAnswer = (response: GmXhrResponse): boolean => response.status === 200;
+
+const suggestionsIn = (response: GmXhrResponse): readonly string[] =>
+  pipe(
+    response.responseText,
+    Option.fromNullishOr,
+    Option.getOrElse(() => ""),
+    parseSuggestResponse,
+    Array.take(SUGGEST_LIMIT),
   );
-};
 
 /**
  * Build the suggester for this frame.
@@ -93,39 +140,85 @@ export const makeSuggester: Effect.Effect<Suggester, never, Gm | Settings | Scop
     const gm = yield* Gm;
     const settings = yield* Settings;
 
-    const cache = yield* Ref.make<ReadonlyMap<string, CacheEntry>>(new Map());
+    const cache = yield* Ref.make<Cache>(Record.empty());
     const available = yield* Ref.make(gm.canRequest);
     const inFlight = yield* FiberHandle.make<void, never>();
 
-    const fetch = Effect.fn("Suggester.fetch")(function* (endpoint: string, query: string) {
-      // A function, so that a query which holds `$&` cannot become a
-      // replacement pattern.
-      const url = endpoint.replaceAll("%s", () => encodeURIComponent(query));
+    /**
+     * Latched, and silent by design. On a manager without `@connect` this is
+     * a permanent condition, and not an incident. Every other failure — no
+     * network, a timeout, a refusal by CORS — leaves the list as it is.
+     */
+    const onRequestFailure = (error: GmError) =>
+      pipe(
+        Match.value(error.reason),
+        Match.when("unavailable", () => pipe(Ref.set(available, false), Effect.as(NO_SUGGESTIONS))),
+        Match.whenOr("failed", "invalid", () => Effect.succeed(NO_SUGGESTIONS)),
+        Match.exhaustive,
+      );
 
+    const fetch = Effect.fn("Suggester.fetch")(function* (question: Question) {
       return yield* pipe(
         gm.request({
-          url,
+          url: buildSearchUrl(question.endpoint, question.text),
           method: "GET",
           timeoutMs: SUGGEST_TIMEOUT_MS,
         }),
+        // Two deadlines, and both are needed. The manager gets `timeoutMs`,
+        // and not every manager honours it. `Effect.timeoutOption` interrupts
+        // the fiber, which releases the request handle. That interruption is
+        // what the old `AbortController` did.
         Effect.timeoutOption(Duration.millis(SUGGEST_TIMEOUT_MS)),
-        Effect.matchEffect(
-          // Two deadlines, and both are needed. The manager gets `timeoutMs`,
-          // and not every manager honours it. `Effect.timeoutOption` interrupts
-          // the fiber, which releases the request handle. That interruption is
-          // what the old `AbortController` did.
-          {
-            onFailure: (error) =>
-              // Latched, and silent by design. On a manager without `@connect`
-              // this is a permanent condition, and not an incident. Every other
-              // failure — no network, a timeout, a refusal by CORS — leaves the
-              // list as it is.
-              error.reason === "unavailable"
-                ? pipe(Ref.set(available, false), Effect.as(NO_SUGGESTIONS))
-                : Effect.succeed(NO_SUGGESTIONS),
-            onSuccess: (response) => Effect.succeed(readResponse(response)),
-          },
-        ),
+        Effect.map(Option.filter(isAnswer)),
+        Effect.map(Option.map(suggestionsIn)),
+        Effect.catch(onRequestFailure),
+      );
+    });
+
+    const remember = Effect.fnUntraced(function* (
+      question: Question,
+      suggestions: readonly string[],
+      onResults: SuggestionSink,
+    ) {
+      const at = yield* Clock.currentTimeMillis;
+      yield* Ref.update(cache, Record.set(question.cacheKey, { at, suggestions }));
+      yield* onResults(question.text, suggestions);
+    });
+
+    /** Wait out the debounce, then ask the engine. A newer request interrupts both. */
+    const lookUp = (question: Question, onResults: SuggestionSink): Effect.Effect<void> =>
+      pipe(
+        Effect.gen(function* () {
+          yield* Effect.sleep(Duration.millis(SUGGEST_DEBOUNCE_MS));
+          const suggestions = yield* fetch(question);
+          yield* pipe(
+            suggestions,
+            Option.match({
+              onNone: () => Effect.void,
+              onSome: (found) => remember(question, found, onResults),
+            }),
+          );
+        }),
+        FiberHandle.run(inFlight),
+        Effect.asVoid,
+      );
+
+    const ask = Effect.fnUntraced(function* (question: Question, onResults: SuggestionSink) {
+      const now = yield* Clock.currentTimeMillis;
+      const entries = yield* Ref.get(cache);
+      yield* pipe(
+        entries,
+        Record.get(question.cacheKey),
+        Option.filter(isFresh(now)),
+        Option.match({
+          onSome: ({ suggestions }) => onResults(question.text, suggestions),
+          // An expired answer goes, and the engine is asked again.
+          onNone: () =>
+            pipe(
+              Ref.update(cache, Record.remove(question.cacheKey)),
+              Effect.andThen(lookUp(question, onResults)),
+            ),
+        }),
       );
     });
 
@@ -141,48 +234,17 @@ export const makeSuggester: Effect.Effect<Suggester, never, Gm | Settings | Scop
       // keystroke here leaves the device to a third party with the cookies of
       // the user.
       const current = yield* settings.current;
-      if (!current.enableSearchSuggestions) return;
-      if (!(yield* Ref.get(available))) return;
-
-      const trimmed = query.trim();
-      if (trimmed.length === 0) return;
-
-      // A small permitted table, and not a guess from the search URL. An
-      // unknown engine gets no suggestions.
-      const endpoint = suggestEndpointFor(searchUrl);
-      if (endpoint === undefined) return;
-
-      const key = `${endpoint}\u0000${trimmed}`;
-      const now = yield* Clock.currentTimeMillis;
-      const cached = (yield* Ref.get(cache)).get(key);
-      if (cached !== undefined) {
-        if (now - cached.at < SUGGEST_CACHE_TTL_MS) {
-          yield* onResults(trimmed, cached.suggestions);
-          return;
-        }
-        yield* Ref.update(cache, (current) => {
-          const next = new Map(current);
-          next.delete(key);
-          return next;
-        });
-      }
-
-      yield* Effect.asVoid(
-        FiberHandle.run(
-          inFlight,
-          Effect.gen(function* () {
-            yield* Effect.sleep(Duration.millis(SUGGEST_DEBOUNCE_MS));
-            const suggestions = yield* fetch(endpoint, trimmed);
-            if (Option.isNone(suggestions)) return;
-            const at = yield* Clock.currentTimeMillis;
-            yield* Ref.update(cache, (entries) => {
-              const next = new Map(entries);
-              next.set(key, { at, suggestions: suggestions.value });
-              return next;
-            });
-            yield* onResults(trimmed, suggestions.value);
-          }),
-        ),
+      const canRequest = yield* Ref.get(available);
+      yield* pipe(
+        current.enableSearchSuggestions && canRequest,
+        Boolean.match({
+          onFalse: () => Option.none<Question>(),
+          onTrue: () => questionFor(searchUrl, query),
+        }),
+        Option.match({
+          onNone: () => Effect.void,
+          onSome: (question) => ask(question, onResults),
+        }),
       );
     });
 

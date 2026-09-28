@@ -24,7 +24,21 @@
  * reach the bindings of the page.
  */
 
-import { Clock, Context, Effect, Exit, Layer, Option, Ref, Scope, pipe, Struct } from "effect";
+import {
+  Array,
+  Boolean,
+  Clock,
+  Context,
+  Effect,
+  Exit,
+  Layer,
+  Match,
+  Option,
+  Ref,
+  Scope,
+  pipe,
+  Struct,
+} from "effect";
 import { Commands } from "~/core/Commands.ts";
 import {
   CONTINUE_BUBBLING,
@@ -37,7 +51,6 @@ import { isEscape, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { isComposing } from "~/domain/Key.ts";
-import type { SessionState } from "~/domain/Persisted.ts";
 import {
   classifyQuery,
   parseSearchEngines,
@@ -49,10 +62,18 @@ import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Gm } from "~/platform/Gm.ts";
 import { Storage } from "~/platform/Storage.ts";
-import { Tabs } from "~/platform/Tabs.ts";
+import { type TabError, Tabs } from "~/platform/Tabs.ts";
 import { Hud } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
-import { type Completion, completionsFor, liveTabs, type OmnibarSource } from "./Completers.ts";
+import {
+  type Completion,
+  CompletionAction,
+  completionsFor,
+  CompletionState,
+  type KnownTab,
+  liveTabs,
+  type OmnibarSource,
+} from "./Completers.ts";
 import { makeHistoryIndex } from "./History.ts";
 import { makeOmnibarView, OMNIBAR_CSS, type OmnibarView } from "./OmnibarUi.ts";
 import { makeSuggester } from "./Suggest.ts";
@@ -63,12 +84,14 @@ export type { OmnibarSource } from "./Completers.ts";
 // Text
 // ---------------------------------------------------------------------------
 
-const PLACEHOLDERS: Readonly<Record<OmnibarSource, string>> = {
-  url: "Search or type a URL",
-  command: "Run a command",
-  search: "Search the web",
-  bookmark: "Search or type a URL",
-};
+const placeholderFor = (source: OmnibarSource): string =>
+  pipe(
+    Match.value(source),
+    Match.whenOr("url", "bookmark", () => "Search or type a URL"),
+    Match.when("command", () => "Run a command"),
+    Match.when("search", () => "Search the web"),
+    Match.exhaustive,
+  );
 
 const KEY_LEGEND = "↑↓ move · ⏎ open · ⇧⏎ new tab · esc close";
 
@@ -76,9 +99,29 @@ const KEY_LEGEND = "↑↓ move · ⏎ open · ⇧⏎ new tab · esc close";
 const DEFAULT_SUGGESTION_BADGE = "Suggested";
 
 const footerText = (badLines: number): string =>
-  badLines === 0
-    ? KEY_LEGEND
-    : `${KEY_LEGEND} · ${badLines} malformed ` + `searchEngines line${badLines === 1 ? "" : "s"}`;
+  pipe(
+    Match.value(badLines),
+    Match.when(0, () => KEY_LEGEND),
+    Match.when(1, () => `${KEY_LEGEND} · 1 malformed searchEngines line`),
+    Match.orElse((count) => `${KEY_LEGEND} · ${count} malformed searchEngines lines`),
+  );
+
+/** The sign in front of the field. */
+const promptOf = CompletionState.$match({
+  Commands: () => ":",
+  Destinations: () => "›",
+});
+
+/** A failure to open a tab, with the shortcut of the browser when there is one. */
+const tabFailureText = (error: TabError): string =>
+  pipe(
+    error.nativeAlternative,
+    Option.fromNullishOr,
+    Option.match({
+      onNone: () => error.detail,
+      onSome: (native) => `${error.detail} (${native})`,
+    }),
+  );
 
 // ---------------------------------------------------------------------------
 // Keys
@@ -94,28 +137,49 @@ export type OmnibarKeyAction = "previous" | "next" | "accept" | "accept-new-tab"
  * accepted beside the arrows, for the reason that readline has them, and to
  * agree with the history keys of find mode.
  */
-export const omnibarAction = (event: KeyboardEvent): Option.Option<OmnibarKeyAction> => {
-  if (isEscape(event)) return Option.some("cancel");
+export const omnibarAction = (event: KeyboardEvent): Option.Option<OmnibarKeyAction> =>
+  pipe(
+    Match.value(event),
+    Match.withReturnType<Option.Option<OmnibarKeyAction>>(),
+    Match.when(isEscape, () => Option.some("cancel")),
+    Match.when({ key: "ArrowUp" }, () => Option.some("previous")),
+    Match.when({ key: "ArrowDown" }, () => Option.some("next")),
+    Match.when({ key: "Tab", shiftKey: true }, () => Option.some("previous")),
+    Match.when({ key: "Tab" }, () => Option.some("next")),
+    Match.when({ key: "Enter", shiftKey: true }, () => Option.some("accept-new-tab")),
+    Match.when({ key: "Enter" }, () => Option.some("accept")),
+    // `Ctrl` alone, as readline has it.
+    Match.when({ key: "p", ctrlKey: true, metaKey: false, altKey: false }, () =>
+      Option.some("previous"),
+    ),
+    Match.when({ key: "n", ctrlKey: true, metaKey: false, altKey: false }, () =>
+      Option.some("next"),
+    ),
+    Match.orElse(() => Option.none()),
+  );
 
-  switch (event.key) {
-    case "ArrowUp":
-      return Option.some("previous");
-    case "ArrowDown":
-      return Option.some("next");
-    case "Tab":
-      return Option.some(event.shiftKey ? "previous" : "next");
-    case "Enter":
-      return Option.some(event.shiftKey ? "accept-new-tab" : "accept");
-    default:
-      break;
-  }
+/**
+ * The action of a key, unless an input method is in the middle of a
+ * composition. Every key then belongs to that composition.
+ */
+const keyAction = (event: KeyboardEvent): Option.Option<OmnibarKeyAction> =>
+  pipe(
+    Match.value(event),
+    Match.when(isComposing, () => Option.none<OmnibarKeyAction>()),
+    Match.orElse(omnibarAction),
+  );
 
-  if (event.ctrlKey && !event.metaKey && !event.altKey) {
-    if (event.key === "p") return Option.some("previous");
-    if (event.key === "n") return Option.some("next");
-  }
-  return Option.none();
-};
+/** Move a choice by `delta`, wrapping at both ends of a list of `length` rows. */
+const step =
+  (delta: number, length: number) =>
+  (selected: number): number =>
+    (((selected + delta) % length) + length) % length;
+
+/** Keep a choice inside a list of `length` rows. */
+const clamp =
+  (length: number) =>
+  (selected: number): number =>
+    Math.min(Math.max(selected, 0), Math.max(0, length - 1));
 
 // ---------------------------------------------------------------------------
 // The session
@@ -128,6 +192,56 @@ interface SuggestionState {
   readonly badge: string;
   readonly items: readonly string[];
 }
+
+/**
+ * Only the suggestions that belong to the query on screen. A late answer for
+ * a query that the user has left behind is worse than no answer.
+ */
+const suggestionsFor = (query: string, suggestion: SuggestionState): readonly string[] =>
+  pipe(
+    suggestion.query === query.trim(),
+    Boolean.match({ onTrue: () => suggestion.items, onFalse: () => Array.empty<string>() }),
+  );
+
+/** Where suggestions for a query go, and the badge of their rows. */
+interface SuggestionTarget {
+  readonly template: string;
+  readonly text: string;
+  readonly badge: string;
+}
+
+/**
+ * Where suggestions for a query may be asked, if anywhere.
+ *
+ * A keyword in front sends the suggestions to that engine, which is what the
+ * user asked for by typing it. A keyword is an explicit "search this engine
+ * for the rest", so it settles the question by itself. Without one, the
+ * classification decides, and only a search may go out.
+ */
+const suggestionTarget = (
+  query: string,
+  engines: readonly SearchEngine[],
+  searchUrl: string,
+): Option.Option<SuggestionTarget> =>
+  pipe(
+    splitKeyword(query, engines),
+    Option.map(({ engine, rest }): SuggestionTarget => ({
+      template: engine.url,
+      text: rest,
+      badge: engine.description,
+    })),
+    Option.orElse(() =>
+      pipe(
+        query,
+        Option.liftPredicate((text) => classifyQuery(text) === "search"),
+        Option.map((text): SuggestionTarget => ({
+          template: searchUrl,
+          text,
+          badge: DEFAULT_SUGGESTION_BADGE,
+        })),
+      ),
+    ),
+  );
 
 interface Session {
   readonly source: OmnibarSource;
@@ -146,13 +260,36 @@ interface EngineCache {
   readonly badLines: number;
 }
 
+const parseEngines = (source: string): EngineCache =>
+  pipe(parseSearchEngines(source), ({ engines, diagnostics }) => ({
+    source,
+    engines,
+    badLines: diagnostics.length,
+  }));
+
 /**
- * A configuration string that no user can type.
- *
- * The first read must always parse, and an empty configuration is a value that
- * the user can choose.
+ * Put a tab that we just opened first, and drop the tabs that are gone. Its
+ * signal is the time to judge the others by.
  */
-const NO_ENGINE_SOURCE = "\u0000 never parsed";
+const withOpenedTab =
+  (opened: KnownTab) =>
+  (tabs: readonly KnownTab[]): KnownTab[] =>
+    pipe(
+      liveTabs(tabs, opened.heartbeat),
+      Array.filter((tab) => tab.url !== opened.url),
+      Array.prepend(opened),
+    );
+
+/** A fresh signal for one tab, and every other tab that is still live at that time. */
+const withSignal =
+  (signal: KnownTab) =>
+  (tabs: readonly KnownTab[]): KnownTab[] =>
+    pipe(
+      liveTabs(tabs, signal.heartbeat),
+      Array.map((tab) =>
+        pipe(tab.url === signal.url, Boolean.match({ onTrue: () => signal, onFalse: () => tab })),
+      ),
+    );
 
 // ---------------------------------------------------------------------------
 // The service
@@ -215,37 +352,80 @@ export class Omnibar extends Context.Service<
       yield* ui.addStyle(OMNIBAR_CSS);
 
       const session = yield* Ref.make(Option.none<Session>());
-      const engineCache = yield* Ref.make<EngineCache>({
-        source: NO_ENGINE_SOURCE,
-        engines: [],
-        badLines: 0,
-      });
+      // Empty until the first read, which therefore always parses. An empty
+      // configuration is a value that the user can choose.
+      const engineCache = yield* Ref.make(Option.none<EngineCache>());
 
       /** The engines of the current configuration, parsed at most once. */
       const engines = Effect.fn("Omnibar.engines")(function* () {
         const current = yield* settings.current;
         const cached = yield* Ref.get(engineCache);
-        if (cached.source === current.searchEngines) return cached;
-        const parsed = parseSearchEngines(current.searchEngines);
-        const next: EngineCache = {
-          source: current.searchEngines,
-          engines: parsed.engines,
-          badLines: parsed.diagnostics.length,
-        };
-        yield* Ref.set(engineCache, next);
-        return next;
+        const fresh = pipe(
+          cached,
+          Option.filter((held) => held.source === current.searchEngines),
+          Option.getOrElse(() => parseEngines(current.searchEngines)),
+        );
+        yield* Ref.set(engineCache, Option.some(fresh));
+        return fresh;
       });
+
+      /** The session is still the one on screen. */
+      const isLive = (current: Session): Effect.Effect<boolean> =>
+        pipe(Ref.get(session), Effect.map(Option.exists((live) => live === current)));
 
       // ---------------------------------------------------------------
       // Lifecycle
       // ---------------------------------------------------------------
 
-      const close: Effect.Effect<void> = Effect.gen(function* () {
-        const current = yield* Ref.getAndSet(session, Option.none());
-        if (Option.isNone(current)) return;
-        yield* suggester.cancel;
-        // The scope owns the overlay, the listeners and the mode frame.
-        yield* Scope.close(current.value.scope, Exit.void);
+      const close: Effect.Effect<void> = pipe(
+        Ref.getAndSet(session, Option.none()),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (current) =>
+              pipe(
+                suggester.cancel,
+                // The scope owns the overlay, the listeners and the mode frame.
+                Effect.andThen(Scope.close(current.scope, Exit.void)),
+              ),
+          }),
+        ),
+      );
+
+      // ---------------------------------------------------------------
+      // Drawing
+      // ---------------------------------------------------------------
+
+      /** Draw the list for the text in the field, and give what it drew. */
+      const render = Effect.fn("Omnibar.render")(function* (current: Session) {
+        const config = yield* settings.current;
+        const parsed = yield* engines();
+        const query = yield* current.view.value;
+        const visits = yield* history.visits;
+        const stored = yield* storage.session.current;
+        const now = yield* Clock.currentTimeMillis;
+        const suggestion = yield* Ref.get(current.suggestions);
+
+        const state = completionsFor({
+          source: current.source,
+          query,
+          commands: commands.all,
+          engines: parsed.engines,
+          searchUrl: config.searchUrl,
+          visits,
+          knownTabs: liveTabs(stored.knownTabs, now),
+          suggestions: suggestionsFor(query, suggestion),
+          suggestionEngine: suggestion.badge,
+          now,
+        });
+
+        yield* Ref.set(current.rows, state.rows);
+        const selected = yield* Ref.updateAndGet(current.selected, clamp(state.rows.length));
+
+        yield* current.view.setPrefix(promptOf(state));
+        yield* current.view.setFooter(footerText(parsed.badLines));
+        yield* current.view.render(state.rows, selected);
+        return state;
       });
 
       // ---------------------------------------------------------------
@@ -267,85 +447,41 @@ export class Omnibar extends Context.Service<
         query: string,
       ) {
         const config = yield* settings.current;
-        const parsed = (yield* engines()).engines;
-
-        // A keyword in front sends the suggestions to that engine, which is
-        // what the user asked for by typing it.
-        const split = splitKeyword(query, parsed);
-        const template = Option.isSome(split) ? split.value.engine.url : config.searchUrl;
-        const text = Option.isSome(split) ? split.value.rest : query;
-
-        // A keyword is an explicit "search this engine for the rest", so it
-        // settles the question by itself. Without one, the classification
-        // decides, and only a search may go out.
-        if (Option.isNone(split) && classifyQuery(text) !== "search") return;
-
-        const badge = Option.isSome(split)
-          ? split.value.engine.description
-          : DEFAULT_SUGGESTION_BADGE;
+        const parsed = yield* engines();
 
         // Keyed on the *whole* input, and not on the text that goes to the
         // engine, so that the answer can be compared with what is on screen.
         const forQuery = query.trim();
 
-        yield* suggester.request(template, text, (_answered, items) =>
-          Effect.gen(function* () {
-            const live = yield* Ref.get(session);
-            if (Option.isNone(live) || live.value !== current) return;
-            yield* Ref.set(current.suggestions, {
-              query: forQuery,
-              badge,
-              items,
-            });
-            // Draw again only. To ask again here would loop.
-            yield* render(current, false);
+        yield* pipe(
+          suggestionTarget(query, parsed.engines, config.searchUrl),
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: ({ template, text, badge }) =>
+              suggester.request(template, text, (_answered, items) =>
+                pipe(
+                  Ref.set(current.suggestions, { query: forQuery, badge, items }),
+                  // Draw again only. To ask again here would loop.
+                  Effect.andThen(render(current)),
+                  Effect.when(isLive(current)),
+                  Effect.asVoid,
+                ),
+              ),
           }),
         );
       });
 
-      // ---------------------------------------------------------------
-      // Drawing
-      // ---------------------------------------------------------------
-
-      const render: (current: Session, askForSuggestions: boolean) => Effect.Effect<void> =
-        Effect.fn("Omnibar.render")(function* (current: Session, askForSuggestions: boolean) {
-          const config = yield* settings.current;
-          const parsed = yield* engines();
-          const query = yield* current.view.value;
-          const visits = yield* history.visits;
-          const stored = yield* storage.session.current;
-          const now = yield* Clock.currentTimeMillis;
-          const suggestion = yield* Ref.get(current.suggestions);
-
-          const state = completionsFor({
-            source: current.source,
-            query,
-            commands: commands.all,
-            engines: parsed.engines,
-            searchUrl: config.searchUrl,
-            visits,
-            knownTabs: liveTabs(stored.knownTabs, now),
-            // Only the suggestions that belong to the query on screen. A late
-            // answer for a query that the user has left behind is worse than
-            // no answer.
-            suggestions: suggestion.query === query.trim() ? suggestion.items : [],
-            suggestionEngine: suggestion.badge,
-            now,
-          });
-
-          yield* Ref.set(current.rows, state.rows);
-          const selected = yield* Ref.updateAndGet(current.selected, (value) =>
-            Math.min(Math.max(value, 0), Math.max(0, state.rows.length - 1)),
-          );
-
-          yield* current.view.setPrefix(state.commandMode ? ":" : "›");
-          yield* current.view.setFooter(footerText(parsed.badLines));
-          yield* current.view.render(state.rows, selected);
-
-          if (askForSuggestions && !state.commandMode) {
-            yield* requestSuggestions(current, state.effectiveQuery);
-          }
-        });
+      /** Draw, and then ask the engine about the query outside command mode. */
+      const refresh = (current: Session): Effect.Effect<void> =>
+        pipe(
+          render(current),
+          Effect.flatMap(
+            CompletionState.$match({
+              Commands: () => Effect.void,
+              Destinations: ({ query }) => requestSuggestions(current, query),
+            }),
+          ),
+        );
 
       // ---------------------------------------------------------------
       // Acting on a row
@@ -363,18 +499,11 @@ export class Omnibar extends Context.Service<
         title: string,
       ) {
         const now = yield* Clock.currentTimeMillis;
-        yield* Effect.ignore(
-          storage.session.update((current): SessionState =>
-            pipe(
-              current,
-              Struct.assign({
-                knownTabs: [
-                  { url, title, heartbeat: now },
-                  ...liveTabs(current.knownTabs, now).filter((tab) => tab.url !== url),
-                ],
-              }),
-            ),
+        yield* pipe(
+          storage.session.update(
+            Struct.evolve({ knownTabs: withOpenedTab({ url, title, heartbeat: now }) }),
           ),
+          Effect.ignore,
         );
       });
 
@@ -383,60 +512,63 @@ export class Omnibar extends Context.Service<
           tabs.open(url, { active: true }),
           Effect.matchEffect({
             onSuccess: (outcome) => registerOpenedTab(outcome.url, ""),
-            onFailure: (error) =>
-              report.error(
-                error.nativeAlternative === undefined
-                  ? error.detail
-                  : `${error.detail} (${error.nativeAlternative})`,
-              ),
+            onFailure: (error) => report.error(tabFailureText(error)),
           }),
         );
       });
 
-      const activate = Effect.fn("Omnibar.activate")(function* (index: number, newTab: boolean) {
-        const live = yield* Ref.get(session);
-        if (Option.isNone(live)) return;
-        const current = live.value;
-        const row = (yield* Ref.get(current.rows))[index];
-        if (row === undefined) return;
+      /** Go to a URL in this tab, or in a new one. */
+      const goTo = (url: string, newTab: boolean): Effect.Effect<void> =>
+        pipe(
+          newTab,
+          Boolean.match({
+            onTrue: () => openInNewTab(url),
+            onFalse: () =>
+              pipe(
+                tabs.navigate(url),
+                Effect.catch((error) => report.error(error.detail)),
+              ),
+          }),
+        );
 
-        switch (row.action.type) {
-          case "fill": {
-            // To adopt a keyword is a refinement, and not a destination. The
-            // omnibar stays open with the cursor after the keyword.
-            yield* current.view.setValue(row.action.text);
-            yield* Ref.set(current.selected, 0);
-            yield* render(current, true);
-            return;
-          }
-          case "none": {
-            yield* close;
-            return;
-          }
-          case "command": {
-            const name = row.action.name;
-            yield* close;
-            // A tier C command is run, and not blocked here. The catalogue
-            // owns the refusal, and a second copy of it would move away from
-            // the first.
-            yield* Effect.catch(
-              commands.run(name, { count: 1, options: {}, event: null }),
-              (error) => report.error(error.detail),
-            );
-            return;
-          }
-          case "navigate": {
-            const url = row.action.url;
-            yield* close;
-            if (newTab) {
-              yield* openInNewTab(url);
-              return;
-            }
-            yield* Effect.catch(tabs.navigate(url), (error) => report.error(error.detail));
-            return;
-          }
-        }
-      });
+      /** Carry out the action of a chosen row. */
+      const perform = (current: Session, newTab: boolean) =>
+        CompletionAction.$match({
+          // To adopt a keyword is a refinement, and not a destination. The
+          // omnibar stays open with the cursor after the keyword.
+          Fill: ({ text }) =>
+            pipe(
+              current.view.setValue(text),
+              Effect.andThen(Ref.set(current.selected, 0)),
+              Effect.andThen(refresh(current)),
+            ),
+          Dismiss: () => close,
+          // A tier C command is run, and not blocked here. The catalogue owns
+          // the refusal, and a second copy of it would move away from the
+          // first.
+          Command: ({ name }) =>
+            pipe(
+              close,
+              Effect.andThen(commands.run(name, { count: 1, options: {}, event: null })),
+              Effect.catch((error) => report.error(error.detail)),
+            ),
+          Navigate: ({ url }) => pipe(close, Effect.andThen(goTo(url, newTab))),
+        });
+
+      const activate = Effect.fn("Omnibar.activate")(
+        function* (index: number, newTab: boolean) {
+          const current = yield* pipe(Ref.get(session), Effect.flatMap(Effect.fromOption));
+          const row = yield* pipe(
+            Ref.get(current.rows),
+            Effect.map(Array.get(index)),
+            Effect.flatMap(Effect.fromOption),
+          );
+          yield* pipe(row.action, perform(current, newTab));
+        },
+        // No session, or no row at the index: the list changed under the key
+        // or the click. Nothing happens.
+        Effect.catchTag("NoSuchElementError", () => Effect.void),
+      );
 
       /**
        * Start the work of a row, and give the key task back at once.
@@ -447,14 +579,12 @@ export class Omnibar extends Context.Service<
        * window of the key press.
        */
       const startActivation = (index: number, newTab: boolean): Effect.Effect<void> =>
-        Effect.asVoid(
-          Effect.forkDetach(activate(index, newTab), {
-            startImmediately: true,
-          }),
-        );
+        pipe(activate(index, newTab), Effect.forkDetach({ startImmediately: true }), Effect.asVoid);
 
-      const startClose: Effect.Effect<void> = Effect.asVoid(
-        Effect.forkDetach(close, { startImmediately: true }),
+      const startClose: Effect.Effect<void> = pipe(
+        close,
+        Effect.forkDetach({ startImmediately: true }),
+        Effect.asVoid,
       );
 
       // ---------------------------------------------------------------
@@ -463,36 +593,37 @@ export class Omnibar extends Context.Service<
 
       const move = Effect.fn("Omnibar.move")(function* (current: Session, delta: number) {
         const rows = yield* Ref.get(current.rows);
-        if (rows.length === 0) return;
-        // It wraps, because a list this short is faster to cycle than to
-        // turn around.
-        const selected = yield* Ref.updateAndGet(
-          current.selected,
-          (value) => (((value + delta) % rows.length) + rows.length) % rows.length,
+        yield* pipe(
+          rows,
+          Array.match({
+            onEmpty: () => Effect.void,
+            // It wraps, because a list this short is faster to cycle than to
+            // turn around.
+            onNonEmpty: (listed) =>
+              pipe(
+                Ref.updateAndGet(current.selected, step(delta, listed.length)),
+                Effect.flatMap((selected) => current.view.render(listed, selected)),
+              ),
+          }),
         );
-        yield* current.view.render(rows, selected);
       });
 
-      const onAction = (current: Session, action: OmnibarKeyAction): Effect.Effect<void> => {
-        switch (action) {
-          case "previous":
-            return move(current, -1);
-          case "next":
-            return move(current, 1);
-          case "accept":
-            return pipe(
-              Ref.get(current.selected),
-              Effect.flatMap((index) => startActivation(index, false)),
-            );
-          case "accept-new-tab":
-            return pipe(
-              Ref.get(current.selected),
-              Effect.flatMap((index) => startActivation(index, true)),
-            );
-          case "cancel":
-            return startClose;
-        }
-      };
+      const acceptSelected = (current: Session, newTab: boolean): Effect.Effect<void> =>
+        pipe(
+          Ref.get(current.selected),
+          Effect.flatMap((index) => startActivation(index, newTab)),
+        );
+
+      const onAction = (current: Session, action: OmnibarKeyAction): Effect.Effect<void> =>
+        pipe(
+          Match.value(action),
+          Match.when("previous", () => move(current, -1)),
+          Match.when("next", () => move(current, 1)),
+          Match.when("accept", () => acceptSelected(current, false)),
+          Match.when("accept-new-tab", () => acceptSelected(current, true)),
+          Match.when("cancel", () => startClose),
+          Match.exhaustive,
+        );
 
       /**
        * Let our own field have the key, and swallow a key from anywhere else.
@@ -504,47 +635,52 @@ export class Omnibar extends Context.Service<
        * extension-origin iframe that upstream Vimium has and we do not.
        */
       const passIfOurs = (view: OmnibarView, event: KeyboardEvent): HandlerResult =>
-        view.ownsFocus(event.target) ? PASS_EVENT_TO_PAGE : SUPPRESS_EVENT;
+        pipe(
+          view.ownsFocus(event.target),
+          Boolean.match({ onTrue: () => PASS_EVENT_TO_PAGE, onFalse: () => SUPPRESS_EVENT }),
+        );
 
       const onKeydown =
         (current: () => Option.Option<Session>, view: OmnibarView) =>
         (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-          Effect.gen(function* () {
-            // An input method is in the middle of a composition. Every key
-            // belongs to that composition.
-            if (isComposing(event)) return passIfOurs(view, event);
-
-            const action = omnibarAction(event);
-            if (Option.isNone(action)) return passIfOurs(view, event);
-
-            const live = current();
-            if (Option.isNone(live)) return passIfOurs(view, event);
-            yield* onAction(live.value, action.value);
-            // `preventDefault` is more than tidiness here. Without it Tab moves
-            // the focus out of the overlay, and the arrows move the caret in the
-            // field.
-            return SUPPRESS_EVENT;
-          });
+          pipe(
+            Option.all({ action: keyAction(event), live: current() }),
+            Option.match({
+              onNone: () => Effect.succeed(passIfOurs(view, event)),
+              // `preventDefault` is more than tidiness here. Without it Tab
+              // moves the focus out of the overlay, and the arrows move the
+              // caret in the field.
+              onSome: ({ action, live }) => pipe(onAction(live, action), Effect.as(SUPPRESS_EVENT)),
+            }),
+          );
 
       // ---------------------------------------------------------------
       // Opening
       // ---------------------------------------------------------------
 
-      const open = Effect.fn("Omnibar.open")(function* (
-        source: OmnibarSource,
-        initialQuery?: string,
-      ) {
+      /**
+       * Draw again for the new text.
+       *
+       * Any edit makes the choice stale: the row under the cursor is almost
+       * never the row that the user now means.
+       */
+      const onInput: Effect.Effect<void> = pipe(
+        Ref.get(session),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (live) => pipe(Ref.set(live.selected, 0), Effect.andThen(refresh(live))),
+          }),
+        ),
+      );
+
+      const open = Effect.fn("Omnibar.open")(function* (source: OmnibarSource, initialQuery = "") {
         yield* close;
         // The omnibar takes the keyboard, so a message that is still on
         // screen is no longer the thing that the user looks at.
         yield* hud.hide;
 
         const scope = yield* Scope.make();
-        const inScope = <A, R>(
-          effect: Effect.Effect<A, never, R>,
-        ): Effect.Effect<A, never, Exclude<R, Scope.Scope>> =>
-          Effect.provideService(effect, Scope.Scope, scope);
-
         const rows = yield* Ref.make<readonly Completion[]>([]);
         const selected = yield* Ref.make(0);
         const suggestions = yield* Ref.make<SuggestionState>({
@@ -553,27 +689,18 @@ export class Omnibar extends Context.Service<
           items: [],
         });
 
-        const view = yield* inScope(
-          pipe(
-            makeOmnibarView({
-              placeholder: PLACEHOLDERS[source],
-              onInput: () =>
-                Effect.gen(function* () {
-                  const live = yield* Ref.get(session);
-                  if (Option.isNone(live)) return;
-                  // Any edit makes the choice stale: the row under the cursor
-                  // is almost never the row that the user now means.
-                  yield* Ref.set(live.value.selected, 0);
-                  yield* render(live.value, true);
-                }),
-              onActivate: startActivation,
-              onDismiss: close,
-            }),
-            Effect.provideContext(services),
-          ),
+        const view = yield* pipe(
+          makeOmnibarView({
+            placeholder: placeholderFor(source),
+            onInput: () => onInput,
+            onActivate: startActivation,
+            onDismiss: close,
+          }),
+          Effect.provideContext(services),
+          Scope.provide(scope),
         );
 
-        const mode = yield* inScope(
+        const mode = yield* pipe(
           modes.enter(
             {
               name: "omnibar",
@@ -592,11 +719,17 @@ export class Omnibar extends Context.Service<
               focus: (event) =>
                 // Keep insert mode, which sits below us, from reading a focus on
                 // our own field as the page asking for insert mode.
-                Effect.succeed(
-                  view.ownsFocus(event.target) ? SUPPRESS_PROPAGATION : CONTINUE_BUBBLING,
+                pipe(
+                  view.ownsFocus(event.target),
+                  Boolean.match({
+                    onTrue: () => SUPPRESS_PROPAGATION,
+                    onFalse: () => CONTINUE_BUBBLING,
+                  }),
+                  Effect.succeed,
                 ),
             },
           ),
+          Scope.provide(scope),
         );
 
         const current: Session = {
@@ -612,23 +745,30 @@ export class Omnibar extends Context.Service<
         // Anything that removes us — another singleton mode, a navigation —
         // must take the overlay with it, or the user is left with a field
         // that cannot be reached.
-        yield* mode.onExit(() =>
-          Effect.gen(function* () {
-            const live = yield* Ref.get(session);
-            if (Option.isSome(live) && live.value === current) yield* close;
-          }),
-        );
+        yield* mode.onExit(() => pipe(close, Effect.when(isLive(current)), Effect.asVoid));
 
         // The optional first query is what "open a link with the omnibar"
         // gives us.
-        yield* view.setValue(initialQuery ?? "");
+        yield* view.setValue(initialQuery);
         yield* view.focus;
-        yield* render(current, true);
+        yield* refresh(current);
       });
 
       // ---------------------------------------------------------------
       // Page bookkeeping
       // ---------------------------------------------------------------
+
+      /** Refresh the signal of the tab at `href`. */
+      const beat = Effect.fnUntraced(function* (href: string) {
+        const title = yield* dom.probeOr(() => dom.document.title, "");
+        const now = yield* Clock.currentTimeMillis;
+        yield* pipe(
+          storage.session.update(
+            Struct.evolve({ knownTabs: withSignal({ url: href, title, heartbeat: now }) }),
+          ),
+          Effect.ignore,
+        );
+      });
 
       /**
        * Refresh the signal of this tab, but only when it is already a tab that
@@ -640,21 +780,10 @@ export class Omnibar extends Context.Service<
       const heartbeat = Effect.fn("Omnibar.heartbeat")(function* () {
         const href = yield* dom.href;
         const stored = yield* storage.session.current;
-        if (!stored.knownTabs.some((tab) => tab.url === href)) return;
-
-        const title = yield* dom.probeOr(() => dom.document.title, "");
-        const now = yield* Clock.currentTimeMillis;
-        yield* Effect.ignore(
-          storage.session.update((current): SessionState =>
-            pipe(
-              current,
-              Struct.assign({
-                knownTabs: liveTabs(current.knownTabs, now).map((tab) =>
-                  tab.url === href ? { url: href, title, heartbeat: now } : tab,
-                ),
-              }),
-            ),
-          ),
+        yield* pipe(
+          stored.knownTabs,
+          Array.some((tab) => tab.url === href),
+          Boolean.match({ onFalse: () => Effect.void, onTrue: () => beat(href) }),
         );
       });
 

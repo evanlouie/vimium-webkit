@@ -18,7 +18,8 @@
  * There is no `dispose` method.
  */
 
-import { Effect, FiberHandle, Option, Ref, type Scope, pipe } from "effect";
+import { Array, Boolean, Effect, FiberHandle, Option, Ref, type Scope, pipe, String } from "effect";
+import { constVoid } from "effect/Function";
 import { Dom } from "~/platform/Dom.ts";
 import { deepActiveElement } from "~/platform/Elements.ts";
 import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
@@ -249,291 +250,348 @@ export interface OmnibarView {
  */
 const OMNIBAR_NAME = "Vimium-WebKit omnibar";
 
-/** Build the overlay. It exists for as long as the enclosing scope. */
-export const makeOmnibarView = (
-  options: OmnibarViewOptions,
-): Effect.Effect<OmnibarView, never, Dom | Ui | Scope.Scope> =>
-  Effect.gen(function* () {
-    const dom = yield* Dom;
-    const ui = yield* Ui;
-    const doc = dom.document;
-    const host = yield* ui.layer("omnibar");
+/** A click with Shift or Command opens a new tab, as Shift and Enter do. */
+const wantsNewTab = (event: Event): boolean =>
+  event instanceof MouseEvent && (event.shiftKey || event.metaKey);
 
-    // Taken before the field takes the focus, and given back when the scope
-    // closes. To close the omnibar must not steal the focus of the page.
-    yield* Effect.acquireRelease(
-      dom.probeOr(() => Option.fromNullishOr(deepActiveElement(doc)), Option.none<Element>()),
-      (previous) =>
-        Effect.ignore(
-          dom.attempt("HTMLElement.focus", () => {
-            if (Option.isNone(previous)) return;
-            const element = previous.value;
-            if (element instanceof HTMLElement && element.isConnected) {
-              element.focus({ preventScroll: true });
-            }
+/** The index of the row that holds the target of an event. */
+const rowIndexOf =
+  (target: EventTarget | null) =>
+  (rows: readonly HTMLElement[]): Option.Option<number> =>
+    pipe(
+      target,
+      Option.liftPredicate((node) => node instanceof Node),
+      Option.flatMap((node) =>
+        pipe(
+          rows,
+          Array.findFirstIndex((row) => row.contains(node)),
+        ),
+      ),
+    );
+
+/** Build the overlay. It exists for as long as the enclosing scope. */
+export const makeOmnibarView: (
+  options: OmnibarViewOptions,
+) => Effect.Effect<OmnibarView, never, Dom | Ui | Scope.Scope> = Effect.fnUntraced(function* (
+  options: OmnibarViewOptions,
+) {
+  const dom = yield* Dom;
+  const ui = yield* Ui;
+  const doc = dom.document;
+  const host = yield* ui.layer("omnibar");
+  const ariaLabel = pipe(
+    options.ariaLabel,
+    Option.fromNullishOr,
+    Option.getOrElse(() => OMNIBAR_NAME),
+  );
+
+  // Taken before the field takes the focus, and given back when the scope
+  // closes. To close the omnibar must not steal the focus of the page.
+  yield* Effect.acquireRelease(
+    dom.probeOr(() => Option.fromNullishOr(deepActiveElement(doc)), Option.none<Element>()),
+    (previous) =>
+      pipe(
+        dom.probeOr(
+          () =>
+            pipe(
+              previous,
+              Option.filter((element) => element instanceof HTMLElement),
+              Option.filter((element) => element.isConnected),
+            ),
+          Option.none<HTMLElement>(),
+        ),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (element) =>
+              dom.attempt("HTMLElement.focus", () => element.focus({ preventScroll: true })),
           }),
         ),
-    );
+        Effect.ignore,
+      ),
+  );
 
-    const parts = yield* Effect.acquireRelease(
+  const parts = yield* Effect.acquireRelease(
+    Effect.sync(() => {
+      const container = doc.createElement("div");
+      container.className = "vw-omnibar";
+
+      const panel = doc.createElement("div");
+      panel.className = "vw-omnibar__panel";
+      container.appendChild(panel);
+
+      const field = doc.createElement("div");
+      field.className = "vw-omnibar__field";
+      panel.appendChild(field);
+
+      const prefix = doc.createElement("span");
+      prefix.className = "vw-omnibar__prefix";
+      field.appendChild(prefix);
+
+      const input = doc.createElement("input");
+      input.className = "vw-omnibar__input";
+      input.type = "text";
+      input.placeholder = options.placeholder;
+      // The autofill and the spellcheck of the page have no business inside
+      // our overlay, and a completion list of the browser here would sit on
+      // top of our own list.
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.setAttribute("autocapitalize", "off");
+      input.setAttribute("autocorrect", "off");
+      // The field has no visible label, and the placeholder disappears as
+      // soon as the user types.
+      input.setAttribute("aria-label", ariaLabel);
+      field.appendChild(input);
+
+      const list = doc.createElement("ul");
+      list.className = "vw-omnibar__list";
+      panel.appendChild(list);
+
+      const footer = doc.createElement("div");
+      footer.className = "vw-omnibar__footer";
+      panel.appendChild(footer);
+
+      host.appendChild(container);
+      return { container, panel, prefix, input, list, footer };
+    }),
+    (built) =>
       Effect.sync(() => {
-        const container = doc.createElement("div");
-        container.className = "vw-omnibar";
-
-        const panel = doc.createElement("div");
-        panel.className = "vw-omnibar__panel";
-        container.appendChild(panel);
-
-        const field = doc.createElement("div");
-        field.className = "vw-omnibar__field";
-        panel.appendChild(field);
-
-        const prefix = doc.createElement("span");
-        prefix.className = "vw-omnibar__prefix";
-        field.appendChild(prefix);
-
-        const input = doc.createElement("input");
-        input.className = "vw-omnibar__input";
-        input.type = "text";
-        input.placeholder = options.placeholder;
-        // The autofill and the spellcheck of the page have no business inside
-        // our overlay, and a completion list of the browser here would sit on
-        // top of our own list.
-        input.autocomplete = "off";
-        input.spellcheck = false;
-        input.setAttribute("autocapitalize", "off");
-        input.setAttribute("autocorrect", "off");
-        // The field has no visible label, and the placeholder disappears as
-        // soon as the user types.
-        input.setAttribute("aria-label", options.ariaLabel ?? OMNIBAR_NAME);
-        field.appendChild(input);
-
-        const list = doc.createElement("ul");
-        list.className = "vw-omnibar__list";
-        panel.appendChild(list);
-
-        const footer = doc.createElement("div");
-        footer.className = "vw-omnibar__footer";
-        panel.appendChild(footer);
-
-        host.appendChild(container);
-        return { container, panel, prefix, input, list, footer };
+        built.container.remove();
       }),
-      (built) =>
-        Effect.sync(() => {
-          built.container.remove();
-        }),
+  );
+
+  // The layer takes pointer events while the omnibar is open, and gives them
+  // back to the page when the scope closes.
+  yield* acceptPointerEvents(host);
+  // The omnibar is a true control, so assistive technology must reach it.
+  // The overlay host is hidden from the accessibility tree until a layer
+  // asks for attention like this.
+  yield* ui.expose(host);
+
+  const rowElements = yield* Ref.make<readonly HTMLElement[]>([]);
+
+  // ---------------------------------------------------------------
+  // Drawing
+  // ---------------------------------------------------------------
+
+  const span = (className: string, text: string): HTMLSpanElement => {
+    const element = doc.createElement("span");
+    element.className = className;
+    element.textContent = text;
+    return element;
+  };
+
+  const buildRow = (completion: Completion, selected: boolean): HTMLElement => {
+    const row = doc.createElement("li");
+    row.className = "vw-omnibar__row";
+    row.classList.toggle("vw-omnibar__row--selected", selected);
+    row.classList.toggle("vw-omnibar__row--muted", completion.muted);
+
+    const body = doc.createElement("span");
+    body.className = "vw-omnibar__body";
+    // `textContent` everywhere, and never `innerHTML`. A title comes from a
+    // page that we visited, and a suggestion comes off the network, so both
+    // are text from a third party. Markup here would be a route into our own
+    // overlay.
+    body.append(
+      span("vw-omnibar__title", completion.title),
+      ...pipe(
+        completion.detail,
+        Option.liftPredicate(String.isNonEmpty),
+        Option.map((detail) => span("vw-omnibar__detail", detail)),
+        Option.toArray,
+      ),
     );
 
-    // The layer takes pointer events while the omnibar is open, and gives them
-    // back to the page when the scope closes.
-    yield* acceptPointerEvents(host);
-    // The omnibar is a true control, so assistive technology must reach it.
-    // The overlay host is hidden from the accessibility tree until a layer
-    // asks for attention like this.
-    yield* ui.expose(host);
+    row.append(
+      span("vw-omnibar__badge", completion.badge),
+      body,
+      ...pipe(
+        completion.nativeAlternative,
+        Option.map((native) => span("vw-omnibar__native", native)),
+        Option.toArray,
+      ),
+    );
+    return row;
+  };
 
-    const rowElements = yield* Ref.make<readonly HTMLElement[]>([]);
+  const noMatches = (): HTMLElement => {
+    const empty = doc.createElement("li");
+    empty.className = "vw-omnibar__empty";
+    empty.textContent = "No matches";
+    return empty;
+  };
 
-    // ---------------------------------------------------------------
-    // Drawing
-    // ---------------------------------------------------------------
-
-    const buildRow = (completion: Completion, selected: boolean): HTMLElement => {
-      const row = doc.createElement("li");
-      const classes = ["vw-omnibar__row"];
-      if (selected) classes.push("vw-omnibar__row--selected");
-      if (completion.muted) classes.push("vw-omnibar__row--muted");
-      row.className = classes.join(" ");
-
-      const badge = doc.createElement("span");
-      badge.className = "vw-omnibar__badge";
-      badge.textContent = completion.badge;
-      row.appendChild(badge);
-
-      const body = doc.createElement("span");
-      body.className = "vw-omnibar__body";
-      row.appendChild(body);
-
-      // `textContent` everywhere, and never `innerHTML`. A title comes from a
-      // page that we visited, and a suggestion comes off the network, so both
-      // are text from a third party. Markup here would be a route into our own
-      // overlay.
-      const title = doc.createElement("span");
-      title.className = "vw-omnibar__title";
-      title.textContent = completion.title;
-      body.appendChild(title);
-
-      if (completion.detail.length > 0) {
-        const detail = doc.createElement("span");
-        detail.className = "vw-omnibar__detail";
-        detail.textContent = completion.detail;
-        body.appendChild(detail);
-      }
-
-      if (Option.isSome(completion.nativeAlternative)) {
-        const native = doc.createElement("span");
-        native.className = "vw-omnibar__native";
-        native.textContent = completion.nativeAlternative.value;
-        row.appendChild(native);
-      }
-
-      return row;
-    };
-
-    const render = Effect.fn("OmnibarView.render")(function* (
-      rows: readonly Completion[],
-      selected: number,
-    ) {
-      if (rows.length === 0) {
-        yield* Ref.set(rowElements, []);
-        yield* Effect.sync(() => {
-          const empty = doc.createElement("li");
-          empty.className = "vw-omnibar__empty";
-          empty.textContent = "No matches";
-          parts.list.replaceChildren(empty);
-        });
-        return;
-      }
-
-      const elements = rows.map((completion, index) => buildRow(completion, index === selected));
-      yield* Ref.set(rowElements, elements);
-      yield* Effect.sync(() => {
-        parts.list.replaceChildren(...elements);
-        const active = elements[selected];
-        if (active !== undefined) {
-          active.scrollIntoView({ block: "nearest", behavior: "instant" });
-        }
-      });
-    });
-
-    // ---------------------------------------------------------------
-    // The viewport
-    // ---------------------------------------------------------------
-
-    const applyViewport = Effect.gen(function* () {
-      const rect = yield* ui.viewport;
-      yield* Effect.ignore(
-        dom.attempt("CSSStyleDeclaration.setProperty", () => {
-          const style = parts.container.style;
-          style.transform = `translate(${rect.offsetLeft}px, ${rect.offsetTop}px)`;
-          style.width = `${rect.width}px`;
-          style.height = `${rect.height}px`;
-          style.paddingTop = `${Math.round(rect.height * TOP_FRACTION)}px`;
+  const render = Effect.fn("OmnibarView.render")(function* (
+    rows: readonly Completion[],
+    selected: number,
+  ) {
+    const elements = pipe(
+      rows,
+      Array.map((completion, index) => buildRow(completion, index === selected)),
+    );
+    yield* Ref.set(rowElements, elements);
+    yield* Effect.sync(() => {
+      parts.list.replaceChildren(
+        ...pipe(
+          elements,
+          Array.match({ onEmpty: () => [noMatches()], onNonEmpty: (items) => items }),
+        ),
+      );
+      pipe(
+        elements,
+        Array.get(selected),
+        Option.match({
+          onNone: constVoid,
+          onSome: (active) => active.scrollIntoView({ block: "nearest", behavior: "instant" }),
         }),
       );
     });
-
-    // One write for each animation frame. A resize and a scroll arrive many
-    // times inside one frame, and a newer one interrupts the fiber that the
-    // one before it started.
-    const repositionFiber = yield* FiberHandle.make<void, never>();
-    const reposition = Effect.asVoid(
-      FiberHandle.run(repositionFiber, pipe(dom.nextFrame, Effect.andThen(applyViewport))),
-    );
-
-    yield* dom.listen("window", "resize", () => reposition, { passive: true });
-
-    const visualViewport = yield* dom.probeOr(
-      () => Option.fromNullishOr(dom.window.visualViewport),
-      Option.none<VisualViewport>(),
-    );
-    if (Option.isSome(visualViewport)) {
-      const visual = visualViewport.value;
-      yield* dom.listenOn(visual, "resize", () => reposition, {
-        passive: true,
-      });
-      yield* dom.listenOn(visual, "scroll", () => reposition, {
-        passive: true,
-      });
-    }
-
-    yield* applyViewport;
-
-    // ---------------------------------------------------------------
-    // The listeners of the panel
-    // ---------------------------------------------------------------
-
-    const ownsFocus = (target: EventTarget | null): boolean =>
-      // `Ui.owns` as well as the field itself. The overlay lives in a *closed*
-      // shadow root, so an event that a listener on `window` sees has already
-      // been retargeted to the host, and it never equals the field.
-      target === parts.input || ui.owns(target);
-
-    // The body of `onInput` reads storage and may suspend, and a DOM listener
-    // must not. A newer keystroke interrupts the render of the older one.
-    const inputFiber = yield* FiberHandle.make<void, never>();
-    yield* dom.listenOn(parts.input, "input", () =>
-      Effect.asVoid(FiberHandle.run(inputFiber, options.onInput(parts.input.value))),
-    );
-
-    /**
-     * Keep the focus in the field when the user reaches for a row.
-     *
-     * Without this, `mousedown` blurs the field, the blur body closes the
-     * omnibar, and the `click` then lands on nothing.
-     */
-    yield* dom.listenOn(parts.panel, "mousedown", (event) =>
-      Effect.sync(() => {
-        if (event.target !== parts.input) event.preventDefault();
-      }),
-    );
-
-    yield* dom.listenOn(parts.panel, "click", (event) =>
-      Effect.gen(function* () {
-        const elements = yield* Ref.get(rowElements);
-        const target = event.target;
-        const index = elements.findIndex((row) => target instanceof Node && row.contains(target));
-        if (index === -1) return;
-        const mouse = event instanceof MouseEvent ? event : null;
-        yield* options.onActivate(index, mouse !== null && (mouse.shiftKey || mouse.metaKey));
-      }),
-    );
-
-    // A click on a row blurs the field for one task before the focus comes
-    // back, so only a focus that has truly left our shadow root is a
-    // dismissal. The check waits one task, in a fiber of this scope.
-    const blurFiber = yield* FiberHandle.make<void, never>();
-    yield* dom.listenOn(parts.input, "blur", () =>
-      Effect.asVoid(
-        FiberHandle.run(
-          blurFiber,
-          Effect.gen(function* () {
-            yield* dom.yieldToBrowser;
-            const active = yield* dom.probeOr(() => ui.shadow.activeElement, null);
-            if (active === parts.input) return;
-            yield* options.onDismiss;
-          }),
-        ),
-      ),
-    );
-
-    return {
-      value: Effect.sync(() => parts.input.value),
-      setValue: (value) =>
-        Effect.ignore(
-          dom.attempt("HTMLInputElement.setSelectionRange", () => {
-            parts.input.value = value;
-            parts.input.setSelectionRange(value.length, value.length);
-          }),
-        ),
-      setPrefix: (text) =>
-        Effect.sync(() => {
-          parts.prefix.textContent = text;
-        }),
-      setFooter: (text) =>
-        Effect.sync(() => {
-          parts.footer.textContent = text;
-          parts.footer.hidden = text.length === 0;
-        }),
-      focus: Effect.ignore(
-        dom.attempt("HTMLElement.focus", () => {
-          // `preventScroll`: without it WebKit scrolls the *page* to show an
-          // element inside a fixed overlay.
-          parts.input.focus({ preventScroll: true });
-        }),
-      ),
-      render,
-      ownsFocus,
-    };
   });
+
+  // ---------------------------------------------------------------
+  // The viewport
+  // ---------------------------------------------------------------
+
+  const applyViewport = pipe(
+    ui.viewport,
+    Effect.flatMap((rect) =>
+      dom.attempt("CSSStyleDeclaration.setProperty", () => {
+        const style = parts.container.style;
+        style.transform = `translate(${rect.offsetLeft}px, ${rect.offsetTop}px)`;
+        style.width = `${rect.width}px`;
+        style.height = `${rect.height}px`;
+        style.paddingTop = `${Math.round(rect.height * TOP_FRACTION)}px`;
+      }),
+    ),
+    Effect.ignore,
+  );
+
+  // One write for each animation frame. A resize and a scroll arrive many
+  // times inside one frame, and a newer one interrupts the fiber that the
+  // one before it started.
+  const repositionFiber = yield* FiberHandle.make<void, never>();
+  const reposition = pipe(
+    dom.nextFrame,
+    Effect.andThen(applyViewport),
+    FiberHandle.run(repositionFiber),
+    Effect.asVoid,
+  );
+
+  yield* dom.listen("window", "resize", () => reposition, { passive: true });
+
+  const visualViewport = yield* dom.probeOr(
+    () => Option.fromNullishOr(dom.window.visualViewport),
+    Option.none<VisualViewport>(),
+  );
+  yield* pipe(
+    visualViewport,
+    Option.match({
+      onNone: () => Effect.void,
+      onSome: (visual) =>
+        pipe(
+          ["resize", "scroll"],
+          Effect.forEach(
+            (type) => dom.listenOn(visual, type, () => reposition, { passive: true }),
+            { discard: true },
+          ),
+        ),
+    }),
+  );
+
+  yield* applyViewport;
+
+  // ---------------------------------------------------------------
+  // The listeners of the panel
+  // ---------------------------------------------------------------
+
+  const ownsFocus = (target: EventTarget | null): boolean =>
+    // `Ui.owns` as well as the field itself. The overlay lives in a *closed*
+    // shadow root, so an event that a listener on `window` sees has already
+    // been retargeted to the host, and it never equals the field.
+    target === parts.input || ui.owns(target);
+
+  // The body of `onInput` reads storage and may suspend, and a DOM listener
+  // must not. A newer keystroke interrupts the render of the older one.
+  const inputFiber = yield* FiberHandle.make<void, never>();
+  yield* dom.listenOn(parts.input, "input", () =>
+    pipe(options.onInput(parts.input.value), FiberHandle.run(inputFiber), Effect.asVoid),
+  );
+
+  /**
+   * Keep the focus in the field when the user reaches for a row.
+   *
+   * Without this, `mousedown` blurs the field, the blur body closes the
+   * omnibar, and the `click` then lands on nothing.
+   */
+  yield* dom.listenOn(parts.panel, "mousedown", (event) =>
+    pipe(
+      event.target === parts.input,
+      Boolean.match({
+        onTrue: () => Effect.void,
+        onFalse: () => Effect.sync(() => event.preventDefault()),
+      }),
+    ),
+  );
+
+  yield* dom.listenOn(parts.panel, "click", (event) =>
+    pipe(
+      Ref.get(rowElements),
+      Effect.map(rowIndexOf(event.target)),
+      Effect.flatMap(
+        Option.match({
+          onNone: () => Effect.void,
+          onSome: (index) => options.onActivate(index, wantsNewTab(event)),
+        }),
+      ),
+    ),
+  );
+
+  // A click on a row blurs the field for one task before the focus comes
+  // back, so only a focus that has truly left our shadow root is a
+  // dismissal. The check waits one task, in a fiber of this scope.
+  const blurFiber = yield* FiberHandle.make<void, never>();
+  const focusLeft = pipe(
+    dom.probeOr(() => ui.shadow.activeElement, null),
+    Effect.map((active) => active !== parts.input),
+  );
+  const dismissIfFocusLeft = pipe(options.onDismiss, Effect.when(focusLeft), Effect.asVoid);
+  yield* dom.listenOn(parts.input, "blur", () =>
+    pipe(
+      dom.yieldToBrowser,
+      Effect.andThen(dismissIfFocusLeft),
+      FiberHandle.run(blurFiber),
+      Effect.asVoid,
+    ),
+  );
+
+  return {
+    value: Effect.sync(() => parts.input.value),
+    setValue: (value) =>
+      pipe(
+        dom.attempt("HTMLInputElement.setSelectionRange", () => {
+          parts.input.value = value;
+          parts.input.setSelectionRange(value.length, value.length);
+        }),
+        Effect.ignore,
+      ),
+    setPrefix: (text) =>
+      Effect.sync(() => {
+        parts.prefix.textContent = text;
+      }),
+    setFooter: (text) =>
+      Effect.sync(() => {
+        parts.footer.textContent = text;
+        parts.footer.hidden = text.length === 0;
+      }),
+    focus: pipe(
+      // `preventScroll`: without it WebKit scrolls the *page* to show an
+      // element inside a fixed overlay.
+      dom.attempt("HTMLElement.focus", () => parts.input.focus({ preventScroll: true })),
+      Effect.ignore,
+    ),
+    render,
+    ownsFocus,
+  };
+});

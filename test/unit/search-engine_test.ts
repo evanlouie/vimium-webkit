@@ -7,7 +7,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option } from "effect";
+import { Array, Effect, Option, pipe } from "effect";
 import {
   buildSearchUrl,
   classifyQuery,
@@ -25,6 +25,20 @@ const DEFAULT_SEARCH = "https://www.google.com/search?q=%s";
 const ENGINES: readonly SearchEngine[] = parseSearchEngines(
   ["w: https://wiki.test/?q=%s Wikipedia", "gh: https://gh.test/?q=%s GitHub"].join("\n"),
 ).engines;
+
+const keywordOf = ({ keyword }: SearchEngine): string => keyword;
+
+/** The first item, or a failed test. */
+const first = <A>(items: readonly A[]) => pipe(items, Array.head, Effect.fromOption);
+
+/** The engine keyword and the rest, which is what a split is checked for. */
+const splitOf = (
+  query: string,
+): Option.Option<{ readonly keyword: string; readonly rest: string }> =>
+  pipe(
+    splitKeyword(query, ENGINES),
+    Option.map(({ engine, rest }) => ({ keyword: engine.keyword, rest })),
+  );
 
 describe("SearchEngine", () => {
   it.effect("reads the keyword, the URL and the description", () =>
@@ -44,9 +58,10 @@ describe("SearchEngine", () => {
   );
 
   it.effect("uses the keyword when the line gives no description", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const parsed = parseSearchEngines("g: https://example.com/?q=%s");
-      assert.strictEqual(parsed.engines[0]?.description, "g");
+      const engine = yield* first(parsed.engines);
+      assert.strictEqual(engine.description, "g");
     }),
   );
 
@@ -65,54 +80,54 @@ describe("SearchEngine", () => {
       const parsed = parseSearchEngines(
         "a: https://a.test/?q=%s A\r\nb: https://b.test/?q=%s B\r\n",
       );
-      assert.deepEqual(
-        parsed.engines.map((engine) => engine.keyword),
-        ["a", "b"],
-      );
+      const keywords = pipe(parsed.engines, Array.map(keywordOf));
+      assert.deepEqual(keywords, ["a", "b"]);
       assert.deepEqual(parsed.diagnostics, []);
     }),
   );
 
   it.effect("reports a malformed line and keeps the other lines", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const parsed = parseSearchEngines(
         ["a: https://a.test/?q=%s A", "this line is nonsense", "b: https://b.test/?q=%s B"].join(
           "\n",
         ),
       );
-      assert.deepEqual(
-        parsed.engines.map((engine) => engine.keyword),
-        ["a", "b"],
-      );
+      const keywords = pipe(parsed.engines, Array.map(keywordOf));
+      assert.deepEqual(keywords, ["a", "b"]);
       assert.lengthOf(parsed.diagnostics, 1);
-      assert.strictEqual(parsed.diagnostics[0]?.line, 2);
-      assert.strictEqual(parsed.diagnostics[0]?.text, "this line is nonsense");
+      const diagnostic = yield* first(parsed.diagnostics);
+      assert.strictEqual(diagnostic.line, 2);
+      assert.strictEqual(diagnostic.text, "this line is nonsense");
     }),
   );
 
   it.effect("refuses a URL with no %s", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const parsed = parseSearchEngines("x: https://example.com/ Example");
       assert.deepEqual(parsed.engines, []);
       assert.lengthOf(parsed.diagnostics, 1);
-      assert.strictEqual(parsed.diagnostics[0]?.line, 1);
+      const diagnostic = yield* first(parsed.diagnostics);
+      assert.strictEqual(diagnostic.line, 1);
     }),
   );
 
   it.effect("lets a later duplicate win, with a diagnostic", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const parsed = parseSearchEngines(
         ["g: https://first.test/?q=%s First", "g: https://second.test/?q=%s Second"].join("\n"),
       );
       assert.lengthOf(parsed.engines, 1);
-      assert.strictEqual(parsed.engines[0]?.description, "Second");
+      const engine = yield* first(parsed.engines);
+      assert.strictEqual(engine.description, "Second");
       assert.lengthOf(parsed.diagnostics, 1);
-      assert.strictEqual(parsed.diagnostics[0]?.line, 2);
+      const diagnostic = yield* first(parsed.diagnostics);
+      assert.strictEqual(diagnostic.line, 2);
     }),
   );
 
   it.effect("keeps the original position of an engine that is redefined", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const parsed = parseSearchEngines(
         [
           "a: https://a.test/?q=%s A",
@@ -120,19 +135,19 @@ describe("SearchEngine", () => {
           "a: https://a2.test/?q=%s A2",
         ].join("\n"),
       );
-      assert.deepEqual(
-        parsed.engines.map((engine) => engine.keyword),
-        ["a", "b"],
-      );
-      assert.strictEqual(parsed.engines[0]?.description, "A2");
+      const keywords = pipe(parsed.engines, Array.map(keywordOf));
+      assert.deepEqual(keywords, ["a", "b"]);
+      const engine = yield* first(parsed.engines);
+      assert.strictEqual(engine.description, "A2");
     }),
   );
 
   it.effect("accepts a colon with a space around it", () =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const parsed = parseSearchEngines("gh : https://github.com/search?q=%s GitHub");
-      assert.strictEqual(parsed.engines[0]?.keyword, "gh");
-      assert.strictEqual(parsed.engines[0]?.description, "GitHub");
+      const engine = yield* first(parsed.engines);
+      assert.strictEqual(engine.keyword, "gh");
+      assert.strictEqual(engine.description, "GitHub");
     }),
   );
 
@@ -165,21 +180,16 @@ describe("SearchEngine", () => {
 
   it.effect("takes a keyword off the front of the query", () =>
     Effect.sync(() => {
-      const split = splitKeyword("w quantum mechanics", ENGINES);
-      assert.isTrue(Option.isSome(split));
-      if (Option.isNone(split)) return;
-      assert.strictEqual(split.value.engine.keyword, "w");
-      assert.strictEqual(split.value.rest, "quantum mechanics");
+      assert.deepEqual(
+        splitOf("w quantum mechanics"),
+        Option.some({ keyword: "w", rest: "quantum mechanics" }),
+      );
     }),
   );
 
   it.effect("matches a bare keyword with no space after it", () =>
     Effect.sync(() => {
-      const split = splitKeyword("gh", ENGINES);
-      assert.isTrue(Option.isSome(split));
-      if (Option.isNone(split)) return;
-      assert.strictEqual(split.value.engine.keyword, "gh");
-      assert.strictEqual(split.value.rest, "");
+      assert.deepEqual(splitOf("gh"), Option.some({ keyword: "gh", rest: "" }));
     }),
   );
 
@@ -193,10 +203,8 @@ describe("SearchEngine", () => {
 
   it.effect("narrows the completion list on the keyword", () =>
     Effect.sync(() => {
-      assert.deepEqual(
-        enginesMatchingPrefix(ENGINES, "g").map((engine) => engine.keyword),
-        ["gh"],
-      );
+      const keywords = pipe(enginesMatchingPrefix(ENGINES, "g"), Array.map(keywordOf));
+      assert.deepEqual(keywords, ["gh"]);
       assert.lengthOf(enginesMatchingPrefix(ENGINES, ""), 2);
       assert.deepEqual(enginesMatchingPrefix(ENGINES, "zz"), []);
     }),
@@ -278,14 +286,15 @@ describe("SearchEngine", () => {
         ].join("\n"),
       );
 
-      assert.deepEqual(
-        parsed.engines.map((engine) => engine.keyword),
-        ["ok"],
-      );
+      const keywords = pipe(parsed.engines, Array.map(keywordOf));
+      assert.deepEqual(keywords, ["ok"]);
       assert.lengthOf(parsed.diagnostics, 3);
-      for (const diagnostic of parsed.diagnostics) {
-        assert.strictEqual(diagnostic.message, "the URL must be http:// or https://");
-      }
+      const messages = pipe(
+        parsed.diagnostics,
+        Array.map(({ message }) => message),
+      );
+      const refusal = "the URL must be http:// or https://";
+      assert.deepEqual(messages, [refusal, refusal, refusal]);
     }),
   );
 
