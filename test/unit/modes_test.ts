@@ -6,7 +6,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer, Ref, SubscriptionRef, pipe } from "effect";
+import { Array, Effect, Layer, Ref, SubscriptionRef, pipe } from "effect";
 import { HandlerStack } from "~/core/HandlerStack.ts";
 import { type ExitReason, Modes } from "~/core/Modes.ts";
 
@@ -16,12 +16,72 @@ const layer = Layer.provideMerge(Modes.layer, HandlerStack.layer);
 /**
  * A `keydown` event for the walk.
  *
- * Node has `Event` and has no `KeyboardEvent`. The mode handler reads a
- * property of the event only when an exit condition asks for it, so a plain
- * event is enough to make the walk run a body.
+ * Node has no `KeyboardEvent`, so the test gives a double of its own. The mode
+ * handler reads a property of the event only when an exit condition asks for
+ * it, so the values of a plain, unmodified key are enough to make the walk run
+ * a body.
  */
-const keyEvent = (): KeyboardEvent =>
-  new Event("keydown", { cancelable: true }) as unknown as KeyboardEvent;
+class KeyEventDouble implements KeyboardEvent {
+  readonly type = "keydown";
+  readonly bubbles = true;
+  cancelBubble = false;
+  readonly cancelable = true;
+  readonly composed = true;
+  readonly currentTarget = null;
+  defaultPrevented = false;
+  readonly eventPhase = 0;
+  readonly isTrusted = true;
+  returnValue = true;
+  readonly srcElement = null;
+  readonly target = null;
+  readonly timeStamp = 0;
+  readonly NONE = 0;
+  readonly CAPTURING_PHASE = 1;
+  readonly AT_TARGET = 2;
+  readonly BUBBLING_PHASE = 3;
+  readonly detail = 0;
+  readonly view = null;
+  readonly which = 0;
+  readonly key = "x";
+  readonly code = "KeyX";
+  readonly keyCode = 88;
+  readonly charCode = 0;
+  readonly location = 0;
+  readonly altKey = false;
+  readonly ctrlKey = false;
+  readonly metaKey = false;
+  readonly shiftKey = false;
+  readonly isComposing = false;
+  readonly repeat = false;
+  readonly DOM_KEY_LOCATION_STANDARD = 0;
+  readonly DOM_KEY_LOCATION_LEFT = 1;
+  readonly DOM_KEY_LOCATION_RIGHT = 2;
+  readonly DOM_KEY_LOCATION_NUMPAD = 3;
+
+  composedPath(): EventTarget[] {
+    return [];
+  }
+
+  getModifierState(): boolean {
+    return false;
+  }
+
+  initEvent(): void {}
+
+  initUIEvent(): void {}
+
+  initKeyboardEvent(): void {}
+
+  preventDefault(): void {
+    this.defaultPrevented = true;
+  }
+
+  stopImmediatePropagation(): void {}
+
+  stopPropagation(): void {}
+}
+
+const keyEvent = (): KeyboardEvent => new KeyEventDouble();
 
 describe("Modes", () => {
   it.effect("enters a mode, exits it, and enters it again", () =>
@@ -59,12 +119,19 @@ describe("Modes", () => {
         const modes = yield* Modes;
         const stack = yield* HandlerStack;
 
-        for (let index = 0; index < 8; index++) {
-          const mode = yield* modes.enter<never>({ name: "cycle" });
-          assert.strictEqual(yield* stack.depth, 1);
-          yield* mode.exit();
-          assert.strictEqual(yield* stack.depth, 0);
-        }
+        yield* pipe(
+          Array.range(1, 8),
+          Effect.forEach(
+            () =>
+              Effect.gen(function* () {
+                const mode = yield* modes.enter<never>({ name: "cycle" });
+                assert.strictEqual(yield* stack.depth, 1);
+                yield* mode.exit();
+                assert.strictEqual(yield* stack.depth, 0);
+              }),
+            { discard: true },
+          ),
+        );
         assert.deepEqual(yield* modes.activeNames, []);
       }),
       Effect.provide(layer),
@@ -78,7 +145,7 @@ describe("Modes", () => {
         const reasons = yield* Ref.make<readonly ExitReason[]>([]);
 
         const mode = yield* modes.enter<never>({ name: "reasons" });
-        yield* mode.onExit((reason) => Ref.update(reasons, (current) => [...current, reason]));
+        yield* mode.onExit((reason) => pipe(reasons, Ref.update(Array.append(reason))));
 
         yield* mode.exit("escape");
         assert.deepEqual(yield* Ref.get(reasons), ["escape"]);
@@ -100,7 +167,12 @@ describe("Modes", () => {
         const mode = yield* modes.enter<never>({ name: "late" });
         yield* mode.exit();
 
-        yield* mode.onExit(() => Ref.update(fired, (count) => count + 1));
+        yield* mode.onExit(() =>
+          pipe(
+            fired,
+            Ref.update((count) => count + 1),
+          ),
+        );
         assert.strictEqual(yield* Ref.get(fired), 1);
       }),
       Effect.provide(layer),
@@ -114,7 +186,12 @@ describe("Modes", () => {
         const fired = yield* Ref.make(0);
 
         const mode = yield* modes.enter<never>({ name: "queued" });
-        yield* mode.onExit(() => Ref.update(fired, (count) => count + 1));
+        yield* mode.onExit(() =>
+          pipe(
+            fired,
+            Ref.update((count) => count + 1),
+          ),
+        );
         assert.strictEqual(yield* Ref.get(fired), 0);
 
         yield* mode.exit();
@@ -133,11 +210,12 @@ describe("Modes", () => {
         const mode = yield* modes.enter<never>({ name: "failing" });
         yield* mode.onExit(() =>
           pipe(
-            Ref.update(seen, (current) => [...current, "first"]),
+            seen,
+            Ref.update(Array.append("first")),
             Effect.andThen(Effect.die(new Error("boom"))),
           ),
         );
-        yield* mode.onExit(() => Ref.update(seen, (current) => [...current, "second"]));
+        yield* mode.onExit(() => pipe(seen, Ref.update(Array.append("second"))));
 
         yield* mode.exit();
         assert.deepEqual(yield* Ref.get(seen), ["first", "second"]);
@@ -192,7 +270,7 @@ describe("Modes", () => {
           name: "first",
           singleton: "group",
         });
-        yield* first.onExit((reason) => Ref.update(reasons, (current) => [...current, reason]));
+        yield* first.onExit((reason) => pipe(reasons, Ref.update(Array.append(reason))));
         yield* modes.enter<never>({ name: "second", singleton: "group" });
 
         assert.deepEqual(yield* Ref.get(reasons), ["singleton"]);
@@ -269,7 +347,7 @@ describe("Modes", () => {
           { name: "defective", indicator: "DEFECTIVE", singleton: "group" },
           { keydown: () => Effect.die(new Error("boom")) },
         );
-        yield* mode.onExit((reason) => Ref.update(reasons, (current) => [...current, reason]));
+        yield* mode.onExit((reason) => pipe(reasons, Ref.update(Array.append(reason))));
         assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "DEFECTIVE");
 
         // The event still reaches the page, because a failed frame decides
@@ -308,7 +386,12 @@ describe("Modes", () => {
           { name: "defective" },
           { keydown: () => Effect.die(new Error("boom")) },
         );
-        yield* mode.onExit(() => Ref.update(fired, (count) => count + 1));
+        yield* mode.onExit(() =>
+          pipe(
+            fired,
+            Ref.update((count) => count + 1),
+          ),
+        );
 
         yield* stack.bubble("keydown", keyEvent());
         yield* stack.bubble("keydown", keyEvent());
@@ -330,7 +413,7 @@ describe("Modes", () => {
         const handle = yield* Effect.scoped(
           Effect.gen(function* () {
             const mode = yield* modes.enter<never>({ name: "scoped" });
-            yield* mode.onExit((reason) => Ref.update(reasons, (current) => [...current, reason]));
+            yield* mode.onExit((reason) => pipe(reasons, Ref.update(Array.append(reason))));
             assert.strictEqual(yield* stack.depth, 1);
             return mode;
           }),

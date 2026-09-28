@@ -10,7 +10,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option, Result } from "effect";
+import { Array, Effect, Option, Result, Struct, pipe } from "effect";
 import {
   appendCountDigit,
   isComposing,
@@ -30,13 +30,30 @@ import {
  *
  * `KeyEventLike` is a plain interface on purpose, so no DOM is needed.
  */
-const event = (partial: Partial<KeyEventLike> & { readonly key: string }): KeyEventLike => ({
-  shiftKey: false,
-  ctrlKey: false,
-  altKey: false,
-  metaKey: false,
-  ...partial,
-});
+const event = (partial: Partial<KeyEventLike> & { readonly key: string }): KeyEventLike =>
+  pipe(
+    partial,
+    Struct.assign({
+      shiftKey: partial.shiftKey ?? false,
+      ctrlKey: partial.ctrlKey ?? false,
+      altKey: partial.altKey ?? false,
+      metaKey: partial.metaKey ?? false,
+    }),
+  );
+
+/**
+ * The rows of a table as test cases, each one named by its row.
+ *
+ * A case that is a tuple gives its first element to `%s` in the test name,
+ * and vitest prints that element whole.
+ */
+const named = <Row extends { readonly name: string }>(
+  rows: ReadonlyArray<Row>,
+): ReadonlyArray<readonly [string, Row]> =>
+  pipe(
+    rows,
+    Array.map((row) => [row.name, row] as const),
+  );
 
 /** The notation of an event, or `null` when the event carries no key. */
 const notation = (input: KeyEventLike, ignoreKeyboardLayout = false): string | null =>
@@ -453,13 +470,11 @@ describe("Key", () => {
     },
   ];
 
-  for (const row of OPTION_CHORDS) {
-    it.effect(`reads an Apple Option chord: ${row.name}`, () =>
-      Effect.sync(() => {
-        assert.strictEqual(appleNotation(row.event), row.expected);
-      }),
-    );
-  }
+  it.effect.each(named(OPTION_CHORDS))("reads an Apple Option chord: %s", ([, row]) =>
+    Effect.sync(() => {
+      assert.strictEqual(appleNotation(row.event), row.expected);
+    }),
+  );
 
   /**
    * The same rule must not run on Windows and on Linux.
@@ -540,13 +555,11 @@ describe("Key", () => {
     },
   ];
 
-  for (const row of NON_APPLE_ALT_CHORDS) {
-    it.effect(`leaves an Alt chord alone: ${row.name}`, () =>
-      Effect.sync(() => {
-        assert.strictEqual(notation(row.event), row.expected);
-      }),
-    );
-  }
+  it.effect.each(named(NON_APPLE_ALT_CHORDS))("leaves an Alt chord alone: %s", ([, row]) =>
+    Effect.sync(() => {
+      assert.strictEqual(notation(row.event), row.expected);
+    }),
+  );
 
   /**
    * The whole table of key codes, and the whole table of positions.
@@ -616,13 +629,11 @@ describe("Key", () => {
     },
   ];
 
-  for (const row of ASTRAL_SEQUENCES) {
-    it.effect(`parses an astral sequence: ${row.name}`, () =>
-      Effect.sync(() => {
-        assert.deepEqual(sequence(row.input), row.expected);
-      }),
-    );
-  }
+  it.effect.each(named(ASTRAL_SEQUENCES))("parses an astral sequence: %s", ([, row]) =>
+    Effect.sync(() => {
+      assert.deepEqual(sequence(row.input), row.expected);
+    }),
+  );
 
   /**
    * The notation of an astral key press.
@@ -652,15 +663,13 @@ describe("Key", () => {
     },
   ];
 
-  for (const row of ASTRAL_EVENTS) {
-    it.effect(`writes an astral key: ${row.name}`, () =>
-      Effect.sync(() => {
-        assert.strictEqual(notation(row.event), row.expected);
-        // The mapping and the press must meet.
-        assert.deepEqual(sequence(row.expected), [row.expected]);
-      }),
-    );
-  }
+  it.effect.each(named(ASTRAL_EVENTS))("writes an astral key: %s", ([, row]) =>
+    Effect.sync(() => {
+      assert.strictEqual(notation(row.event), row.expected);
+      // The mapping and the press must meet.
+      assert.deepEqual(sequence(row.expected), [row.expected]);
+    }),
+  );
 
   it.effect("does not take half of an astral character as a count digit", () =>
     Effect.sync(() => {
@@ -715,9 +724,13 @@ describe("Key", () => {
   it.effect("treats a trailing dash as the key", () =>
     Effect.sync(() => {
       const parsed = parseKeySequence("<c-->");
+      const first = pipe(
+        parsed,
+        Result.getSuccess,
+        Option.map(Array.headNonEmpty),
+        Option.getOrNull,
+      );
       assert.isTrue(Result.isSuccess(parsed));
-      if (Result.isFailure(parsed)) return;
-      const first = parsed.success[0];
       assert.strictEqual(first?.char, "-");
       assert.strictEqual(first?.ctrl, true);
     }),
@@ -734,24 +747,28 @@ describe("Key", () => {
     }),
   );
 
-  it.effect("gives a failure value for malformed notation", () =>
-    Effect.sync(() => {
-      for (const input of ["<c-a", "<c-nosuchkey>", "<c->", ""]) {
-        const parsed = parseKeySequence(input);
-        assert.isTrue(Result.isFailure(parsed), `${input} was accepted`);
-        if (Result.isSuccess(parsed)) continue;
-        assert.strictEqual(parsed.failure._tag, "KeyNotationError");
-        assert.isAbove(parsed.failure.detail.length, 0);
-      }
-    }),
+  it.effect.each(["<c-a", "<c-nosuchkey>", "<c->", ""])(
+    "gives a failure value for malformed notation: %s",
+    (input) =>
+      Effect.sync(() => {
+        const failure = pipe(parseKeySequence(input), Result.getFailure, Option.getOrNull);
+        assert.isNotNull(failure, `${input} was accepted`);
+        assert.strictEqual(failure?._tag, "KeyNotationError");
+        assert.isAbove(failure?.detail.length ?? 0, 0);
+      }),
   );
 
   it.effect("names an unknown modifier in the failure detail", () =>
     Effect.sync(() => {
       const parsed = parseKeySequence("<x-a>");
+      const detail = pipe(
+        parsed,
+        Result.getFailure,
+        Option.map((failure) => failure.detail),
+        Option.getOrElse(() => ""),
+      );
       assert.isTrue(Result.isFailure(parsed));
-      if (Result.isSuccess(parsed)) return;
-      assert.include(parsed.failure.detail, "unknown modifier");
+      assert.include(detail, "unknown modifier");
     }),
   );
 

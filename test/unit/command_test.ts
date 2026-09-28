@@ -3,7 +3,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option, Record } from "effect";
+import { Array, Effect, Option, Record, pipe } from "effect";
 import { COMMANDS, DEFAULT_MAPPINGS } from "~/domain/Command.ts";
 import { type KeyEventLike, keyNotation } from "~/domain/Key.ts";
 import { compileMappings } from "~/domain/Mapping.ts";
@@ -88,37 +88,41 @@ describe("Command", () => {
     },
   ];
 
-  for (const row of OPTION_BINDINGS) {
-    it.effect(`runs a default Option binding: ${row.name}`, () =>
-      Effect.sync(() => {
-        const event: KeyEventLike = {
-          key: row.key,
-          code: row.code,
-          keyCode: row.keyCode,
-          altKey: true,
-          ctrlKey: false,
-          metaKey: false,
-          shiftKey: false,
-        };
-        const notation = Option.getOrNull(
-          keyNotation(event, {
-            ignoreKeyboardLayout: false,
-            applePlatform: true,
-          }),
-        );
-        const compiled = compileMappings(DEFAULT_MAPPINGS, {
-          knownCommands: names,
-          rejectReservedShortcuts: true,
-        });
-        const binding = compiled.bindings.find(
-          (entry) => entry.keys.length === 1 && entry.keys[0] === notation,
-        );
-        assert.strictEqual(
-          binding?.command ?? null,
-          row.command,
-          `${notation} runs no default binding`,
-        );
-      }),
-    );
-  }
+  // A case that is a tuple gives its first element to `%s`, and vitest prints
+  // that element whole.
+  const cases = pipe(
+    OPTION_BINDINGS,
+    Array.map((row) => [row.name, row] as const),
+  );
+
+  it.effect.each(cases)("runs a default Option binding: %s", ([, row]) =>
+    Effect.sync(() => {
+      const event: KeyEventLike = {
+        key: row.key,
+        code: row.code,
+        keyCode: row.keyCode,
+        altKey: true,
+        ctrlKey: false,
+        metaKey: false,
+        shiftKey: false,
+      };
+      const notation = Option.getOrNull(
+        keyNotation(event, {
+          ignoreKeyboardLayout: false,
+          applePlatform: true,
+        }),
+      );
+      const compiled = compileMappings(DEFAULT_MAPPINGS, {
+        knownCommands: names,
+        rejectReservedShortcuts: true,
+      });
+      const command = pipe(
+        compiled.bindings,
+        Array.findFirst(({ keys }) => keys.length === 1 && Array.headNonEmpty(keys) === notation),
+        Option.map((binding) => binding.command),
+        Option.getOrNull,
+      );
+      assert.strictEqual(command, row.command, `${notation} runs no default binding`);
+    }),
+  );
 });

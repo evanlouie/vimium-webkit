@@ -8,7 +8,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Ref, pipe } from "effect";
+import { Array, Boolean, Effect, Ref, pipe } from "effect";
 import {
   CONTINUE_BUBBLING,
   type Handler,
@@ -24,11 +24,7 @@ const event = (): Event => new Event("scroll", { cancelable: true });
 /** A handler that writes its name into `seen` and lets the walk continue. */
 const record = (name: string, seen: Ref.Ref<readonly string[]>): Handler<never> => ({
   name,
-  scroll: () =>
-    pipe(
-      Ref.update(seen, (current) => [...current, name]),
-      Effect.as(CONTINUE_BUBBLING),
-    ),
+  scroll: () => pipe(seen, Ref.update(Array.append(name)), Effect.as(CONTINUE_BUBBLING)),
 });
 
 describe("HandlerStack", () => {
@@ -68,7 +64,7 @@ describe("HandlerStack", () => {
           name: "C",
           scroll: () =>
             Effect.gen(function* () {
-              yield* Ref.update(seen, (current) => [...current, "C"]);
+              yield* pipe(seen, Ref.update(Array.append("C")));
               yield* stack.remove(middle);
               return CONTINUE_BUBBLING;
             }),
@@ -92,7 +88,7 @@ describe("HandlerStack", () => {
           name: "remover",
           scroll: () =>
             Effect.gen(function* () {
-              yield* Ref.update(seen, (current) => [...current, "remover"]);
+              yield* pipe(seen, Ref.update(Array.append("remover")));
               yield* stack.remove(victim);
               return CONTINUE_BUBBLING;
             }),
@@ -171,23 +167,30 @@ describe("HandlerStack", () => {
         const stack = yield* HandlerStack;
         const seen = yield* Ref.make<readonly string[]>([]);
         const opened = yield* Ref.make(false);
+        // Whether the opener opened its handler before.
+        const reopened = pipe(opened, Ref.getAndSet(true));
+
+        // The handler that the opener pushes. It must see the event that
+        // pushed it.
+        const pushed: Handler<never> = {
+          name: "opened",
+          scroll: () => pipe(seen, Ref.update(Array.append("opened")), Effect.as(SUPPRESS_EVENT)),
+        };
 
         yield* stack.push({
           name: "opener",
           scroll: () =>
-            Effect.gen(function* () {
-              yield* Ref.update(seen, (current) => [...current, "opener"]);
-              if (yield* Ref.getAndSet(opened, true)) return CONTINUE_BUBBLING;
-              yield* stack.push({
-                name: "opened",
-                scroll: () =>
-                  pipe(
-                    Ref.update(seen, (current) => [...current, "opened"]),
-                    Effect.as(SUPPRESS_EVENT),
-                  ),
-              });
-              return RESTART_BUBBLING;
-            }),
+            pipe(
+              seen,
+              Ref.update(Array.append("opener")),
+              Effect.andThen(reopened),
+              Effect.flatMap(
+                Boolean.match({
+                  onFalse: () => pipe(stack.push(pushed), Effect.as(RESTART_BUBBLING)),
+                  onTrue: () => Effect.succeed(CONTINUE_BUBBLING),
+                }),
+              ),
+            ),
         });
 
         assert.isFalse(yield* stack.bubble("scroll", event()));
@@ -249,7 +252,7 @@ describe("HandlerStack", () => {
         const failing = yield* stack.push({
           name: "owned",
           scroll: () => Effect.die(new Error("boom")),
-          onDefect: () => Ref.update(cleaned, (current) => [...current, "owned"]),
+          onDefect: () => pipe(cleaned, Ref.update(Array.append("owned"))),
         });
 
         assert.isTrue(yield* stack.bubble("scroll", event()));
@@ -294,7 +297,7 @@ describe("HandlerStack", () => {
               return CONTINUE_BUBBLING;
             }),
         });
-        yield* Ref.set(self, id);
+        yield* pipe(self, Ref.set(id));
 
         yield* stack.bubble("scroll", event());
         assert.isFalse(yield* stack.has(id));
