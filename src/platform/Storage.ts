@@ -40,7 +40,6 @@ import {
   Option,
   Order,
   Ordering,
-  Predicate,
   Queue,
   Result,
   Schema,
@@ -50,6 +49,7 @@ import {
   pipe,
 } from "effect";
 import { constVoid, flow } from "effect/Function";
+import { describeThrown } from "~/domain/Failure.ts";
 import type { GroupSpec, Migration } from "~/domain/Persisted.ts";
 import {
   type FindHistory,
@@ -278,30 +278,6 @@ const byTarget: Order.Order<Migration> = pipe(
   Order.mapInput((step: Migration) => step.to),
 );
 
-const detailOf = (cause: unknown): Option.Option<string> =>
-  pipe(
-    cause,
-    Option.liftPredicate(Predicate.isObjectOrArray),
-    Option.map((object): unknown => Reflect.get(object, "detail")),
-    Option.filter(Predicate.isString),
-    Option.filter((detail) => detail.length > 0),
-  );
-
-const messageOf = (cause: unknown): Option.Option<string> =>
-  pipe(
-    cause,
-    Option.liftPredicate(Predicate.isError),
-    Option.map((error) => error.message),
-    Option.filter((message) => message.length > 0),
-  );
-
-const describeCause = (cause: unknown): string =>
-  pipe(
-    detailOf(cause),
-    Option.orElse(() => messageOf(cause)),
-    Option.getOrElse(() => String(cause)),
-  );
-
 /**
  * Build one value group over the value store.
  *
@@ -349,7 +325,7 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
         reason,
         direction,
         group: spec.name,
-        detail: `${detail}: ${describeCause(cause)}`,
+        detail: `${detail}: ${describeThrown(cause)}`,
         cause,
       });
 

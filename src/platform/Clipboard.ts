@@ -25,7 +25,8 @@
  *    where `navigator.clipboard` is `undefined`.
  */
 
-import { Boolean, Context, Effect, Layer, Match, Option, Predicate, Schema, pipe } from "effect";
+import { Boolean, Context, Effect, Layer, Option, Predicate, Schema, pipe } from "effect";
+import { describeThrown } from "~/domain/Failure.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Gm } from "~/platform/Gm.ts";
 
@@ -50,17 +51,9 @@ export class ClipboardError extends Schema.TaggedError<ClipboardError>()("Clipbo
   cause: Schema.optional(Schema.Defect()),
 }) {}
 
-const describe = (cause: unknown): string =>
-  pipe(
-    Match.value(cause),
-    Match.when(Predicate.isError, (error) => error.message),
-    Match.when(Predicate.isString, (text) => text),
-    Match.orElse((other) => String(other)),
-  );
-
 /** The browser or the user refused a clipboard promise. */
 const denied = (cause: unknown): ClipboardError =>
-  new ClipboardError({ reason: "denied", detail: describe(cause), cause });
+  new ClipboardError({ reason: "denied", detail: describeThrown(cause), cause });
 
 // ---------------------------------------------------------------------------
 // The bound browser accessors
@@ -159,7 +152,7 @@ const execCommandCopy = (doc: Document, text: string): Effect.Effect<void, Clipb
             return doc.execCommand("copy");
           },
           catch: (cause) =>
-            new ClipboardError({ reason: "failed", detail: describe(cause), cause }),
+            new ClipboardError({ reason: "failed", detail: describeThrown(cause), cause }),
         }),
         Effect.flatMap(
           Boolean.match({

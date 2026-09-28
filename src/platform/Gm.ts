@@ -18,7 +18,6 @@ import {
   Data,
   Effect,
   Layer,
-  Match,
   MutableRef,
   Option,
   Predicate,
@@ -29,6 +28,7 @@ import {
   pipe,
 } from "effect";
 import { constVoid, flow } from "effect/Function";
+import { describeThrown } from "~/domain/Failure.ts";
 import { Dom } from "./Dom.ts";
 import type {
   GmNamespace,
@@ -80,18 +80,10 @@ export const gmUnavailable = (api: string): GmError =>
     detail: `${api} is not provided by this userscript manager`,
   });
 
-const describe = (cause: unknown): string =>
-  pipe(
-    Match.value(cause),
-    Match.when(Predicate.isError, (error) => error.message),
-    Match.when(Predicate.isString, (text) => text),
-    Match.orElse((other) => String(other)),
-  );
-
 const gmFailed =
   (api: string) =>
   (cause: unknown): GmError =>
-    new GmError({ reason: "failed", api, detail: describe(cause), cause });
+    new GmError({ reason: "failed", api, detail: describeThrown(cause), cause });
 
 /**
  * Run a synchronous manager call.

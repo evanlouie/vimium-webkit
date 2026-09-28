@@ -20,7 +20,6 @@ import {
   Exit,
   Layer,
   Match,
-  Predicate,
   Result,
   Schema,
   type Scope,
@@ -28,6 +27,7 @@ import {
   pipe,
 } from "effect";
 import { constVoid } from "effect/Function";
+import { describeThrown } from "~/domain/Failure.ts";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -187,7 +187,7 @@ export class Dom extends Context.Service<
             new DomError({
               reason: "denied",
               api,
-              detail: describe(cause),
+              detail: describeThrown(cause),
               cause,
             }),
         });
@@ -314,11 +314,3 @@ const readClock = (): number =>
 const reportListenerFailure = (type: string, cause: Cause.Cause<never>): void => {
   console.error(`[vimium-webkit] the ${type} listener failed`, Cause.pretty(cause));
 };
-
-const describe = (cause: unknown): string =>
-  pipe(
-    Match.value(cause),
-    Match.when(Predicate.isError, (error) => error.message),
-    Match.when(Predicate.isString, (text) => text),
-    Match.orElse((other) => String(other)),
-  );
