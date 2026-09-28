@@ -50,7 +50,7 @@ import {
 import { Commands } from "~/core/Commands.ts";
 import { type HandlerResult, SUPPRESS_EVENT, SUPPRESS_PROPAGATION } from "~/core/HandlerStack.ts";
 import { Mappings } from "~/core/Mappings.ts";
-import { Modes } from "~/core/Modes.ts";
+import { ExitTrigger, KeyPolicy, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { type CommandDef, type CommandGroup, DEFAULT_MAPPINGS } from "~/domain/Command.ts";
@@ -1294,8 +1294,10 @@ export class Dialog extends Context.Service<
           modes.enter(
             {
               name: "dialog",
-              singleton: "dialog",
-              exitOnEscape: true,
+              indicator: Option.none(),
+              exitOn: [ExitTrigger.Escape()],
+              keyboard: KeyPolicy.Shared(),
+              singleton: Option.some("dialog"),
             },
             { keydown: (event) => trapKey(parts.dialog, event) },
           ),
@@ -1310,7 +1312,7 @@ export class Dialog extends Context.Service<
         // drops the focus leaves the user at the top of the document.
         yield* pipe(
           Effect.acquireRelease(
-            dom.probeOr(() => Option.fromNullishOr(deepActiveElement(doc)), Option.none<Element>()),
+            dom.probeOrElse(() => Option.fromNullishOr(deepActiveElement(doc)), Option.none),
             focusAgain,
           ),
           Scope.provide(scope),

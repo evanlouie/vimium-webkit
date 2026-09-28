@@ -34,6 +34,7 @@ import {
   Context,
   Data,
   Deferred,
+  Duration,
   Effect,
   FiberHandle,
   Layer,
@@ -58,6 +59,25 @@ export const DEFAULT_HUD_DURATION_MS = 2200;
 
 /** An error stays twice as long, because it asks the user to act. */
 export const ERROR_HUD_DURATION_MS = DEFAULT_HUD_DURATION_MS * 2;
+
+/** How long a message stays on screen. */
+export type HudDuration = Data.TaggedEnum<{
+  /** The message goes after `duration`. */
+  Transient: { readonly duration: Duration.Duration };
+  /** The message stays until the next one replaces it. For a live status. */
+  Sticky: Record<never, never>;
+}>;
+export const HudDuration = Data.taggedEnum<HudDuration>();
+
+/** The upstream duration of a message. */
+export const BRIEFLY: HudDuration = HudDuration.Transient({
+  duration: Duration.millis(DEFAULT_HUD_DURATION_MS),
+});
+
+/** The duration of an error. */
+const AS_AN_ERROR: HudDuration = HudDuration.Transient({
+  duration: Duration.millis(ERROR_HUD_DURATION_MS),
+});
 
 export type HudTone = "info" | "error";
 
@@ -286,7 +306,8 @@ const promptKey = (event: KeyboardEvent): PromptKey =>
 export class Hud extends Context.Service<
   Hud,
   {
-    readonly show: (text: string, durationMs?: number) => Effect.Effect<void>;
+    /** Show a message for `duration`. */
+    readonly show: (text: string, duration: HudDuration) => Effect.Effect<void>;
     readonly error: (text: string) => Effect.Effect<void>;
     readonly hide: Effect.Effect<void>;
     /** Ask the user for a line of text. `None` when the user cancels. */
@@ -409,44 +430,41 @@ export class Hud extends Context.Service<
           pipe(state, Ref.update(change), Effect.andThen(render));
 
         /**
-         * Take the message away after `durationMs`.
+         * Take the message away when its duration is over.
          *
          * A fiber that sleeps, and not a timeout. The handle holds one fiber, so
          * a new message interrupts the one before it, and the layer scope
-         * interrupts the last one. A duration of zero or less keeps the message
+         * interrupts the last one. A sticky message keeps no fiber, and stays
          * until the next one replaces it.
          */
-        const arm = Effect.fn("Hud.arm")(function* (durationMs: number) {
+        const arm = Effect.fn("Hud.arm")(function* (duration: HudDuration) {
           yield* pipe(
-            durationMs > 0,
-            Boolean.match({
-              onFalse: () => FiberHandle.clear(timer),
-              onTrue: () =>
+            duration,
+            HudDuration.$match({
+              Transient: ({ duration: shown }) =>
                 pipe(
-                  Effect.sleep(durationMs),
+                  Effect.sleep(shown),
                   Effect.andThen(patch(withoutMessage)),
                   FiberHandle.run(timer),
                 ),
+              Sticky: () => FiberHandle.clear(timer),
             }),
           );
         });
 
-        const draw = Effect.fn("Hud.draw")(function* (line: HudLine, durationMs: number) {
+        const draw = Effect.fn("Hud.draw")(function* (line: HudLine, duration: HudDuration) {
           yield* patch(Struct.assign({ transient: Option.some(line) }));
-          yield* arm(durationMs);
+          yield* arm(duration);
         });
 
         // `currentUnsafe`, because a command body reaches this from the key
         // path, and nothing on that path may suspend. Every other step of `show`
         // is a `Ref` write or a fork.
-        const show = Effect.fn("Hud.show")(function* (
-          text: string,
-          durationMs: number = DEFAULT_HUD_DURATION_MS,
-        ) {
+        const show = Effect.fn("Hud.show")(function* (text: string, duration: HudDuration) {
           yield* pipe(
             settings.currentUnsafe().hideHud,
             Boolean.match({
-              onFalse: () => draw(infoLine(text), durationMs),
+              onFalse: () => draw(infoLine(text), duration),
               onTrue: () => Effect.void,
             }),
           );
@@ -455,7 +473,7 @@ export class Hud extends Context.Service<
         // An error ignores `hideHud`. A refused capability that says nothing is
         // the exact failure that `Report` exists to prevent.
         const error = (text: string): Effect.Effect<void> =>
-          draw({ text, tone: "error" }, ERROR_HUD_DURATION_MS);
+          draw({ text, tone: "error" }, AS_AN_ERROR);
 
         const clearMessage = pipe(FiberHandle.clear(timer), Effect.andThen(patch(withoutMessage)));
 
@@ -481,9 +499,7 @@ export class Hud extends Context.Service<
         yield* pipe(
           modes.indicator,
           SubscriptionRef.changes,
-          Stream.runForEach((value) =>
-            patch(Struct.assign({ indicator: Option.fromNullishOr(value) })),
-          ),
+          Stream.runForEach((indicator) => patch(Struct.assign({ indicator }))),
           Effect.forkScoped,
         );
 
@@ -500,7 +516,7 @@ export class Hud extends Context.Service<
         const deliver = pipe(
           Match.type<UserMessage>(),
           Match.when({ level: "error" }, ({ text }) => error(text)),
-          Match.when({ level: "info" }, ({ text }) => show(text)),
+          Match.when({ level: "info" }, ({ text }) => show(text, BRIEFLY)),
           Match.exhaustive,
         );
 

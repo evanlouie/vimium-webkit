@@ -36,6 +36,7 @@ import {
   type CommandName,
   COMMANDS,
 } from "~/domain/Command.ts";
+import { recoverEvenIfInterrupted } from "./Recovery.ts";
 
 export type { CommandDef, CommandGroup, CommandName, CommandTier } from "~/domain/Command.ts";
 
@@ -154,13 +155,15 @@ export class Commands extends Context.Service<
 
         yield* pipe(
           body(invocation),
-          Effect.catchCause(() =>
-            Effect.fail(
-              new CommandError({
-                reason: "failed",
-                command: name,
-                detail: `${name} failed`,
-              }),
+          recoverEvenIfInterrupted(
+            `the command ${name}`,
+            Effect.failSync(
+              () =>
+                new CommandError({
+                  reason: "failed",
+                  command: name,
+                  detail: `${name} failed`,
+                }),
             ),
           ),
         );

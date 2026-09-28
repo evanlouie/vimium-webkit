@@ -394,13 +394,13 @@ export const makeMarkerLayer: Effect.Effect<MarkerLayer, never, Dom | Ui | Scope
     const readScroll = (): ScrollPosition => ({ x: dom.window.scrollX, y: dom.window.scrollY });
 
     /** Where the page stood when the rects of the current specs were measured. */
-    const first = yield* dom.probeOr(readScroll, { x: 0, y: 0 });
+    const first = yield* dom.probeOrElse(readScroll, () => ({ x: 0, y: 0 }));
     const originRef = yield* Ref.make(first);
 
     const scrollNow = pipe(
       originRef,
       Ref.get,
-      Effect.flatMap((origin) => dom.probeOr(readScroll, origin)),
+      Effect.flatMap((origin) => dom.probeOrElse(readScroll, () => origin)),
     );
 
     const applyOffset = Effect.gen(function* () {
@@ -440,9 +440,9 @@ export const makeMarkerLayer: Effect.Effect<MarkerLayer, never, Dom | Ui | Scope
     });
     yield* dom.listen("window", "resize", () => reposition, { passive: true });
 
-    const visualViewport = yield* dom.probeOr(
+    const visualViewport = yield* dom.probeOrElse(
       () => Option.fromNullishOr(dom.window.visualViewport),
-      Option.none<VisualViewport>(),
+      Option.none,
     );
     yield* pipe(
       visualViewport,

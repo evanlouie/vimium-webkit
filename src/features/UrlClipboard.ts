@@ -13,7 +13,7 @@ import { Commands } from "~/core/Commands.ts";
 import { Report } from "~/core/Report.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { Hud } from "~/ui/Hud.ts";
+import { BRIEFLY, Hud } from "~/ui/Hud.ts";
 import { type Destination, Navigation } from "./Navigation.ts";
 
 /** Text with something in it besides white space. */
@@ -54,7 +54,7 @@ export class UrlClipboard extends Context.Service<
           clipboard.write(text),
           Effect.matchCauseEffect({
             onFailure: () => report.error(`Could not copy the ${label}`),
-            onSuccess: () => hud.show(`Copied ${label}`),
+            onSuccess: () => hud.show(`Copied ${label}`, BRIEFLY),
           }),
         );
       });
@@ -66,7 +66,7 @@ export class UrlClipboard extends Context.Service<
         Effect.flatMap(
           Option.match({
             onNone: () => Effect.void,
-            onSome: (text) => hud.show(`Clipboard: ${text.slice(0, 80)}`),
+            onSome: (text) => hud.show(`Clipboard: ${text.slice(0, 80)}`, BRIEFLY),
           }),
         ),
         Effect.ignore,
@@ -106,7 +106,10 @@ export class UrlClipboard extends Context.Service<
 
         copyCurrentTitle: () =>
           pipe(
-            dom.probeOr(() => dom.document.title, ""),
+            dom.probeOrElse(
+              () => dom.document.title,
+              () => "",
+            ),
             Effect.flatMap((title) => copy(title, "title")),
           ),
 

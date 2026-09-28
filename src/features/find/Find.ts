@@ -51,7 +51,7 @@ import {
   SUPPRESS_EVENT,
   SUPPRESS_PROPAGATION,
 } from "~/core/HandlerStack.ts";
-import { Modes } from "~/core/Modes.ts";
+import { ExitTrigger, KeyPolicy, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import {
@@ -67,7 +67,7 @@ import { Dom } from "~/platform/Dom.ts";
 import { elementAt } from "~/platform/Elements.ts";
 import { Storage } from "~/platform/Storage.ts";
 import type { HudPromptOptions } from "~/ui/Hud.ts";
-import { Hud, KeyClaim } from "~/ui/Hud.ts";
+import { BRIEFLY, Hud, HudDuration, KeyClaim } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
 import {
   collectTextRuns,
@@ -435,12 +435,12 @@ export class Find extends Context.Service<
 
       // -- the browser ---------------------------------------------------
 
-      const selection: Effect.Effect<Option.Option<Selection>> = dom.probeOr(
+      const selection: Effect.Effect<Option.Option<Selection>> = dom.probeOrElse(
         () => Option.fromNullishOr(win.getSelection()),
-        Option.none<Selection>(),
+        Option.none,
       );
 
-      /** Read the selection inside `dom.probeOr`. No selection gives `fallback`. */
+      /** Read the selection inside `dom.probeOrElse`. No selection gives `fallback`. */
       const probeSelection = <A>(
         read: (selection: Selection) => A,
         fallback: A,
@@ -450,22 +450,26 @@ export class Find extends Context.Service<
           Effect.flatMap(
             Option.match({
               onNone: () => Effect.succeed(fallback),
-              onSome: (target) => dom.probeOr(() => read(target), fallback),
+              onSome: (target) =>
+                dom.probeOrElse(
+                  () => read(target),
+                  () => fallback,
+                ),
             }),
           ),
         );
 
-      const readScroll: Effect.Effect<ScrollPosition> = dom.probeOr(
+      const readScroll: Effect.Effect<ScrollPosition> = dom.probeOrElse(
         () => ({ x: win.scrollX, y: win.scrollY }),
-        { x: 0, y: 0 },
+        () => ({ x: 0, y: 0 }),
       );
 
       // `instant`, because a restore is a jump. The smooth scrolling of Safari
       // cannot be cancelled, so it would fight the next command.
       const restoreScroll = (position: ScrollPosition): Effect.Effect<void> =>
-        dom.probeOr(
+        dom.probeOrElse(
           () => win.scrollTo({ left: position.x, top: position.y, behavior: "instant" }),
-          undefined,
+          constVoid,
         );
 
       // -- the highlight overlay -----------------------------------------
@@ -569,7 +573,7 @@ export class Find extends Context.Service<
        * Once for each session, and not once for each keystroke.
        */
       const refreshRuns = Effect.fn("Find.refreshRuns")(function* () {
-        const collected = yield* dom.probeOr<ReadonlyArray<TextRun>>(
+        const collected = yield* dom.probeOrElse<ReadonlyArray<TextRun>>(
           () =>
             collectTextRuns({
               view: win,
@@ -578,7 +582,7 @@ export class Find extends Context.Service<
               excludeHost: Option.some(ui.shadow.host),
               maxCharacters: DEFAULT_MAX_CHARACTERS,
             }),
-          [],
+          () => [],
         );
         yield* pipe(runs, Ref.set(collected));
       });
@@ -596,7 +600,10 @@ export class Find extends Context.Service<
               pipe(
                 Ref.get(runs),
                 Effect.flatMap((collected) =>
-                  dom.probeOr(() => matchesInRuns(doc, collected, pattern), NOTHING_FOUND),
+                  dom.probeOrElse(
+                    () => matchesInRuns(doc, collected, pattern),
+                    () => NOTHING_FOUND,
+                  ),
                 ),
               ),
           }),
@@ -756,7 +763,7 @@ export class Find extends Context.Service<
       /** Select the current match, and say where it is. */
       const showMatch = Effect.fn("Find.showMatch")(function* (found: Found, prefix: string) {
         yield* selectCurrent();
-        yield* hud.show(`${prefix}${statusText(matchesOutcome(found))}`);
+        yield* hud.show(`${prefix}${statusText(matchesOutcome(found))}`, BRIEFLY);
       });
 
       // -- the mode that lives on after Enter -----------------------------
@@ -792,11 +799,10 @@ export class Find extends Context.Service<
             modes.enter(
               {
                 name: "post-find",
-                indicator: null,
-                exitOnEscape: true,
-                exitOnClick: true,
-                exitOnFocus: true,
-                singleton: "find",
+                indicator: Option.none(),
+                exitOn: [ExitTrigger.Escape(), ExitTrigger.Click(), ExitTrigger.Focus()],
+                keyboard: KeyPolicy.Shared(),
+                singleton: Option.some("find"),
               },
               {
                 // Everything except Escape, which the mode itself takes,
@@ -838,9 +844,9 @@ export class Find extends Context.Service<
 
       const showStatus = Effect.fn("Find.showStatus")(function* (outcome: SearchOutcome) {
         const status = statusText(outcome);
-        // A duration of zero holds the line until the next message. The count
-        // is a live status, and not an announcement.
-        const live = () => hud.show(status, 0);
+        // The line stays until the next message. The count is a live status,
+        // and not an announcement.
+        const live = () => hud.show(status, HudDuration.Sticky());
         yield* pipe(
           outcome,
           SearchOutcome.$match({
@@ -1013,11 +1019,12 @@ export class Find extends Context.Service<
         const handle = yield* modes.enter(
           {
             name: "find",
-            indicator: prompt.indicator,
+            indicator: Option.some(prompt.indicator),
             // The HUD input owns Escape: it has to settle the prompt, and an
             // exit at the level of the mode would leave the prompt open.
-            exitOnEscape: false,
-            singleton: "find",
+            exitOn: [],
+            keyboard: KeyPolicy.Shared(),
+            singleton: Option.some("find"),
           },
           {
             keydown: passIfOurs,
@@ -1064,7 +1071,7 @@ export class Find extends Context.Service<
         );
 
       const noMatchesFor = (text: string): Effect.Effect<void> =>
-        pipe(hud.show(`No matches for "${text}"`), Effect.andThen(clearState));
+        pipe(hud.show(`No matches for "${text}"`, BRIEFLY), Effect.andThen(clearState));
 
       /**
        * Settle on the current match.
@@ -1075,7 +1082,7 @@ export class Find extends Context.Service<
       const settle = Effect.fn("Find.settle")(function* (outcome: SearchOutcome) {
         yield* scrollToCurrent();
         yield* selectCurrent();
-        yield* hud.show(statusText(outcome));
+        yield* hud.show(statusText(outcome), BRIEFLY);
         yield* enterPost();
       });
 
@@ -1173,7 +1180,7 @@ export class Find extends Context.Service<
         yield* pipe(
           latest,
           Hits.$match({
-            None: () => hud.show(`No matches for "${last.raw}"`),
+            None: () => hud.show(`No matches for "${last.raw}"`, BRIEFLY),
             Found: (found) =>
               pipe(
                 stepBy(found, count * sign),
@@ -1202,7 +1209,7 @@ export class Find extends Context.Service<
         yield* pipe(
           last,
           Option.match({
-            onNone: () => hud.show("No previous search"),
+            onNone: () => hud.show("No previous search", BRIEFLY),
             onSome: (parsed) => stepQuery(parsed, count),
           }),
         );
@@ -1212,7 +1219,7 @@ export class Find extends Context.Service<
         direction: 1 | -1,
       ) {
         const word = yield* probeSelection(wordUnderCursor, "");
-        const noWord = () => hud.show("No word under the cursor");
+        const noWord = () => hud.show("No word under the cursor", BRIEFLY);
         yield* pipe(
           wordQuery(word),
           ParsedFindQuery.$match({

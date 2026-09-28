@@ -13,7 +13,7 @@
  *
  * Every function here takes the `Selection`, the `Document` or the
  * `CapabilityReport` that it needs, and gives an answer. None of them reads a
- * global. The service in `Visual.ts` calls them inside `dom.probeOr`.
+ * global. The service in `Visual.ts` calls them inside `dom.probeOrElse`.
  */
 
 import {

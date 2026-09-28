@@ -19,7 +19,7 @@
  *   character that was typed into the omnibar — and it keeps the default
  *   action, so the field still types the character.
  *
- * The mode is declared `suppressAllKeyboardEvents`. That is the backstop: a
+ * The mode owns the keyboard, with `KeyPolicy.Owned`. That is the backstop: a
  * keyboard event that this file does not classify is swallowed, and does not
  * reach the bindings of the page.
  */
@@ -47,7 +47,7 @@ import {
   SUPPRESS_EVENT,
   SUPPRESS_PROPAGATION,
 } from "~/core/HandlerStack.ts";
-import { isEscape, Modes } from "~/core/Modes.ts";
+import { isEscape, KeyPolicy, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { isComposing } from "~/domain/Key.ts";
@@ -704,13 +704,13 @@ export class Omnibar extends Context.Service<
           modes.enter(
             {
               name: "omnibar",
-              indicator: null,
+              indicator: Option.none(),
               // Escape is handled above, and not by the mode, so that the
               // overlay goes and the focus comes back before the frame does.
-              exitOnEscape: false,
+              exitOn: [],
               // The backstop, and not the mechanism. Read the file comment.
-              suppressAllKeyboardEvents: true,
-              singleton: "omnibar",
+              keyboard: KeyPolicy.Owned(),
+              singleton: Option.some("omnibar"),
             },
             {
               keydown: onKeydown(() => Ref.getUnsafe(session), view),
@@ -760,7 +760,10 @@ export class Omnibar extends Context.Service<
 
       /** Refresh the signal of the tab at `href`. */
       const beat = Effect.fnUntraced(function* (href: string) {
-        const title = yield* dom.probeOr(() => dom.document.title, "");
+        const title = yield* dom.probeOrElse(
+          () => dom.document.title,
+          () => "",
+        );
         const now = yield* Clock.currentTimeMillis;
         yield* pipe(
           storage.session.update(

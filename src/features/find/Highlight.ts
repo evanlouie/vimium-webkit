@@ -273,9 +273,9 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
     const rects = yield* Ref.make<ReadonlyArray<HTMLElement>>([]);
     const origin = yield* Ref.make<Origin>({ x: 0, y: 0 });
 
-    const readScroll: Effect.Effect<Origin> = dom.probeOr(
+    const readScroll: Effect.Effect<Origin> = dom.probeOrElse(
       () => ({ x: win.scrollX, y: win.scrollY }),
-      { x: 0, y: 0 },
+      () => ({ x: 0, y: 0 }),
     );
 
     /**
@@ -304,7 +304,10 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
         minTop: -VIEWPORT_MARGIN,
         maxTop: viewport.height + VIEWPORT_MARGIN,
       };
-      return yield* dom.probeOr(() => placeAll(matches, currentIndex, band), []);
+      return yield* dom.probeOrElse(
+        () => placeAll(matches, currentIndex, band),
+        () => [],
+      );
     });
 
     /** A new rectangle element, which lives as long as the overlay. */
@@ -402,9 +405,9 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
     });
     yield* dom.listen("window", "resize", () => reposition, { passive: true });
 
-    const visualViewport = yield* dom.probeOr(
+    const visualViewport = yield* dom.probeOrElse(
       () => Option.fromNullishOr(win.visualViewport),
-      Option.none<VisualViewport>(),
+      Option.none,
     );
     yield* pipe(
       visualViewport,

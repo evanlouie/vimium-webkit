@@ -25,6 +25,7 @@ import {
   Boolean,
   Context,
   Data,
+  Duration,
   Effect,
   Exit,
   Layer,
@@ -38,17 +39,17 @@ import {
   flow,
   pipe,
 } from "effect";
-import { constVoid } from "effect/Function";
+import { constTrue, constVoid } from "effect/Function";
 import { Commands } from "~/core/Commands.ts";
 import { type HandlerResult, SUPPRESS_EVENT } from "~/core/HandlerStack.ts";
-import { type ExitReason, type ModeHandle, Modes } from "~/core/Modes.ts";
+import { type ExitReason, ExitTrigger, KeyPolicy, type ModeHandle, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { appendCountDigit, isComposing, isCountDigit, keyNotation } from "~/domain/Key.ts";
 import { Capabilities, type CapabilityReport } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { Hud } from "~/ui/Hud.ts";
+import { BRIEFLY, Hud, HudDuration } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
 import {
   canModify,
@@ -78,7 +79,9 @@ const PASTE_EXPLANATION =
   "own paste affordance. Use ⌘V (Ctrl+V).";
 
 /** How long the explanation above stays on screen. */
-const PASTE_EXPLANATION_MS = 4000;
+const PASTE_EXPLANATION_DURATION: HudDuration = HudDuration.Transient({
+  duration: Duration.millis(4000),
+});
 
 /** `1 character`, or `2 characters`. */
 const characters = (count: number): string =>
@@ -328,12 +331,12 @@ export class Visual extends Context.Service<
       /** The count prefix, and whether a `g` is pending. */
       const typed = yield* Ref.make(NOTHING_TYPED);
 
-      const selection: Effect.Effect<Option.Option<Selection>> = dom.probeOr(
+      const selection: Effect.Effect<Option.Option<Selection>> = dom.probeOrElse(
         () => Option.fromNullishOr(win.getSelection()),
-        Option.none<Selection>(),
+        Option.none,
       );
 
-      /** Read or change the selection inside `dom.probeOr`. No selection gives `fallback`. */
+      /** Read or change the selection inside `dom.probeOrElse`. No selection gives `fallback`. */
       const probeSelection = <A>(
         read: (selection: Selection) => A,
         fallback: A,
@@ -343,7 +346,11 @@ export class Visual extends Context.Service<
           Effect.flatMap(
             Option.match({
               onNone: () => Effect.succeed(fallback),
-              onSome: (target) => dom.probeOr(() => read(target), fallback),
+              onSome: (target) =>
+                dom.probeOrElse(
+                  () => read(target),
+                  () => fallback,
+                ),
             }),
           ),
         );
@@ -435,7 +442,7 @@ export class Visual extends Context.Service<
           clipboard.write(text),
           Effect.catch((error) => report.error(`Copy failed: ${error.detail}`)),
           Effect.forkDetach({ startImmediately: true }),
-          Effect.andThen(hud.show(`Yanked ${characters(text.length)}`)),
+          Effect.andThen(hud.show(`Yanked ${characters(text.length)}`, BRIEFLY)),
         );
 
       /** `y`: copy the selection and leave. */
@@ -445,7 +452,7 @@ export class Visual extends Context.Service<
           text,
           Option.liftPredicate((text) => text.length > 0),
           Option.match({
-            onNone: () => hud.show("Nothing to copy"),
+            onNone: () => hud.show("Nothing to copy", BRIEFLY),
             onSome: copy,
           }),
         );
@@ -460,7 +467,7 @@ export class Visual extends Context.Service<
           Yank: () => yank(),
           SwapEnds: () => swapEnds(),
           Enter: (command) => enterKind(command.kind),
-          ExplainPaste: () => hud.show(PASTE_EXPLANATION, PASTE_EXPLANATION_MS),
+          ExplainPaste: () => hud.show(PASTE_EXPLANATION, PASTE_EXPLANATION_DURATION),
         });
 
       const handleKey = Effect.fn("Visual.handleKey")(function* (
@@ -506,7 +513,7 @@ export class Visual extends Context.Service<
       /** Put a caret at the start of the first large text of the page. */
       const placeCaret = (current: Selection): Effect.Effect<void, VisualStartError> =>
         pipe(
-          dom.probeOr(() => findCaretAnchor(doc), Option.none<Text>()),
+          dom.probeOrElse(() => findCaretAnchor(doc), Option.none),
           Effect.flatMap(Effect.fromOption(() => new VisualStartError({ reason: "no-text" }))),
           Effect.flatMap((anchor) =>
             pipe(
@@ -525,7 +532,7 @@ export class Visual extends Context.Service<
        */
       const adoptOrPlace = (current: Selection): Effect.Effect<Selection, VisualStartError> =>
         pipe(
-          dom.probeOr(() => current.rangeCount === 0 || current.anchorNode === null, true),
+          dom.probeOrElse(() => current.rangeCount === 0 || current.anchorNode === null, constTrue),
           Effect.flatMap(
             Boolean.match({
               onFalse: () => Effect.void,
@@ -541,7 +548,7 @@ export class Visual extends Context.Service<
           Match.when("unavailable", () =>
             report.error("Text selection is not available in this frame."),
           ),
-          Match.when("no-text", () => hud.show("No text on this page to select.")),
+          Match.when("no-text", () => hud.show("No text on this page to select.", BRIEFLY)),
           Match.when("unplaceable", () => report.error("Could not place the caret on this page.")),
           Match.exhaustive,
         );
@@ -551,10 +558,10 @@ export class Visual extends Context.Service<
         function* (kind: VisualKind) {
           const current = yield* pipe(modifiableSelection, Effect.flatMap(adoptOrPlace));
           const viewport = yield* ui.viewport;
-          yield* dom.probeOr(() => {
+          yield* dom.probeOrElse(() => {
             profileOf(kind).shape(current, capabilities);
             scrollSelectionIntoView(current, viewport);
-          }, undefined);
+          }, constVoid);
         },
         Effect.catchTag("VisualStartError", (error) =>
           pipe(explainRefusal(error), Effect.andThen(exitCurrent())),
@@ -585,13 +592,13 @@ export class Visual extends Context.Service<
           modes.enter(
             {
               name: kind,
-              indicator: profileOf(kind).indicator,
-              exitOnEscape: true,
+              indicator: Option.some(profileOf(kind).indicator),
+              exitOn: [ExitTrigger.Escape()],
               // These modes own the keyboard outright: a key that they do not
               // use must not reach the page, or `j` scrolls out from under the
               // selection.
-              suppressAllKeyboardEvents: true,
-              singleton: "visual",
+              keyboard: KeyPolicy.Owned(),
+              singleton: Option.some("visual"),
             },
             {
               keydown: onKeydown(kind),

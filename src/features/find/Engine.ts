@@ -8,8 +8,8 @@
  *
  * Every function here is a plain function. Each one takes the `Document`, the
  * `Window` or the `CapabilityReport` that it needs, and gives an answer. The
- * service in `Find.ts` calls them inside `dom.probeOr`, so a realm that refuses
- * a read costs one search and not the application.
+ * service in `Find.ts` calls them inside `dom.probeOrElse`, so a realm that
+ * refuses a read costs one search and not the application.
  *
  * A run is the longest sequence of text nodes that share one tree root. A match
  * is only ever built *inside* one run, because a `Range` whose two boundaries

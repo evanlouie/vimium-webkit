@@ -11,19 +11,8 @@
  * `ARCHITECTURE.md` section 3.
  */
 
-import {
-  Array,
-  Cause,
-  Context,
-  Effect,
-  Layer,
-  Match,
-  Option,
-  Ref,
-  Struct,
-  flow,
-  pipe,
-} from "effect";
+import { Array, Context, Effect, Layer, Match, Option, Ref, Struct, flow, pipe } from "effect";
+import { recoverEvenIfInterrupted } from "./Recovery.ts";
 
 // ---------------------------------------------------------------------------
 // Answers
@@ -90,7 +79,7 @@ export type Handler<R = never> = {
    * release the rest. This body must not suspend. See `ARCHITECTURE.md`
    * section 3.
    */
-  readonly onDefect?: (cause: Cause.Cause<never>) => Effect.Effect<void, never, R>;
+  readonly onDefect?: Effect.Effect<void, never, R>;
 } & {
   readonly [K in HandlerEventName]?: (
     event: HandlerEventMap[K],
@@ -112,7 +101,7 @@ interface BoundHandler {
   readonly name: string;
   readonly bodies: BoundBodies;
   /** Tell the owner that a body failed. A handler with no `onDefect` does nothing. */
-  readonly onDefect: (cause: Cause.Cause<never>) => Effect.Effect<void>;
+  readonly onDefect: Effect.Effect<void>;
 }
 
 interface StackEntry extends BoundHandler {
@@ -136,7 +125,7 @@ const AT_BOTTOM: Placement = Array.prepend;
  * Supply the services of a handler once.
  *
  * The event bodies each take an event and answer with a result. The cleanup
- * body takes a cause, and not an event, so it is bound on its own.
+ * body takes no event, so it is bound on its own.
  */
 const bound = <R>(handler: Handler<R>, services: Context.Context<R>): BoundHandler => {
   const provided = <A>(
@@ -163,8 +152,8 @@ const bound = <R>(handler: Handler<R>, services: Context.Context<R>): BoundHandl
       handler.onDefect,
       Option.fromUndefinedOr,
       Option.match({
-        onNone: () => () => Effect.void,
-        onSome: (run) => flow(run, Effect.provideContext(services)),
+        onNone: () => Effect.void,
+        onSome: Effect.provideContext(services),
       }),
     ),
   };
@@ -292,24 +281,11 @@ export class HandlerStack extends Context.Service<
        * Drop the frame, tell its owner, and continue. The owner holds
        * everything else that belongs to the frame.
        */
-      const dropDefective = Effect.fnUntraced(function* (
-        entry: StackEntry,
-        name: HandlerEventName,
-        cause: Cause.Cause<never>,
-      ) {
-        yield* Effect.logError(
-          `the "${entry.name}" handler failed during ${name}`,
-          Cause.pretty(cause),
-        );
+      const dropDefective = Effect.fnUntraced(function* (entry: StackEntry) {
         yield* remove(entry.id);
         yield* pipe(
-          entry.onDefect(cause),
-          Effect.catchCause((failure) =>
-            Effect.logError(
-              `the owner of "${entry.name}" failed to clean up`,
-              Cause.pretty(failure),
-            ),
-          ),
+          entry.onDefect,
+          recoverEvenIfInterrupted(`the owner of the "${entry.name}" handler`, Effect.void),
         );
         return CONTINUE_BUBBLING;
       });
@@ -334,7 +310,10 @@ export class HandlerStack extends Context.Service<
                 onSome: (body) =>
                   pipe(
                     body(event),
-                    Effect.catchCause((cause) => dropDefective(entry, name, cause)),
+                    recoverEvenIfInterrupted(
+                      `the "${entry.name}" handler during ${name}`,
+                      dropDefective(entry),
+                    ),
                   ),
               }),
             ),

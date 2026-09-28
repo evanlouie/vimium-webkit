@@ -6,12 +6,29 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Array, Effect, Layer, Ref, SubscriptionRef, pipe } from "effect";
+import { Array, Effect, Layer, Option, Ref, Struct, SubscriptionRef, pipe } from "effect";
 import { HandlerStack } from "~/core/HandlerStack.ts";
-import { type ExitReason, Modes } from "~/core/Modes.ts";
+import { type ExitReason, KeyPolicy, type ModeOptions, Modes } from "~/core/Modes.ts";
 
 /** Modes over its one dependency. Nothing here touches a global. */
 const layer = Layer.provideMerge(Modes.layer, HandlerStack.layer);
+
+/** A mode with no indicator, no exit trigger, a shared keyboard and no singleton group. */
+const plain = (name: string): ModeOptions => ({
+  name,
+  indicator: Option.none(),
+  exitOn: [],
+  keyboard: KeyPolicy.Shared(),
+  singleton: Option.none(),
+});
+
+/** A plain mode in a singleton group. */
+const grouped = (name: string, group: string): ModeOptions =>
+  pipe(plain(name), Struct.assign({ singleton: Option.some(group) }));
+
+/** A plain mode that shows an indicator. */
+const shown = (name: string, indicator: string): ModeOptions =>
+  pipe(plain(name), Struct.assign({ indicator: Option.some(indicator) }));
 
 /**
  * A `keydown` event for the walk.
@@ -92,7 +109,7 @@ describe("Modes", () => {
 
         assert.strictEqual(yield* stack.depth, 0);
 
-        const first = yield* modes.enter<never>({ name: "demo" });
+        const first = yield* modes.enter<never>(plain("demo"));
         assert.isTrue(yield* first.isActive);
         assert.strictEqual(yield* stack.depth, 1);
         assert.deepEqual(yield* modes.activeNames, ["demo"]);
@@ -101,7 +118,7 @@ describe("Modes", () => {
         assert.isFalse(yield* first.isActive);
         assert.strictEqual(yield* stack.depth, 0);
 
-        const second = yield* modes.enter<never>({ name: "demo" });
+        const second = yield* modes.enter<never>(plain("demo"));
         assert.isTrue(yield* second.isActive);
         assert.strictEqual(yield* stack.depth, 1);
 
@@ -124,7 +141,7 @@ describe("Modes", () => {
           Effect.forEach(
             () =>
               Effect.gen(function* () {
-                const mode = yield* modes.enter<never>({ name: "cycle" });
+                const mode = yield* modes.enter<never>(plain("cycle"));
                 assert.strictEqual(yield* stack.depth, 1);
                 yield* mode.exit();
                 assert.strictEqual(yield* stack.depth, 0);
@@ -144,7 +161,7 @@ describe("Modes", () => {
         const modes = yield* Modes;
         const reasons = yield* Ref.make<readonly ExitReason[]>([]);
 
-        const mode = yield* modes.enter<never>({ name: "reasons" });
+        const mode = yield* modes.enter<never>(plain("reasons"));
         yield* mode.onExit((reason) => pipe(reasons, Ref.update(Array.append(reason))));
 
         yield* mode.exit("escape");
@@ -164,7 +181,7 @@ describe("Modes", () => {
         const modes = yield* Modes;
         const fired = yield* Ref.make(0);
 
-        const mode = yield* modes.enter<never>({ name: "late" });
+        const mode = yield* modes.enter<never>(plain("late"));
         yield* mode.exit();
 
         yield* mode.onExit(() =>
@@ -185,7 +202,7 @@ describe("Modes", () => {
         const modes = yield* Modes;
         const fired = yield* Ref.make(0);
 
-        const mode = yield* modes.enter<never>({ name: "queued" });
+        const mode = yield* modes.enter<never>(plain("queued"));
         yield* mode.onExit(() =>
           pipe(
             fired,
@@ -207,7 +224,7 @@ describe("Modes", () => {
         const modes = yield* Modes;
         const seen = yield* Ref.make<readonly string[]>([]);
 
-        const mode = yield* modes.enter<never>({ name: "failing" });
+        const mode = yield* modes.enter<never>(plain("failing"));
         yield* mode.onExit(() =>
           pipe(
             seen,
@@ -230,25 +247,16 @@ describe("Modes", () => {
         const modes = yield* Modes;
         const stack = yield* HandlerStack;
 
-        const first = yield* modes.enter<never>({
-          name: "first",
-          singleton: "group",
-        });
+        const first = yield* modes.enter<never>(grouped("first", "group"));
         assert.deepEqual(yield* modes.activeNames, ["first"]);
 
-        const second = yield* modes.enter<never>({
-          name: "second",
-          singleton: "group",
-        });
+        const second = yield* modes.enter<never>(grouped("second", "group"));
         assert.isFalse(yield* first.isActive);
         assert.isTrue(yield* second.isActive);
         assert.deepEqual(yield* modes.activeNames, ["second"]);
         assert.strictEqual(yield* stack.depth, 1);
 
-        const third = yield* modes.enter<never>({
-          name: "third",
-          singleton: "group",
-        });
+        const third = yield* modes.enter<never>(grouped("third", "group"));
         assert.isFalse(yield* second.isActive);
         assert.deepEqual(yield* modes.activeNames, ["third"]);
         assert.strictEqual(yield* stack.depth, 1);
@@ -266,12 +274,9 @@ describe("Modes", () => {
         const modes = yield* Modes;
         const reasons = yield* Ref.make<readonly ExitReason[]>([]);
 
-        const first = yield* modes.enter<never>({
-          name: "first",
-          singleton: "group",
-        });
+        const first = yield* modes.enter<never>(grouped("first", "group"));
         yield* first.onExit((reason) => pipe(reasons, Ref.update(Array.append(reason))));
-        yield* modes.enter<never>({ name: "second", singleton: "group" });
+        yield* modes.enter<never>(grouped("second", "group"));
 
         assert.deepEqual(yield* Ref.get(reasons), ["singleton"]);
       }),
@@ -279,31 +284,25 @@ describe("Modes", () => {
     ),
   );
 
-  it.effect("shows the innermost indicator that is not null", () =>
+  it.effect("shows the innermost indicator that a mode gives", () =>
     pipe(
       Effect.gen(function* () {
         const modes = yield* Modes;
 
-        const outer = yield* modes.enter<never>({
-          name: "outer",
-          indicator: "OUTER",
-        });
-        assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "OUTER");
+        const outer = yield* modes.enter<never>(shown("outer", "OUTER"));
+        assert.deepEqual(yield* SubscriptionRef.get(modes.indicator), Option.some("OUTER"));
 
-        const silent = yield* modes.enter<never>({ name: "silent" });
-        assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "OUTER");
+        const silent = yield* modes.enter<never>(plain("silent"));
+        assert.deepEqual(yield* SubscriptionRef.get(modes.indicator), Option.some("OUTER"));
 
-        const inner = yield* modes.enter<never>({
-          name: "inner",
-          indicator: "INNER",
-        });
-        assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "INNER");
+        const inner = yield* modes.enter<never>(shown("inner", "INNER"));
+        assert.deepEqual(yield* SubscriptionRef.get(modes.indicator), Option.some("INNER"));
 
         yield* inner.exit();
-        assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "OUTER");
+        assert.deepEqual(yield* SubscriptionRef.get(modes.indicator), Option.some("OUTER"));
 
         yield* outer.exit();
-        assert.isNull(yield* SubscriptionRef.get(modes.indicator));
+        assert.deepEqual(yield* SubscriptionRef.get(modes.indicator), Option.none());
 
         yield* silent.exit();
       }),
@@ -317,9 +316,9 @@ describe("Modes", () => {
         const modes = yield* Modes;
         const stack = yield* HandlerStack;
 
-        const first = yield* modes.enter<never>({ name: "a" });
-        const second = yield* modes.enter<never>({ name: "b" });
-        const third = yield* modes.enter<never>({ name: "c" });
+        const first = yield* modes.enter<never>(plain("a"));
+        const second = yield* modes.enter<never>(plain("b"));
+        const third = yield* modes.enter<never>(plain("c"));
         assert.strictEqual(yield* stack.depth, 3);
 
         yield* modes.exitAll();
@@ -342,13 +341,16 @@ describe("Modes", () => {
         const modes = yield* Modes;
         const stack = yield* HandlerStack;
         const reasons = yield* Ref.make<readonly ExitReason[]>([]);
-
-        const mode = yield* modes.enter<never>(
-          { name: "defective", indicator: "DEFECTIVE", singleton: "group" },
-          { keydown: () => Effect.die(new Error("boom")) },
+        const options = pipe(
+          grouped("defective", "group"),
+          Struct.assign({ indicator: Option.some("DEFECTIVE") }),
         );
+
+        const mode = yield* modes.enter<never>(options, {
+          keydown: () => Effect.die(new Error("boom")),
+        });
         yield* mode.onExit((reason) => pipe(reasons, Ref.update(Array.append(reason))));
-        assert.strictEqual(yield* SubscriptionRef.get(modes.indicator), "DEFECTIVE");
+        assert.deepEqual(yield* SubscriptionRef.get(modes.indicator), Option.some("DEFECTIVE"));
 
         // The event still reaches the page, because a failed frame decides
         // nothing.
@@ -357,14 +359,11 @@ describe("Modes", () => {
         assert.isFalse(yield* mode.isActive);
         assert.deepEqual(yield* modes.activeNames, []);
         assert.strictEqual(yield* stack.depth, 0);
-        assert.isNull(yield* SubscriptionRef.get(modes.indicator));
+        assert.deepEqual(yield* SubscriptionRef.get(modes.indicator), Option.none());
         assert.deepEqual(yield* Ref.get(reasons), ["defect"]);
 
         // The singleton group is free again, so the feature can be used again.
-        const next = yield* modes.enter<never>({
-          name: "next",
-          singleton: "group",
-        });
+        const next = yield* modes.enter<never>(grouped("next", "group"));
         assert.isTrue(yield* next.isActive);
         assert.deepEqual(yield* modes.activeNames, ["next"]);
         yield* next.exit();
@@ -382,10 +381,9 @@ describe("Modes", () => {
         const stack = yield* HandlerStack;
         const fired = yield* Ref.make(0);
 
-        const mode = yield* modes.enter<never>(
-          { name: "defective" },
-          { keydown: () => Effect.die(new Error("boom")) },
-        );
+        const mode = yield* modes.enter<never>(plain("defective"), {
+          keydown: () => Effect.die(new Error("boom")),
+        });
         yield* mode.onExit(() =>
           pipe(
             fired,
@@ -412,7 +410,7 @@ describe("Modes", () => {
 
         const handle = yield* Effect.scoped(
           Effect.gen(function* () {
-            const mode = yield* modes.enter<never>({ name: "scoped" });
+            const mode = yield* modes.enter<never>(plain("scoped"));
             yield* mode.onExit((reason) => pipe(reasons, Ref.update(Array.append(reason))));
             assert.strictEqual(yield* stack.depth, 1);
             return mode;

@@ -43,7 +43,10 @@ import {
   flow,
   pipe,
 } from "effect";
+import { constFalse } from "effect/Function";
 import { Commands } from "~/core/Commands.ts";
+import { isUserEvent } from "~/core/Keyboard.ts";
+import { recoverUnlessInterrupted } from "~/core/Recovery.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -565,11 +568,6 @@ export class Scroller extends Context.Service<
     readonly position: Effect.Effect<ScrollPosition>;
 
     readonly restore: (x: number, y: number) => Effect.Effect<void>;
-
-    /** Call this from the key path, before a command runs. */
-    readonly noteKeydown: (event: KeyboardEvent) => Effect.Effect<void>;
-
-    readonly noteKeyup: (event: KeyboardEvent) => Effect.Effect<void>;
   }
 >()("vimium/features/Scroller") {
   static readonly layer: Layer.Layer<Scroller, never, Commands | Dom | Report | Settings> =
@@ -643,9 +641,9 @@ export class Scroller extends Context.Service<
               onFalse: () => Effect.succeed(false),
               onTrue: () =>
                 pipe(
-                  dom.probeOr(
+                  dom.probeOrElse(
                     () => dom.window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-                    false,
+                    constFalse,
                   ),
                   Effect.map(Boolean.not),
                 ),
@@ -655,7 +653,7 @@ export class Scroller extends Context.Service<
 
         /** The element that must absorb the scroll. */
         const target = (axis: ScrollAxis, direction: Direction): Effect.Effect<Element> =>
-          dom.probeOr(
+          dom.probeOrElse(
             () =>
               findScrollableAncestor(
                 dom.window,
@@ -664,7 +662,7 @@ export class Scroller extends Context.Service<
                 axis,
                 direction,
               ),
-            rootElement(),
+            rootElement,
           );
 
         const cancel = (axis: ScrollAxis): Effect.Effect<void> =>
@@ -801,11 +799,9 @@ export class Scroller extends Context.Service<
         const animate = (axis: ScrollAxis): Effect.Effect<void> =>
           pipe(
             loop(axis),
-            Effect.catchDefect((defect) =>
-              Effect.gen(function* () {
-                yield* Effect.logError("the scroll animation failed", defect);
-                yield* report.error("Scrolling stopped after an internal failure");
-              }),
+            recoverUnlessInterrupted(
+              "the scroll animation",
+              report.error("Scrolling stopped after an internal failure"),
             ),
           );
 
@@ -1005,20 +1001,28 @@ export class Scroller extends Context.Service<
           );
         });
 
-        const noteKeydown = Effect.fn("Scroller.noteKeydown")(function* (event: KeyboardEvent) {
-          yield* pipe(
-            event,
-            Option.liftPredicate((press) => !press.repeat),
-            Option.match({ onNone: () => Effect.void, onSome: notePress }),
-          );
-        });
+        /** A key that the page made neither presses nor releases anything. */
+        const noteKeydown = flow(
+          Option.liftPredicate((event: KeyboardEvent) => isUserEvent(event) && !event.repeat),
+          Option.match({ onNone: () => Effect.void, onSome: notePress }),
+        );
 
-        const noteKeyup = Effect.fn("Scroller.noteKeyup")(function* (event: KeyboardEvent) {
-          yield* pipe(
-            physicalKey(event),
-            Option.match({ onNone: () => Effect.void, onSome: release }),
-          );
-        });
+        const noteKeyup = flow(
+          Option.liftPredicate((event: KeyboardEvent) => isUserEvent(event)),
+          Option.flatMap(physicalKey),
+          Option.match({ onNone: () => Effect.void, onSome: release }),
+        );
+
+        // The press counter and the held keys follow every key of the user.
+        // `Keyboard` cannot report them, because it never imports a feature,
+        // so this service listens itself. These listeners are attached while
+        // the application is built, and the key bridge only after that. On the
+        // same target and in the same phase they therefore run first: a press
+        // is counted before the command that it runs reads the counter, and a
+        // release is seen before normal mode stops the event. Nothing here
+        // suspends, because this is the key path.
+        yield* dom.listen("window", "keydown", noteKeydown, { capture: true });
+        yield* dom.listen("window", "keyup", noteKeyup, { capture: true });
 
         // A lost `keyup` — the window loses focus in the middle of a repeat —
         // would otherwise leave an animation running for ever.
@@ -1045,8 +1049,6 @@ export class Scroller extends Context.Service<
               // whatever the user does next.
               rootElement().scrollTo({ left: x, top: y, behavior: "instant" });
             }),
-          noteKeydown,
-          noteKeyup,
         });
 
         const configuredStep = (): number => settings.currentUnsafe().scrollStepSize;

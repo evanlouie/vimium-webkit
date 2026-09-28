@@ -13,19 +13,19 @@
 
 import { Deferred, Effect, Option, flow, pipe } from "effect";
 import { SUPPRESS_EVENT } from "~/core/HandlerStack.ts";
-import { Modes } from "~/core/Modes.ts";
-import { isComposing, isModifierKey, keyNotation } from "~/domain/Key.ts";
+import { ExitTrigger, KeyPolicy, Modes } from "~/core/Modes.ts";
+import { isComposing, isModifierKey, type KeyContext, keyNotation } from "~/domain/Key.ts";
 
 export interface CaptureKeyOptions {
   /** The text that the HUD shows while the mode waits, for example `Set mark:`. */
   readonly prompt: string;
   /**
-   * Read the physical key, and not the character of the layout.
+   * How to read the key: the layout option of the user, and the platform.
    *
    * The caller supplies it, because a caller that has no `Settings` dependency
    * must still be able to ask for one key.
    */
-  readonly ignoreKeyboardLayout?: boolean;
+  readonly context: KeyContext;
 }
 
 /**
@@ -35,12 +35,10 @@ export interface CaptureKeyOptions {
  * modifier alone is no character. Neither answers, so the mode stays armed and
  * waits for the result.
  */
-const typedNotation = (
-  ignoreKeyboardLayout: boolean,
-): ((event: KeyboardEvent) => Option.Option<string>) =>
+const typedNotation = (context: KeyContext): ((event: KeyboardEvent) => Option.Option<string>) =>
   flow(
     Option.liftPredicate((event: KeyboardEvent) => !isComposing(event) && !isModifierKey(event)),
-    Option.flatMap((event) => keyNotation(event, ignoreKeyboardLayout)),
+    Option.flatMap((event) => keyNotation(event, context)),
   );
 
 /**
@@ -60,14 +58,14 @@ export const captureNextKey: (
   const handle = yield* modes.enter(
     {
       name: "capture-next-key",
-      indicator: options.prompt,
-      exitOnEscape: true,
-      suppressAllKeyboardEvents: true,
-      singleton: "capture-next-key",
+      indicator: Option.some(options.prompt),
+      exitOn: [ExitTrigger.Escape()],
+      keyboard: KeyPolicy.Owned(),
+      singleton: Option.some("capture-next-key"),
     },
     {
       keydown: flow(
-        typedNotation(options.ignoreKeyboardLayout ?? false),
+        typedNotation(options.context),
         Option.match({
           onNone: () => Effect.void,
           onSome: (notation) =>

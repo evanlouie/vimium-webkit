@@ -18,11 +18,12 @@ import {
   Context,
   Data,
   Effect,
+  Exit,
   Layer,
   Option,
   Record,
   Ref,
-  type Scope,
+  Scope,
   SubscriptionRef,
   flow,
   pipe,
@@ -35,8 +36,10 @@ import {
   HandlerStack,
   SUPPRESS_EVENT,
 } from "./HandlerStack.ts";
+import { recoverEvenIfInterrupted } from "./Recovery.ts";
 
-export type ModeIndicator = string | null;
+/** The text that the HUD shows for the live modes. `None` shows nothing. */
+export type ModeIndicator = Option.Option<string>;
 
 export type ExitReason =
   | "explicit"
@@ -49,26 +52,57 @@ export type ExitReason =
   /** A body of the mode handler failed, so the stack dropped the frame. */
   | "defect";
 
-export interface ModeOptions {
-  readonly name: string;
-  /** Text that the HUD shows while the mode is live. `null` shows nothing. */
-  readonly indicator?: ModeIndicator;
-  readonly exitOnEscape?: boolean;
-  readonly exitOnBlur?: EventTarget | null;
-  readonly exitOnClick?: boolean;
-  readonly exitOnFocus?: boolean;
+/** A variant that carries no data. */
+type NoFields = Record.ReadonlyRecord<never, never>;
+
+/** An event that ends a mode, besides an explicit exit, its singleton group and a navigation. */
+export type ExitTrigger = Data.TaggedEnum<{
   /**
-   * Take every keyboard event while the mode is live.
+   * Escape, or its `<c-[>` synonym. The mode takes the key, so that the page
+   * does not also act on it.
+   */
+  Escape: NoFields;
+  /** Any click. */
+  Click: NoFields;
+  /** Any focus. */
+  Focus: NoFields;
+  /** The blur of one target. */
+  Blur: { readonly target: EventTarget };
+}>;
+export const ExitTrigger = Data.taggedEnum<ExitTrigger>();
+
+/** Who gets a keyboard event that the bodies of the mode leave unanswered. */
+export type KeyPolicy = Data.TaggedEnum<{
+  /** The handlers below the mode, and then the page. */
+  Shared: NoFields;
+  /**
+   * Nobody. The mode takes every keyboard event while it is live.
    *
    * For a modal overlay that owns the keyboard, and for the mode that holds
-   * keys while the application starts.
+   * keys while the hints are collected.
    */
-  readonly suppressAllKeyboardEvents?: boolean;
+  Owned: NoFields;
+}>;
+export const KeyPolicy = Data.taggedEnum<KeyPolicy>();
+
+export interface ModeOptions {
+  readonly name: string;
+  /** Text that the HUD shows while the mode is live. */
+  readonly indicator: Option.Option<string>;
+  /** The events that end the mode. */
+  readonly exitOn: ReadonlyArray<ExitTrigger>;
+  readonly keyboard: KeyPolicy;
   /** Only one mode per group may be live. A second one exits the first. */
-  readonly singleton?: string;
+  readonly singleton: Option.Option<string>;
 }
 
-/** A live mode. Hold it to exit the mode, or to learn that it exited. */
+/**
+ * A live mode. Hold it to exit the mode, or to learn that it exited.
+ *
+ * The mode owns a scope of its own, inside the scope that entered it. The exit
+ * closes that scope, and the close of the outer scope exits the mode. A mode
+ * that ends therefore leaves nothing behind in the scope of its caller.
+ */
 export interface ModeHandle {
   readonly name: string;
   readonly isActive: Effect.Effect<boolean>;
@@ -99,9 +133,6 @@ interface ModeState {
 }
 
 type ExitBody = (reason: ExitReason) => Effect.Effect<void>;
-
-/** A variant that carries no data. */
-type NoFields = Record.ReadonlyRecord<never, never>;
 
 /** The life of one mode. A mode that exited never comes back. */
 type Life = Data.TaggedEnum<{
@@ -185,7 +216,6 @@ const innermostIndicator = ({ active }: ModeState): ModeIndicator =>
   pipe(
     active,
     Array.findLast((mode) => mode.indicator),
-    Option.getOrNull,
   );
 
 export class Modes extends Context.Service<
@@ -195,7 +225,9 @@ export class Modes extends Context.Service<
      * Enter a mode. It stays until it exits, or until the scope closes.
      *
      * The scope makes teardown structural. A feature that opens a mode inside its
-     * own scope cannot leave the mode behind.
+     * own scope cannot leave the mode behind. A service that enters a mode again
+     * and again for as long as its layer lives gives the layer scope, and holds
+     * only the handle: each mode that ends takes its own scope with it.
      */
     readonly enter: <R>(
       options: ModeOptions,
@@ -217,9 +249,9 @@ export class Modes extends Context.Service<
     Effect.gen(function* () {
       const stack = yield* HandlerStack;
       const state = yield* Ref.make<ModeState>({ active: [], singletons: Record.empty() });
-      const indicator = yield* SubscriptionRef.make<ModeIndicator>(null);
+      const indicator = yield* SubscriptionRef.make<ModeIndicator>(Option.none());
 
-      /** Show the innermost indicator that is not `null`. */
+      /** Show the innermost indicator that a live mode gives. */
       const refreshIndicator = pipe(
         Ref.get(state),
         Effect.map(innermostIndicator),
@@ -231,8 +263,10 @@ export class Modes extends Context.Service<
         handlers?: Omit<Handler<R>, "name" | "onDefect">,
       ): Effect.Effect<ModeHandle, never, R | Scope.Scope> =>
         Effect.gen(function* () {
-          const group = Option.fromUndefinedOr(options.singleton);
+          const group = options.singleton;
           const life = yield* Ref.make<Life>(Life.Live({ handler: Option.none(), bodies: [] }));
+          const owner = yield* Scope.Scope;
+          const scope = yield* Scope.fork(owner);
 
           const close = Effect.fnUntraced(function* (
             handler: Option.Option<HandlerId>,
@@ -241,18 +275,25 @@ export class Modes extends Context.Service<
           ) {
             yield* pipe(handler, Option.match({ onNone: () => Effect.void, onSome: stack.remove }));
             yield* pipe(state, Ref.update(left(handle, group)));
+            // One body that fails must not keep the others from running.
             yield* pipe(
               bodies,
               Effect.forEach(
                 (body) =>
                   pipe(
                     body(reason),
-                    Effect.catchCause((cause) => Effect.logError("a mode exit body failed", cause)),
+                    recoverEvenIfInterrupted(
+                      `an exit body of the "${options.name}" mode`,
+                      Effect.void,
+                    ),
                   ),
                 { discard: true },
               ),
             );
             yield* refreshIndicator;
+            // The mode is gone, so its scope goes too, and the scope of the
+            // caller no longer holds it.
+            yield* Scope.close(scope, Exit.void);
           });
 
           const exit = (reason: ExitReason = "explicit"): Effect.Effect<void> =>
@@ -308,35 +349,43 @@ export class Modes extends Context.Service<
             <A extends Event>(body: (event: A) => Effect.Effect<Option.Option<HandlerResult>>) =>
               flow(body, Effect.map(Option.getOrElse(() => unanswered)));
 
-          const keyboard = pipe(
-            options.suppressAllKeyboardEvents === true,
-            Boolean.match({ onFalse: () => CONTINUE_BUBBLING, onTrue: () => SUPPRESS_EVENT }),
+          const keyEvent = pipe(
+            options.keyboard,
+            KeyPolicy.$match({ Shared: () => CONTINUE_BUBBLING, Owned: () => SUPPRESS_EVENT }),
             answered,
           );
           const other = answered(CONTINUE_BUBBLING);
 
-          /** An exit that a flag of the options asks for. */
-          const exitWhen = (flag: boolean | undefined, reason: ExitReason): Effect.Effect<void> =>
+          /** The exit for `reason`, when a trigger of the mode fires. */
+          const exitWhen = (
+            fires: (trigger: ExitTrigger) => boolean,
+            reason: ExitReason,
+          ): Effect.Effect<void> =>
             pipe(
-              flag === true,
+              options.exitOn,
+              Array.some(fires),
               Boolean.match({ onFalse: () => Effect.void, onTrue: () => exit(reason) }),
             );
 
-          const keydown = keyboard(provided(own.keydown));
+          const keydown = keyEvent(provided(own.keydown));
           const click = other(provided(own.click));
           const focus = other(provided(own.focus));
           const blur = other(provided(own.blur));
-          const escapeExits = options.exitOnEscape === true;
-          const clickExit = exitWhen(options.exitOnClick, "click");
-          const focusExit = exitWhen(options.exitOnFocus, "focus");
-          const blurTarget = Option.fromNullishOr(options.exitOnBlur);
+          const escapeExits = pipe(options.exitOn, Array.some(ExitTrigger.$is("Escape")));
+          const clickExit = exitWhen(ExitTrigger.$is("Click"), "click");
+          const focusExit = exitWhen(ExitTrigger.$is("Focus"), "focus");
+          const blurExit = (target: EventTarget | null): Effect.Effect<void> =>
+            exitWhen(
+              (trigger) => ExitTrigger.$is("Blur")(trigger) && trigger.target === target,
+              "blur",
+            );
 
           const id = yield* stack.push<never>({
             name: options.name,
             // The stack drops a frame whose body failed. Only the mode can
             // release the rest: the singleton group, the indicator and the
             // exit bodies that hold the overlay of a feature.
-            onDefect: () => exit("defect"),
+            onDefect: exit("defect"),
             keydown: (event) =>
               pipe(
                 escapeExits && isEscape(event),
@@ -348,30 +397,19 @@ export class Modes extends Context.Service<
                   onTrue: () => pipe(exit("escape"), Effect.as(SUPPRESS_EVENT)),
                 }),
               ),
-            keypress: keyboard(provided(own.keypress)),
-            keyup: keyboard(provided(own.keyup)),
+            keypress: keyEvent(provided(own.keypress)),
+            keyup: keyEvent(provided(own.keyup)),
             click: (event) => pipe(clickExit, Effect.andThen(click(event))),
             focus: (event) => pipe(focusExit, Effect.andThen(focus(event))),
-            blur: (event) =>
-              pipe(
-                blurTarget,
-                Option.filter((target) => event.target === target),
-                Option.match({ onNone: () => Effect.void, onSome: () => exit("blur") }),
-                Effect.andThen(blur(event)),
-              ),
+            blur: (event) => pipe(blurExit(event.target), Effect.andThen(blur(event))),
           });
 
           yield* pipe(life, Ref.update(attached(id)));
-          yield* pipe(
-            state,
-            Ref.update(
-              joined({ handle, indicator: Option.fromNullishOr(options.indicator) }, group),
-            ),
-          );
+          yield* pipe(state, Ref.update(joined({ handle, indicator: options.indicator }, group)));
           yield* refreshIndicator;
 
           // The scope owns the mode. Nothing has to remember to exit it.
-          yield* Effect.addFinalizer(() => exit("navigation"));
+          yield* Scope.addFinalizer(scope, exit("navigation"));
 
           return handle;
         });

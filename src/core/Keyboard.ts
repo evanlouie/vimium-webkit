@@ -20,7 +20,6 @@ import {
   Context,
   Data,
   Effect,
-  Exit,
   HashSet,
   Layer,
   Match,
@@ -59,7 +58,7 @@ import { Commands } from "./Commands.ts";
 import { Exclusions } from "./Exclusions.ts";
 import { CONTINUE_BUBBLING, type HandlerResult, SUPPRESS_EVENT } from "./HandlerStack.ts";
 import { Mappings } from "./Mappings.ts";
-import { isEscape, Modes } from "./Modes.ts";
+import { isEscape, KeyPolicy, type ModeHandle, Modes } from "./Modes.ts";
 import { Report } from "./Report.ts";
 import { Settings } from "./Settings.ts";
 
@@ -682,54 +681,64 @@ export class Keyboard extends Context.Service<
       /**
        * Normal mode follows the exclusion verdict.
        *
-       * The mode lives in its own child scope. Closing that scope removes the
-       * handler and every finalizer that the mode registered. Nothing has to
-       * remember what to undo.
+       * The mode belongs to the layer scope, and it owns a scope of its own
+       * inside that one. Its exit removes the handler and every finalizer that
+       * the mode registered. Nothing has to remember what to undo.
        */
-      const modeScope = yield* Ref.make(Option.none<Scope.Closeable>());
+      const layerScope = yield* Scope.Scope;
+      const normal = yield* Ref.make(Option.none<ModeHandle>());
 
       const exitNormal = pipe(
-        modeScope,
-        Ref.getAndSet(Option.none<Scope.Closeable>()),
+        normal,
+        Ref.getAndSet(Option.none<ModeHandle>()),
         Effect.flatMap(
           Option.match({
             onNone: () => Effect.void,
-            onSome: (scope) => Scope.close(scope, Exit.void),
+            onSome: (handle) => handle.exit("explicit"),
           }),
         ),
       );
 
       const openNormal = Effect.gen(function* () {
-        const scope = yield* Scope.make();
         yield* reset;
         const handle = yield* pipe(
           modes.enter(
-            { name: "normal" },
+            {
+              name: "normal",
+              indicator: Option.none(),
+              exitOn: [],
+              keyboard: KeyPolicy.Shared(),
+              singleton: Option.none(),
+            },
             {
               keydown: onKeydown,
               keyup: onKeyup,
               focus: onFocus,
             },
           ),
-          Scope.provide(scope),
+          Scope.provide(layerScope),
         );
-        yield* pipe(modeScope, Ref.set(Option.some(scope)));
-        // The scope must go when the mode goes. `Modes.exitAll` ends every live
-        // mode, and a soft navigation calls it, so normal mode can exit without
-        // this service. The scope would then stay, `enterNormal` would refuse
-        // to build the mode again, and the page would keep no key bindings at
-        // all after a `pushState`.
-        yield* handle.onExit(() => exitNormal);
+        yield* pipe(normal, Ref.set(Option.some(handle)));
       });
 
+      /**
+       * Build normal mode, unless it is live.
+       *
+       * The mode decides whether it is live, and not the handle that this
+       * service holds. `Modes.exitAll` ends every live mode, and a soft
+       * navigation calls it, so normal mode can exit without this service. A
+       * held handle would then refuse to build the mode again, and the page
+       * would keep no key bindings at all after a `pushState`.
+       */
       const enterNormal = pipe(
-        Ref.get(modeScope),
+        Ref.get(normal),
         Effect.flatMap(
           Option.match({
-            onNone: () => openNormal,
-            onSome: () => Effect.void,
+            onNone: () => Effect.succeed(false),
+            onSome: (handle) => handle.isActive,
           }),
         ),
+        Effect.flatMap(Boolean.match({ onFalse: () => openNormal, onTrue: () => Effect.void })),
       );
 
       const followExclusion: (rule: EffectiveRule) => Effect.Effect<void> = EffectiveRule.match({
@@ -749,8 +758,6 @@ export class Keyboard extends Context.Service<
         Stream.runForEach(followExclusion),
         Effect.forkScoped,
       );
-
-      yield* Effect.addFinalizer(() => exitNormal);
 
       return Keyboard.of({
         pending,
