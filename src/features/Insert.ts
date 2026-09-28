@@ -360,7 +360,10 @@ export class Insert extends Context.Service<
          * must cost us the shadow case only, and not the whole handler.
          */
         const focusedNode = (event: FocusEvent): Effect.Effect<EventTarget | null> =>
-          dom.probeOr(() => composedTarget(event), event.target);
+          dom.probeOrElse(
+            () => composedTarget(event),
+            () => event.target,
+          );
 
         const onFocus = Effect.fnUntraced(function* (event: FocusEvent) {
           const target = yield* focusedNode(event);
@@ -497,9 +500,9 @@ export class Insert extends Context.Service<
          * and there is no count, the hints choose, through the registry.
          */
         const focusInput = Effect.fn("Insert.focusInput")(function* (count: number) {
-          const inputs = yield* dom.probeOr(
+          const inputs = yield* dom.probeOrElse(
             () => focusableInputs(dom.window, dom.document),
-            Array.empty<HTMLElement>(),
+            Array.empty,
           );
           yield* pipe(
             inputs,

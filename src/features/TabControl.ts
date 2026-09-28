@@ -198,7 +198,10 @@ export class TabControl extends Context.Service<
       });
 
       const applyZoom = Effect.fn("TabControl.applyZoom")(function* (change: ZoomChange) {
-        const origin = yield* dom.probeOr(() => dom.window.location.origin, "");
+        const origin = yield* dom.probeOrElse(
+          () => dom.window.location.origin,
+          () => "",
+        );
         const session = yield* storage.session.current;
         const current = pipe(
           session.zoomByOrigin,

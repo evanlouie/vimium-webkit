@@ -43,6 +43,7 @@ import {
   flow,
   pipe,
 } from "effect";
+import { constFalse } from "effect/Function";
 import { Commands } from "~/core/Commands.ts";
 import { recoverUnlessInterrupted } from "~/core/Recovery.ts";
 import { Report } from "~/core/Report.ts";
@@ -644,9 +645,9 @@ export class Scroller extends Context.Service<
               onFalse: () => Effect.succeed(false),
               onTrue: () =>
                 pipe(
-                  dom.probeOr(
+                  dom.probeOrElse(
                     () => dom.window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-                    false,
+                    constFalse,
                   ),
                   Effect.map(Boolean.not),
                 ),
@@ -656,7 +657,7 @@ export class Scroller extends Context.Service<
 
         /** The element that must absorb the scroll. */
         const target = (axis: ScrollAxis, direction: Direction): Effect.Effect<Element> =>
-          dom.probeOr(
+          dom.probeOrElse(
             () =>
               findScrollableAncestor(
                 dom.window,
@@ -665,7 +666,7 @@ export class Scroller extends Context.Service<
                 axis,
                 direction,
               ),
-            rootElement(),
+            rootElement,
           );
 
         const cancel = (axis: ScrollAxis): Effect.Effect<void> =>

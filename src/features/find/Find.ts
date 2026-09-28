@@ -435,12 +435,12 @@ export class Find extends Context.Service<
 
       // -- the browser ---------------------------------------------------
 
-      const selection: Effect.Effect<Option.Option<Selection>> = dom.probeOr(
+      const selection: Effect.Effect<Option.Option<Selection>> = dom.probeOrElse(
         () => Option.fromNullishOr(win.getSelection()),
-        Option.none<Selection>(),
+        Option.none,
       );
 
-      /** Read the selection inside `dom.probeOr`. No selection gives `fallback`. */
+      /** Read the selection inside `dom.probeOrElse`. No selection gives `fallback`. */
       const probeSelection = <A>(
         read: (selection: Selection) => A,
         fallback: A,
@@ -450,22 +450,26 @@ export class Find extends Context.Service<
           Effect.flatMap(
             Option.match({
               onNone: () => Effect.succeed(fallback),
-              onSome: (target) => dom.probeOr(() => read(target), fallback),
+              onSome: (target) =>
+                dom.probeOrElse(
+                  () => read(target),
+                  () => fallback,
+                ),
             }),
           ),
         );
 
-      const readScroll: Effect.Effect<ScrollPosition> = dom.probeOr(
+      const readScroll: Effect.Effect<ScrollPosition> = dom.probeOrElse(
         () => ({ x: win.scrollX, y: win.scrollY }),
-        { x: 0, y: 0 },
+        () => ({ x: 0, y: 0 }),
       );
 
       // `instant`, because a restore is a jump. The smooth scrolling of Safari
       // cannot be cancelled, so it would fight the next command.
       const restoreScroll = (position: ScrollPosition): Effect.Effect<void> =>
-        dom.probeOr(
+        dom.probeOrElse(
           () => win.scrollTo({ left: position.x, top: position.y, behavior: "instant" }),
-          undefined,
+          constVoid,
         );
 
       // -- the highlight overlay -----------------------------------------
@@ -569,7 +573,7 @@ export class Find extends Context.Service<
        * Once for each session, and not once for each keystroke.
        */
       const refreshRuns = Effect.fn("Find.refreshRuns")(function* () {
-        const collected = yield* dom.probeOr<ReadonlyArray<TextRun>>(
+        const collected = yield* dom.probeOrElse<ReadonlyArray<TextRun>>(
           () =>
             collectTextRuns({
               view: win,
@@ -578,7 +582,7 @@ export class Find extends Context.Service<
               excludeHost: Option.some(ui.shadow.host),
               maxCharacters: DEFAULT_MAX_CHARACTERS,
             }),
-          [],
+          () => [],
         );
         yield* pipe(runs, Ref.set(collected));
       });
@@ -596,7 +600,10 @@ export class Find extends Context.Service<
               pipe(
                 Ref.get(runs),
                 Effect.flatMap((collected) =>
-                  dom.probeOr(() => matchesInRuns(doc, collected, pattern), NOTHING_FOUND),
+                  dom.probeOrElse(
+                    () => matchesInRuns(doc, collected, pattern),
+                    () => NOTHING_FOUND,
+                  ),
                 ),
               ),
           }),

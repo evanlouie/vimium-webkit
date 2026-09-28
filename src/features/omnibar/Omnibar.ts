@@ -760,7 +760,10 @@ export class Omnibar extends Context.Service<
 
       /** Refresh the signal of the tab at `href`. */
       const beat = Effect.fnUntraced(function* (href: string) {
-        const title = yield* dom.probeOr(() => dom.document.title, "");
+        const title = yield* dom.probeOrElse(
+          () => dom.document.title,
+          () => "",
+        );
         const now = yield* Clock.currentTimeMillis;
         yield* pipe(
           storage.session.update(

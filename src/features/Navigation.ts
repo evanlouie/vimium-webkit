@@ -276,9 +276,9 @@ export class Navigation extends Context.Service<
         const current = yield* settings.current;
         const { name, patterns } = REL_LINKS[rel];
         const texts = patterns(current).split(",");
-        const found = yield* dom.probeOr(
+        const found = yield* dom.probeOrElse(
           () => findRelLink(dom.document, rel, texts),
-          Option.none<HTMLAnchorElement>(),
+          Option.none,
         );
         yield* pipe(
           found,

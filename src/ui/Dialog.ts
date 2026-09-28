@@ -1312,7 +1312,7 @@ export class Dialog extends Context.Service<
         // drops the focus leaves the user at the top of the document.
         yield* pipe(
           Effect.acquireRelease(
-            dom.probeOr(() => Option.fromNullishOr(deepActiveElement(doc)), Option.none<Element>()),
+            dom.probeOrElse(() => Option.fromNullishOr(deepActiveElement(doc)), Option.none),
             focusAgain,
           ),
           Scope.provide(scope),

@@ -37,7 +37,7 @@ import {
   pipe,
   String,
 } from "effect";
-import { flow } from "effect/Function";
+import { constFalse, constTrue, flow } from "effect/Function";
 import { Settings } from "~/core/Settings.ts";
 import type { HistoryIndex as HistoryIndexData, Visit } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -229,7 +229,7 @@ type StorageEstimator = () => Promise<StorageEstimate>;
 /**
  * Read `navigator.storage.estimate`.
  *
- * A userscript does not own its globals, so call this inside `Dom.probeOr`.
+ * A userscript does not own its globals, so call this inside `Dom.probeOrElse`.
  */
 const storageEstimator = (window: Window & typeof globalThis): Option.Option<StorageEstimator> =>
   pipe(
@@ -295,10 +295,10 @@ const quotaPrivacy = (estimator: StorageEstimator): Effect.Effect<PrivacyProbe> 
 export const detectPrivateBrowsing: Effect.Effect<PrivacyProbe, never, Dom> = Effect.gen(
   function* () {
     const dom = yield* Dom;
-    const writable = yield* dom.probeOr(writeProbe(dom.window), false);
+    const writable = yield* dom.probeOrElse(writeProbe(dom.window), constFalse);
     // Without an estimate API we have no opinion, which is `clear`.
     const byQuota = pipe(
-      dom.probeOr(() => storageEstimator(dom.window), Option.none<StorageEstimator>()),
+      dom.probeOrElse(() => storageEstimator(dom.window), Option.none),
       Effect.flatMap(
         Option.match({ onNone: () => Effect.succeed<PrivacyProbe>("clear"), onSome: quotaPrivacy }),
       ),
@@ -405,7 +405,7 @@ export const makeHistoryIndex: Effect.Effect<
     yield* pipe(
       // A document that refuses the read is not recorded. The safe answer to
       // "we could not tell" is "do not record".
-      dom.probeOr(() => hasNoIndexDirective(dom.document), true),
+      dom.probeOrElse(() => hasNoIndexDirective(dom.document), constTrue),
       Effect.filterOrFail(
         (noindex) => !noindex,
         (): RecordingBlock => "noindex",
@@ -426,9 +426,9 @@ export const makeHistoryIndex: Effect.Effect<
   const record = Effect.fn("HistoryIndex.record")(
     function* () {
       const { url, limit } = yield* recordable();
-      const title = yield* dom.probeOr(
+      const title = yield* dom.probeOrElse(
         () => dom.document.title.trim().slice(0, MAX_TITLE_LENGTH),
-        "",
+        () => "",
       );
       const at = yield* Clock.currentTimeMillis;
       // The limit is applied here, on the write, and never on a timer.

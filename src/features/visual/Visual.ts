@@ -39,7 +39,7 @@ import {
   flow,
   pipe,
 } from "effect";
-import { constVoid } from "effect/Function";
+import { constTrue, constVoid } from "effect/Function";
 import { Commands } from "~/core/Commands.ts";
 import { type HandlerResult, SUPPRESS_EVENT } from "~/core/HandlerStack.ts";
 import { type ExitReason, ExitTrigger, KeyPolicy, type ModeHandle, Modes } from "~/core/Modes.ts";
@@ -331,12 +331,12 @@ export class Visual extends Context.Service<
       /** The count prefix, and whether a `g` is pending. */
       const typed = yield* Ref.make(NOTHING_TYPED);
 
-      const selection: Effect.Effect<Option.Option<Selection>> = dom.probeOr(
+      const selection: Effect.Effect<Option.Option<Selection>> = dom.probeOrElse(
         () => Option.fromNullishOr(win.getSelection()),
-        Option.none<Selection>(),
+        Option.none,
       );
 
-      /** Read or change the selection inside `dom.probeOr`. No selection gives `fallback`. */
+      /** Read or change the selection inside `dom.probeOrElse`. No selection gives `fallback`. */
       const probeSelection = <A>(
         read: (selection: Selection) => A,
         fallback: A,
@@ -346,7 +346,11 @@ export class Visual extends Context.Service<
           Effect.flatMap(
             Option.match({
               onNone: () => Effect.succeed(fallback),
-              onSome: (target) => dom.probeOr(() => read(target), fallback),
+              onSome: (target) =>
+                dom.probeOrElse(
+                  () => read(target),
+                  () => fallback,
+                ),
             }),
           ),
         );
@@ -509,7 +513,7 @@ export class Visual extends Context.Service<
       /** Put a caret at the start of the first large text of the page. */
       const placeCaret = (current: Selection): Effect.Effect<void, VisualStartError> =>
         pipe(
-          dom.probeOr(() => findCaretAnchor(doc), Option.none<Text>()),
+          dom.probeOrElse(() => findCaretAnchor(doc), Option.none),
           Effect.flatMap(Effect.fromOption(() => new VisualStartError({ reason: "no-text" }))),
           Effect.flatMap((anchor) =>
             pipe(
@@ -528,7 +532,7 @@ export class Visual extends Context.Service<
        */
       const adoptOrPlace = (current: Selection): Effect.Effect<Selection, VisualStartError> =>
         pipe(
-          dom.probeOr(() => current.rangeCount === 0 || current.anchorNode === null, true),
+          dom.probeOrElse(() => current.rangeCount === 0 || current.anchorNode === null, constTrue),
           Effect.flatMap(
             Boolean.match({
               onFalse: () => Effect.void,
@@ -554,10 +558,10 @@ export class Visual extends Context.Service<
         function* (kind: VisualKind) {
           const current = yield* pipe(modifiableSelection, Effect.flatMap(adoptOrPlace));
           const viewport = yield* ui.viewport;
-          yield* dom.probeOr(() => {
+          yield* dom.probeOrElse(() => {
             profileOf(kind).shape(current, capabilities);
             scrollSelectionIntoView(current, viewport);
-          }, undefined);
+          }, constVoid);
         },
         Effect.catchTag("VisualStartError", (error) =>
           pipe(explainRefusal(error), Effect.andThen(exitCurrent())),

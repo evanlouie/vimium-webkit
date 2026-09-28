@@ -72,7 +72,7 @@ import {
   String,
   Struct,
 } from "effect";
-import { constVoid } from "effect/Function";
+import { constFalse, constVoid } from "effect/Function";
 import { Commands } from "~/core/Commands.ts";
 import { type HandlerResult, SUPPRESS_EVENT } from "~/core/HandlerStack.ts";
 import { type ExitReason, ExitTrigger, KeyPolicy, type ModeHandle, Modes } from "~/core/Modes.ts";
@@ -1642,7 +1642,10 @@ export class Hints extends Context.Service<
       /** The events of a pointer at the centre of `element`. */
       const eventInitAt = (element: Element): Effect.Effect<MouseEventInit> =>
         pipe(
-          dom.probeOr(() => centreOf(element), { x: 0, y: 0 }),
+          dom.probeOrElse(
+            () => centreOf(element),
+            () => ({ x: 0, y: 0 }),
+          ),
           Effect.map(({ x, y }) => eventInit(x, y)),
         );
 
@@ -1656,10 +1659,7 @@ export class Hints extends Context.Service<
       const remeasure: Effect.Effect<void> = Effect.gen(function* () {
         const hints = yield* Ref.get(localRef);
         const anchors = yield* Ref.get(anchorsRef);
-        const next = yield* dom.probeOr(
-          () => measurePlacements(hints, anchors),
-          Array.empty<Placement>(),
-        );
+        const next = yield* dom.probeOrElse(() => measurePlacements(hints, anchors), Array.empty);
         yield* pipe(placementsRef, Ref.set(next));
       });
 
@@ -1686,9 +1686,9 @@ export class Hints extends Context.Service<
             Option.match({
               onNone: () => Effect.succeed(false),
               onSome: ({ anchor, shift }) =>
-                dom.probeOr(
+                dom.probeOrElse(
                   () => targetStillMatches(dom.document, host, hint, anchor, shift),
-                  false,
+                  constFalse,
                 ),
             }),
           );
@@ -1973,9 +1973,9 @@ export class Hints extends Context.Service<
         // The anchors of this pass. They are measured now, and not from the
         // rects of the detection, because a hint rect is cropped to the visible
         // region and an `<area>` takes its geometry from its image.
-        const anchors: readonly HintRect[] = yield* dom.probeOr(
+        const anchors: readonly HintRect[] = yield* dom.probeOrElse(
           () => pipe(result.hints, Array.map(flow(targetOf, rectOf))),
-          Array.empty<HintRect>(),
+          Array.empty,
         );
         yield* pipe(anchorsRef, Ref.set(anchors));
         yield* pipe(placementsRef, Ref.set(NO_PLACEMENTS));

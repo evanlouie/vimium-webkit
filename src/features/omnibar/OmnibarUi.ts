@@ -19,7 +19,7 @@
  */
 
 import { Array, Boolean, Effect, FiberHandle, Option, Ref, type Scope, pipe, String } from "effect";
-import { constVoid } from "effect/Function";
+import { constNull, constVoid } from "effect/Function";
 import { Dom } from "~/platform/Dom.ts";
 import { deepActiveElement } from "~/platform/Elements.ts";
 import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
@@ -288,17 +288,17 @@ export const makeOmnibarView: (
   // Taken before the field takes the focus, and given back when the scope
   // closes. To close the omnibar must not steal the focus of the page.
   yield* Effect.acquireRelease(
-    dom.probeOr(() => Option.fromNullishOr(deepActiveElement(doc)), Option.none<Element>()),
+    dom.probeOrElse(() => Option.fromNullishOr(deepActiveElement(doc)), Option.none),
     (previous) =>
       pipe(
-        dom.probeOr(
+        dom.probeOrElse(
           () =>
             pipe(
               previous,
               Option.filter((element) => element instanceof HTMLElement),
               Option.filter((element) => element.isConnected),
             ),
-          Option.none<HTMLElement>(),
+          Option.none,
         ),
         Effect.flatMap(
           Option.match({
@@ -481,9 +481,9 @@ export const makeOmnibarView: (
 
   yield* dom.listen("window", "resize", () => reposition, { passive: true });
 
-  const visualViewport = yield* dom.probeOr(
+  const visualViewport = yield* dom.probeOrElse(
     () => Option.fromNullishOr(dom.window.visualViewport),
-    Option.none<VisualViewport>(),
+    Option.none,
   );
   yield* pipe(
     visualViewport,
@@ -553,7 +553,7 @@ export const makeOmnibarView: (
   // dismissal. The check waits one task, in a fiber of this scope.
   const blurFiber = yield* FiberHandle.make<void, never>();
   const focusLeft = pipe(
-    dom.probeOr(() => ui.shadow.activeElement, null),
+    dom.probeOrElse(() => ui.shadow.activeElement, constNull),
     Effect.map((active) => active !== parts.input),
   );
   const dismissIfFocusLeft = pipe(options.onDismiss, Effect.when(focusLeft), Effect.asVoid);

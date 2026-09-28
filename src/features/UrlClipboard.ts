@@ -106,7 +106,10 @@ export class UrlClipboard extends Context.Service<
 
         copyCurrentTitle: () =>
           pipe(
-            dom.probeOr(() => dom.document.title, ""),
+            dom.probeOrElse(
+              () => dom.document.title,
+              () => "",
+            ),
             Effect.flatMap((title) => copy(title, "title")),
           ),
 
