@@ -11,7 +11,7 @@
  * and the letter must not scroll the page.
  */
 
-import { Deferred, Effect, Option } from "effect";
+import { Deferred, Effect, Option, flow, pipe } from "effect";
 import { SUPPRESS_EVENT } from "~/core/HandlerStack.ts";
 import { Modes } from "~/core/Modes.ts";
 import { isComposing, isModifierKey, keyNotation } from "~/domain/Key.ts";
@@ -29,49 +29,60 @@ export interface CaptureKeyOptions {
 }
 
 /**
+ * The notation of a keystroke that completes a character.
+ *
+ * A dead key or an input method is in the middle of a character, and a
+ * modifier alone is no character. Neither answers, so the mode stays armed and
+ * waits for the result.
+ */
+const typedNotation = (
+  ignoreKeyboardLayout: boolean,
+): ((event: KeyboardEvent) => Option.Option<string>) =>
+  flow(
+    Option.liftPredicate((event: KeyboardEvent) => !isComposing(event) && !isModifierKey(event)),
+    Option.flatMap((event) => keyNotation(event, ignoreKeyboardLayout)),
+  );
+
+/**
  * Wait for one keystroke, and give its notation.
  *
  * `None` means that the user left the mode instead: Escape, a click, or a
  * navigation that exited every mode.
  */
-export const captureNextKey = (
+export const captureNextKey: (
   options: CaptureKeyOptions,
-): Effect.Effect<Option.Option<string>, never, Modes> =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const modes = yield* Modes;
-      const answer = yield* Deferred.make<Option.Option<string>>();
+) => Effect.Effect<Option.Option<string>, never, Modes> = Effect.fnUntraced(function* (
+  options: CaptureKeyOptions,
+) {
+  const modes = yield* Modes;
+  const answer = yield* Deferred.make<Option.Option<string>>();
 
-      const handle = yield* modes.enter(
-        {
-          name: "capture-next-key",
-          indicator: options.prompt,
-          exitOnEscape: true,
-          suppressAllKeyboardEvents: true,
-          singleton: "capture-next-key",
-        },
-        {
-          keydown: (event) =>
-            Effect.gen(function* () {
-              // A dead key or an input method is in the middle of a character.
-              // Stay armed and wait for the result.
-              if (isComposing(event) || isModifierKey(event)) {
-                return SUPPRESS_EVENT;
-              }
-              const notation = keyNotation(event, options.ignoreKeyboardLayout ?? false);
-              if (Option.isNone(notation)) return SUPPRESS_EVENT;
-              yield* Deferred.succeed(answer, notation);
-              return SUPPRESS_EVENT;
-            }),
-        },
-      );
-
-      // The mode can also end without a key. The caller must never wait for a
-      // keystroke that can no longer arrive.
-      yield* handle.onExit(() => Effect.asVoid(Deferred.succeed(answer, Option.none())));
-
-      const notation = yield* Deferred.await(answer);
-      yield* handle.exit("explicit");
-      return notation;
-    }),
+  const handle = yield* modes.enter(
+    {
+      name: "capture-next-key",
+      indicator: options.prompt,
+      exitOnEscape: true,
+      suppressAllKeyboardEvents: true,
+      singleton: "capture-next-key",
+    },
+    {
+      keydown: flow(
+        typedNotation(options.ignoreKeyboardLayout ?? false),
+        Option.match({
+          onNone: () => Effect.void,
+          onSome: (notation) =>
+            pipe(answer, Deferred.succeed(Option.some(notation)), Effect.asVoid),
+        }),
+        Effect.as(SUPPRESS_EVENT),
+      ),
+    },
   );
+
+  // The mode can also end without a key. The caller must never wait for a
+  // keystroke that can no longer arrive.
+  yield* handle.onExit(() => pipe(answer, Deferred.succeed(Option.none<string>()), Effect.asVoid));
+
+  const notation = yield* Deferred.await(answer);
+  yield* handle.exit("explicit");
+  return notation;
+}, Effect.scoped);
