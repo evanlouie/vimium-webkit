@@ -45,11 +45,10 @@ import { Exclusions } from "~/core/Exclusions.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { Dom } from "~/platform/Dom.ts";
-import type { FrameId } from "~/platform/Realm.ts";
+import { type FrameId, FrameRole } from "~/platform/Realm.ts";
 import {
   FrameBus,
   type FrameError,
-  FrameRole,
   type InboundMessage,
   REQUEST_DEADLINE,
   toFrame,
@@ -167,8 +166,8 @@ export class FrameLink extends Context.Service<
       const pushSettings: Effect.Effect<void> = pipe(
         bus.role,
         FrameRole.$match({
-          Coordinator: () => broadcastVerdict,
-          Member: () => Effect.void,
+          Top: () => broadcastVerdict,
+          Child: () => Effect.void,
         }),
       );
 
@@ -180,8 +179,8 @@ export class FrameLink extends Context.Service<
       const effectiveExclusion: Effect.Effect<EffectiveRule, FrameError> = pipe(
         bus.role,
         FrameRole.$match({
-          Coordinator: () => topVerdict,
-          Member: () => askTop,
+          Top: () => topVerdict,
+          Child: () => askTop,
         }),
       );
 
@@ -289,8 +288,8 @@ export class FrameLink extends Context.Service<
       yield* pipe(
         bus.role,
         FrameRole.$match({
-          Coordinator: () => serveAsCoordinator,
-          Member: () => serveAsMember,
+          Top: () => serveAsCoordinator,
+          Child: () => serveAsMember,
         }),
       );
 

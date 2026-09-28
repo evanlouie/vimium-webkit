@@ -20,7 +20,7 @@ import {
 } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
-import { Realm } from "~/platform/Realm.ts";
+import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
 
 /** A backend that already holds the settings that a test needs. */
@@ -70,22 +70,17 @@ const domAt = (url: string): Layer.Layer<Dom> =>
     Layer.provide(Dom.layer),
   );
 
-/** The real `Realm`, told whether this frame is the top frame. */
-const realmAs = (isTop: boolean): Layer.Layer<Realm, never, Dom> =>
-  pipe(
-    Realm,
-    Effect.map(Struct.assign({ isTop })),
-    Layer.effect(Realm),
-    Layer.provide(Realm.layer),
-  );
+/** The real `Realm`, told whether this frame is the top frame or a child. */
+const realmAs = (role: FrameRole): Layer.Layer<Realm, never, Dom> =>
+  pipe(Realm, Effect.map(Struct.assign({ role })), Layer.effect(Realm), Layer.provide(Realm.layer));
 
 const layerFor = (options: {
   readonly url: string;
-  readonly isTop: boolean;
+  readonly role: FrameRole;
   readonly rules: readonly ExclusionRule[];
 }): Layer.Layer<Exclusions | Settings | Storage> => {
   const dom = domAt(options.url);
-  const realm = pipe(realmAs(options.isTop), Layer.provide(dom));
+  const realm = pipe(realmAs(options.role), Layer.provide(dom));
   const storage = pipe(Storage.layer, Layer.provide(storedSettings(options.rules)));
   const settings = pipe(Settings.layer, Layer.provide(storage));
   return pipe(Exclusions.layer, Layer.provideMerge(Layer.mergeAll(dom, realm, settings, storage)));
@@ -123,7 +118,7 @@ describe("Exclusions", () => {
       Effect.provide(
         layerFor({
           url: "https://excluded.test/inbox",
-          isTop: true,
+          role: FrameRole.Top(),
           rules: EXCLUDED,
         }),
       ),
@@ -149,7 +144,7 @@ describe("Exclusions", () => {
       Effect.provide(
         layerFor({
           url: "https://other.test/",
-          isTop: true,
+          role: FrameRole.Top(),
           rules: EXCLUDED,
         }),
       ),
@@ -181,7 +176,7 @@ describe("Exclusions", () => {
         layerFor({
           // The URL of the child frame is excluded, and it must be ignored.
           url: "https://excluded.test/advert",
-          isTop: false,
+          role: FrameRole.Child(),
           rules: EXCLUDED,
         }),
       ),

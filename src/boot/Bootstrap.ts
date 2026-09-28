@@ -25,10 +25,11 @@ import { Keyboard } from "~/core/Keyboard.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
-import { FrameBus, FrameRole } from "~/frames/Bus.ts";
+import { FrameBus } from "~/frames/Bus.ts";
 import { FrameLink } from "~/frames/Link.ts";
 import { Capabilities, degradationWarnings } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
+import { FrameRole } from "~/platform/Realm.ts";
 import { Storage, type StorageError } from "~/platform/Storage.ts";
 import { Insert } from "~/features/Insert.ts";
 import { Omnibar } from "~/features/omnibar/Omnibar.ts";
@@ -232,8 +233,8 @@ export const BootstrapLayer: Layer.Layer<
       pipe(
         bus.role,
         FrameRole.$match({
-          Coordinator: () => work,
-          Member: () => Effect.void,
+          Top: () => work,
+          Child: () => Effect.void,
         }),
       );
 

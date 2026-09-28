@@ -33,7 +33,7 @@ import {
 } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 import { isEditable } from "~/platform/Elements.ts";
-import { Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
+import { FrameRole, Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
 
 /**
  * The guard property.
@@ -278,16 +278,16 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
     // immediate. A child frame waits for a key of its own, or for the wake that
     // a cross-frame function sends.
     yield* pipe(
-      realm.isTop,
-      Boolean.match({
-        onTrue: () =>
+      realm.role,
+      FrameRole.$match({
+        Top: () =>
           pipe(
             activate("idle"),
             Effect.delay(`${IDLE_START_MS} millis`),
             Effect.forkScoped,
             Effect.asVoid,
           ),
-        onFalse: () => Effect.void,
+        Child: () => Effect.void,
       }),
     );
 

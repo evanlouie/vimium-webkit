@@ -99,7 +99,7 @@ import { FrameBus, type InboundMessage, REQUEST_DEADLINE, toFrame, toTop } from 
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
-import type { FrameId } from "~/platform/Realm.ts";
+import { type FrameId, FrameRole } from "~/platform/Realm.ts";
 import { Tabs } from "~/platform/Tabs.ts";
 import { Hud } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
@@ -2850,14 +2850,14 @@ export class Hints extends Context.Service<
       // The top frame is the broker of the round. A child frame asks it, and
       // it fans the request out to every frame.
       yield* pipe(
-        bus.isTop,
-        Boolean.match({
-          onFalse: () => Effect.void,
-          onTrue: () =>
+        bus.role,
+        FrameRole.$match({
+          Top: () =>
             bus.serve(
               "REQUEST_HINTS",
               answering((message) => message.kind === "REQUEST_HINTS", answerRequestHints),
             ),
+          Child: () => Effect.void,
         }),
       );
       yield* bus.serve(

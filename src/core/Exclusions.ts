@@ -34,7 +34,7 @@ import {
   MAX_REGEX_URL_LENGTH,
 } from "~/domain/Exclusion.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { Realm } from "~/platform/Realm.ts";
+import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { Settings } from "./Settings.ts";
 
 export type { EffectiveRule };
@@ -173,10 +173,10 @@ export class Exclusions extends Context.Service<
       );
 
       yield* pipe(
-        realm.isTop,
-        Boolean.match({
-          onTrue: () => followRules,
-          onFalse: () => Effect.void,
+        realm.role,
+        FrameRole.$match({
+          Top: () => followRules,
+          Child: () => Effect.void,
         }),
       );
 
