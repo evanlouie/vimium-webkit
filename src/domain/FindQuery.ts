@@ -14,7 +14,17 @@
  * `error`, and the HUD shows it while the user still types.
  */
 
-import { Option, pipe } from "effect";
+import {
+  Array,
+  Boolean,
+  flow,
+  Match,
+  Option,
+  pipe,
+  Predicate,
+  Result,
+  String as Str,
+} from "effect";
 import { regexSafetyError } from "~/domain/RegexSafety.ts";
 
 // ---------------------------------------------------------------------------
@@ -38,7 +48,7 @@ export interface ParsedFindQuery {
   /** True when smartcase gave `ignoreCase`, and the user did not state it. */
   readonly smartcase: boolean;
   readonly isEmpty: boolean;
-  /** The `RegExp` source of this query. It is `""` when the query is empty or bad. */
+  /** The `RegExp` source of this query. It is `""` when the query is empty. */
   readonly source: string;
   readonly flags: string;
   /** A `Some` when the pattern is not a regular expression that compiles. */
@@ -49,6 +59,9 @@ export interface ParsedFindQuery {
 // Case analysis
 // ---------------------------------------------------------------------------
 
+/** The characters of `text`, one code point each. */
+const charactersOf = (text: string): ReadonlyArray<string> => Array.fromIterable(text);
+
 /**
  * Does `text` hold a character in upper case that has a different lower case?
  *
@@ -56,16 +69,23 @@ export interface ParsedFindQuery {
  * not Latin, and says nothing. The general form costs one pass, and it is
  * correct for Greek, for Cyrillic and for the Latin supplement.
  */
-export const hasUpperCase = (text: string): boolean => {
-  for (const char of text) {
-    if (char !== char.toLowerCase() && char === char.toUpperCase()) return true;
-  }
-  return false;
-};
+export const hasUpperCase: (text: string) => boolean = flow(
+  charactersOf,
+  Array.some((char) => char !== char.toLowerCase() && char === char.toUpperCase()),
+);
+
+/** The flag letter that case-insensitive matching adds. */
+const caseFlag: (ignoreCase: boolean) => string = Boolean.match({
+  onFalse: () => "",
+  onTrue: () => "i",
+});
 
 // ---------------------------------------------------------------------------
 // Escaping
 // ---------------------------------------------------------------------------
+
+/** The characters that mean something in a regular expression. */
+const METACHARACTERS = /[.*+?^${}()|[\]\\]/g;
 
 /**
  * Escape `text` for literal use inside a regular expression.
@@ -74,7 +94,7 @@ export const hasUpperCase = (text: string): boolean => {
  * and this module never sets `u`, so that a pattern with a single escape such
  * as `\d` behaves as a user of Vim expects.
  */
-export const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+export const escapeRegExp: (text: string) => string = Str.replace(METACHARACTERS, "\\$&");
 
 /** The engine changes each whitespace character in the page to U+0020. */
 const WHITESPACE_RUN = /\s+/;
@@ -88,8 +108,11 @@ const WHITESPACE_RUN = /\s+/;
  * string*, because an offset must still point at a position in the DOM. Runs of
  * spaces stay, which is why the pattern uses ` +` and not one space.
  */
-export const literalSource = (pattern: string): string =>
-  pattern.split(WHITESPACE_RUN).map(escapeRegExp).join(" +");
+export const literalSource: (pattern: string) => string = flow(
+  Str.split(WHITESPACE_RUN),
+  Array.map(escapeRegExp),
+  Array.join(" +"),
+);
 
 // ---------------------------------------------------------------------------
 // `/regex/` literals
@@ -103,6 +126,36 @@ export interface RegexLiteral {
   readonly flags: string;
 }
 
+/** Does an odd number of backslashes come before the character at `index`? */
+const isEscaped = (text: string, index: number): boolean =>
+  pipe(
+    text.slice(0, index),
+    charactersOf,
+    Array.reverse,
+    Array.takeWhile((char) => char === "\\"),
+    Array.length,
+    (slashes) => slashes % 2 === 1,
+  );
+
+/** The last `/` of `text` that is not escaped, after the first character. */
+const closingDelimiter = (text: string): Option.Option<number> =>
+  pipe(
+    Array.range(1, text.length - 1),
+    Array.findLast((index) => text.charAt(index) === "/" && !isEscaped(text, index)),
+  );
+
+/** Allowed flag letters, each at most once. `new RegExp` would throw on a repeated flag. */
+const areLiteralFlags = (flags: string): boolean =>
+  pipe(
+    flags,
+    charactersOf,
+    (letters) =>
+      pipe(
+        letters,
+        Array.every((flag) => ALLOWED_LITERAL_FLAGS.includes(flag)),
+      ) && pipe(letters, Array.dedupe, Array.length) === flags.length,
+  );
+
 /**
  * Split `/pattern/flags`.
  *
@@ -111,34 +164,14 @@ export interface RegexLiteral {
  * be an allowed flag letter. A plain search for `and/or` is therefore still a
  * literal search, and not an empty regular expression with a false flag.
  */
-export const splitRegexLiteral = (text: string): Option.Option<RegexLiteral> => {
-  if (text.length < 2 || !text.startsWith("/")) return Option.none();
-
-  let closing = -1;
-  for (let index = text.length - 1; index >= 1; index--) {
-    if (text[index] !== "/") continue;
-    if (isEscaped(text, index)) continue;
-    closing = index;
-    break;
-  }
-  if (closing <= 0) return Option.none();
-
-  const flags = text.slice(closing + 1);
-  for (const flag of flags) {
-    if (!ALLOWED_LITERAL_FLAGS.includes(flag)) return Option.none();
-  }
-  // Refuse a repeated flag here. `new RegExp` would throw on it.
-  if (new Set(flags).size !== flags.length) return Option.none();
-
-  return Option.some({ body: text.slice(1, closing), flags });
-};
-
-/** Does an odd number of backslashes come before the character at `index`? */
-const isEscaped = (text: string, index: number): boolean => {
-  let slashes = 0;
-  for (let i = index - 1; i >= 0 && text[i] === "\\"; i--) slashes++;
-  return slashes % 2 === 1;
-};
+export const splitRegexLiteral = (text: string): Option.Option<RegexLiteral> =>
+  pipe(
+    text,
+    Option.liftPredicate((candidate) => candidate.length >= 2 && candidate.startsWith("/")),
+    Option.flatMap(closingDelimiter),
+    Option.map((closing) => ({ body: text.slice(1, closing), flags: text.slice(closing + 1) })),
+    Option.filter(({ flags }) => areLiteralFlags(flags)),
+  );
 
 // ---------------------------------------------------------------------------
 // The inline directives of Vimium
@@ -150,47 +183,55 @@ export interface Directives {
   readonly ignoreCase: Option.Option<boolean>;
 }
 
+/** `\r`, `\R`, `\i` and `\I`, and the same four with a doubled backslash. */
+const DIRECTIVE = /(\\{1,2})([rRiI])/g;
+
+/** The text of one group of a match, or `""` when it matched nothing. */
+const groupText = (match: RegExpMatchArray, group: number): string =>
+  pipe(
+    match,
+    Array.get(group),
+    Option.flatMap(Option.fromNullishOr),
+    Option.getOrElse(() => ""),
+  );
+
+/** What the last of the letters `on` and `off` sets, when one of them is there. */
+const lastSetting = (
+  letters: ReadonlyArray<string>,
+  on: string,
+  off: string,
+): Option.Option<boolean> =>
+  pipe(
+    letters,
+    Array.findLast((letter) => letter === on || letter === off),
+    Option.map((letter) => letter === on),
+  );
+
 /**
  * Remove the `\r`, `\R`, `\i` and `\I` directives of Vimium.
  *
  * `\r` selects regex mode, `\R` selects literal mode, `\i` selects
  * case-insensitive and `\I` selects case-sensitive. They are kept, so the
- * habits of an upstream user still work.
+ * habits of an upstream user still work. When one query holds two directives
+ * of one kind, the last one wins.
  *
  * One difference on purpose: upstream keeps a doubled `\\r` in the query as it
  * is, so a literal search for `\r` is not possible. Here `\\r` becomes `\r`,
  * which is the meaning of "escape the escape character".
  */
 export const stripDirectives = (text: string): Directives => {
-  let isRegex: boolean | null = null;
-  let ignoreCase: boolean | null = null;
-
-  const stripped = text.replace(
-    /(\\{1,2})([rRiI])/g,
-    (_match: string, slashes: string, flag: string) => {
-      if (slashes.length === 2) return `\\${flag}`;
-      switch (flag) {
-        case "r":
-          isRegex = true;
-          break;
-        case "R":
-          isRegex = false;
-          break;
-        case "i":
-          ignoreCase = true;
-          break;
-        default:
-          ignoreCase = false;
-          break;
-      }
-      return "";
-    },
+  const letters = pipe(
+    text.matchAll(DIRECTIVE),
+    Array.fromIterable,
+    Array.filter((match) => groupText(match, 1).length === 1),
+    Array.map((match) => groupText(match, 2)),
   );
-
   return {
-    text: stripped,
-    isRegex: Option.fromNullishOr(isRegex),
-    ignoreCase: Option.fromNullishOr(ignoreCase),
+    text: text.replace(DIRECTIVE, (_match: string, slashes: string, letter: string) =>
+      pipe(slashes.length === 2, Boolean.match({ onFalse: () => "", onTrue: () => `\\${letter}` })),
+    ),
+    isRegex: lastSetting(letters, "r", "R"),
+    ignoreCase: lastSetting(letters, "i", "I"),
   };
 };
 
@@ -200,107 +241,123 @@ export const stripDirectives = (text: string): Directives => {
 
 const BASE_FLAGS = "g";
 
+/** The longest pattern from the user that we compile. */
+const MAX_PATTERN_LENGTH = 512;
+
+/** The `RegExp` source that a pattern of this kind gives. */
+const sourceOf = (kind: FindQueryKind, pattern: string): string =>
+  pipe(
+    Match.value(kind),
+    Match.when("regex", () => pattern),
+    Match.when("literal", () => literalSource(pattern)),
+    Match.exhaustive,
+  );
+
+/** The message of what `new RegExp` threw. */
+const failureMessage = (cause: unknown): string =>
+  pipe(
+    cause,
+    Option.liftPredicate(Predicate.hasProperty("message")),
+    Option.map(({ message }) => message),
+    Option.filter(Predicate.isString),
+    Option.getOrElse(() => String(cause)),
+  );
+
+/** A new `RegExp`, or the message of the syntax error. */
+const compile = (source: string, flags: string): Result.Result<RegExp, string> =>
+  Result.try({ try: () => new RegExp(source, flags), catch: failureMessage });
+
+/** A `None` when `source` and `flags` compile *and* are safe to run. */
+const compileError = (source: string, flags: string): Option.Option<string> =>
+  pipe(
+    source,
+    Option.liftPredicate((text) => text.length > MAX_PATTERN_LENGTH),
+    Option.map(() => `pattern is longer than ${MAX_PATTERN_LENGTH} characters`),
+    Option.orElse(() => pipe(compile(source, flags), Result.getFailure)),
+    // The safety check reads the text of the pattern, and never runs it. A
+    // measurement cannot protect the page here, because the measurement cannot
+    // end before the match ends: `(a|a|a|a)*$` takes minutes against twenty
+    // characters, and nothing in JavaScript can stop an `exec` that is already
+    // inside such a pattern. Find mode owns the keyboard, so the tab stops
+    // answering.
+    //
+    // The check refuses only the shapes that it can prove ambiguous. It does
+    // not promise a linear match, so `~/features/find/Engine.ts` reads the page
+    // text in measured windows and stops at a deadline. That budget is the
+    // second limit on the same pattern.
+    Option.orElse(() =>
+      pipe(
+        regexSafetyError(source, flags),
+        Option.map((reason) => `${reason}; try a simpler one`),
+      ),
+    ),
+  );
+
 /**
  * Parse a raw find query into everything that the engine needs.
  *
  * This function never fails. A pattern that does not compile comes back with
- * `error` set to a `Some`.
+ * `error` set to a `Some`. An empty query has no error.
  */
 export const parseFindQuery = (raw: string, options: FindQueryOptions): ParsedFindQuery => {
   const literal = splitRegexLiteral(raw);
-
-  const directives: Directives = Option.isNone(literal)
-    ? stripDirectives(raw)
-    : {
-        text: literal.value.body,
+  const directives = pipe(
+    literal,
+    Option.match({
+      onNone: () => stripDirectives(raw),
+      onSome: ({ body }): Directives => ({
+        text: body,
         isRegex: Option.some(true),
         ignoreCase: Option.none(),
-      };
-
+      }),
+    }),
+  );
   const pattern = directives.text;
-  const kind: FindQueryKind = pipe(
+  const kind = pipe(
     directives.isRegex,
     Option.getOrElse(() => options.regexFindMode),
-  )
-    ? "regex"
-    : "literal";
-
-  const literalIgnoreCase =
-    Option.isSome(literal) && literal.value.flags.includes("i")
-      ? Option.some(true)
-      : Option.none<boolean>();
+    Boolean.match({
+      onFalse: (): FindQueryKind => "literal",
+      onTrue: (): FindQueryKind => "regex",
+    }),
+  );
   const explicitIgnoreCase = pipe(
     directives.ignoreCase,
-    Option.orElse(() => literalIgnoreCase),
+    Option.orElse(() =>
+      pipe(
+        literal,
+        Option.filter(({ flags }) => flags.includes("i")),
+        Option.as(true),
+      ),
+    ),
   );
-  const smartcase = Option.isNone(explicitIgnoreCase);
   const ignoreCase = pipe(
     explicitIgnoreCase,
     Option.getOrElse(() => !hasUpperCase(pattern)),
   );
-
-  const extraFlags = Option.isNone(literal) ? "" : literal.value.flags.replace("i", "");
-  const flags = `${BASE_FLAGS}${ignoreCase ? "i" : ""}${extraFlags}`;
-
-  if (pattern.length === 0) {
-    return {
-      raw,
-      pattern,
-      kind,
-      ignoreCase,
-      smartcase,
-      isEmpty: true,
-      source: "",
-      flags,
-      error: Option.none(),
-    };
-  }
-
-  const source = kind === "regex" ? pattern : literalSource(pattern);
+  const extraFlags = pipe(
+    literal,
+    Option.map(({ flags }) => flags.replace("i", "")),
+    Option.getOrElse(() => ""),
+  );
+  const flags = `${BASE_FLAGS}${caseFlag(ignoreCase)}${extraFlags}`;
+  const source = sourceOf(kind, pattern);
 
   return {
     raw,
     pattern,
     kind,
     ignoreCase,
-    smartcase,
-    isEmpty: false,
+    smartcase: Option.isNone(explicitIgnoreCase),
+    isEmpty: pattern.length === 0,
     source,
     flags,
-    error: compileError(source, flags),
+    error: pipe(
+      pattern,
+      Option.liftPredicate(Str.isNonEmpty),
+      Option.flatMap(() => compileError(source, flags)),
+    ),
   };
-};
-
-/** The longest pattern from the user that we compile. */
-const MAX_PATTERN_LENGTH = 512;
-
-/** A `None` when `source` and `flags` compile *and* are safe to run. */
-const compileError = (source: string, flags: string): Option.Option<string> => {
-  if (source.length > MAX_PATTERN_LENGTH) {
-    return Option.some(`pattern is longer than ${MAX_PATTERN_LENGTH} characters`);
-  }
-
-  try {
-    new RegExp(source, flags);
-  } catch (cause) {
-    return Option.some(cause instanceof Error ? cause.message : String(cause));
-  }
-
-  // The safety check reads the text of the pattern, and never runs it. A
-  // measurement cannot protect the page here, because the measurement cannot
-  // end before the match ends: `(a|a|a|a)*$` takes minutes against twenty
-  // characters, and nothing in JavaScript can stop an `exec` that is already
-  // inside such a pattern. Find mode owns the keyboard, so the tab stops
-  // answering.
-  //
-  // The check refuses only the shapes that it can prove ambiguous. It does not
-  // promise a linear match, so `~/features/find/Engine.ts` reads the page text
-  // in measured windows and stops at a deadline. That budget is the second
-  // limit on the same pattern.
-  return pipe(
-    regexSafetyError(source, flags),
-    Option.map((reason) => `${reason}; try a simpler one`),
-  );
 };
 
 /**
@@ -311,30 +368,26 @@ const compileError = (source: string, flags: string): Option.Option<string> => {
  * expression is state that changes, and two searches that share it lose
  * matches. Such a fault is almost impossible to reproduce.
  */
-export const toRegExp = (query: ParsedFindQuery): Option.Option<RegExp> => {
-  if (query.isEmpty || Option.isSome(query.error)) return Option.none();
-  try {
-    return Option.some(new RegExp(query.source, query.flags));
-  } catch {
-    return Option.none();
-  }
-};
+export const toRegExp: (query: ParsedFindQuery) => Option.Option<RegExp> = flow(
+  Option.liftPredicate(({ isEmpty, error }: ParsedFindQuery) => !isEmpty && Option.isNone(error)),
+  Option.flatMap(({ source, flags }) => pipe(compile(source, flags), Result.getSuccess)),
+);
+
+/** `\b` when `edge` finds a word character at that end of `text`. */
+const boundary = (edge: RegExp, text: string): string =>
+  pipe(edge.test(text), Boolean.match({ onFalse: () => "", onTrue: () => "\\b" }));
 
 /**
  * A query that matches `text` literally, for `*` and `#`.
  *
  * A `\b` word boundary is added where the word starts or ends with a word
  * character, as the `*` of Vim does. The case still goes through smartcase, so
- * `*` on `Foo` finds `Foo` and not `foo`. Upstream does the same.
+ * `*` on `Foo` finds `Foo` and not `foo`. Upstream does the same. An empty word
+ * gives an empty source.
  */
 export const wordQuery = (word: string): ParsedFindQuery => {
   const trimmed = word.trim();
   const ignoreCase = !hasUpperCase(trimmed);
-  const flags = `g${ignoreCase ? "i" : ""}`;
-  const core = literalSource(trimmed);
-  const leading = /^\w/.test(trimmed) ? "\\b" : "";
-  const trailing = /\w$/.test(trimmed) ? "\\b" : "";
-  const source = `${leading}${core}${trailing}`;
 
   return {
     raw: trimmed,
@@ -343,8 +396,8 @@ export const wordQuery = (word: string): ParsedFindQuery => {
     ignoreCase,
     smartcase: true,
     isEmpty: trimmed.length === 0,
-    source: trimmed.length === 0 ? "" : source,
-    flags,
+    source: `${boundary(/^\w/, trimmed)}${literalSource(trimmed)}${boundary(/\w$/, trimmed)}`,
+    flags: `g${caseFlag(ignoreCase)}`,
     error: Option.none(),
   };
 };
