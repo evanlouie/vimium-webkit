@@ -7,7 +7,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect } from "effect";
+import { Array, Effect, Iterable, pipe } from "effect";
 import {
   hintCharacterCount,
   hintCharacterKey,
@@ -19,6 +19,25 @@ import {
 } from "~/domain/HintString.ts";
 
 const DEFAULT_ALPHABET = "sadfjklewcmpgh";
+
+/** The code points of a string. The split into code points is intentional. */
+const codePoints = (value: string): readonly string[] => Array.fromIterable(value);
+
+/** Every ordered pair of two different hints where the first is a prefix of the second. */
+const prefixPairs = (hints: readonly string[]): readonly (readonly [string, string])[] =>
+  pipe(
+    hints,
+    Array.cartesian(hints),
+    Array.filter(([first, second]) => first !== second && second.startsWith(first)),
+  );
+
+/** The characters of every hint that are not in the alphabet. */
+const foreignCharacters = (hints: readonly string[], alphabet: string): readonly string[] =>
+  pipe(
+    hints,
+    Array.flatMap(codePoints),
+    Array.filter((char) => !alphabet.includes(char)),
+  );
 
 describe("HintString", () => {
   it.effect("reverses astral characters correctly", () =>
@@ -32,9 +51,12 @@ describe("HintString", () => {
 
   it.effect("gives exactly the number of hints that was asked for", () =>
     Effect.sync(() => {
-      for (const count of [1, 2, 5, 13, 14, 15, 100, 197, 1000]) {
-        assert.lengthOf(hintStrings(count, DEFAULT_ALPHABET), count);
-      }
+      const counts = [1, 2, 5, 13, 14, 15, 100, 197, 1000];
+      const lengths = pipe(
+        counts,
+        Array.map((count) => hintStrings(count, DEFAULT_ALPHABET).length),
+      );
+      assert.deepEqual(lengths, counts);
     }),
   );
 
@@ -50,35 +72,32 @@ describe("HintString", () => {
   it.effect("gives unique hints", () =>
     Effect.sync(() => {
       const hints = hintStrings(500, DEFAULT_ALPHABET);
-      assert.strictEqual(new Set(hints).size, hints.length);
+      assert.lengthOf(Array.dedupe(hints), hints.length);
     }),
   );
 
   it.effect("gives prefix-free hints", () =>
     Effect.sync(() => {
-      for (const count of [3, 14, 15, 200, 421]) {
-        const hints = hintStrings(count, DEFAULT_ALPHABET);
-        for (const first of hints) {
-          for (const second of hints) {
-            if (first === second) continue;
-            assert.isFalse(
-              second.startsWith(first),
-              `"${first}" is a prefix of "${second}" at count ${count}`,
-            );
-          }
-        }
-      }
+      const clashes = pipe(
+        [3, 14, 15, 200, 421],
+        Array.flatMap((count) =>
+          pipe(
+            hintStrings(count, DEFAULT_ALPHABET),
+            prefixPairs,
+            Array.map(
+              ([first, second]) => `"${first}" is a prefix of "${second}" at count ${count}`,
+            ),
+          ),
+        ),
+      );
+      assert.deepEqual(clashes, []);
     }),
   );
 
   it.effect("uses only characters of the alphabet", () =>
     Effect.sync(() => {
       const alphabet = "abc";
-      for (const hint of hintStrings(40, alphabet)) {
-        for (const char of hint) {
-          assert.include(alphabet, char, `unexpected character "${char}"`);
-        }
-      }
+      assert.deepEqual(foreignCharacters(hintStrings(40, alphabet), alphabet), []);
     }),
   );
 
@@ -98,9 +117,12 @@ describe("HintString", () => {
       // The sort and the reverse exist so that the one-character hints do not
       // all go to the first links, which are almost always the site menu.
       const hints = hintStrings(10, "abcd");
-      const shortPositions = hints
-        .map((hint, index) => (hint.length === 1 ? index : -1))
-        .filter((index) => index >= 0);
+      const shortPositions = pipe(
+        hints,
+        Array.map((hint, index) => ({ hint, index })),
+        Array.filter(({ hint }) => hint.length === 1),
+        Array.map(({ index }) => index),
+      );
 
       assert.isAbove(shortPositions.length, 0);
       assert.isAbove(
@@ -114,11 +136,15 @@ describe("HintString", () => {
   it.effect("grows the length only as far as it must", () =>
     Effect.sync(() => {
       const alphabet = "abcd";
-      assert.isTrue(hintStrings(4, alphabet).every((hint) => hint.length === 1));
+      const lengthsOf = (count: number): number[] =>
+        pipe(
+          hintStrings(count, alphabet),
+          Array.map((hint) => hint.length),
+          Array.dedupe,
+        );
+      assert.deepEqual(lengthsOf(4), [1]);
       // The fifth link forces two characters, but not for every link.
-      const five = hintStrings(5, alphabet);
-      assert.isTrue(five.some((hint) => hint.length === 1));
-      assert.isTrue(five.some((hint) => hint.length === 2));
+      assert.includeMembers(lengthsOf(5), [1, 2]);
     }),
   );
 
@@ -194,37 +220,30 @@ describe("HintString", () => {
     },
   ];
 
-  for (const row of FOLD_CASES) {
-    it.effect(`folds the alphabet: ${row.name}`, () =>
-      Effect.sync(() => {
-        assert.strictEqual(normaliseHintCharacters(row.input, "xy"), row.expected);
-      }),
-    );
-  }
+  it.effect.each(FOLD_CASES)("folds the alphabet: $name", (row) =>
+    Effect.sync(() => {
+      assert.strictEqual(normaliseHintCharacters(row.input, "xy"), row.expected);
+    }),
+  );
 
-  it.effect("gives distinct labels for an alphabet that folds", () =>
+  it.effect.each(FOLD_CASES)("gives distinct labels for an alphabet that folds: $name", (row) =>
     Effect.sync(() => {
       // Every character that survives the fold must be one code point, so no
       // two links can show the same label.
-      for (const input of FOLD_CASES.map((row) => row.input)) {
-        const alphabet = normaliseHintCharacters(input, "xy");
-        // The split into code points is intentional.
-        const chars = [...alphabet];
-        assert.strictEqual(
-          new Set(chars).size,
-          chars.length,
-          `the alphabet of "${input}" has a duplicate character`,
-        );
-        const hints = hintStrings(60, alphabet);
-        assert.strictEqual(
-          new Set(hints).size,
-          hints.length,
-          `the alphabet of "${input}" gives two equal labels`,
-        );
-        for (const hint of hints) {
-          for (const char of hint) assert.include(alphabet, char);
-        }
-      }
+      const alphabet = normaliseHintCharacters(row.input, "xy");
+      const chars = codePoints(alphabet);
+      assert.lengthOf(
+        Array.dedupe(chars),
+        chars.length,
+        `the alphabet of "${row.input}" has a duplicate character`,
+      );
+      const hints = hintStrings(60, alphabet);
+      assert.lengthOf(
+        Array.dedupe(hints),
+        hints.length,
+        `the alphabet of "${row.input}" gives two equal labels`,
+      );
+      assert.deepEqual(foreignCharacters(hints, alphabet), []);
     }),
   );
 
@@ -342,13 +361,11 @@ describe("HintString", () => {
     },
   ];
 
-  for (const row of INVISIBLE_CASES) {
-    it.effect(`drops a character with no shape: ${row.name}`, () =>
-      Effect.sync(() => {
-        assert.strictEqual(normaliseHintCharacters(row.input, "xy"), row.expected);
-      }),
-    );
-  }
+  it.effect.each(INVISIBLE_CASES)("drops a character with no shape: $name", (row) =>
+    Effect.sync(() => {
+      assert.strictEqual(normaliseHintCharacters(row.input, "xy"), row.expected);
+    }),
+  );
 
   /** The four grapheme cases from the review. */
   const GRAPHEME_CASES: readonly {
@@ -383,15 +400,13 @@ describe("HintString", () => {
     },
   ];
 
-  for (const row of GRAPHEME_CASES) {
-    it.effect(`keeps grapheme boundaries: ${row.name}`, () =>
-      Effect.sync(() => {
-        const alphabet = normaliseHintCharacters(row.input, "xy");
-        assert.strictEqual(alphabet, row.alphabet);
-        assert.deepEqual(hintStrings(4, alphabet), row.labels);
-      }),
-    );
-  }
+  it.effect.each(GRAPHEME_CASES)("keeps grapheme boundaries: $name", (row) =>
+    Effect.sync(() => {
+      const alphabet = normaliseHintCharacters(row.input, "xy");
+      assert.strictEqual(alphabet, row.alphabet);
+      assert.deepEqual(hintStrings(4, alphabet), row.labels);
+    }),
+  );
 
   it.effect("gives visible and distinct labels for a heart and a face", () =>
     Effect.sync(() => {
@@ -402,10 +417,12 @@ describe("HintString", () => {
       const alphabet = normaliseHintCharacters("\u2764\ufe0f\u{1f600}", "xy");
       assert.strictEqual(alphabet, "\u2764\u{1f600}");
       const labels = hintStrings(4, alphabet);
-      assert.strictEqual(new Set(labels).size, labels.length);
-      for (const label of labels) {
-        assert.strictEqual(label.normalize("NFC"), label);
-      }
+      assert.lengthOf(Array.dedupe(labels), labels.length);
+      const composed = pipe(
+        labels,
+        Array.map((label) => label.normalize("NFC")),
+      );
+      assert.deepEqual(composed, labels);
     }),
   );
 
@@ -424,21 +441,33 @@ describe("HintString", () => {
       assert.strictEqual(normaliseHintCharacters("\u1161x", "xy"), "xy");
       const alphabet = normaliseHintCharacters("\u1100x\u1161\uac00", "xy");
       assert.strictEqual(alphabet, "x\uac00");
-      const labels = hintStrings(6, alphabet);
-      assert.strictEqual(
-        new Set(labels.map((label) => label.normalize("NFC"))).size,
-        labels.length,
+      const composedLabels = pipe(
+        hintStrings(6, alphabet),
+        Array.map((label) => label.normalize("NFC")),
       );
+      assert.lengthOf(Array.dedupe(composedLabels), composedLabels.length);
 
-      const pairs = [...alphabet].flatMap((first) => [...alphabet].map((second) => first + second));
-      assert.strictEqual(new Set(pairs.map((pair) => pair.normalize("NFC"))).size, pairs.length);
-      assert.strictEqual(new Set(pairs.map(hintCharacterKey)).size, pairs.length);
+      const chars = codePoints(alphabet);
+      const pairs = pipe(
+        chars,
+        Array.cartesianWith(chars, (first, second) => first + second),
+      );
+      const composedPairs = pipe(
+        pairs,
+        Array.map((pair) => pair.normalize("NFC")),
+      );
+      assert.lengthOf(Array.dedupe(composedPairs), pairs.length);
+      const pairKeys = pipe(pairs, Array.map(hintCharacterKey));
+      assert.lengthOf(Array.dedupe(pairKeys), pairs.length);
       const segmenter = new Intl.Segmenter(undefined, {
         granularity: "grapheme",
       });
-      for (const pair of pairs) {
-        assert.lengthOf([...segmenter.segment(pair)], 2);
-      }
+      const graphemeCounts = pipe(
+        pairs,
+        Array.map((pair) => Iterable.size(segmenter.segment(pair))),
+        Array.dedupe,
+      );
+      assert.deepEqual(graphemeCounts, [2]);
     }),
   );
 
