@@ -17,18 +17,8 @@
  * word.
  */
 
-import {
-  Array,
-  Boolean,
-  HashSet,
-  Iterable,
-  Match,
-  Number,
-  Option,
-  Result,
-  flow,
-  pipe,
-} from "effect";
+import { Array, Boolean, HashSet, Match, Number, Option, Result, flow, pipe } from "effect";
+import { constFalse } from "effect/Function";
 import type { CapabilityReport } from "~/platform/Capabilities.ts";
 
 // ---------------------------------------------------------------------------
@@ -370,7 +360,7 @@ export const locateOffset = (
   pipe(
     lastIndexWhere(starts, (start) => start <= offset),
     Option.filter(() => offset >= 0),
-    Option.map((found) => chunkFor(starts, lengths, offset, end, found)),
+    Option.map((found) => chunkChooser(end)(starts, lengths, offset, found)),
     Option.flatMap((index) => positionIn(starts, lengths, index, offset)),
   );
 
@@ -378,78 +368,78 @@ export const locateOffset = (
  * The chunk that owns `offset`, from `found`, the last chunk that begins at or
  * before it.
  */
-const chunkFor = (
+type ChunkChooser = (
   starts: ReadonlyArray<number>,
   lengths: ReadonlyArray<number>,
   offset: number,
-  end: MatchEnd,
   found: number,
-): number =>
-  pipe(
-    Match.value(end),
-    // Step forward over a chunk of length zero.
-    Match.when("start", () => skipEmpty(lengths, found, starts.length - 1)),
-    // Step back over the boundary itself, to the chunk that closes there.
-    Match.when("end", () => lastChunkBefore(starts, offset)),
-    Match.exhaustive,
-  );
+) => number;
 
-/** The last chunk that begins before `offset`, or the first chunk. */
-const lastChunkBefore = (starts: ReadonlyArray<number>, offset: number): number =>
+/** The start of a match steps forward over a chunk of length zero. */
+const chunkAtStart: ChunkChooser = (starts, lengths, _offset, found) =>
+  skipEmpty(lengths, found, starts.length - 1);
+
+/** The end of a match steps back over the boundary, to the chunk that closes there. */
+const chunkAtEnd: ChunkChooser = (starts, _lengths, offset) =>
   pipe(
     lastIndexWhere(starts, (start) => start < offset),
     Option.getOrElse(() => 0),
   );
+
+const chunkChooser: (end: MatchEnd) => ChunkChooser = pipe(
+  Match.type<MatchEnd>(),
+  Match.when("start", () => chunkAtStart),
+  Match.when("end", () => chunkAtEnd),
+  Match.exhaustive,
+);
 
 /**
  * The last index of `sorted` at which `holds` is true.
  *
  * `holds` must be true for a prefix of `sorted` and false after it, so a
  * binary search finds the edge.
+ *
+ * This is a loop on purpose. It runs for both ends of every match, on every
+ * keystroke, over the chunks of the largest run. A recursive search with
+ * `Boolean.match` and `Array.get` made `locateOffset` 36 to 64 times slower:
+ * 0.07 ms against 4.3 ms for 500 matches over 50 000 chunks, which made a
+ * whole search of a large page six times slower.
  */
 const lastIndexWhere = (
   sorted: ReadonlyArray<number>,
   holds: (value: number) => boolean,
 ): Option.Option<number> => {
-  const narrow = (low: number, high: number): number =>
-    pipe(
-      low > high,
-      Boolean.match({
-        onTrue: () => high,
-        onFalse: () => {
-          const middle = (low + high) >> 1;
-          return pipe(
-            sorted,
-            Array.get(middle),
-            Option.exists(holds),
-            Boolean.match({
-              onTrue: () => narrow(middle + 1, high),
-              onFalse: () => narrow(low, middle - 1),
-            }),
-          );
-        },
-      }),
-    );
+  let low = 0;
+  let high = sorted.length - 1;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    const value = sorted[middle];
+    if (value !== undefined && holds(value)) low = middle + 1;
+    else high = middle - 1;
+  }
   return pipe(
-    narrow(0, sorted.length - 1),
+    high,
     Option.liftPredicate((index) => index >= 0),
   );
 };
 
-/** The first index from `from` whose chunk is not empty, and `last` at most. */
-const skipEmpty = (lengths: ReadonlyArray<number>, from: number, last: number): number =>
+/**
+ * Step forward from `index` over chunks of length zero, and stop at `last`.
+ *
+ * A walk never collects an empty text node, so a run has no such chunk.
+ */
+const skipEmpty = (lengths: ReadonlyArray<number>, index: number, last: number): number =>
   pipe(
-    Iterable.range(from, last),
-    Iterable.findFirst(
-      (index) =>
-        index === last ||
-        pipe(
-          lengths,
-          Array.get(index),
-          Option.exists((length) => length !== 0),
-        ),
-    ),
-    Option.getOrElse(() => last),
+    index < last &&
+      pipe(
+        lengths,
+        Array.get(index),
+        Option.exists((length) => length === 0),
+      ),
+    Boolean.match({
+      onFalse: () => index,
+      onTrue: () => skipEmpty(lengths, index + 1, last),
+    }),
   );
 
 /** The position of `offset` inside chunk `index`, when the chunk holds it. */
@@ -460,13 +450,19 @@ const positionIn = (
   offset: number,
 ): Option.Option<ChunkPosition> =>
   pipe(
-    Option.all({
-      start: pipe(starts, Array.get(index)),
-      length: pipe(lengths, Array.get(index)),
-    }),
-    Option.map(({ start, length }) => ({ local: offset - start, length })),
-    Option.filter(({ local, length }) => local >= 0 && local <= length),
-    Option.map(({ local }) => ({ index, offset: local })),
+    starts,
+    Array.get(index),
+    Option.map((start) => offset - start),
+    Option.filter(
+      (local) =>
+        local >= 0 &&
+        pipe(
+          lengths,
+          Array.get(index),
+          Option.exists((length) => local <= length),
+        ),
+    ),
+    Option.map((local) => ({ index, offset: local })),
   );
 
 // ---------------------------------------------------------------------------
@@ -566,7 +562,8 @@ export const DEFAULT_MAX_CHARACTERS = 2_000_000;
 interface WalkContext {
   readonly document: Document;
   readonly visible: (element: Element) => boolean;
-  readonly excludeHost: Option.Option<Element>;
+  /** Is this the host of our own closed shadow root? */
+  readonly excluded: (element: Element) => boolean;
 }
 
 const VISIBILITY_OPTIONS: CheckVisibilityOptions = {
@@ -622,7 +619,13 @@ export const collectTextRuns = (options: CollectOptions): ReadonlyArray<TextRun>
   const context: WalkContext = {
     document: options.document,
     visible: isVisible(options.view, options.capabilities),
-    excludeHost: options.excludeHost,
+    excluded: pipe(
+      options.excludeHost,
+      Option.match({
+        onNone: () => constFalse,
+        onSome: (host) => (element: Element) => element === host,
+      }),
+    ),
   };
   const start: Walk = { pending: [options.document], remaining: options.maxCharacters };
   return pipe(Array.unfold(start, nextRoot(context)), Array.getSomes);
@@ -720,52 +723,45 @@ const walkScope = (root: Document | ShadowRoot): Node =>
     Option.getOrElse((): Node => root),
   );
 
-/** What the walker does with each node: take it, skip it, or cut its subtree. */
-const nodeVerdict = (context: WalkContext): ((node: Node) => number) =>
-  pipe(
-    Match.type<Node>(),
-    Match.when(isText, textVerdict),
-    Match.when(isElement, elementVerdict(context)),
-    Match.orElse(() => NodeFilter.FILTER_SKIP),
-  );
+// The verdicts are built once, and not for each node: the walker asks for one
+// on every node of the page.
 
 /** An empty text node holds nothing to find. */
-const textVerdict = (text: Text): number =>
-  pipe(
-    text.data.length > 0,
-    Boolean.match({
-      onTrue: () => NodeFilter.FILTER_ACCEPT,
-      onFalse: () => NodeFilter.FILTER_REJECT,
-    }),
-  );
-
-const elementVerdict =
-  (context: WalkContext) =>
-  (element: Element): number =>
-    pipe(
-      element,
-      Option.liftPredicate((element) => isSearchable(context, element)),
-      Option.match({
-        // A reject cuts the whole subtree. That is what makes one visibility
-        // check for each element affordable *and* correct: a `display: none`
-        // on an ancestor is never derived again from a descendant.
-        onNone: () => NodeFilter.FILTER_REJECT,
-        onSome: hostVerdict,
-      }),
-    );
+const textVerdict: (nonEmpty: boolean) => number = Boolean.match({
+  onTrue: () => NodeFilter.FILTER_ACCEPT,
+  onFalse: () => NodeFilter.FILTER_REJECT,
+});
 
 /**
  * A searchable element is accepted only so that the walk can queue its shadow
  * root. The light children are still walked, and that is where slotted text is.
  */
-const hostVerdict = (element: Element): number =>
+const hostVerdict: (hasShadowRoot: boolean) => number = Boolean.match({
+  onTrue: () => NodeFilter.FILTER_ACCEPT,
+  onFalse: () => NodeFilter.FILTER_SKIP,
+});
+
+const elementVerdict: (searchable: Option.Option<Element>) => number = Option.match({
+  // A reject cuts the whole subtree. That is what makes one visibility check
+  // for each element affordable *and* correct: a `display: none` on an
+  // ancestor is never derived again from a descendant.
+  onNone: () => NodeFilter.FILTER_REJECT,
+  onSome: (element: Element) => hostVerdict(element.shadowRoot !== null),
+});
+
+/** What the walker does with each node: take it, skip it, or cut its subtree. */
+const nodeVerdict = (context: WalkContext): ((node: Node) => number) =>
   pipe(
-    element.shadowRoot,
-    Option.fromNullishOr,
-    Option.match({
-      onNone: () => NodeFilter.FILTER_SKIP,
-      onSome: () => NodeFilter.FILTER_ACCEPT,
-    }),
+    Match.type<Node>(),
+    Match.when(isText, (text) => textVerdict(text.data.length > 0)),
+    Match.when(
+      isElement,
+      flow(
+        Option.liftPredicate((element: Element) => isSearchable(context, element)),
+        elementVerdict,
+      ),
+    ),
+    Match.orElse(() => NodeFilter.FILTER_SKIP),
   );
 
 /**
@@ -775,24 +771,25 @@ const hostVerdict = (element: Element): number =>
  * layout.
  */
 const isSearchable = (context: WalkContext, element: Element): boolean =>
-  !pipe(
-    context.excludeHost,
-    Option.exists((host) => host === element),
-  ) &&
+  !context.excluded(element) &&
   !pipe(OPAQUE_TAGS, HashSet.has(element.tagName)) &&
   !element.hasAttribute("hidden") &&
   context.visible(element);
 
 /** The nodes that `walker` accepts, until the text among them reaches `budget` characters. */
-const acceptedNodes = (walker: TreeWalker, budget: number): ReadonlyArray<Node> =>
-  Array.unfold(0, (consumed) =>
+const acceptedNodes = (walker: TreeWalker, budget: number): ReadonlyArray<Node> => {
+  const nextWithin = flow(
+    Option.liftPredicate((consumed: number) => consumed < budget),
+    Option.flatMapNullishOr(() => walker.nextNode()),
+  );
+  return Array.unfold(0, (consumed) =>
     pipe(
       consumed,
-      Option.liftPredicate((consumed) => consumed < budget),
-      Option.flatMapNullishOr(() => walker.nextNode()),
+      nextWithin,
       Option.map((node) => [node, consumed + textLength(node)] as const),
     ),
   );
+};
 
 const textLength: (node: Node) => number = pipe(
   Match.type<Node>(),
@@ -841,15 +838,16 @@ export const rangeForSpan = (
   run: TextRun,
   span: MatchSpan,
 ): Option.Option<Range> =>
-  Option.gen(function* () {
-    const start = yield* caretIn(run, span.start, "start");
-    const end = yield* caretIn(run, span.end, "end");
-    const range = yield* spanRange(document, start, end);
-    return yield* pipe(
-      range,
-      Option.liftPredicate((range) => !range.collapsed),
-    );
-  });
+  pipe(
+    caretIn(run, span.start, "start"),
+    Option.flatMap((start) =>
+      pipe(
+        caretIn(run, span.end, "end"),
+        Option.flatMap((end) => spanRange(document, start, end)),
+      ),
+    ),
+    Option.filter((range) => !range.collapsed),
+  );
 
 /** The text node and the offset in it that one end of a match maps to. */
 const caretIn = (run: TextRun, offset: number, end: MatchEnd): Option.Option<CaretPosition> =>
