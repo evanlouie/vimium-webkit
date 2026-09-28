@@ -334,8 +334,15 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
         cause,
       });
 
+  /** A write that the backend refused. The detail of the backend says why, once. */
   const backendWriteFailure = (cause: GmError): StorageError =>
-    failureFrom("backend", "write", cause.detail)(cause);
+    new StorageError({
+      reason: "backend",
+      direction: "write",
+      group: spec.name,
+      detail: cause.detail,
+      cause,
+    });
 
   const report = (error: StorageError): Effect.Effect<void> => pipe(issues, Queue.offer(error));
 
