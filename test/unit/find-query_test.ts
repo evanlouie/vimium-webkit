@@ -7,13 +7,15 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option } from "effect";
+import { Effect, Option, pipe } from "effect";
 import {
   escapeRegExp,
   type FindQueryOptions,
   hasUpperCase,
   literalSource,
+  ParsedFindQuery,
   parseFindQuery,
+  type ReadyFindQuery,
   splitRegexLiteral,
   stripDirectives,
   toRegExp,
@@ -22,6 +24,18 @@ import {
 
 const literal: FindQueryOptions = { regexFindMode: false };
 const regexMode: FindQueryOptions = { regexFindMode: true };
+
+/** The query, which must be ready to run. */
+const ready = (query: ParsedFindQuery): ReadyFindQuery =>
+  pipe(
+    query,
+    Option.liftPredicate(ParsedFindQuery.$is("Ready")),
+    Option.getOrElse(() => assert.fail(`${query.raw} is not ready to run`)),
+  );
+
+const isEmpty = ParsedFindQuery.$is("Empty");
+const isInvalid = ParsedFindQuery.$is("Invalid");
+const isReady = ParsedFindQuery.$is("Ready");
 
 describe("FindQuery", () => {
   it.effect("does not limit the case test to ASCII", () =>
@@ -37,7 +51,7 @@ describe("FindQuery", () => {
 
   it.effect("makes a lower-case query case-insensitive", () =>
     Effect.sync(() => {
-      const query = parseFindQuery("hello", literal);
+      const query = ready(parseFindQuery("hello", literal));
       assert.isTrue(query.ignoreCase);
       assert.isTrue(query.smartcase);
       assert.include(query.flags, "i");
@@ -46,7 +60,7 @@ describe("FindQuery", () => {
 
   it.effect("makes any upper-case character case-sensitive", () =>
     Effect.sync(() => {
-      const query = parseFindQuery("Hello", literal);
+      const query = ready(parseFindQuery("Hello", literal));
       assert.isFalse(query.ignoreCase);
       assert.isTrue(query.smartcase);
       assert.notInclude(query.flags, "i");
@@ -55,12 +69,12 @@ describe("FindQuery", () => {
 
   it.effect("lets an explicit directive beat smartcase", () =>
     Effect.sync(() => {
-      const forced = parseFindQuery("Hello\\i", literal);
+      const forced = ready(parseFindQuery("Hello\\i", literal));
       assert.isTrue(forced.ignoreCase);
       assert.isFalse(forced.smartcase);
       assert.strictEqual(forced.pattern, "Hello");
 
-      const pinned = parseFindQuery("hello\\I", literal);
+      const pinned = ready(parseFindQuery("hello\\I", literal));
       assert.isFalse(pinned.ignoreCase);
       assert.isFalse(pinned.smartcase);
     }),
@@ -81,11 +95,11 @@ describe("FindQuery", () => {
 
   it.effect("takes the default kind from regexFindMode", () =>
     Effect.sync(() => {
-      assert.strictEqual(parseFindQuery("a.c", literal).kind, "literal");
-      assert.strictEqual(parseFindQuery("a.c", regexMode).kind, "regex");
+      assert.strictEqual(ready(parseFindQuery("a.c", literal)).kind, "literal");
+      assert.strictEqual(ready(parseFindQuery("a.c", regexMode)).kind, "regex");
       // The directive beats the setting, in both directions.
-      assert.strictEqual(parseFindQuery("a.c\\r", literal).kind, "regex");
-      assert.strictEqual(parseFindQuery("a.c\\R", regexMode).kind, "literal");
+      assert.strictEqual(ready(parseFindQuery("a.c\\r", literal)).kind, "regex");
+      assert.strictEqual(ready(parseFindQuery("a.c\\R", regexMode)).kind, "literal");
     }),
   );
 
@@ -106,7 +120,7 @@ describe("FindQuery", () => {
 
   it.effect("treats /pattern/ as a regex even with regexFindMode off", () =>
     Effect.gen(function* () {
-      const query = parseFindQuery("/a.c/", literal);
+      const query = ready(parseFindQuery("/a.c/", literal));
       assert.strictEqual(query.kind, "regex");
       assert.strictEqual(query.source, "a.c");
 
@@ -117,7 +131,7 @@ describe("FindQuery", () => {
 
   it.effect("lets /pattern/i beat smartcase", () =>
     Effect.sync(() => {
-      const query = parseFindQuery("/Foo/i", literal);
+      const query = ready(parseFindQuery("/Foo/i", literal));
       assert.isTrue(query.ignoreCase);
       assert.isFalse(query.smartcase);
       assert.strictEqual(query.flags, "gi");
@@ -146,19 +160,18 @@ describe("FindQuery", () => {
   it.effect("treats an empty query as empty and not as an error", () =>
     Effect.sync(() => {
       const query = parseFindQuery("", literal);
-      assert.isTrue(query.isEmpty);
-      assert.isTrue(Option.isNone(query.error));
+      assert.isTrue(isEmpty(query));
       assert.isTrue(Option.isNone(toRegExp(query)));
 
       // A query of directives alone is also empty.
-      assert.isTrue(parseFindQuery("\\i", literal).isEmpty);
+      assert.isTrue(isEmpty(parseFindQuery("\\i", literal)));
     }),
   );
 
   it.effect("reports a malformed regex instead of throwing", () =>
     Effect.sync(() => {
       const query = parseFindQuery("/a(/", literal);
-      assert.isTrue(Option.isSome(query.error));
+      assert.isTrue(isInvalid(query));
       assert.isTrue(Option.isNone(toRegExp(query)));
     }),
   );
@@ -166,7 +179,7 @@ describe("FindQuery", () => {
   it.effect("never treats a literal query as malformed", () =>
     Effect.gen(function* () {
       const query = parseFindQuery("a(", literal);
-      assert.isTrue(Option.isNone(query.error));
+      assert.isTrue(isReady(query));
       const compiled = yield* Effect.fromOption(toRegExp(query));
       assert.isTrue(compiled.test("a("));
     }),
@@ -188,7 +201,7 @@ describe("FindQuery", () => {
 
   it.effect("anchors a word query on word boundaries", () =>
     Effect.gen(function* () {
-      const query = wordQuery("find");
+      const query = ready(wordQuery("find"));
       const compiled = yield* Effect.fromOption(toRegExp(query));
       assert.isTrue(compiled.test("please find it"));
       assert.isFalse(new RegExp(query.source, "i").test("refinance"));
@@ -197,7 +210,7 @@ describe("FindQuery", () => {
 
   it.effect("does not anchor a token that is not a word", () =>
     Effect.gen(function* () {
-      const query = wordQuery("->");
+      const query = ready(wordQuery("->"));
       assert.notInclude(query.source, "\\b");
       const compiled = yield* Effect.fromOption(toRegExp(query));
       assert.isTrue(compiled.test("a -> b"));
@@ -206,8 +219,8 @@ describe("FindQuery", () => {
 
   it.effect("applies smartcase to a word query", () =>
     Effect.sync(() => {
-      assert.isTrue(wordQuery("find").ignoreCase);
-      assert.isFalse(wordQuery("Find").ignoreCase);
+      assert.isTrue(ready(wordQuery("find")).ignoreCase);
+      assert.isFalse(ready(wordQuery("Find")).ignoreCase);
     }),
   );
 
@@ -218,7 +231,7 @@ describe("FindQuery", () => {
     it.effect.each(["(a+)+$", "(a*)*b", "(\\d+)+$", "(a|a)*$"])("%s", (source) =>
       Effect.sync(() => {
         const query = parseFindQuery(source, regexMode);
-        assert.isTrue(Option.isSome(query.error), `${source} compiled with no complaint`);
+        assert.isTrue(isInvalid(query), `${source} compiled with no complaint`);
         assert.isTrue(Option.isNone(toRegExp(query)));
       }),
     );
@@ -249,7 +262,7 @@ describe("FindQuery", () => {
     it.effect.each(slow)("%s", (source) =>
       Effect.sync(() => {
         const query = parseFindQuery(source, regexMode);
-        assert.isTrue(Option.isSome(query.error), `${source} compiled with no complaint`);
+        assert.isTrue(isInvalid(query), `${source} compiled with no complaint`);
         assert.isTrue(Option.isNone(toRegExp(query)));
       }),
     );
@@ -274,7 +287,7 @@ describe("FindQuery", () => {
     it.effect.each(ordinary)("%s", (source) =>
       Effect.sync(() => {
         const query = parseFindQuery(source, regexMode);
-        assert.isTrue(Option.isNone(query.error), `${source} was refused`);
+        assert.isTrue(isReady(query), `${source} was refused`);
         assert.isTrue(Option.isSome(toRegExp(query)));
       }),
     );
@@ -288,14 +301,14 @@ describe("FindQuery", () => {
       (text) =>
         Effect.sync(() => {
           const query = parseFindQuery(text, literal);
-          assert.isTrue(Option.isNone(query.error), `${text} was refused`);
+          assert.isTrue(isReady(query), `${text} was refused`);
           assert.isTrue(Option.isSome(toRegExp(query)));
         }),
     );
 
     it.effect("as a word query either", () =>
       Effect.sync(() => {
-        assert.isTrue(Option.isNone(wordQuery("a+b").error));
+        assert.isTrue(isReady(wordQuery("a+b")));
       }),
     );
   });
@@ -303,7 +316,7 @@ describe("FindQuery", () => {
   it.effect("refuses an absurdly long pattern", () =>
     Effect.sync(() => {
       const query = parseFindQuery("a".repeat(600), regexMode);
-      assert.isTrue(Option.isSome(query.error));
+      assert.isTrue(isInvalid(query));
     }),
   );
 });
