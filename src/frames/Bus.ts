@@ -73,6 +73,7 @@ import {
   Stream,
   pipe,
 } from "effect";
+import { describeThrown } from "~/domain/Failure.ts";
 import {
   type ChallengeMessage,
   challengeMessage,
@@ -238,14 +239,6 @@ const isInboundOf =
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
-
-const describe = (cause: unknown): string =>
-  pipe(
-    Match.value(cause),
-    Match.when(Predicate.isError, (error) => error.message),
-    Match.when(Predicate.isString, (text) => text),
-    Match.orElse((other) => String(other)),
-  );
 
 /**
  * The origin to post to.
@@ -613,7 +606,7 @@ const postTo = (port: MessagePort, message: SealedMessage): Effect.Effect<void, 
     catch: (cause) =>
       new FrameError({
         reason: "failed",
-        detail: `the port refused the message: ${describe(cause)}`,
+        detail: `the port refused the message: ${describeThrown(cause)}`,
       }),
   });
 

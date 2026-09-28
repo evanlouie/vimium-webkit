@@ -23,8 +23,6 @@ import {
   Layer,
   Logger,
   ManagedRuntime,
-  Match,
-  Predicate,
   References,
   Schema,
   flow,
@@ -39,6 +37,7 @@ import {
   type RuntimeOwner,
 } from "~/boot/Bootstrap.ts";
 import { awaitActivation, type BootSignal, claimRealm } from "~/boot/Guard.ts";
+import { describeThrown } from "~/domain/Failure.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Realm } from "~/platform/Realm.ts";
 
@@ -70,14 +69,6 @@ class StartupFailed extends Schema.TaggedError<StartupFailed>()("StartupFailed",
   cause: Schema.optional(Schema.Defect()),
 }) {}
 
-/** What a thrown value says. */
-const describe = (cause: unknown): string =>
-  pipe(
-    Match.value(cause),
-    Match.when(Predicate.isError, (error) => error.message),
-    Match.orElse((other) => String(other)),
-  );
-
 /** The whole application for one activation, over the owner of its runtime. */
 const applicationLayer =
   (signal: BootSignal) =>
@@ -99,7 +90,7 @@ const buildApplication = ({ runtime, release }: OwnedRuntime<never, never>): Eff
   pipe(
     Effect.tryPromise({
       try: () => runtime.runPromise(Effect.void),
-      catch: (cause) => new StartupFailed({ detail: describe(cause), cause }),
+      catch: (cause) => new StartupFailed({ detail: describeThrown(cause), cause }),
     }),
     Effect.catchCause((cause) =>
       pipe(

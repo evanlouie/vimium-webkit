@@ -81,7 +81,6 @@ import {
   Layer,
   Match,
   Option,
-  Predicate,
   Queue,
   Ref,
   Result,
@@ -90,6 +89,7 @@ import {
   Struct,
   pipe,
 } from "effect";
+import { describeThrown } from "~/domain/Failure.ts";
 import {
   joinProofPayload,
   linkKeyPayload,
@@ -158,14 +158,6 @@ export interface FrameCipher {
     sealed: SealedMessage,
   ) => Effect.Effect<Option.Option<string>, FrameAuthError>;
 }
-
-const describe = (cause: unknown): string =>
-  pipe(
-    Match.value(cause),
-    Match.when(Predicate.isError, (error) => error.message),
-    Match.when(Predicate.isString, (text) => text),
-    Match.orElse((other) => String(other)),
-  );
 
 /** One character for each byte, which is the text that `btoa` takes. */
 const binaryText: (bytes: Uint8Array) => string = Iterable.reduce(
@@ -375,7 +367,7 @@ export class FrameAuth extends Context.Service<
         catch: (cause) =>
           new FrameAuthError({
             reason: "unavailable",
-            detail: `no random source: ${describe(cause)}`,
+            detail: `no random source: ${describeThrown(cause)}`,
           }),
       });
 
@@ -474,7 +466,7 @@ export class FrameAuth extends Context.Service<
           catch: (cause) =>
             new FrameAuthError({
               reason: "failed",
-              detail: `could not import the credential: ${describe(cause)}`,
+              detail: `could not import the credential: ${describeThrown(cause)}`,
             }),
         });
         yield* pipe(cache, Ref.set(Option.some({ secret: value, key })));
@@ -509,7 +501,7 @@ export class FrameAuth extends Context.Service<
           catch: (cause) =>
             new FrameAuthError({
               reason: "failed",
-              detail: `could not sign: ${describe(cause)}`,
+              detail: `could not sign: ${describeThrown(cause)}`,
             }),
         });
       });
@@ -546,7 +538,7 @@ export class FrameAuth extends Context.Service<
                 catch: (cause) =>
                   new FrameAuthError({
                     reason: "failed",
-                    detail: `could not verify: ${describe(cause)}`,
+                    detail: `could not verify: ${describeThrown(cause)}`,
                   }),
               }),
           }),
@@ -564,7 +556,7 @@ export class FrameAuth extends Context.Service<
           catch: (cause) =>
             new FrameAuthError({
               reason: "failed",
-              detail: `could not import the link key: ${describe(cause)}`,
+              detail: `could not import the link key: ${describeThrown(cause)}`,
             }),
         });
 
@@ -587,7 +579,7 @@ export class FrameAuth extends Context.Service<
             catch: (cause) =>
               new FrameAuthError({
                 reason: "failed",
-                detail: `could not seal the message: ${describe(cause)}`,
+                detail: `could not seal the message: ${describeThrown(cause)}`,
               }),
           });
           return sealedMessage(seq, toBase64Url(new Uint8Array(sealed)));
