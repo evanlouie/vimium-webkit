@@ -75,7 +75,18 @@
  *   not the frame that sent it.
  */
 
-import { Option, Schema, pipe, Struct } from "effect";
+import {
+  Array,
+  flow,
+  Iterable,
+  Match,
+  Option,
+  Order,
+  Predicate,
+  Schema,
+  pipe,
+  Struct,
+} from "effect";
 import { FULLY_ENABLED } from "~/domain/Exclusion.ts";
 
 /** The first, cheap test against the other `postMessage` traffic of a page. */
@@ -248,6 +259,16 @@ const sessionDescriptorsSchema = Schema.Array(hintDescriptorSchema).check(
   Schema.isMaxLength(MAX_SESSION_DESCRIPTORS),
 );
 
+const byFrameId: Order.Order<HintDescriptor> = pipe(
+  Order.String,
+  Order.mapInput(({ frameId }: HintDescriptor) => frameId),
+);
+
+const byLocalIndex: Order.Order<HintDescriptor> = pipe(
+  Order.Number,
+  Order.mapInput(({ localIndex }: HintDescriptor) => localIndex),
+);
+
 /**
  * The total order that every frame must agree on.
  *
@@ -256,17 +277,131 @@ const sessionDescriptorsSchema = Schema.Array(hintDescriptorSchema).check(
  * means that two frames do not agree about what `sa` selects. The hints service
  * must use this function, and no other.
  */
-export const compareDescriptors = (left: HintDescriptor, right: HintDescriptor): number =>
-  left.frameId === right.frameId
-    ? left.localIndex - right.localIndex
-    : left.frameId < right.frameId
-      ? -1
-      : 1;
+export const compareDescriptors: Order.Order<HintDescriptor> = pipe(
+  byFrameId,
+  Order.combine(byLocalIndex),
+);
 
 /** Sort into the canonical cross-frame order. The input is not changed. */
-export const sortDescriptors = (
+export const sortDescriptors: (
   descriptors: readonly HintDescriptor[],
-): readonly HintDescriptor[] => [...descriptors].sort(compareDescriptors);
+) => readonly HintDescriptor[] = Array.sort(compareDescriptors);
+
+const encoder = new TextEncoder();
+
+/** The JSON byte cost of one descriptor inside an array. */
+const descriptorBytes = (descriptor: HintDescriptor): number =>
+  encoder.encode(JSON.stringify(descriptor)).byteLength + 1;
+
+/**
+ * Keep a canonical prefix that fits in one sealed message.
+ *
+ * Every receiver gets this complete list. No receiver reconstructs a removed
+ * share, so this byte decision stays the same in every frame.
+ */
+export const limitDescriptorBytes = (
+  descriptors: readonly HintDescriptor[],
+  byteLimit: number = MAX_DESCRIPTOR_PAYLOAD_BYTES,
+): readonly HintDescriptor[] =>
+  pipe(
+    descriptors,
+    // The bytes that the array uses up to the end of each descriptor. The
+    // opening bracket costs one byte. Each descriptor cost includes its comma,
+    // or the closing bracket for the last descriptor. The walk is lazy, so it
+    // measures no descriptor after the first one that does not fit.
+    Iterable.scan(1, (used, descriptor) => used + descriptorBytes(descriptor)),
+    Iterable.drop(1),
+    Iterable.zip(descriptors),
+    Iterable.takeWhile(([used]) => used <= byteLimit),
+    Iterable.map(([, descriptor]) => descriptor),
+    Array.fromIterable,
+  );
+
+/** The descriptors of one frame, in `localIndex` order. */
+type FrameDescriptors = Array.NonEmptyReadonlyArray<HintDescriptor>;
+
+const sameFrame = (left: HintDescriptor, right: HintDescriptor): boolean =>
+  left.frameId === right.frameId;
+
+/** Split a sorted list into the lists of its frames, in the canonical order. */
+const byFrame: (sorted: readonly HintDescriptor[]) => ReadonlyArray<FrameDescriptors> = Array.match(
+  {
+    onEmpty: () => Array.empty<FrameDescriptors>(),
+    onNonEmpty: Array.groupWith(sameFrame),
+  },
+);
+
+/**
+ * How a bound is shared, when it cuts anything.
+ *
+ * `level` is the largest number that every frame may keep. `spare` is what is
+ * left after every frame took the level. It goes one by one to the frames that
+ * want more, in the canonical order, so that every frame works out the same
+ * list.
+ */
+interface Quota {
+  readonly level: number;
+  readonly spare: number;
+}
+
+/** What is left of the bound, and the frames that still share it. */
+interface Pool {
+  readonly remaining: number;
+  readonly sharers: number;
+}
+
+/**
+ * The quota of a bound, or `None` when every frame fits inside it.
+ *
+ * A frame that wants less than the level costs only what it wants, and the
+ * rest of its share raises the level for the frames that want more. The frames
+ * take their part from the smallest to the largest, and the first one that
+ * wants more than its share sets the level.
+ */
+const quotaWithin =
+  (total: number) =>
+  (wanted: ReadonlyArray<number>): Option.Option<Quota> => {
+    const ascending = pipe(wanted, Array.sort(Order.Number));
+    const pools = pipe(
+      ascending,
+      Array.scan({ remaining: total, sharers: ascending.length }, (pool: Pool, count): Pool => ({
+        remaining: pool.remaining - count,
+        sharers: pool.sharers - 1,
+      })),
+    );
+    return pipe(
+      pools,
+      Array.zip(ascending),
+      Array.findFirst(([{ remaining, sharers }, count]) =>
+        pipe(
+          Math.floor(remaining / sharers),
+          Option.liftPredicate((share) => count > share),
+          Option.map((level) => ({ level, spare: remaining - level * sharers })),
+        ),
+      ),
+    );
+  };
+
+/** What one frame keeps, and the spare that is left for the frames after it. */
+const allot =
+  ({ level }: Quota) =>
+  (spare: number, frame: FrameDescriptors): readonly [number, readonly HintDescriptor[]] =>
+    pipe(
+      Match.value({ wanted: frame.length, spare }),
+      Match.withReturnType<readonly [number, readonly HintDescriptor[]]>(),
+      Match.when({ wanted: (wanted) => wanted <= level }, () => [spare, frame]),
+      Match.when({ spare: (left) => left > 0 }, () => [
+        spare - 1,
+        pipe(frame, Array.take(level + 1)),
+      ]),
+      Match.orElse(() => [spare, pipe(frame, Array.take(level))]),
+    );
+
+/** Keep the quota of each frame, in the canonical order. */
+const keepQuota = (
+  quota: Quota,
+): ((frames: ReadonlyArray<FrameDescriptors>) => readonly HintDescriptor[]) =>
+  flow(Array.mapAccum(quota.spare, allot(quota)), ([, kept]) => Array.flatten(kept));
 
 /**
  * Share a bound between the frames, and cut what does not fit.
@@ -290,89 +425,23 @@ export const sortDescriptors = (
  * one large document and twenty small frames would otherwise lose most of the
  * hints of the document.
  */
-const encoder = new TextEncoder();
-
-/** The JSON byte cost of one descriptor inside an array. */
-const descriptorBytes = (descriptor: HintDescriptor): number =>
-  encoder.encode(JSON.stringify(descriptor)).byteLength + 1;
-
-/**
- * Keep a canonical prefix that fits in one sealed message.
- *
- * Every receiver gets this complete list. No receiver reconstructs a removed
- * share, so this byte decision stays the same in every frame.
- */
-export const limitDescriptorBytes = (
-  descriptors: readonly HintDescriptor[],
-  byteLimit: number = MAX_DESCRIPTOR_PAYLOAD_BYTES,
-): readonly HintDescriptor[] => {
-  const kept: HintDescriptor[] = [];
-  // The opening bracket costs one byte. Each descriptor cost includes its
-  // comma, or the closing bracket for the last descriptor.
-  let used = 1;
-  for (const descriptor of descriptors) {
-    const cost = descriptorBytes(descriptor);
-    if (used + cost > byteLimit) break;
-    kept.push(descriptor);
-    used += cost;
-  }
-  return kept;
-};
-
 export const limitDescriptors = (
   descriptors: readonly HintDescriptor[],
   total: number = MAX_SESSION_DESCRIPTORS,
   byteLimit: number = MAX_DESCRIPTOR_PAYLOAD_BYTES,
 ): readonly HintDescriptor[] => {
   const sorted = sortDescriptors(descriptors);
-  if (sorted.length <= total) return limitDescriptorBytes(sorted, byteLimit);
-
-  /** How many each frame asks for, in the canonical order of the frame ids. */
-  const wanted = new Map<string, number>();
-  for (const descriptor of sorted) {
-    wanted.set(descriptor.frameId, (wanted.get(descriptor.frameId) ?? 0) + 1);
-  }
-
-  // The level is the largest number that every frame may keep. A frame that
-  // wants less than the level costs only what it wants, and the rest of its
-  // share raises the level for the frames that want more.
-  const ascending = [...wanted.values()].sort((left, right) => left - right);
-  let remaining = total;
-  let sharers = ascending.length;
-  let level = 0;
-  for (const count of ascending) {
-    const share = Math.floor(remaining / sharers);
-    if (count > share) {
-      level = share;
-      break;
-    }
-    remaining -= count;
-    sharers -= 1;
-  }
-
-  // What is left after every frame took the level. It goes one by one to the
-  // frames that want more, in the canonical order, so that every frame works
-  // out the same list.
-  let spare = remaining - level * sharers;
-  const quota = new Map<string, number>();
-  for (const frameId of [...wanted.keys()].sort()) {
-    const count = wanted.get(frameId) ?? 0;
-    if (count <= level) {
-      quota.set(frameId, count);
-      continue;
-    }
-    quota.set(frameId, spare > 0 ? level + 1 : level);
-    if (spare > 0) spare -= 1;
-  }
-
-  const kept = new Map<string, number>();
-  const withinCount = sorted.filter((descriptor) => {
-    const taken = kept.get(descriptor.frameId) ?? 0;
-    if (taken >= (quota.get(descriptor.frameId) ?? 0)) return false;
-    kept.set(descriptor.frameId, taken + 1);
-    return true;
-  });
-  return limitDescriptorBytes(withinCount, byteLimit);
+  const frames = byFrame(sorted);
+  return pipe(
+    frames,
+    Array.map(Array.length),
+    quotaWithin(total),
+    Option.match({
+      onNone: () => sorted,
+      onSome: (quota) => pipe(frames, keepQuota(quota)),
+    }),
+    (kept) => limitDescriptorBytes(kept, byteLimit),
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -407,7 +476,8 @@ export const DEFAULT_EXCLUSION: EffectiveExclusion = FULLY_ENABLED;
 // The handshake
 // ---------------------------------------------------------------------------
 
-const envelopeShape = () => ({
+/** The envelope literals, which every message schema begins with. */
+const envelopeSchema = Schema.Struct({
   magic: Schema.Literal(PROTOCOL_MAGIC),
   v: Schema.Literal(PROTOCOL_VERSION),
 });
@@ -420,8 +490,9 @@ const envelopeShape = () => ({
  * that is addressed to the window that announced itself. The port moves in the
  * `JOIN` only.
  */
-export const helloSchema = Schema.Struct(
-  pipe(envelopeShape(), Struct.assign({ kind: Schema.Literal("HELLO") })),
+export const helloSchema = pipe(
+  envelopeSchema,
+  Schema.fieldsAssign({ kind: Schema.Literal("HELLO") }),
 );
 
 /**
@@ -431,11 +502,9 @@ export const helloSchema = Schema.Struct(
  * It is not the session nonce. To read it is not enough, because a `JOIN` must
  * also prove possession of the manager-private credential.
  */
-export const challengeSchema = Schema.Struct(
-  pipe(
-    envelopeShape(),
-    Struct.assign({ kind: Schema.Literal("CHALLENGE"), token: handshakeIdSchema }),
-  ),
+export const challengeSchema = pipe(
+  envelopeSchema,
+  Schema.fieldsAssign({ kind: Schema.Literal("CHALLENGE"), token: handshakeIdSchema }),
 );
 
 /**
@@ -449,18 +518,16 @@ export const challengeSchema = Schema.Struct(
  * `frameId` is the identity that this frame will use on the wire. The proof
  * covers it, so a frame that holds no credential cannot claim an identity.
  */
-export const joinSchema = Schema.Struct(
-  pipe(
-    envelopeShape(),
-    Struct.assign({
-      kind: Schema.Literal("JOIN"),
-      token: handshakeIdSchema,
-      helloId: handshakeIdSchema,
-      frameId: handshakeIdSchema,
-      /** The HMAC over the token, the hello id and the frame id. */
-      proof: idSchema,
-    }),
-  ),
+export const joinSchema = pipe(
+  envelopeSchema,
+  Schema.fieldsAssign({
+    kind: Schema.Literal("JOIN"),
+    token: handshakeIdSchema,
+    helloId: handshakeIdSchema,
+    frameId: handshakeIdSchema,
+    /** The HMAC over the token, the hello id and the frame id. */
+    proof: idSchema,
+  }),
 );
 
 /**
@@ -473,25 +540,41 @@ export const joinSchema = Schema.Struct(
  * It is the first message of the link, so it proves that the other end holds
  * the credential. A page that copied the port cannot make one.
  */
-export const welcomeSchema = Schema.Struct(
-  pipe(
-    envelopeShape(),
-    Struct.assign({
-      kind: Schema.Literal("WELCOME"),
-      nonce: handshakeIdSchema,
-      /** The identity that the coordinator recorded, which the `JOIN` claimed. */
-      frameId: handshakeIdSchema,
-      /** It gives back the `JOIN` that earned it. Anything else is a race or a spoof. */
-      helloId: handshakeIdSchema,
-      frames: Schema.Array(handshakeIdSchema).check(Schema.isMaxLength(MAX_FRAMES)),
-    }),
-  ),
+export const welcomeSchema = pipe(
+  envelopeSchema,
+  Schema.fieldsAssign({
+    kind: Schema.Literal("WELCOME"),
+    nonce: handshakeIdSchema,
+    /** The identity that the coordinator recorded, which the `JOIN` claimed. */
+    frameId: handshakeIdSchema,
+    /** It gives back the `JOIN` that earned it. Anything else is a race or a spoof. */
+    helloId: handshakeIdSchema,
+    frames: Schema.Array(handshakeIdSchema).check(Schema.isMaxLength(MAX_FRAMES)),
+  }),
 );
 
 export type HelloMessage = typeof helloSchema.Type;
 export type ChallengeMessage = typeof challengeSchema.Type;
 export type JoinMessage = typeof joinSchema.Type;
 export type WelcomeMessage = typeof welcomeSchema.Type;
+
+/** The fields of a message that its sender chooses. The envelope and the kind are fixed. */
+type OwnFields<M> = Omit<M, keyof typeof ENVELOPE | "kind">;
+
+/** Put the envelope literals on a handshake message or a sealed message. */
+const withEnvelope = <const M extends { readonly kind: string }>(message: M) =>
+  pipe(ENVELOPE, Struct.assign(message));
+
+export const helloMessage: HelloMessage = withEnvelope({ kind: "HELLO" });
+
+export const challengeMessage = (token: string): ChallengeMessage =>
+  withEnvelope({ kind: "CHALLENGE", token });
+
+export const joinMessage = (fields: OwnFields<JoinMessage>): JoinMessage =>
+  pipe(withEnvelope({ kind: "JOIN" }), Struct.assign(fields));
+
+export const welcomeMessage = (fields: OwnFields<WelcomeMessage>): WelcomeMessage =>
+  pipe(withEnvelope({ kind: "WELCOME" }), Struct.assign(fields));
 
 /** What the top frame accepts on its `window`. Nothing else is a handshake. */
 export const windowToTopSchema = Schema.Union([helloSchema, joinSchema]);
@@ -534,19 +617,20 @@ export type SealDirection = typeof SealDirection.Type;
  * initialisation vector and to refuse a message that it has already seen. The
  * counter is also in the associated data, so a peer cannot change it.
  */
-export const sealedSchema = Schema.Struct(
-  pipe(
-    envelopeShape(),
-    Struct.assign({
-      kind: Schema.Literal("SEALED"),
-      seq: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: MAX_SEAL_SEQUENCE })),
-      /** The ciphertext and its tag, in base64 for a URL, with no padding. */
-      data: Schema.String.check(Schema.isMaxLength(MAX_SEALED_LENGTH)),
-    }),
-  ),
+export const sealedSchema = pipe(
+  envelopeSchema,
+  Schema.fieldsAssign({
+    kind: Schema.Literal("SEALED"),
+    seq: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: MAX_SEAL_SEQUENCE })),
+    /** The ciphertext and its tag, in base64 for a URL, with no padding. */
+    data: Schema.String.check(Schema.isMaxLength(MAX_SEALED_LENGTH)),
+  }),
 );
 
 export type SealedMessage = typeof sealedSchema.Type;
+
+export const sealedMessage = (seq: number, data: string): SealedMessage =>
+  withEnvelope({ kind: "SEALED", seq, data });
 
 /**
  * The text that a link key is derived from.
@@ -583,15 +667,14 @@ export const sealedAad = (link: string, direction: SealDirection, seq: number): 
  * `WIRE_TARGET_TOP`, `WIRE_TARGET_ALL` or a frame id. `requestId` correlates a
  * reply with its request, and it is `NO_REQUEST_ID` when there is none.
  */
-const routedShape = () =>
-  pipe(
-    envelopeShape(),
-    Struct.assign({ nonce: idSchema, from: idSchema, to: idSchema, requestId: idSchema }),
-  );
+const routedSchema = pipe(
+  envelopeSchema,
+  Schema.fieldsAssign({ nonce: idSchema, from: idSchema, to: idSchema, requestId: idSchema }),
+);
 
 const define = <F extends Schema.Struct.Fields>(fields: F) => ({
   payload: Schema.Struct(fields),
-  wire: Schema.Struct(pipe(routedShape(), Struct.assign(fields))),
+  wire: pipe(routedSchema, Schema.fieldsAssign(fields)),
 });
 
 /**
@@ -822,11 +905,19 @@ export interface WireEnvelope {
 }
 
 /** Put one message in its envelope. Pure, and it never fails. */
-export const encodeMessage = (envelope: WireEnvelope, message: FrameMessage): FrameWire => ({
-  ...ENVELOPE,
-  ...envelope,
-  ...message,
-});
+export const encodeMessage = (envelope: WireEnvelope, message: FrameMessage): FrameWire =>
+  pipe(ENVELOPE, Struct.assign(envelope), Struct.assign(message));
+
+/**
+ * Narrow a message to one kind.
+ *
+ * The union is checked once, by its `kind`, and the caller then reads the
+ * fields of that kind without a second test.
+ */
+export const isKind =
+  <K extends MessageKind>(kind: K) =>
+  (message: FrameMessage): message is MessageOf<K> =>
+    message.kind === kind;
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -847,28 +938,31 @@ const decodeChallenge = Schema.decodeUnknownOption(challengeSchema);
 const decodeWelcome = Schema.decodeUnknownOption(welcomeSchema);
 const decodeSealed = Schema.decodeUnknownOption(sealedSchema);
 
-const readEnvelope = (data: unknown): Option.Option<Record<string, unknown>> => {
-  if (typeof data !== "object" || data === null) return Option.none();
-  const raw = data as Record<string, unknown>;
+/**
+ * An object whose envelope says that it is ours.
+ *
+ * A direct read, and not a decode. It proves nothing about the other fields.
+ */
+type Envelope = { readonly [field: PropertyKey]: unknown };
+
+const readEnvelope: (data: unknown) => Option.Option<Envelope> = flow(
+  Option.liftPredicate(Predicate.isObject),
   // The magic test is not a security control. It is a cost control, because a
   // busy page posts messages all the time, and a full decode of each one is
   // waste.
-  if (raw["magic"] !== PROTOCOL_MAGIC) return Option.none();
-  if (raw["v"] !== PROTOCOL_VERSION) return Option.none();
-  return Option.some(raw);
-};
+  Option.filter((raw) => raw["magic"] === PROTOCOL_MAGIC && raw["v"] === PROTOCOL_VERSION),
+);
 
 /**
  * Read the kind of a message without a decode.
  *
  * The caller uses it to choose a decoder. It proves nothing about the payload.
  */
-export const peekKind = (data: unknown): Option.Option<string> => {
-  const raw = readEnvelope(data);
-  if (Option.isNone(raw)) return Option.none();
-  const kind = raw.value["kind"];
-  return typeof kind === "string" ? Option.some(kind) : Option.none();
-};
+export const peekKind: (data: unknown) => Option.Option<string> = flow(
+  readEnvelope,
+  Option.map((raw) => raw["kind"]),
+  Option.filter(Predicate.isString),
+);
 
 /**
  * Decide whether a payload is worth a validation, with a direct property read.
@@ -881,12 +975,11 @@ export const peekKind = (data: unknown): Option.Option<string> => {
  * The comparison is not constant time. It does not need to be. The attacker is
  * in the same page, and can already observe our timing more directly.
  */
-export const preauthorize = (data: unknown, expectedNonce: Option.Option<string>): boolean => {
-  const raw = readEnvelope(data);
-  if (Option.isNone(raw)) return false;
-  if (Option.isNone(expectedNonce)) return false;
-  return raw.value["nonce"] === expectedNonce.value;
-};
+export const preauthorize = (data: unknown, expectedNonce: Option.Option<string>): boolean =>
+  pipe(
+    Option.all([readEnvelope(data), expectedNonce]),
+    Option.exists(([raw, nonce]) => raw["nonce"] === nonce),
+  );
 
 /**
  * Parse a routed message, and check the session nonce.
@@ -898,22 +991,30 @@ export const preauthorize = (data: unknown, expectedNonce: Option.Option<string>
 export const parseWire = (
   data: unknown,
   expectedNonce: Option.Option<string>,
-): Option.Option<FrameWire> => {
-  if (!preauthorize(data, expectedNonce)) return Option.none();
-  return decodeWire(data);
-};
+): Option.Option<FrameWire> =>
+  pipe(
+    data,
+    Option.liftPredicate((raw) => preauthorize(raw, expectedNonce)),
+    Option.flatMap(decodeWire),
+  );
 
 /** Parse a `HELLO` or a `JOIN`. Both come before any nonce exists. */
-export const parseWindowToTop = (data: unknown): Option.Option<WindowToTopMessage> =>
-  Option.isNone(readEnvelope(data)) ? Option.none() : decodeWindowToTop(data);
+export const parseWindowToTop: (data: unknown) => Option.Option<WindowToTopMessage> = flow(
+  readEnvelope,
+  Option.flatMap(decodeWindowToTop),
+);
 
 /** Parse a `CHALLENGE`. The caller must first check that the sender is the top frame. */
-export const parseChallenge = (data: unknown): Option.Option<ChallengeMessage> =>
-  Option.isNone(readEnvelope(data)) ? Option.none() : decodeChallenge(data);
+export const parseChallenge: (data: unknown) => Option.Option<ChallengeMessage> = flow(
+  readEnvelope,
+  Option.flatMap(decodeChallenge),
+);
 
 /** Parse a `WELCOME`. The caller must check the `helloId` of the attempt. */
-export const parseWelcome = (data: unknown): Option.Option<WelcomeMessage> =>
-  Option.isNone(readEnvelope(data)) ? Option.none() : decodeWelcome(data);
+export const parseWelcome: (data: unknown) => Option.Option<WelcomeMessage> = flow(
+  readEnvelope,
+  Option.flatMap(decodeWelcome),
+);
 
 /**
  * Parse the envelope of a sealed message.
@@ -921,5 +1022,7 @@ export const parseWelcome = (data: unknown): Option.Option<WelcomeMessage> =>
  * This says nothing about the payload. The payload is opened with the key of
  * the link, and only then is it parsed.
  */
-export const parseSealed = (data: unknown): Option.Option<SealedMessage> =>
-  Option.isNone(readEnvelope(data)) ? Option.none() : decodeSealed(data);
+export const parseSealed: (data: unknown) => Option.Option<SealedMessage> = flow(
+  readEnvelope,
+  Option.flatMap(decodeSealed),
+);
