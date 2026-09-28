@@ -91,6 +91,30 @@ const field = <S extends Schema.Top>(schema: S, fallback: S["Type"]) => {
 };
 
 /**
+ * The range of a numeric setting.
+ *
+ * The schema checks it, and the settings dialog builds its control from the
+ * same value, so the two cannot disagree about the range.
+ */
+export interface SettingBounds {
+  readonly min: number;
+  readonly max: number;
+}
+
+/** How far one scroll step moves, in pixels. */
+export const SCROLL_STEP_BOUNDS: SettingBounds = { min: 1, max: 10_000 };
+
+/** How many visits the history index keeps. `0` stops the recording. */
+export const HISTORY_INDEX_LIMIT_BOUNDS: SettingBounds = { min: 0, max: 50_000 };
+
+/** The fewest characters of a hint alphabet. One character labels one hint only. */
+export const MIN_HINT_CHARACTERS = 2;
+
+/** A finite number inside `bounds`. */
+const boundedNumber = ({ min, max }: SettingBounds) =>
+  Schema.Finite.check(Schema.isGreaterThanOrEqualTo(min), Schema.isLessThanOrEqualTo(max));
+
+/**
  * Repair a hint alphabet as the schema decodes it.
  *
  * The transformation composes the value, removes invalid characters and
@@ -105,7 +129,7 @@ const hintCharactersSchema = pipe(
     }),
   ),
 ).check(
-  Schema.makeFilter((value) => hintCharacterCount(value) >= 2, {
+  Schema.makeFilter((value) => hintCharacterCount(value) >= MIN_HINT_CHARACTERS, {
     message: "at least two hint characters are needed",
   }),
 );
@@ -115,10 +139,7 @@ const hasQueryPlaceholder = (value: string): boolean => value.includes("%s");
 
 export const settingsSchema = Schema.Struct({
   // --- Scrolling ---
-  scrollStepSize: field(
-    Schema.Finite.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(10_000)),
-    60,
-  ),
+  scrollStepSize: field(boundedNumber(SCROLL_STEP_BOUNDS), 60),
   smoothScroll: field(Schema.Boolean, true),
 
   // --- Link hints ---
@@ -201,10 +222,7 @@ export const settingsSchema = Schema.Struct({
    */
   enableHistoryIndex: field(Schema.Boolean, false),
   historyIndexDenylist: field(Schema.mutable(Schema.Array(Schema.String)), []),
-  historyIndexLimit: field(
-    Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(50_000)),
-    5000,
-  ),
+  historyIndexLimit: field(boundedNumber(HISTORY_INDEX_LIMIT_BOUNDS), 5000),
 
   // --- Rules ---
   exclusionRules: field(Schema.mutable(Schema.Array(exclusionRuleSchema)), []),

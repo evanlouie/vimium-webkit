@@ -55,7 +55,14 @@ import { Settings } from "~/core/Settings.ts";
 import { type CommandDef, type CommandGroup, DEFAULT_MAPPINGS } from "~/domain/Command.ts";
 import { exclusionProblems, type ExclusionRule, parseExclusionLines } from "~/domain/Exclusion.ts";
 import { type CompiledMappings, formatDiagnostics, keysByCommand } from "~/domain/Mapping.ts";
-import { defaultSettings, type Settings as SettingsData } from "~/domain/Persisted.ts";
+import {
+  defaultSettings,
+  HISTORY_INDEX_LIMIT_BOUNDS,
+  MIN_HINT_CHARACTERS,
+  SCROLL_STEP_BOUNDS,
+  type SettingBounds,
+  type Settings as SettingsData,
+} from "~/domain/Persisted.ts";
 import { Capabilities, formatCapabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { deepActiveElement } from "~/platform/Elements.ts";
@@ -265,7 +272,7 @@ const line = ({
   });
 
 /**
- * One numeric input, for a whole number from `min` to `max`.
+ * One numeric input, for a whole number inside `bounds`.
  *
  * `write` brings the number into range and drops its decimals. A text with no
  * number keeps the stored value.
@@ -274,11 +281,10 @@ const whole = ({
   key,
   label,
   note,
-  min,
-  max,
+  bounds: { min, max },
   read,
   write,
-}: FieldSpec & Access<number> & { readonly min: number; readonly max: number }): SettingsField =>
+}: FieldSpec & Access<number> & { readonly bounds: SettingBounds }): SettingsField =>
   SettingsField.Entry({
     key,
     label,
@@ -383,8 +389,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       whole({
         key: "scrollStepSize",
         label: "Scroll step size (px)",
-        min: 1,
-        max: 10_000,
+        bounds: SCROLL_STEP_BOUNDS,
         read: (settings) => settings.scrollStepSize,
         write: (settings, value) => pipe(settings, Struct.assign({ scrollStepSize: value })),
       }),
@@ -401,11 +406,14 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     description: Option.none(),
     fields: [
       // A hint alphabet needs two characters, or it can label one hint only.
+      // This control counts the length of the text, and the schema counts the
+      // distinct characters that it keeps, so `aa` passes here and storage
+      // then puts the default back.
       line({
         key: "linkHintCharacters",
         label: "Link hint characters",
         note: "Two or more, and all different.",
-        minLength: 2,
+        minLength: MIN_HINT_CHARACTERS,
         read: (settings) => settings.linkHintCharacters,
         write: (settings, value) => pipe(settings, Struct.assign({ linkHintCharacters: value })),
       }),
@@ -413,7 +421,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         key: "linkHintNumbers",
         label: "Digits that choose among filtered hints",
         note: "Two or more.",
-        minLength: 2,
+        minLength: MIN_HINT_CHARACTERS,
         read: (settings) => settings.linkHintNumbers,
         write: (settings, value) => pipe(settings, Struct.assign({ linkHintNumbers: value })),
       }),
@@ -596,8 +604,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         key: "historyIndexLimit",
         label: "Entries kept in the index",
         note: "0 stops the recording.",
-        min: 0,
-        max: 50_000,
+        bounds: HISTORY_INDEX_LIMIT_BOUNDS,
         read: (settings) => settings.historyIndexLimit,
         write: (settings, value) => pipe(settings, Struct.assign({ historyIndexLimit: value })),
       }),
