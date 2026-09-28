@@ -1207,7 +1207,7 @@ const alphabetSpec =
         ),
       }),
       Option.match({
-        onNone: () => MarkerSpec.Hidden(),
+        onNone: () => MarkerSpec.Hidden({ secondary: own.secondary, active: false }),
         onSome: ({ shift, hintString }) =>
           MarkerSpec.Shown({
             rect: shiftedRect(own.hint.rect, shift),
@@ -1225,25 +1225,27 @@ type Shown = Record.ReadonlyRecord<string, FilterMatch>;
 
 const filterSpec =
   (shown: Shown, active: Option.Option<number>, digits: string, placements: readonly Placement[]) =>
-  (own: OwnHint): MarkerSpec =>
-    pipe(
+  (own: OwnHint): MarkerSpec => {
+    const isActive = pipe(active, Option.contains(own.position));
+    return pipe(
       Option.all({
         shift: shiftAt(placements, own.localIndex),
         match: pipe(shown, Record.get(`${own.position}`)),
       }),
       Option.match({
-        onNone: () => MarkerSpec.Hidden(),
+        onNone: () => MarkerSpec.Hidden({ secondary: own.secondary, active: isActive }),
         onSome: ({ shift, match }) =>
           MarkerSpec.Shown({
             rect: shiftedRect(own.hint.rect, shift),
             hintString: match.hintString,
             matchedLength: matchedPrefixLength(match.hintString, digits),
             secondary: own.secondary,
-            active: pipe(active, Option.contains(own.position)),
+            active: isActive,
             label: labelOf(own.hint),
           }),
       }),
     );
+  };
 
 const filterSpecs = (
   { outcome, activeIndex, digits }: FilterState,

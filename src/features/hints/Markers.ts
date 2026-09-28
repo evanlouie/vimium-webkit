@@ -202,22 +202,27 @@ export const hintCss: (userDefinedLinkHintCss: string) => string = flow(
 // The markers
 // ---------------------------------------------------------------------------
 
+/** The classes of a marker that do not depend on whether it is drawn. */
+type MarkerStyle = {
+  readonly secondary: boolean;
+  /** Filter mode: the candidate that `Enter` would activate. */
+  readonly active: boolean;
+};
+
 /**
  * What one marker draws.
  *
  * A marker is hidden when the typed keys filter it out, or when the page took
- * its target away. A hidden marker keeps its element for the next draw.
+ * its target away. A hidden marker keeps its element for the next draw, and
+ * the classes of its style.
  */
 export type MarkerSpec = Data.TaggedEnum<{
-  Hidden: Record<never, never>;
-  Shown: {
+  Hidden: MarkerStyle;
+  Shown: MarkerStyle & {
     readonly rect: HintRect;
     readonly hintString: string;
     /** How many first characters are already typed. They are drawn dimmed. */
     readonly matchedLength: number;
-    readonly secondary: boolean;
-    /** Filter mode: the candidate that `Enter` would activate. */
-    readonly active: boolean;
     /** Filter mode: the link text beside the number, for a hint that has no visible text. */
     readonly label: Option.Option<string>;
   };
@@ -258,20 +263,24 @@ interface ScrollPosition {
   readonly y: number;
 }
 
-const HIDDEN_CLASS = "vw-hint vw-hint--hidden";
+const SHOWN_CLASSES = ["vw-hint"];
+const HIDDEN_CLASSES = ["vw-hint", "vw-hint--hidden"];
 
-/** The class list of a marker that is drawn. */
-const shownClass = ({ secondary, active }: ShownMarker): string =>
+/** The class list of a marker: the classes of its state, then those of its style. */
+const classList = (state: ReadonlyArray<string>, { secondary, active }: MarkerStyle): string =>
   pipe(
     [
-      { name: "vw-hint", on: true },
       { name: "vw-hint--secondary", on: secondary },
       { name: "vw-hint--active", on: active },
     ],
     Array.filter(({ on }) => on),
     Array.map(({ name }) => name),
+    Array.prependAll(state),
     Array.join(" "),
   );
+
+/** The class list of a marker that has no spec, or of every marker after `clear`. */
+const HIDDEN_CLASS = classList(HIDDEN_CLASSES, { secondary: false, active: false });
 
 const textSpan = (document: Document, className: string, text: string): HTMLSpanElement => {
   const span = document.createElement("span");
@@ -312,7 +321,7 @@ const paintText = (document: Document, marker: HTMLElement, shown: ShownMarker):
 };
 
 const paintShown = (document: Document, marker: HTMLElement, shown: ShownMarker): void => {
-  marker.className = shownClass(shown);
+  marker.className = classList(SHOWN_CLASSES, shown);
   const left = Math.max(MARKER_INSET, shown.rect.left);
   const top = Math.max(MARKER_INSET, shown.rect.top);
   // Whole pixels: a marker on a fractional boundary is drawn blurred, and hint
@@ -327,7 +336,9 @@ const hide = (marker: HTMLElement): void => {
 
 const paint = (document: Document, marker: HTMLElement): ((spec: MarkerSpec) => void) =>
   MarkerSpec.$match({
-    Hidden: () => hide(marker),
+    Hidden: (style) => {
+      marker.className = classList(HIDDEN_CLASSES, style);
+    },
     Shown: (shown) => paintShown(document, marker, shown),
   });
 
@@ -343,8 +354,10 @@ const paintAll = (
       pipe(
         specs,
         Array.get(index),
-        Option.getOrElse(() => MarkerSpec.Hidden()),
-        paint(document, marker),
+        Option.match({
+          onNone: () => hide(marker),
+          onSome: paint(document, marker),
+        }),
       ),
     ),
   );
