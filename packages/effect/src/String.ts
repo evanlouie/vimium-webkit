@@ -13,6 +13,7 @@ import type { NonEmptyArray } from "./Array.ts"
 import * as Equ from "./Equivalence.ts"
 import { dual } from "./Function.ts"
 import * as readonlyArray from "./internal/array.ts"
+import * as Count from "./internal/count.ts"
 import * as number from "./Number.ts"
 import * as Option from "./Option.ts"
 import * as order from "./Order.ts"
@@ -774,6 +775,10 @@ export const padStart = (maxLength: number, fillString?: string) => (self: strin
 /**
  * Repeats the string the specified number of times.
  *
+ * **Details**
+ *
+ * `count` is rounded down. `NaN` and non-positive values are treated as `0`.
+ *
  * **Example** (Repeating strings)
  *
  * ```ts import.meta.vitest
@@ -786,7 +791,7 @@ export const padStart = (maxLength: number, fillString?: string) => (self: strin
  * @category transforming
  * @since 2.0.0
  */
-export const repeat = (count: number) => (self: string): string => self.repeat(count)
+export const repeat = (count: number) => (self: string): string => self.repeat(Count.normalize(count))
 
 /**
  * Replaces all occurrences of a substring or pattern in a string.
@@ -876,7 +881,8 @@ export const toLocaleUpperCase = (locale?: string | Array<string>) => (self: str
  * If `n` is larger than the available number of characters, the string will
  * be returned whole.
  *
- * If `n` is not a positive number, an empty string will be returned.
+ * If `n` is not a positive number, including `NaN`, an empty string will be
+ * returned.
  *
  * If `n` is a float, it will be rounded down to the nearest integer.
  *
@@ -894,7 +900,7 @@ export const toLocaleUpperCase = (locale?: string | Array<string>) => (self: str
 export const takeLeft: {
   (n: number): (self: string) => string
   (self: string, n: number): string
-} = dual(2, (self: string, n: number): string => self.slice(0, Math.max(n, 0)))
+} = dual(2, (self: string, n: number): string => self.slice(0, Count.normalize(n)))
 
 /**
  * Keeps the specified number of characters from the end of a string.
@@ -904,7 +910,8 @@ export const takeLeft: {
  * If `n` is larger than the available number of characters, the string will
  * be returned whole.
  *
- * If `n` is not a positive number, an empty string will be returned.
+ * If `n` is not a positive number, including `NaN`, an empty string will be
+ * returned.
  *
  * If `n` is a float, it will be rounded down to the nearest integer.
  *
@@ -924,7 +931,7 @@ export const takeRight: {
   (self: string, n: number): string
 } = dual(
   2,
-  (self: string, n: number): string => self.slice(Math.max(0, self.length - Math.floor(n)), Infinity)
+  (self: string, n: number): string => self.slice(self.length - Math.min(Count.normalize(n), self.length), Infinity)
 )
 
 const CR = 0x0d
@@ -1034,6 +1041,7 @@ export const stripMargin = (self: string): string => stripMarginWith(self, "|")
  * @since 2.0.0
  */
 export const snakeToCamel = (self: string): string => {
+  if (self.length === 0) return self
   let str = self[0]
   for (let i = 1; i < self.length; i++) {
     str += self[i] === "_" ? self[++i].toUpperCase() : self[i]
@@ -1057,6 +1065,7 @@ export const snakeToCamel = (self: string): string => {
  * @since 2.0.0
  */
 export const snakeToPascal = (self: string): string => {
+  if (self.length === 0) return self
   let str = self[0].toUpperCase()
   for (let i = 1; i < self.length; i++) {
     str += self[i] === "_" ? self[++i].toUpperCase() : self[i]
@@ -1234,15 +1243,20 @@ export const noCase: {
   readonly delimiter?: string | undefined
   readonly transform?: (part: string, index: number, parts: ReadonlyArray<string>) => string
 }): string => {
+  const splitRegExp = toRegExpArray(options?.splitRegExp ?? SPLIT_REGEXP)
+  const stripRegExp = toRegExpArray(options?.stripRegExp ?? STRIP_REGEXP)
   const delimiter = options?.delimiter ?? " "
   const transform = options?.transform ?? toLowerCase
-  return normalizeCase(input, SPLIT_REGEXP, STRIP_REGEXP, delimiter, transform)
+  return normalizeCase(input, splitRegExp, stripRegExp, delimiter, transform)
 })
+
+const toRegExpArray = (regexp: RegExp | ReadonlyArray<RegExp>): ReadonlyArray<RegExp> =>
+  predicate.isRegExp(regexp) ? [regexp] : regexp
 
 const normalizeCase = (
   input: string,
   splitRegExp: ReadonlyArray<RegExp>,
-  stripRegExp: RegExp,
+  stripRegExp: ReadonlyArray<RegExp>,
   delimiter: string,
   transform: (part: string, index: number, parts: ReadonlyArray<string>) => string
 ): string => {
@@ -1250,7 +1264,9 @@ const normalizeCase = (
   for (const regexp of splitRegExp) {
     result = result.replace(regexp, "$1\0$2")
   }
-  result = result.replace(stripRegExp, "\0")
+  for (const regexp of stripRegExp) {
+    result = result.replace(regexp, "\0")
+  }
   let start = 0
   let end = result.length
   // Trim the delimiter from around the output string.
@@ -1370,7 +1386,7 @@ export const constantCase: (self: string) => string = noCase({
  * @since 4.0.0
  */
 export const configCase: (self: string) => string = (self) =>
-  normalizeCase(self, CONFIG_SPLIT_REGEXP, STRIP_REGEXP, "_", toUpperCase)
+  normalizeCase(self, CONFIG_SPLIT_REGEXP, [STRIP_REGEXP], "_", toUpperCase)
 
 /**
  * Converts a string to kebab-case (lowercase with hyphens).

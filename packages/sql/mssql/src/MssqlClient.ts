@@ -19,13 +19,12 @@ import * as Effect from "effect/Effect"
 import { identity } from "effect/Function"
 import * as Layer from "effect/Layer"
 import * as Pool from "effect/Pool"
+import * as Reactivity from "effect/reactivity/Reactivity"
 import * as Rec from "effect/Record"
 import * as Redacted from "effect/Redacted"
 import * as Scope from "effect/Scope"
-import * as Stream from "effect/Stream"
-import * as Reactivity from "effect/unstable/reactivity/Reactivity"
-import * as Client from "effect/unstable/sql/SqlClient"
-import type { Connection } from "effect/unstable/sql/SqlConnection"
+import * as Client from "effect/sql/SqlClient"
+import type { Connection } from "effect/sql/SqlConnection"
 import {
   AuthenticationError,
   AuthorizationError,
@@ -38,8 +37,10 @@ import {
   SqlSyntaxError,
   UniqueViolation,
   UnknownError
-} from "effect/unstable/sql/SqlError"
-import * as Statement from "effect/unstable/sql/Statement"
+} from "effect/sql/SqlError"
+import * as Statement from "effect/sql/Statement"
+import * as Stream from "effect/Stream"
+import { Buffer } from "node:buffer"
 import * as Tedious from "tedious"
 import type { ConnectionOptions } from "tedious/lib/connection.ts"
 import type { DataType } from "tedious/lib/data-type.ts"
@@ -311,6 +312,7 @@ export const make = (
         authentication: {
           type: (options.authType as any) ?? "default",
           options: {
+            domain: options.domain,
             userName: options.username,
             password: options.password
               ? Redacted.value(options.password)
@@ -373,6 +375,7 @@ export const make = (
 
           conn.cancel()
           conn.execSql(req)
+          return Effect.sync(() => conn.cancel())
         })
 
       const runProcedure = (
@@ -396,7 +399,7 @@ export const make = (
                 }
                 resume(
                   Effect.succeed({
-                    params: result,
+                    output: result,
                     rows
                   })
                 )
@@ -421,6 +424,7 @@ export const make = (
 
           conn.cancel()
           conn.callProcedure(req)
+          return Effect.sync(() => conn.cancel())
         })
 
       const connection = identity<MssqlConnection>({
@@ -704,6 +708,17 @@ function numberToParamName(n: number) {
   return `${Math.ceil(n + 1)}`
 }
 
+const byteArrayParameterType: DataType = {
+  ...Tedious.TYPES.VarBinary,
+  validate(value, collation, options) {
+    return Tedious.TYPES.VarBinary.validate(
+      Buffer.isBuffer(value) ? value : Buffer.from(value.buffer, value.byteOffset, value.byteLength),
+      collation,
+      options
+    )
+  }
+}
+
 /**
  * Default mapping from Effect SQL primitive value kinds to Tedious SQL Server parameter data types.
  *
@@ -711,13 +726,13 @@ function numberToParamName(n: number) {
  * @since 4.0.0
  */
 export const defaultParameterTypes: Record<Statement.PrimitiveKind, DataType> = {
-  string: Tedious.TYPES.VarChar,
-  number: Tedious.TYPES.Int,
+  string: Tedious.TYPES.NVarChar,
+  number: Tedious.TYPES.Float,
   bigint: Tedious.TYPES.BigInt,
   boolean: Tedious.TYPES.Bit,
   Date: Tedious.TYPES.DateTime,
-  Uint8Array: Tedious.TYPES.VarBinary,
-  Int8Array: Tedious.TYPES.VarBinary,
+  Uint8Array: byteArrayParameterType,
+  Int8Array: byteArrayParameterType,
   null: Tedious.TYPES.Bit
 }
 
