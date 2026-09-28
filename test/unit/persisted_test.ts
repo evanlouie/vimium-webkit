@@ -5,7 +5,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Result, Record, pipe, Struct } from "effect";
+import { Array, Effect, Record, Result, Struct, pipe } from "effect";
 import {
   defaultSettings,
   LOCAL_MARK_TTL_MS,
@@ -23,15 +23,17 @@ const decodeSettings = decodeUnknown(settingsSchema);
 /** A fixed instant, so no test reads the clock. */
 const NOW = 1_800_000_000_000;
 
-const markTable = (urls: number, at: (index: number) => number): Marks => {
-  const local: Record<string, Record<string, LocalMark>> = {};
-  for (let index = 0; index < urls; index++) {
-    local[`https://example.com/${index}`] = {
-      a: { scrollX: 0, scrollY: index, savedAt: at(index) },
-    };
-  }
-  return { local, global: {} };
-};
+const markTable = (urls: number, at: (index: number) => number): Marks => ({
+  local: pipe(
+    urls,
+    Array.makeBy((index): readonly [string, Record<string, LocalMark>] => [
+      `https://example.com/${index}`,
+      { a: { scrollX: 0, scrollY: index, savedAt: at(index) } },
+    ]),
+    Record.fromEntries,
+  ),
+  global: {},
+});
 
 describe("Persisted", () => {
   it.effect("keeps every other field when one field is absent", () =>
@@ -40,75 +42,108 @@ describe("Persisted", () => {
       const keys = Record.keys(full);
       assert.isAbove(keys.length, 20, "the point is that there are many");
 
-      for (const missing of keys) {
-        const partial: Record<string, unknown> = { ...full };
-        delete partial[missing];
-
-        const parsed = decodeSettings(partial);
-        assert.isTrue(Result.isSuccess(parsed), `dropping ${missing} rejected the whole object`);
-        if (Result.isFailure(parsed)) continue;
-        // The defaults are what an empty object decodes to, so the result of
-        // dropping one field must be the defaults again.
-        assert.deepEqual(parsed.success, full, `dropping ${missing} changed another field`);
-      }
+      pipe(
+        keys,
+        Array.forEach((missing) => {
+          const parsed = pipe(full, Struct.omit([missing]), decodeSettings);
+          assert.isTrue(Result.isSuccess(parsed), `dropping ${missing} rejected the whole object`);
+          // The defaults are what an empty object decodes to, so the result of
+          // dropping one field must be the defaults again.
+          assert.deepEqual(
+            parsed,
+            Result.succeed(full),
+            `dropping ${missing} changed another field`,
+          );
+        }),
+      );
     }),
   );
 
   it.effect("costs exactly one field when one field is corrupt", () =>
     Effect.sync(() => {
-      const parsed = decodeSettings(
-        pipe(
-          defaultSettings(),
-          Struct.assign({
-            scrollStepSize: "sixty",
-            keyMappings: 42,
-            exclusionRules: "not an array",
-          }),
-        ),
+      const parsed = pipe(
+        defaultSettings(),
+        Struct.assign({
+          scrollStepSize: "sixty",
+          keyMappings: 42,
+          exclusionRules: "not an array",
+        }),
+        decodeSettings,
       );
 
       assert.isTrue(Result.isSuccess(parsed));
-      if (Result.isFailure(parsed)) return;
-      assert.strictEqual(parsed.success.scrollStepSize, 60);
-      assert.strictEqual(parsed.success.keyMappings, "");
-      assert.deepEqual(parsed.success.exclusionRules, []);
-      // The neighbours that nobody touched stay as they are.
-      assert.strictEqual(parsed.success.smoothScroll, true);
-      assert.strictEqual(parsed.success.searchUrl, "https://www.google.com/search?q=%s");
+      const fields = pipe(
+        parsed,
+        Result.map(
+          Struct.pick([
+            "scrollStepSize",
+            "keyMappings",
+            "exclusionRules",
+            "smoothScroll",
+            "searchUrl",
+          ]),
+        ),
+      );
+      assert.deepEqual(
+        fields,
+        Result.succeed({
+          scrollStepSize: 60,
+          keyMappings: "",
+          exclusionRules: [],
+          // The neighbours that nobody touched stay as they are.
+          smoothScroll: true,
+          searchUrl: "https://www.google.com/search?q=%s",
+        }),
+      );
     }),
   );
 
   it.effect("removes duplicate hint characters during decoding", () =>
     Effect.sync(() => {
       // A duplicate makes two hints answer to the same string.
-      const parsed = decodeSettings(
-        pipe(defaultSettings(), Struct.assign({ linkHintCharacters: "aabbcc" })),
+      const parsed = pipe(
+        defaultSettings(),
+        Struct.assign({ linkHintCharacters: "aabbcc" }),
+        decodeSettings,
       );
       assert.isTrue(Result.isSuccess(parsed));
-      if (Result.isFailure(parsed)) return;
-      assert.strictEqual(parsed.success.linkHintCharacters, "abc");
+      const linkHintCharacters = pipe(
+        parsed,
+        Result.map((settings) => settings.linkHintCharacters),
+      );
+      assert.deepEqual(linkHintCharacters, Result.succeed("abc"));
     }),
   );
 
   it.effect("repairs hint number characters during decoding", () =>
     Effect.sync(() => {
-      const parsed = decodeSettings(
-        pipe(defaultSettings(), Struct.assign({ linkHintNumbers: "012\ufe0f3" })),
+      const parsed = pipe(
+        defaultSettings(),
+        Struct.assign({ linkHintNumbers: "012\ufe0f3" }),
+        decodeSettings,
       );
       assert.isTrue(Result.isSuccess(parsed));
-      if (Result.isFailure(parsed)) return;
-      assert.strictEqual(parsed.success.linkHintNumbers, "0123");
+      const linkHintNumbers = pipe(
+        parsed,
+        Result.map((settings) => settings.linkHintNumbers),
+      );
+      assert.deepEqual(linkHintNumbers, Result.succeed("0123"));
     }),
   );
 
   it.effect("falls back on a search URL that has no %s", () =>
     Effect.sync(() => {
-      const parsed = decodeSettings(
-        pipe(defaultSettings(), Struct.assign({ searchUrl: "https://example.com/search" })),
+      const parsed = pipe(
+        defaultSettings(),
+        Struct.assign({ searchUrl: "https://example.com/search" }),
+        decodeSettings,
       );
       assert.isTrue(Result.isSuccess(parsed));
-      if (Result.isFailure(parsed)) return;
-      assert.strictEqual(parsed.success.searchUrl, "https://www.google.com/search?q=%s");
+      const searchUrl = pipe(
+        parsed,
+        Result.map((settings) => settings.searchUrl),
+      );
+      assert.deepEqual(searchUrl, Result.succeed("https://www.google.com/search?q=%s"));
     }),
   );
 

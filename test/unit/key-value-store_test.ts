@@ -11,8 +11,8 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer, Option, Stream, pipe } from "effect";
-import { Gm, GmError, type GmValueApi } from "~/platform/Gm.ts";
+import { Effect, Layer, MutableRef, Option, Record, Stream, pipe } from "effect";
+import { Gm, GmError, GmValueApi } from "~/platform/Gm.ts";
 import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 
 /** A manager that gives the value API that the test names, and nothing else. */
@@ -23,11 +23,11 @@ const gmLayer = (values: Option.Option<GmValueApi>): Layer.Layer<Gm> => {
     Gm,
     Gm.of({
       identity: {
-        handler: null,
-        handlerVersion: null,
-        scriptVersion: null,
-        injectInto: null,
-        sandboxMode: null,
+        handler: Option.none(),
+        handlerVersion: Option.none(),
+        scriptVersion: Option.none(),
+        injectInto: Option.none(),
+        sandboxMode: Option.none(),
       },
       info: null,
       values,
@@ -49,32 +49,30 @@ const gmLayer = (values: Option.Option<GmValueApi>): Layer.Layer<Gm> => {
 
 /** The value API of a manager that has one. */
 const valueApi = (): GmValueApi => {
-  const map = new Map<string, string>();
-  return {
-    kind: "gm-sync",
-    get: (key) => Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
-    set: (key, value) =>
-      Effect.sync(() => {
-        map.set(key, value);
-      }),
+  const stored = MutableRef.make<Record.ReadonlyRecord<string, string>>({});
+  const put = (key: string, value: string): void => {
+    pipe(stored, MutableRef.update(Record.set(key, value)));
+  };
+  return GmValueApi.Sync({
+    get: (key) => Effect.sync(() => pipe(MutableRef.get(stored), Record.get(key))),
+    set: (key, value) => Effect.sync(() => put(key, value)),
     remove: (key) =>
       Effect.sync(() => {
-        map.delete(key);
+        pipe(stored, MutableRef.update(Record.remove(key)));
       }),
-    setUnsafe: (key, value) => {
-      map.set(key, value);
-    },
+    setUnsafe: put,
     changes: Option.none(),
-  };
+  });
 };
+
+/** The real layer, over a manager that gives `values`. */
+const storeOver = (values: Option.Option<GmValueApi>): Layer.Layer<KeyValueStore> =>
+  pipe(KeyValueStore.layer, Layer.provide(gmLayer(values)));
 
 describe("KeyValueStore", () => {
   it.effect("falls back to memory when the manager has no value API", () =>
     Effect.gen(function* () {
-      const kv = yield* Effect.provide(
-        KeyValueStore,
-        pipe(KeyValueStore.layer, Layer.provide(gmLayer(Option.none()))),
-      );
+      const kv = yield* pipe(KeyValueStore, Effect.provide(storeOver(Option.none())));
 
       assert.strictEqual(kv.kind, "memory");
       assert.isFalse(kv.durable);
@@ -86,16 +84,13 @@ describe("KeyValueStore", () => {
       // The store still works. The application stays alive with no manager.
       yield* kv.set("k", "v");
       assert.deepEqual(yield* kv.get("k"), Option.some("v"));
-      assert.deepEqual(yield* Stream.runCollect(kv.changes("k")), []);
+      assert.deepEqual(yield* pipe(kv.changes("k"), Stream.runCollect), []);
     }),
   );
 
   it.effect("uses the manager value store when there is one", () =>
     Effect.gen(function* () {
-      const kv = yield* Effect.provide(
-        KeyValueStore,
-        pipe(KeyValueStore.layer, Layer.provide(gmLayer(Option.some(valueApi())))),
-      );
+      const kv = yield* pipe(KeyValueStore, Effect.provide(storeOver(Option.some(valueApi()))));
 
       assert.strictEqual(kv.kind, "gm-sync");
       assert.isTrue(kv.durable);

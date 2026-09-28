@@ -23,7 +23,7 @@
  * `*_SCHEMA_VERSION` of its group.
  */
 
-import { Effect, Schema, SchemaTransformation, pipe, Record } from "effect";
+import { Array, Effect, Order, Record, Schema, SchemaTransformation, pipe } from "effect";
 import { hintCharacterCount, readHintCharacters } from "~/domain/HintString.ts";
 
 // ---------------------------------------------------------------------------
@@ -44,9 +44,10 @@ export interface GroupSpec<A> {
   readonly schema: Schema.Codec<A, unknown>;
   readonly defaults: () => A;
   readonly schemaVersion: number;
-  readonly migrations?: readonly Migration[];
+  /** In any order. A step runs when its `to` is newer than the stored version. */
+  readonly migrations: readonly Migration[];
   /** Join rapid writes. `0` writes at once. */
-  readonly writeDebounceMs?: number;
+  readonly writeDebounceMs: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,7 +74,7 @@ export type ExclusionRule = typeof exclusionRuleSchema.Type;
  * A field that degrades to `fallback` instead of taking the group with it.
  *
  * Named rather than inlined so the intent reads at every use: one bad field
- * costs the user that field. `#decode` returns the defaults for the *whole*
+ * costs the user that field. `Storage` returns the defaults for the *whole*
  * group on a validation failure, which without this would mean a single
  * hand-edited character in the manager's storage viewer erasing every setting.
  *
@@ -242,14 +243,14 @@ export const settingsGroup: GroupSpec<Settings> = {
 // Marks
 // ---------------------------------------------------------------------------
 
-export /**
+/**
  * Use `Schema.Finite` for every persisted number.
  *
  * `Schema.Number` accepts `NaN` and infinities. A `NaN` becomes `null` during
  * JSON encoding. The next read then rejects the group and restores defaults.
  * `Schema.Finite` rejects these values before storage receives them.
  */
-const localMarkSchema = Schema.Struct({
+export const localMarkSchema = Schema.Struct({
   scrollX: Schema.Finite,
   scrollY: Schema.Finite,
   savedAt: Schema.Finite,
@@ -292,36 +293,50 @@ export const LOCAL_MARK_TTL_MS = 90 * 24 * 60 * 60 * 1000;
  * Pure, so the eviction policy is inspectable rather than implied by whatever
  * the write path happens to do.
  */
-export const pruneMarks = (marks: Marks, now: number): Marks => {
-  const entries: Array<[string, Record<string, LocalMark>]> = [];
+export const pruneMarks = (marks: Marks, now: number): Marks => ({
+  local: pipe(
+    marks.local,
+    Record.toEntries,
+    Array.map(liveMarks(now)),
+    Array.filter(({ newest }) => newest > 0),
+    Array.sort(newestFirst),
+    Array.take(LOCAL_MARK_URL_LIMIT),
+    Array.map(({ url, letters }) => [url, letters] as const),
+    Record.fromEntries,
+  ),
+  global: marks.global,
+});
 
-  for (const [url, letters] of Record.toEntries(marks.local)) {
-    const live: Record<string, LocalMark> = {};
-    let newest = 0;
-    for (const [letter, mark] of Record.toEntries(letters)) {
-      if (now - mark.savedAt > LOCAL_MARK_TTL_MS) continue;
-      live[letter] = mark;
-      newest = Math.max(newest, mark.savedAt);
-    }
-    if (newest > 0) entries.push([url, live]);
-  }
+/** The marks of one URL that have not expired, and when the newest was saved. */
+interface LiveMarks {
+  readonly url: string;
+  readonly letters: Record<string, LocalMark>;
+  readonly newest: number;
+}
 
-  entries.sort((a, b) => newestSavedAt(b[1]) - newestSavedAt(a[1]));
+const liveMarks =
+  (now: number) =>
+  ([url, letters]: readonly [string, Record<string, LocalMark>]): LiveMarks => {
+    const live = pipe(
+      letters,
+      Record.filter((mark) => now - mark.savedAt <= LOCAL_MARK_TTL_MS),
+    );
+    return { url, letters: live, newest: newestSavedAt(live) };
+  };
 
-  const local: Record<string, Record<string, LocalMark>> = {};
-  for (const [url, letters] of entries.slice(0, LOCAL_MARK_URL_LIMIT)) {
-    local[url] = letters;
-  }
-  return { local, global: marks.global };
-};
+/** `0` for a URL with no live mark, and such a URL is dropped. */
+const newestSavedAt = (letters: Record<string, LocalMark>): number =>
+  pipe(
+    letters,
+    Record.values,
+    Array.reduce(0, (newest, mark) => Math.max(newest, mark.savedAt)),
+  );
 
-const newestSavedAt = (letters: Record<string, LocalMark>): number => {
-  let newest = 0;
-  for (const mark of Record.values(letters)) {
-    newest = Math.max(newest, mark.savedAt);
-  }
-  return newest;
-};
+const newestFirst: Order.Order<LiveMarks> = pipe(
+  Order.Number,
+  Order.mapInput((entry: LiveMarks) => entry.newest),
+  Order.flip,
+);
 
 export const MARKS_SCHEMA_VERSION = 1;
 
@@ -330,6 +345,7 @@ export const marksGroup: GroupSpec<Marks> = {
   schema: marksSchema,
   defaults: (): Marks => ({ local: {}, global: {} }),
   schemaVersion: MARKS_SCHEMA_VERSION,
+  migrations: [],
   writeDebounceMs: 100,
 };
 
@@ -352,6 +368,7 @@ export const findHistoryGroup: GroupSpec<FindHistory> = {
   schema: findHistorySchema,
   defaults: (): FindHistory => ({ queries: [] }),
   schemaVersion: FIND_HISTORY_SCHEMA_VERSION,
+  migrations: [],
   writeDebounceMs: 500,
 };
 
@@ -380,6 +397,7 @@ export const historyGroup: GroupSpec<HistoryIndex> = {
   schema: historyIndexSchema,
   defaults: (): HistoryIndex => ({ visits: [] }),
   schemaVersion: HISTORY_SCHEMA_VERSION,
+  migrations: [],
   writeDebounceMs: 2000,
 };
 
@@ -423,6 +441,7 @@ export const sessionGroup: GroupSpec<SessionState> = {
     zoomByOrigin: {},
   }),
   schemaVersion: SESSION_SCHEMA_VERSION,
+  migrations: [],
   // A heartbeat and a zoom factor are small, and another tab reads them. A
   // write that waits would show the user a stale list of tabs.
   writeDebounceMs: 0,
@@ -457,6 +476,7 @@ export const frameCredentialGroup: GroupSpec<FrameCredential> = {
   schema: frameCredentialSchema,
   defaults: (): FrameCredential => ({ secret: "" }),
   schemaVersion: FRAME_CREDENTIAL_SCHEMA_VERSION,
+  migrations: [],
   // The credential must reach a sibling frame before the first handshake. The
   // write is one small value, and it happens once for each installation.
   writeDebounceMs: 0,

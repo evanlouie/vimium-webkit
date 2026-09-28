@@ -20,8 +20,8 @@
  * when it is not durable.
  */
 
-import { Context, Effect, Layer, Option, Stream, pipe } from "effect";
-import { Gm, type GmError } from "./Gm.ts";
+import { Context, Effect, Layer, MutableRef, Option, Record, Stream, pipe } from "effect";
+import { Gm, type GmError, GmValueApi } from "./Gm.ts";
 
 export const STORAGE_PREFIX = "vimium-webkit:";
 
@@ -64,34 +64,7 @@ export class KeyValueStore extends Context.Service<
     KeyValueStore,
     Effect.gen(function* () {
       const gm = yield* Gm;
-
-      const fromGm = pipe(
-        gm.values,
-        Option.map((api) =>
-          KeyValueStore.of({
-            kind: api.kind,
-            durable: true,
-            watchable: Option.isSome(api.changes),
-            managerPrivate: true,
-            get: api.get,
-            set: api.set,
-            remove: api.remove,
-            // The API kind is the existing capability probe. Do not infer
-            // durability from a manager name or from a user agent.
-            setUnsafe: api.kind === "gm-async" ? null : api.setUnsafe,
-            changes: (key) =>
-              pipe(
-                api.changes,
-                Option.match({
-                  onNone: () => Stream.empty,
-                  onSome: (make) => make(key),
-                }),
-              ),
-          }),
-        ),
-      );
-
-      return pipe(fromGm, Option.getOrElse(memoryStore));
+      return pipe(gm.values, Option.map(managerStore), Option.getOrElse(memoryStore));
     }),
   );
 
@@ -99,8 +72,54 @@ export class KeyValueStore extends Context.Service<
   static readonly layerMemory: Layer.Layer<KeyValueStore> = Layer.sync(KeyValueStore, memoryStore);
 }
 
+/**
+ * The value store of the manager.
+ *
+ * The API kind is the existing capability probe. Do not infer durability from a
+ * manager name or from a user agent.
+ */
+function managerStore(api: GmValueApi): KeyValueStore["Service"] {
+  return pipe(
+    api,
+    GmValueApi.$match({
+      Async: ({ get, set, remove }) =>
+        KeyValueStore.of({
+          kind: "gm-async",
+          durable: true,
+          watchable: false,
+          managerPrivate: true,
+          get,
+          set,
+          remove,
+          setUnsafe: null,
+          changes: () => Stream.empty,
+        }),
+      Sync: ({ get, set, remove, setUnsafe, changes }) =>
+        KeyValueStore.of({
+          kind: "gm-sync",
+          durable: true,
+          watchable: Option.isSome(changes),
+          managerPrivate: true,
+          get,
+          set,
+          remove,
+          setUnsafe,
+          changes: (key) =>
+            pipe(
+              changes,
+              Option.match({
+                onNone: () => Stream.empty,
+                onSome: (make) => make(key),
+              }),
+            ),
+        }),
+    }),
+  );
+}
+
 function memoryStore(): KeyValueStore["Service"] {
-  const map = new Map<string, string>();
+  // A reference and not a `Ref`, because `setUnsafe` writes it with no effect.
+  const values = MutableRef.make<Record.ReadonlyRecord<string, string>>({});
   return KeyValueStore.of({
     kind: "memory",
     durable: false,
@@ -110,17 +129,17 @@ function memoryStore(): KeyValueStore["Service"] {
     // frame credential. `ARCHITECTURE.md` section 5.1 says why the top frame
     // does not give a credential of its own to a child instead.
     managerPrivate: false,
-    get: (key) => Effect.sync(() => Option.fromNullishOr(map.get(key) ?? null)),
+    get: (key) => Effect.sync(() => pipe(MutableRef.get(values), Record.get(key))),
     set: (key, value) =>
       Effect.sync(() => {
-        map.set(key, value);
+        pipe(values, MutableRef.update(Record.set(key, value)));
       }),
     remove: (key) =>
       Effect.sync(() => {
-        map.delete(key);
+        pipe(values, MutableRef.update(Record.remove(key)));
       }),
     setUnsafe: (key, value) => {
-      map.set(key, value);
+      pipe(values, MutableRef.update(Record.set(key, value)));
     },
     changes: () => Stream.empty,
   });

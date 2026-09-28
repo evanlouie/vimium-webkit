@@ -16,7 +16,7 @@
  * already built, so the report and the services can never disagree.
  */
 
-import { Context, Effect, Layer, Option, Predicate, Record } from "effect";
+import { Array, Context, Effect, Layer, Match, Option, Predicate, Record, pipe } from "effect";
 import { clipboardReader, clipboardWriter } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Gm } from "~/platform/Gm.ts";
@@ -80,16 +80,28 @@ export interface CapabilityReport {
  * managers, and new managers appear often. Behaviour that changes with the
  * manager name is a defect in this application.
  */
-const identifyManager = (handler: string | null): ManagerName => {
-  const name = (handler ?? "").toLowerCase();
-  if (name.includes("violentmonkey")) return "violentmonkey";
-  if (name.includes("tampermonkey")) return "tampermonkey";
-  if (name.includes("scriptcat")) return "scriptcat";
-  if (name.includes("userscripts")) return "userscripts";
-  if (name.includes("stay")) return "stay";
-  if (name.includes("greasemonkey")) return "greasemonkey";
-  return "unknown";
-};
+const identifyManager = (handler: Option.Option<string>): ManagerName =>
+  pipe(
+    handler,
+    Option.map((name) => name.toLowerCase()),
+    Option.flatMap((name) =>
+      pipe(
+        KNOWN_MANAGERS,
+        Array.findFirst((known) => name.includes(known)),
+      ),
+    ),
+    Option.getOrElse((): ManagerName => "unknown"),
+  );
+
+/** The names that a handler string is searched for, in order. */
+const KNOWN_MANAGERS: ReadonlyArray<ManagerName> = [
+  "violentmonkey",
+  "tampermonkey",
+  "scriptcat",
+  "userscripts",
+  "stay",
+  "greasemonkey",
+];
 
 /**
  * The world, as well as we can tell.
@@ -99,16 +111,33 @@ const identifyManager = (handler: string | null): ManagerName => {
  * a diagnostic. The choice of world does not change how keys are intercepted.
  */
 const detectWorld = (
-  injectInto: string | null,
+  injectInto: Option.Option<string>,
   hasUnsafeWindow: boolean,
   hasValueApi: boolean,
-): WorldName => {
-  if (injectInto === "content" || injectInto === "auto") return "content";
-  if (injectInto === "page") return "page";
-  if (hasUnsafeWindow) return "page";
-  if (hasValueApi) return "content";
-  return "unknown";
-};
+): WorldName =>
+  pipe(
+    injectInto,
+    Option.flatMap(reportedWorld),
+    Option.getOrElse(() => inferredWorld(hasUnsafeWindow, hasValueApi)),
+  );
+
+const reportedWorld = (injectInto: string): Option.Option<WorldName> =>
+  pipe(
+    Match.value(injectInto),
+    Match.withReturnType<Option.Option<WorldName>>(),
+    Match.whenOr("content", "auto", () => Option.some("content")),
+    Match.when("page", () => Option.some("page")),
+    Match.orElse(() => Option.none()),
+  );
+
+const inferredWorld = (hasUnsafeWindow: boolean, hasValueApi: boolean): WorldName =>
+  pipe(
+    Match.value({ hasUnsafeWindow, hasValueApi }),
+    Match.withReturnType<WorldName>(),
+    Match.when({ hasUnsafeWindow: true }, () => "page"),
+    Match.when({ hasValueApi: true }, () => "content"),
+    Match.orElse(() => "unknown"),
+  );
 
 /**
  * Is this macOS, iOS or iPadOS?
@@ -137,6 +166,20 @@ const isCallable = (owner: object, member: string): boolean => {
   return Predicate.isFunction(value);
 };
 
+/** Does a shadow root accept a constructed stylesheet? */
+const adoptsStyleSheets = (doc: Document): boolean => {
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(":host{color:inherit}");
+  const root = doc.createElement("div").attachShadow({ mode: "closed" });
+  root.adoptedStyleSheets = [sheet];
+  return root.adoptedStyleSheets.length === 1;
+};
+
+/** A WebKit user agent, and not a Blink one that also names `AppleWebKit`. */
+const isWebKitAgent = (ua: string): boolean =>
+  ua.includes("AppleWebKit") &&
+  !(ua.includes("Chrome/") || ua.includes("Chromium/") || ua.includes("Edg/"));
+
 /**
  * Read the report.
  *
@@ -159,14 +202,9 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
      * The writable `adoptedStyleSheets` is the part that changes between
      * engines. Safari 16.4, Chrome 111 and Firefox 101 are the floors.
      */
-    const adoptedStyleSheets = yield* flag(() => {
-      if (typeof CSSStyleSheet !== "function") return false;
-      const sheet = new CSSStyleSheet();
-      sheet.replaceSync(":host{color:inherit}");
-      const root = doc.createElement("div").attachShadow({ mode: "closed" });
-      root.adoptedStyleSheets = [sheet];
-      return root.adoptedStyleSheets.length === 1;
-    });
+    const adoptedStyleSheets = yield* flag(
+      () => typeof CSSStyleSheet === "function" && adoptsStyleSheets(doc),
+    );
 
     const selectionModify = yield* flag(() => {
       const selection = win.getSelection();
@@ -182,10 +220,7 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
      */
     const webkitLike = yield* flag(() => {
       const ua: unknown = win.navigator.userAgent;
-      if (!Predicate.isString(ua)) return false;
-      const isAppleWebKit = ua.includes("AppleWebKit");
-      const isBlink = ua.includes("Chrome/") || ua.includes("Chromium/") || ua.includes("Edg/");
-      return isAppleWebKit && !isBlink;
+      return pipe(ua, Option.liftPredicate(Predicate.isString), Option.exists(isWebKitAgent));
     });
 
     const constructableStyleSheets = yield* flag(() => typeof CSSStyleSheet === "function");
@@ -205,8 +240,8 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
     const caretRangeFromPoint = yield* flag(() => isCallable(doc, "caretRangeFromPoint"));
     // The same accessors that `Clipboard` calls, so the report and the feature
     // cannot disagree about what exists.
-    const clipboardWrite = yield* flag(() => clipboardWriter(win) !== null);
-    const clipboardRead = yield* flag(() => clipboardReader(win) !== null);
+    const clipboardWrite = yield* flag(() => Option.isSome(clipboardWriter(win)));
+    const clipboardRead = yield* flag(() => Option.isSome(clipboardReader(win)));
     const idleCallback = yield* flag(() => hasNativeIdleCallback(win));
     const visualViewport = yield* flag(() => {
       const viewport: unknown = win.visualViewport;
@@ -218,8 +253,8 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
 
     return {
       manager: identifyManager(identity.handler),
-      managerVersion: identity.handlerVersion,
-      scriptVersion: identity.scriptVersion,
+      managerVersion: Option.getOrNull(identity.handlerVersion),
+      scriptVersion: Option.getOrNull(identity.scriptVersion),
       world: detectWorld(identity.injectInto, gm.hasUnsafeWindow, Option.isSome(gm.values)),
 
       // Asked of the selected store, and not derived again. Separate predicates
@@ -265,46 +300,56 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
  * sign. A capability that only turns off an optional function belongs in the
  * help dialog, and not here.
  */
-export const degradationWarnings = (report: CapabilityReport): readonly string[] => {
-  const warnings: string[] = [];
+export const degradationWarnings = (report: CapabilityReport): readonly string[] =>
+  pipe(
+    WARNINGS,
+    Array.filter(({ applies }) => applies(report)),
+    Array.map(({ text }) => text),
+  );
 
-  if (report.value === "memory") {
-    warnings.push(
+interface Warning {
+  /** Does the report show the loss that the text names? */
+  readonly applies: (report: CapabilityReport) => boolean;
+  readonly text: string;
+}
+
+const WARNINGS: ReadonlyArray<Warning> = [
+  {
+    applies: (report) => report.value === "memory",
+    text:
       "No durable storage is available. Your userscript manager gives no " +
-        "value store, so your settings, marks and history are lost when this " +
-        "page unloads. The frames of a page also stay apart: link hints across " +
-        "frames and frame focus are off, and a frame does not learn that you " +
-        "excluded the page. Install Tampermonkey or Userscripts for durable " +
-        "storage.",
-    );
-  }
-
-  if (!report.adoptedStyleSheets) {
-    warnings.push(
+      "value store, so your settings, marks and history are lost when this " +
+      "page unloads. The frames of a page also stay apart: link hints across " +
+      "frames and frame focus are off, and a frame does not learn that you " +
+      "excluded the page. Install Tampermonkey or Userscripts for durable " +
+      "storage.",
+  },
+  {
+    applies: (report) => !report.adoptedStyleSheets,
+    text:
       "This browser is older than constructable stylesheets (Safari 16.4). " +
-        "A strict Content Security Policy can block the overlay.",
-    );
-  }
-
-  if (!report.openInTab) {
-    warnings.push(
+      "A strict Content Security Policy can block the overlay.",
+  },
+  {
+    applies: (report) => !report.openInTab,
+    text:
       "Your userscript manager does not give GM.openInTab. New-tab commands " +
-        "use window.open, and the browser can block it.",
-    );
-  }
-
-  if (!report.clipboardWrite && !report.setClipboard) {
-    warnings.push("No clipboard API is available. Copy commands are off.");
-  }
-
-  return warnings;
-};
+      "use window.open, and the browser can block it.",
+  },
+  {
+    applies: (report) => !report.clipboardWrite && !report.setClipboard,
+    text: "No clipboard API is available. Copy commands are off.",
+  },
+];
 
 /** The report as text, for a bug report. */
 export const formatCapabilities = (report: CapabilityReport): string =>
-  Record.toEntries(report)
-    .map(([key, value]) => `${key.padEnd(24)} ${String(value)}`)
-    .join("\n");
+  pipe(
+    report,
+    Record.toEntries,
+    Array.map(([key, value]) => `${key.padEnd(24)} ${String(value)}`),
+    Array.join("\n"),
+  );
 
 // ---------------------------------------------------------------------------
 // The service
