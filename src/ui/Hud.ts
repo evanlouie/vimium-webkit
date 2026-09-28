@@ -215,8 +215,9 @@ type HudFrame = Data.TaggedEnum<{
    */
   Prompting: {
     readonly message: Option.Option<HudLine>;
+    /** The span beside the field, and what it says. */
     readonly status: HTMLElement;
-    readonly statusText: string;
+    readonly statusLine: string;
   };
   /** One line, and no prompt. */
   Showing: { readonly line: HudLine };
@@ -231,7 +232,7 @@ const hudFrame = (state: HudState): HudFrame =>
     state.prompt,
     Option.match({
       onSome: ({ status }) =>
-        HudFrame.Prompting({ message: state.transient, status, statusText: statusText(state) }),
+        HudFrame.Prompting({ message: state.transient, status, statusLine: statusText(state) }),
       onNone: () =>
         pipe(
           visibleLine(state),
@@ -361,7 +362,7 @@ export class Hud extends Context.Service<
 
         /** Draw one frame. A hidden HUD keeps its tone while it fades out. */
         const paint = HudFrame.$match({
-          Prompting: ({ message, status, statusText }) => {
+          Prompting: ({ message, status, statusLine }) => {
             writeLine(message);
             element.dataset["tone"] = pipe(
               message,
@@ -369,7 +370,7 @@ export class Hud extends Context.Service<
               Option.getOrElse(() => "info"),
             );
             element.dataset["visible"] = "true";
-            status.textContent = statusText;
+            status.textContent = statusLine;
           },
           Showing: ({ line }) => {
             writeLine(Option.some(line));
