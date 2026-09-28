@@ -12,27 +12,47 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Record, pipe, Struct } from "effect";
+import { Array, Effect, Option, Order, pipe, Record, Struct } from "effect";
 import { defaultSettings } from "~/domain/Persisted.ts";
 import {
   adjustedFields,
+  type EntryField,
+  EntryInput,
   formNotes,
   parseExclusionText,
   parseLines,
   SETTINGS_FIELDS,
+  SettingsField,
 } from "~/ui/Dialog.ts";
 
-const settingKeys = (): readonly string[] => Record.keys(defaultSettings()).toSorted();
+const settingKeys = (): readonly string[] =>
+  pipe(defaultSettings(), Record.keys, Array.sort(Order.String));
 
 const fieldKeys = (): readonly string[] =>
-  SETTINGS_FIELDS.map((field) => String(field.key)).toSorted();
+  pipe(
+    SETTINGS_FIELDS,
+    Array.map((field) => String(field.key)),
+    Array.sort(Order.String),
+  );
 
 /** One control of the form, by the setting that it edits. */
-const field = (key: string) => {
-  const found = SETTINGS_FIELDS.find((one) => String(one.key) === key);
-  assert.isDefined(found, `${key} has no control`);
-  return found;
-};
+const field = (key: string): SettingsField =>
+  pipe(
+    SETTINGS_FIELDS,
+    Array.findFirst((one) => one.key === key),
+    Option.getOrElse(() => assert.fail(`${key} has no control`)),
+  );
+
+/** One text control of the form, by the setting that it edits. */
+const entry = (key: string): EntryField =>
+  pipe(
+    field(key),
+    Option.liftPredicate(SettingsField.$is("Entry")),
+    Option.getOrElse(() => assert.fail(`${key} is not a text control`)),
+  );
+
+const isNumberEntry = (one: SettingsField): one is EntryField =>
+  SettingsField.$is("Entry")(one) && EntryInput.$is("Number")(one.input);
 
 describe("the settings form", () => {
   it.effect("gives every documented setting a control", () =>
@@ -48,39 +68,46 @@ describe("the settings form", () => {
   it.effect("reads back what it writes", () =>
     Effect.sync(() => {
       const base = defaultSettings();
-      for (const field of SETTINGS_FIELDS) {
-        if (field.kind === "toggle") {
-          const flipped = field.write(base, !field.read(base));
-          assert.strictEqual(
-            field.read(flipped),
-            !field.read(base),
-            `the toggle for ${String(field.key)} did not take the new value`,
-          );
-          continue;
-        }
-        // The stored value is written out and read back. A field that changes
-        // its own text would show the user something else after each save.
-        const text = field.read(base);
-        assert.strictEqual(
-          field.read(field.write(base, text)),
-          text,
-          `the field for ${String(field.key)} did not round-trip`,
-        );
-      }
+      pipe(
+        SETTINGS_FIELDS,
+        Array.forEach(
+          SettingsField.$match({
+            Toggle: (toggle) =>
+              assert.strictEqual(
+                toggle.read(toggle.write(base, !toggle.read(base))),
+                !toggle.read(base),
+                `the toggle for ${toggle.key} did not take the new value`,
+              ),
+            // The stored value is written out and read back. A field that
+            // changes its own text would show the user something else after
+            // each save.
+            Entry: (text) =>
+              assert.strictEqual(
+                text.read(text.write(base, text.read(base))),
+                text.read(base),
+                `the field for ${text.key} did not round-trip`,
+              ),
+          }),
+        ),
+      );
     }),
   );
 
   it.effect("keeps the stored value when a number is not a number", () =>
     Effect.sync(() => {
       const base = defaultSettings();
-      for (const field of SETTINGS_FIELDS) {
-        if (field.kind !== "number") continue;
-        assert.strictEqual(
-          field.read(field.write(base, "not a number")),
-          field.read(base),
-          `the field for ${String(field.key)} accepted text as a number`,
-        );
-      }
+      const numbers = pipe(SETTINGS_FIELDS, Array.filter(isNumberEntry));
+      assert.isNotEmpty(numbers);
+      pipe(
+        numbers,
+        Array.forEach((number) =>
+          assert.strictEqual(
+            number.read(number.write(base, "not a number")),
+            number.read(base),
+            `the field for ${number.key} accepted text as a number`,
+          ),
+        ),
+      );
     }),
   );
 
@@ -88,11 +115,8 @@ describe("the settings form", () => {
     Effect.sync(() => {
       const base = defaultSettings();
       const offered = pipe(base, Struct.assign({ hideHud: !base.hideHud, newTabUrl: "x" }));
-      const changed = adjustedFields(offered, base);
-      assert.deepEqual(
-        [...changed].toSorted(),
-        ["Hide the HUD", "Page that a new tab opens"].toSorted(),
-      );
+      const changed = pipe(adjustedFields(offered, base), Array.sort(Order.String));
+      assert.deepEqual(changed, ["Hide the HUD", "Page that a new tab opens"]);
       assert.deepEqual(adjustedFields(base, base), []);
     }),
   );
@@ -129,9 +153,14 @@ describe("the settings form", () => {
         },
       ]);
       assert.strictEqual(notes.dropped.length, 1);
-      assert.include(notes.dropped[0] ?? "", "line 2");
-      assert.include(notes.dropped[0] ?? "", "/(a+)+$/");
-      assert.include(notes.dropped[0] ?? "", "can hang the page");
+      const dropped = pipe(
+        notes.dropped,
+        Array.head,
+        Option.getOrElse(() => ""),
+      );
+      assert.include(dropped, "line 2");
+      assert.include(dropped, "/(a+)+$/");
+      assert.include(dropped, "can hang the page");
     }),
   );
 
@@ -148,9 +177,7 @@ describe("the settings form", () => {
       assert.deepEqual(notes.refused, []);
       assert.deepEqual(notes.clamped, ["Scroll step size (px)", "Entries kept in the index"]);
       // What the message claims must be what the write function does.
-      const control = field("scrollStepSize");
-      assert.notStrictEqual(control.kind, "toggle");
-      if (control.kind === "toggle") return;
+      const control = entry("scrollStepSize");
       const stored = control.write(base, "20000");
       assert.strictEqual(control.read(stored), "10000");
       assert.notStrictEqual(control.read(stored), control.read(base));
@@ -160,10 +187,19 @@ describe("the settings form", () => {
   it.effect("says nothing about a value that it can use", () =>
     Effect.sync(() => {
       const base = defaultSettings();
-      const offered = SETTINGS_FIELDS.map((one) => ({
-        field: one,
-        text: one.kind === "toggle" ? String(one.read(base)) : one.read(base),
-      }));
+      const offered = pipe(
+        SETTINGS_FIELDS,
+        Array.map((one) => ({
+          field: one,
+          text: pipe(
+            one,
+            SettingsField.$match({
+              Toggle: ({ read }) => String(read(base)),
+              Entry: ({ read }) => read(base),
+            }),
+          ),
+        })),
+      );
       assert.deepEqual(formNotes(offered), {
         refused: [],
         clamped: [],
@@ -186,9 +222,7 @@ describe("the settings form", () => {
       assert.deepEqual(notes.truncated, ["Scroll step size (px)"]);
 
       // What the message claims must be what the write function does.
-      const control = field("scrollStepSize");
-      assert.notStrictEqual(control.kind, "toggle");
-      if (control.kind === "toggle") return;
+      const control = entry("scrollStepSize");
       assert.strictEqual(control.read(control.write(base, "50.7")), "50");
     }),
   );
