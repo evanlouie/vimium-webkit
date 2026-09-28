@@ -16,7 +16,18 @@
  * already built, so the report and the services can never disagree.
  */
 
-import { Array, Context, Effect, Layer, Match, Option, Predicate, Record, pipe } from "effect";
+import {
+  Array,
+  Context,
+  Effect,
+  Layer,
+  Match,
+  Option,
+  Predicate,
+  Record,
+  Struct,
+  pipe,
+} from "effect";
 import { constFalse } from "effect/Function";
 import { clipboardReader, clipboardWriter } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -38,8 +49,8 @@ export type WorldName = "page" | "content" | "unknown";
 export interface CapabilityReport {
   // --- Identity. For diagnostics only. ---
   readonly manager: ManagerName;
-  readonly managerVersion: string | null;
-  readonly scriptVersion: string | null;
+  readonly managerVersion: Option.Option<string>;
+  readonly scriptVersion: Option.Option<string>;
   readonly world: WorldName;
 
   // --- The manager surface ---
@@ -254,8 +265,8 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
 
     return {
       manager: identifyManager(identity.handler),
-      managerVersion: Option.getOrNull(identity.handlerVersion),
-      scriptVersion: Option.getOrNull(identity.scriptVersion),
+      managerVersion: identity.handlerVersion,
+      scriptVersion: identity.scriptVersion,
       world: detectWorld(identity.injectInto, gm.hasUnsafeWindow, Option.isSome(gm.values)),
 
       // Asked of the selected store, and not derived again. Separate predicates
@@ -350,10 +361,14 @@ const WARNINGS: ReadonlyArray<Warning> = [
   },
 ];
 
-/** The report as text, for a bug report. */
+/** The report as text, for a bug report. A version that is absent reads `null`. */
 export const formatCapabilities = (report: CapabilityReport): string =>
   pipe(
     report,
+    Struct.evolve({
+      managerVersion: (version) => Option.getOrNull(version),
+      scriptVersion: (version) => Option.getOrNull(version),
+    }),
     Record.toEntries,
     Array.map(([key, value]) => `${key.padEnd(24)} ${String(value)}`),
     Array.join("\n"),

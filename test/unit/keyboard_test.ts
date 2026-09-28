@@ -13,7 +13,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Array, Effect, Layer, Ref, Stream, SubscriptionRef, Record, pipe } from "effect";
+import { Array, Effect, Layer, Option, Ref, Stream, SubscriptionRef, Record, pipe } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Exclusions } from "~/core/Exclusions.ts";
 import { HandlerStack } from "~/core/HandlerStack.ts";
@@ -202,8 +202,8 @@ const capabilitiesOf = (applePlatform: boolean): Layer.Layer<Capabilities> =>
   Layer.sync(Capabilities, () => {
     const report = {
       manager: "unknown",
-      managerVersion: null,
-      scriptVersion: null,
+      managerVersion: Option.none(),
+      scriptVersion: Option.none(),
       world: "unknown",
       value: "memory",
       valueChangeListener: false,
