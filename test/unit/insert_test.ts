@@ -12,11 +12,13 @@ import { assert, describe, it } from "@effect/vitest";
 import { composedTarget } from "~/features/Insert.ts";
 
 /** A focus event with the path that the browser would build. */
-const focusEvent = (path: readonly EventTarget[], target: EventTarget | null): Event =>
-  ({
-    composedPath: () => [...path],
-    target,
-  }) as unknown as Event;
+const focusEvent = (
+  path: ReadonlyArray<EventTarget>,
+  target: EventTarget | null,
+): Pick<Event, "composedPath" | "target"> => ({
+  composedPath: () => [...path],
+  target,
+});
 
 describe("composedTarget", () => {
   it("gives the node inside an open shadow root, not the host", () => {
