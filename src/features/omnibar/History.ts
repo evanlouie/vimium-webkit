@@ -25,7 +25,19 @@
  * >    of the user, and never reads this index.
  */
 
-import { Clock, Effect, Option, Predicate, Ref, type Scope, pipe } from "effect";
+import {
+  Array,
+  Boolean,
+  Clock,
+  Effect,
+  Option,
+  Predicate,
+  Ref,
+  type Scope,
+  pipe,
+  String,
+} from "effect";
+import { flow } from "effect/Function";
 import { Settings } from "~/core/Settings.ts";
 import type { HistoryIndex as HistoryIndexData, Visit } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -52,18 +64,24 @@ export const globToRegExp = (pattern: string): RegExp => {
   return new RegExp(`^${source}$`, "u");
 };
 
+/**
+ * A pattern that does not compile is text from the user. It matches nothing.
+ * It is not a reason to stop recording every page.
+ */
+const compileGlob = Option.liftThrowable(globToRegExp);
+
 export const matchesDenylist = (url: string, patterns: readonly string[]): boolean =>
-  patterns.some((pattern) => {
-    const trimmed = pattern.trim();
-    if (trimmed.length === 0) return false;
-    try {
-      return globToRegExp(trimmed).test(url);
-    } catch {
-      // A pattern that does not compile is text from the user. It matches
-      // nothing. It is not a reason to stop recording every page.
-      return false;
-    }
-  });
+  pipe(
+    patterns,
+    Array.some(
+      flow(
+        String.trim,
+        Option.liftPredicate(String.isNonEmpty),
+        Option.flatMap(compileGlob),
+        Option.exists((pattern) => pattern.test(url)),
+      ),
+    ),
+  );
 
 // ---------------------------------------------------------------------------
 // The index itself
@@ -87,22 +105,39 @@ export const mergeVisit = (
   entry: VisitEntry,
   limit: number,
 ): readonly Visit[] => {
-  if (limit <= 0) return [];
-
-  const existing = visits.find((visit) => visit.url === entry.url);
-  const rest = visits.filter((visit) => visit.url !== entry.url);
-
+  const existing = pipe(
+    visits,
+    Array.findFirst((visit) => visit.url === entry.url),
+  );
   const merged: Visit = {
     url: entry.url,
     // An empty title on a second visit keeps the title that we already have.
     // A navigation inside a single-page application often happens before the
     // page sets the title.
-    title: entry.title.length > 0 ? entry.title : (existing?.title ?? ""),
-    visitCount: (existing?.visitCount ?? 0) + 1,
+    title: pipe(
+      entry.title,
+      Option.liftPredicate(String.isNonEmpty),
+      Option.orElse(() =>
+        pipe(
+          existing,
+          Option.map(({ title }) => title),
+        ),
+      ),
+      Option.getOrElse(() => ""),
+    ),
+    visitCount: pipe(
+      existing,
+      Option.match({ onNone: () => 1, onSome: ({ visitCount }) => visitCount + 1 }),
+    ),
     lastVisit: entry.at,
   };
-
-  return [merged, ...rest].slice(0, limit);
+  // A limit of zero or less keeps nothing.
+  return pipe(
+    visits,
+    Array.filter((visit) => visit.url !== entry.url),
+    Array.prepend(merged),
+    Array.take(limit),
+  );
 };
 
 /**
@@ -118,7 +153,7 @@ export const mergeVisit = (
  * The query is therefore dropped, and only the few keys that identify a *page*
  * and not a *session* stay.
  */
-const PRESERVED_QUERY_KEYS: ReadonlySet<string> = new Set([
+const PRESERVED_QUERY_KEYS: ReadonlyArray<string> = [
   "id",
   "p",
   "page",
@@ -126,13 +161,33 @@ const PRESERVED_QUERY_KEYS: ReadonlySet<string> = new Set([
   "query",
   "search",
   "v",
-]);
+];
 
 /** The longest value that a kept key may have. A token is never this short. */
 const MAX_QUERY_VALUE_LENGTH = 64;
 
 /** A title longer than this says nothing more, and it costs storage. */
 const MAX_TITLE_LENGTH = 300;
+
+const WEB_PROTOCOLS: ReadonlyArray<string> = ["https:", "http:"];
+
+const parseUrl = Option.liftThrowable((raw: string) => new URL(raw));
+
+/** A key that identifies a page, with a value too short to be a token. */
+const isPageParameter = ([key, value]: readonly [string, string]): boolean =>
+  pipe(PRESERVED_QUERY_KEYS, Array.contains(key.toLowerCase())) &&
+  value.length <= MAX_QUERY_VALUE_LENGTH;
+
+/** The query with only the keys that identify a page, with its `?`, or nothing. */
+const keptQuery = (url: URL): string =>
+  pipe(
+    url.searchParams,
+    Array.fromIterable,
+    Array.filter(isPageParameter),
+    (kept) => new URLSearchParams(kept).toString(),
+    Option.liftPredicate(String.isNonEmpty),
+    Option.match({ onNone: () => "", onSome: (query) => `?${query}` }),
+  );
 
 /**
  * The canonical form of a URL, for the index.
@@ -143,33 +198,15 @@ const MAX_TITLE_LENGTH = 300;
  *
  * `None` means "do not record this URL".
  */
-export const canonicaliseUrl = (raw: string): Option.Option<string> => {
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    return Option.none();
-  }
+export const canonicaliseUrl: (raw: string) => Option.Option<string> = flow(
+  parseUrl,
   // Only a true web page. A `data:`, `blob:` or `javascript:` URL is either
   // very long or written by an attacker, and neither belongs in storage.
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    return Option.none();
-  }
-
-  parsed.hash = "";
-  parsed.username = "";
-  parsed.password = "";
-
-  const kept = new URLSearchParams();
-  for (const [key, value] of parsed.searchParams) {
-    if (!PRESERVED_QUERY_KEYS.has(key.toLowerCase())) continue;
-    if (value.length > MAX_QUERY_VALUE_LENGTH) continue;
-    kept.append(key, value);
-  }
-  parsed.search = kept.toString();
-
-  return Option.some(parsed.href);
-};
+  Option.filter((url) => pipe(WEB_PROTOCOLS, Array.contains(url.protocol))),
+  // The origin carries no credentials, and the path carries no query and no
+  // fragment.
+  Option.map((url) => `${url.origin}${url.pathname}${keptQuery(url)}`),
+);
 
 // ---------------------------------------------------------------------------
 // Private browsing
@@ -194,14 +231,47 @@ type StorageEstimator = () => Promise<StorageEstimate>;
  *
  * A userscript does not own its globals, so call this inside `Dom.probeOr`.
  */
-const storageEstimator = (window: Window & typeof globalThis): Option.Option<StorageEstimator> => {
-  const manager: unknown = window.navigator.storage;
-  if (!Predicate.hasProperty(manager, "estimate")) return Option.none();
-  const estimate: unknown = Reflect.get(manager, "estimate");
-  if (!Predicate.isFunction(estimate)) return Option.none();
-  const call = estimate as (this: unknown) => Promise<StorageEstimate>;
-  return Option.some(() => Reflect.apply(call, manager, []));
+const storageEstimator = (window: Window & typeof globalThis): Option.Option<StorageEstimator> =>
+  pipe(
+    // The DOM types promise both. An older WebKit, or a sandboxed frame, can
+    // give neither.
+    Option.fromNullishOr(window.navigator.storage),
+    // `typeof`, so that the method is not read away from its owner before it
+    // is bound to it.
+    Option.filter((manager) => typeof manager.estimate === "function"),
+    Option.map((manager) => manager.estimate.bind(manager)),
+  );
+
+const PROBE_KEY = "__vimium_webkit_private_probe__";
+
+/** A write to `localStorage` that goes through. It throws where storage is blocked. */
+const writeProbe = (window: Window & typeof globalThis) => (): boolean => {
+  window.localStorage.setItem(PROBE_KEY, "1");
+  window.localStorage.removeItem(PROBE_KEY);
+  return true;
 };
+
+/** A quota that is small enough to look like a private window. */
+const privacyOfEstimate = (estimate: StorageEstimate): PrivacyProbe =>
+  pipe(
+    estimate.quota,
+    Option.liftPredicate(Predicate.isNumber),
+    Option.filter((quota) => quota > 0 && quota < PRIVATE_QUOTA_CEILING_BYTES),
+    Option.match({ onNone: (): PrivacyProbe => "clear", onSome: (): PrivacyProbe => "tiny-quota" }),
+  );
+
+/**
+ * Ask for the estimate.
+ *
+ * `estimate()` is refused in some sandboxed frames. We then have no opinion,
+ * which is `clear`.
+ */
+const quotaPrivacy = (estimator: StorageEstimator): Effect.Effect<PrivacyProbe> =>
+  pipe(
+    Effect.tryPromise(estimator),
+    Effect.map(privacyOfEstimate),
+    Effect.orElseSucceed((): PrivacyProbe => "clear"),
+  );
 
 /**
  * Look for private browsing, as well as it can be done.
@@ -225,35 +295,21 @@ const storageEstimator = (window: Window & typeof globalThis): Option.Option<Sto
 export const detectPrivateBrowsing: Effect.Effect<PrivacyProbe, never, Dom> = Effect.gen(
   function* () {
     const dom = yield* Dom;
-
-    const wrote = yield* dom.probeOr(() => {
-      const key = "__vimium_webkit_private_probe__";
-      dom.window.localStorage.setItem(key, "1");
-      dom.window.localStorage.removeItem(key);
-      return true;
-    }, false);
-    if (!wrote) return "storage-blocked";
-
-    const estimator = yield* dom.probeOr(
-      () => storageEstimator(dom.window),
-      Option.none<StorageEstimator>(),
+    const writable = yield* dom.probeOr(writeProbe(dom.window), false);
+    // Without an estimate API we have no opinion, which is `clear`.
+    const byQuota = pipe(
+      dom.probeOr(() => storageEstimator(dom.window), Option.none<StorageEstimator>()),
+      Effect.flatMap(
+        Option.match({ onNone: () => Effect.succeed<PrivacyProbe>("clear"), onSome: quotaPrivacy }),
+      ),
     );
-    if (Option.isNone(estimator)) return "clear";
-
-    // `estimate()` is refused in some sandboxed frames. We then have no
-    // opinion, which is `clear`.
-    const estimate = yield* pipe(
-      Effect.tryPromise({
-        try: estimator.value,
-        catch: () => undefined,
+    return yield* pipe(
+      writable,
+      Boolean.match({
+        onFalse: () => Effect.succeed<PrivacyProbe>("storage-blocked"),
+        onTrue: () => byQuota,
       }),
-      Effect.orElseSucceed((): StorageEstimate => ({})),
     );
-    const quota = estimate.quota;
-    if (typeof quota === "number" && quota > 0 && quota < PRIVATE_QUOTA_CEILING_BYTES) {
-      return "tiny-quota";
-    }
-    return "clear";
   },
 );
 
@@ -282,15 +338,18 @@ export interface HistoryIndex {
 }
 
 /** `<meta name="robots" content="noindex">`, and the same for `googlebot`. */
-const hasNoIndexDirective = (document: Document): boolean => {
-  const metas = document.querySelectorAll<HTMLMetaElement>(
-    'meta[name="robots" i], meta[name="googlebot" i]',
+const hasNoIndexDirective = (document: Document): boolean =>
+  pipe(
+    document.querySelectorAll<HTMLMetaElement>('meta[name="robots" i], meta[name="googlebot" i]'),
+    Array.fromIterable,
+    Array.some((meta) => meta.content.toLowerCase().includes("noindex")),
   );
-  for (const meta of metas) {
-    if (meta.content.toLowerCase().includes("noindex")) return true;
-  }
-  return false;
-};
+
+/** What a recording writes, once every gate has let it through. */
+interface Recordable {
+  readonly url: string;
+  readonly limit: number;
+}
 
 /**
  * Build the index for this frame.
@@ -309,79 +368,90 @@ export const makeHistoryIndex: Effect.Effect<
   const storage = yield* Storage;
 
   const privacy = yield* Ref.make(Option.none<PrivacyProbe>());
-  yield* Effect.forkScoped(
-    pipe(
-      detectPrivateBrowsing,
-      Effect.flatMap((result) => Ref.set(privacy, Option.some(result))),
-    ),
+  yield* pipe(
+    detectPrivateBrowsing,
+    Effect.flatMap((result) => Ref.set(privacy, Option.some(result))),
+    Effect.forkScoped,
   );
 
-  const blockedBy = Effect.fn("HistoryIndex.blockedBy")(function* () {
-    const block = (reason: RecordingBlock): Option.Option<RecordingBlock> => Option.some(reason);
-    const current = yield* settings.current;
-
+  /** The page and the limit, or the first gate that stops the recording. */
+  const recordable = Effect.fnUntraced(function* (): Effect.fn.Return<Recordable, RecordingBlock> {
     // Gate 1. Read on every call, and not captured once, so that the setting
     // takes effect on the very next navigation after the user turns it off.
-    if (!current.enableHistoryIndex) return block("disabled");
-    if (current.historyIndexLimit <= 0) return block("limit-zero");
-
-    const probe = yield* Ref.get(privacy);
-    if (Option.isNone(probe) || probe.value !== "clear") {
-      return block("private");
-    }
-
-    const url = canonicaliseUrl(yield* dom.href);
-    if (Option.isNone(url)) return block("unsupported-url");
-    if (matchesDenylist(url.value, current.historyIndexDenylist)) {
-      return block("denylisted");
-    }
-
-    const noindex = yield* dom.probeOr(
-      () => hasNoIndexDirective(dom.document),
+    const current = yield* pipe(
+      settings.current,
+      Effect.filterOrFail(
+        ({ enableHistoryIndex }) => enableHistoryIndex,
+        (): RecordingBlock => "disabled",
+      ),
+      Effect.filterOrFail(
+        ({ historyIndexLimit }) => historyIndexLimit > 0,
+        (): RecordingBlock => "limit-zero",
+      ),
+    );
+    yield* pipe(
+      Ref.get(privacy),
+      Effect.filterOrFail(Option.contains<PrivacyProbe>("clear"), (): RecordingBlock => "private"),
+    );
+    const url = yield* pipe(
+      dom.href,
+      Effect.map(canonicaliseUrl),
+      Effect.flatMap(Effect.fromOption((): RecordingBlock => "unsupported-url")),
+      Effect.filterOrFail(
+        (canonical) => !matchesDenylist(canonical, current.historyIndexDenylist),
+        (): RecordingBlock => "denylisted",
+      ),
+    );
+    yield* pipe(
       // A document that refuses the read is not recorded. The safe answer to
       // "we could not tell" is "do not record".
-      true,
+      dom.probeOr(() => hasNoIndexDirective(dom.document), true),
+      Effect.filterOrFail(
+        (noindex) => !noindex,
+        (): RecordingBlock => "noindex",
+      ),
     );
-    if (noindex) return block("noindex");
-
-    return Option.none<RecordingBlock>();
+    return { url, limit: current.historyIndexLimit };
   });
 
-  const record = Effect.fn("HistoryIndex.record")(function* () {
-    if (Option.isSome(yield* blockedBy())) return;
+  const blockedBy = pipe(
+    recordable(),
+    Effect.match({
+      onFailure: Option.some,
+      onSuccess: () => Option.none<RecordingBlock>(),
+    }),
+    Effect.withSpan("HistoryIndex.blockedBy"),
+  );
 
-    const url = canonicaliseUrl(yield* dom.href);
-    if (Option.isNone(url)) return;
-
-    const current = yield* settings.current;
-    const title = yield* dom.probeOr(
-      () => dom.document.title.trim().slice(0, MAX_TITLE_LENGTH),
-      "",
-    );
-    const at = yield* Clock.currentTimeMillis;
-
-    // The limit is applied here, on the write, and never on a timer. The
-    // failure is ignored: the store already reports it on its issue stream,
-    // and one page visit is not worth a message to the user.
-    yield* Effect.ignore(
-      storage.history.update((index): HistoryIndexData => ({
-        visits: [
-          ...mergeVisit(index.visits, { url: url.value, title, at }, current.historyIndexLimit),
-        ],
-      })),
-    );
-  });
+  const record = Effect.fn("HistoryIndex.record")(
+    function* () {
+      const { url, limit } = yield* recordable();
+      const title = yield* dom.probeOr(
+        () => dom.document.title.trim().slice(0, MAX_TITLE_LENGTH),
+        "",
+      );
+      const at = yield* Clock.currentTimeMillis;
+      // The limit is applied here, on the write, and never on a timer.
+      yield* storage.history.update((index): HistoryIndexData => ({
+        visits: [...mergeVisit(index.visits, { url, title, at }, limit)],
+      }));
+    },
+    // A gate that stops the recording records nothing, and says nothing. A
+    // failed write is ignored too: the store already reports it on its issue
+    // stream, and one page visit is not worth a message to the user.
+    Effect.ignore,
+  );
 
   return {
     record: record(),
     visits: pipe(
       storage.history.current,
-      Effect.map((index) => index.visits),
+      Effect.map(({ visits }) => visits),
     ),
     // `reset`, and not a write of an empty array: "erase my history" must not
     // leave a hole in the shape of this script in the storage list of the
     // manager either.
-    clear: Effect.asVoid(storage.history.reset),
-    blockedBy: blockedBy(),
+    clear: pipe(storage.history.reset, Effect.asVoid),
+    blockedBy,
   };
 });
