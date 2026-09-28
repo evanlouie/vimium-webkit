@@ -105,6 +105,9 @@ export class Dom extends Context.Service<
     /** The URL of this frame. A read, because a soft navigation changes it. */
     readonly href: Effect.Effect<string>;
 
+    /** The visibility of this frame's document. A read, because the user can hide the tab. */
+    readonly visibility: Effect.Effect<DocumentVisibilityState>;
+
     /**
      * Read a global that this realm may have poisoned.
      *
@@ -245,6 +248,7 @@ export class Dom extends Context.Service<
         window: win,
         document: doc,
         href: Effect.sync(() => win.location.href),
+        visibility: Effect.sync(() => doc.visibilityState),
         probe,
         probeOr,
         attempt: probe,
