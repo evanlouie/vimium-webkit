@@ -34,8 +34,8 @@ jobs:
     name: fmt / lint / check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -55,8 +55,8 @@ jobs:
       matrix:
         node: ["22", "26"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -67,8 +67,8 @@ jobs:
     name: build + invariants
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -80,14 +80,14 @@ jobs:
       # populate it first, and `actions/cache` does not save on a hit — so the
       # e2e matrix would re-download chromium and firefox on every run.
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-webkit-${{ hashFiles('package-lock.json') }}
       - run: npx playwright install --with-deps webkit
 
       - run: npm run build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: userscript
           path: dist/
@@ -105,8 +105,8 @@ jobs:
       matrix:
         project: [webkit, chromium, firefox]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -115,7 +115,7 @@ jobs:
       # Playwright pins its browser revisions to the npm package version, so
       # keying the cache on the lockfile is exact rather than approximate.
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ matrix.project }}-${{ hashFiles('package-lock.json') }}
@@ -126,7 +126,7 @@ jobs:
       # rebuild. Without this, `globalSetup` finds `dist/` missing and shells
       # out to `npm run build` in every leg — which is also why every leg used
       # to need WebKit on top of its own engine.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: userscript
           path: dist/
@@ -143,7 +143,7 @@ jobs:
 
       - run: npm run test:e2e -- --project=${{ matrix.project }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: playwright-results-${{ matrix.project }}
@@ -160,8 +160,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -189,12 +189,12 @@ jobs:
       # e2e matrix would re-download chromium and firefox on every run.
       # The artefact that the `build` job checked and the `e2e` matrix
       # exercised. Rebuilding here would publish bytes nothing had tested.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: userscript
           path: dist/
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/vimium-webkit.user.js
