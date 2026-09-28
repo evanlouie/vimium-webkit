@@ -490,14 +490,14 @@ export const addDelay: {
  * ```ts import.meta.vitest
  * import { Schedule } from "effect"
  *
- * const schedule = Schedule.andThen(Schedule.recurs(1), Schedule.recurs(2))
+ * const schedule = Schedule.concat(Schedule.recurs(1), Schedule.recurs(2))
  * Schedule.isSchedule(schedule) // => true
  * ```
  *
  * @category sequencing
  * @since 2.0.0
  */
-export const andThen: {
+export const concat: {
   <Output2, Input2, Error2, Env2>(
     other: Schedule<Output2, Input2, Error2, Env2>
   ): <Output, Input, Error, Env>(
@@ -511,7 +511,7 @@ export const andThen: {
   self: Schedule<Output, Input, Error, Env>,
   other: Schedule<Output2, Input2, Error2, Env2>
 ): Schedule<Output | Output2, Input & Input2, Error | Error2, Env | Env2> =>
-  map(andThenResult(self, other), ({ output }) => effect.succeed(Result.merge(output))))
+  map(concatResult(self, other), ({ output }) => effect.succeed(Result.merge(output))))
 
 /**
  * Returns a schedule that runs `self` to completion, then runs `other`, and
@@ -528,14 +528,14 @@ export const andThen: {
  * ```ts import.meta.vitest
  * import { Schedule } from "effect"
  *
- * const schedule = Schedule.andThenResult(Schedule.recurs(1), Schedule.recurs(2))
+ * const schedule = Schedule.concatResult(Schedule.recurs(1), Schedule.recurs(2))
  * Schedule.isSchedule(schedule) // => true
  * ```
  *
  * @category sequencing
  * @since 4.0.0
  */
-export const andThenResult: {
+export const concatResult: {
   <Output2, Input2, Error2, Env2>(
     other: Schedule<Output2, Input2, Error2, Env2>
   ): <Output, Input, Error, Env>(
@@ -753,8 +753,8 @@ export const during = (duration: Duration.Input): Schedule<Duration.Duration> =>
     effect.succeed((meta) => {
       const elapsed = Duration.millis(meta.elapsed)
       return meta.elapsed > durationMillis
-        ? effect.succeed([elapsed, Duration.zero])
-        : Cause.done(elapsed)
+        ? Cause.done(elapsed)
+        : effect.succeed([elapsed, Duration.zero])
     })
   )
 }
@@ -1321,6 +1321,13 @@ export const upTo: {
 })
 
 const while_: {
+  <Input, Output, Meta extends Metadata<Output, Input>>(
+    predicate: (
+      metadata: Metadata<Output, Input>
+    ) => metadata is Meta
+  ): <Error, Env>(
+    self: Schedule<Output, Input, Error, Env>
+  ) => Schedule<Meta["output"], Meta["input"], Error, Env>
   <Input, Output, Error2 = never, Env2 = never>(
     predicate: (
       metadata: Metadata<Output, Input>
@@ -1328,6 +1335,12 @@ const while_: {
   ): <Error, Env>(
     self: Schedule<Output, Input, Error, Env>
   ) => Schedule<Output, Input, Error | Error2, Env | Env2>
+  <Output, Input, Error, Env, Meta extends Metadata<Output, Input>>(
+    self: Schedule<Output, Input, Error, Env>,
+    predicate: (
+      metadata: Metadata<Output, Input>
+    ) => metadata is Meta
+  ): Schedule<Meta["output"], Meta["input"], Error, Env>
   <Output, Input, Error, Env, Error2 = never, Env2 = never>(
     self: Schedule<Output, Input, Error, Env>,
     predicate: (
@@ -1445,6 +1458,20 @@ export const windowed = (interval: Duration.Input): Schedule<number> => {
  * @since 2.0.0
  */
 export const forever: Schedule<number> = spaced(Duration.zero)
+
+/**
+ * Returns a schedule that recurs immediately once, then completes.
+ *
+ * **Details**
+ *
+ * The output of both the recurrence and completion is `void`. When used with
+ * `Effect.repeat`, the effect runs twice in total: once initially and once
+ * after the schedule recurs.
+ *
+ * @category constructors
+ * @since 4.0.0
+ */
+export const once: Schedule<void> = map(recurs(1), () => void 0)
 
 const constIdentity = fromStep(
   effect.succeed((_now, input: unknown) => effect.succeed([input, Duration.zero] as [unknown, Duration.Duration]))

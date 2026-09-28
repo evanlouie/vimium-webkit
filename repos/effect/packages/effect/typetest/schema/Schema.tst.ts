@@ -1,4 +1,3 @@
-import type { SchemaAST } from "effect"
 import {
   Brand,
   Context,
@@ -7,7 +6,9 @@ import {
   Option,
   Predicate,
   Schema,
+  type SchemaAST,
   SchemaGetter,
+  type SchemaIssue,
   SchemaTransformation,
   Struct,
   Tuple
@@ -19,13 +20,19 @@ type Make<In, Out> = (input: In, options?: Schema.MakeOptions | undefined) => Ou
 type MakeEffect<In, Out> = (
   input: In,
   options?: Schema.MakeOptions | undefined
-) => Effect.Effect<Out, Schema.SchemaError>
+) => Effect.Effect<Out, SchemaIssue.Issue>
 
 const revealClass = <Self, S extends Schema.Struct<Schema.Struct.Fields>, Inherited>(
   klass: Schema.Class<Self, S, Inherited>
 ): Schema.Class<Self, S, Inherited> => klass
 
 describe("Schema", () => {
+  it("RedactedFromValue", () => {
+    const schema = Schema.RedactedFromValue(Schema.String)
+    expect(schema).type.toBe<Schema.RedactedFromValue<Schema.String>>()
+    expect(schema.from).type.toBe<Schema.String>()
+  })
+
   describe("variance", () => {
     it("Type", () => {
       const f1 = hole<
@@ -136,6 +143,23 @@ describe("Schema", () => {
     it("String", () => {
       const schema = Schema.String
       expect(schema.make).type.toBe<Make<string, string>>()
+    })
+
+    it("StringForLiteralAutocomplete", () => {
+      const schema = Schema.StringForLiteralAutocomplete
+      expect(schema).type.toBe<Schema.StringForLiteralAutocomplete>()
+      expect(schema.make).type.toBe<Make<string & {}, string & {}>>()
+    })
+
+    it("StringForLiteralAutocomplete | Literals", () => {
+      const schema = Schema.Union([
+        Schema.StringForLiteralAutocomplete,
+        Schema.Literals(["GET", "POST"])
+      ])
+      expect(schema.make).type.toBe<
+        Make<"GET" | "POST" | (string & {}), "GET" | "POST" | (string & {})>
+      >()
+      expect(schema.members[1].literals).type.toBe<readonly ["GET", "POST"]>()
     })
 
     it("Number", () => {
@@ -332,16 +356,16 @@ describe("Schema", () => {
       })
     })
 
-    describe("ErrorClass", () => {
+    describe("Error", () => {
       it("make with void input", () => {
-        class E extends Schema.ErrorClass<E>("E")({}) {}
+        class E extends Schema.Error<E>("E")({}) {}
         expect(E.make).type.toBe<Make<void | {}, E>>()
       })
     })
 
-    describe("TaggedErrorClass", () => {
+    describe("TaggedError", () => {
       it("make with void input", () => {
-        class E extends Schema.TaggedErrorClass<E>()("E", {}) {}
+        class E extends Schema.TaggedError<E>()("E", {}) {}
         expect(E.make).type.toBe<Make<void | { readonly _tag?: "E" }, E>>()
       })
     })
@@ -369,6 +393,11 @@ describe("Schema", () => {
       expect(schema.make).type.toBe<
         Make<ReadonlyArray<number & Brand.Brand<"a">>, ReadonlyArray<number & Brand.Brand<"a">>>
       >()
+    })
+
+    it("JsonObject", () => {
+      const schema = Schema.JsonObject
+      expect(schema).type.toBe<Schema.$Record<Schema.String, Schema.Codec<Schema.Json>>>()
     })
 
     it("NonEmptyArray", () => {
@@ -518,6 +547,13 @@ describe("Schema", () => {
     })
   })
 
+  describe("toEncoderXml", () => {
+    it("returns SchemaIssue.Issue in the error channel", () => {
+      const encode = Schema.toEncoderXml(Schema.toCodecStringTree(Schema.FiniteFromString))
+      expect(encode).type.toBe<(value: number) => Effect.Effect<string, SchemaIssue.Issue>>()
+    })
+  })
+
   describe("toCodecArrayFromSingle", () => {
     it("revealCodec + annotate", () => {
       const stringTree = Schema.toCodecStringTree(Schema.Array(Schema.FiniteFromString))
@@ -639,6 +675,35 @@ describe("Schema", () => {
       expect(Schema.revealCodec(schema)).type.toBe<Schema.Codec<string>>()
       expect(schema).type.toBe<Schema.String>()
       expect(schema.annotate({})).type.toBe<Schema.String>()
+    })
+  })
+
+  describe("StringForLiteralAutocomplete", () => {
+    const schema = Schema.StringForLiteralAutocomplete
+
+    it("ast type", () => {
+      expect(schema.ast).type.toBe<SchemaAST.String>()
+    })
+
+    it("revealCodec + annotate", () => {
+      expect(Schema.revealCodec(schema)).type.toBe<Schema.Codec<string & {}>>()
+      expect(schema).type.toBe<Schema.StringForLiteralAutocomplete>()
+      expect(schema.annotate({})).type.toBe<Schema.StringForLiteralAutocomplete>()
+    })
+
+    it("union with Literals", () => {
+      const method = Schema.Union([
+        Schema.StringForLiteralAutocomplete,
+        Schema.Literals(["GET", "POST"])
+      ])
+      expect(Schema.revealCodec(method)).type.toBe<Schema.Codec<"GET" | "POST" | (string & {})>>()
+      expect(method).type.toBe<
+        Schema.Union<readonly [Schema.StringForLiteralAutocomplete, Schema.Literals<readonly ["GET", "POST"]>]>
+      >()
+      expect(method.annotate({})).type.toBe<
+        Schema.Union<readonly [Schema.StringForLiteralAutocomplete, Schema.Literals<readonly ["GET", "POST"]>]>
+      >()
+      expect(method.members[1].literals).type.toBe<readonly ["GET", "POST"]>()
     })
   })
 
@@ -847,6 +912,24 @@ describe("Schema", () => {
       .type.toBe<Schema.Codec<readonly ["a", number & Brand.Brand<"MyBrand">], `a${number}`>>()
     expect(Schema.revealCodec(Schema.TemplateLiteralParser(["a", Schema.Union([Schema.Number, Schema.String])])))
       .type.toBe<Schema.Codec<readonly ["a", string | number], `a${string}` | `a${number}`>>()
+  })
+
+  it("TemplateLiteralParser propagates decoding and encoding services separately", () => {
+    const first = hole<Schema.Codec<number, string, "DecodeFirst", "EncodeFirst">>()
+    const second = hole<Schema.Codec<boolean, 0 | 1, "DecodeSecond", "EncodeSecond">>()
+    const schema = Schema.TemplateLiteralParser(["value:", first, ":", second])
+
+    expect(schema.DecodingServices).type.toBe<"DecodeFirst" | "DecodeSecond">()
+    expect(schema.EncodingServices).type.toBe<"EncodeFirst" | "EncodeSecond">()
+    expect(Schema.decodeEffect(schema)).type.toBe<
+      (
+        input: `value:${string}:0` | `value:${string}:1`,
+        options?: SchemaAST.ParseOptions
+      ) => Effect.Effect<readonly ["value:", number, ":", boolean], Schema.SchemaError, "DecodeFirst" | "DecodeSecond">
+    >()
+    expect(Schema.encodeEffect(schema)(["value:", 1, ":", true])).type.toBe<
+      Effect.Effect<`value:${string}:0` | `value:${string}:1`, Schema.SchemaError, "EncodeFirst" | "EncodeSecond">
+    >()
   })
 
   describe("flip", () => {
@@ -1435,7 +1518,7 @@ describe("Schema", () => {
 
     describe("Error", () => {
       it("extend Fields", () => {
-        class E extends Schema.ErrorClass<E>("E")({
+        class E extends Schema.Error<E>("E")({
           a: Schema.String
         }) {}
 
@@ -1449,7 +1532,7 @@ describe("Schema", () => {
       })
 
       it("extend Struct", () => {
-        class E extends Schema.ErrorClass<E>("E")(Schema.Struct({
+        class E extends Schema.Error<E>("E")(Schema.Struct({
           a: Schema.String
         })) {}
 
@@ -1463,7 +1546,7 @@ describe("Schema", () => {
       })
 
       it("should reject non existing props", () => {
-        class E extends Schema.ErrorClass<E>("E")({
+        class E extends Schema.Error<E>("E")({
           a: Schema.String
         }) {}
 
@@ -1472,7 +1555,7 @@ describe("Schema", () => {
       })
 
       it("mutable field", () => {
-        class E extends Schema.ErrorClass<E>("E")({
+        class E extends Schema.Error<E>("E")({
           a: Schema.String.pipe(Schema.mutableKey)
         }) {}
 
@@ -1500,15 +1583,15 @@ describe("Schema", () => {
         )
       })
 
-      it("ErrorClass", () => {
-        expect(Schema.ErrorClass("A")({})).type.toBe(
-          "Missing `Self` generic - use `class Self extends Schema.ErrorClass<Self>(...)`"
+      it("Error", () => {
+        expect(Schema.Error("A")({})).type.toBe(
+          "Missing `Self` generic - use `class Self extends Schema.Error<Self>(...)`"
         )
       })
 
-      it("TaggedErrorClass", () => {
-        expect(Schema.TaggedErrorClass("A")("A", {})).type.toBe(
-          "Missing `Self` generic - use `class Self extends Schema.TaggedErrorClass<Self>(...)`"
+      it("TaggedError", () => {
+        expect(Schema.TaggedError("A")("A", {})).type.toBe(
+          "Missing `Self` generic - use `class Self extends Schema.TaggedError<Self>(...)`"
         )
       })
     })
@@ -1767,10 +1850,10 @@ describe("Schema", () => {
   it("asStandardSchemaV1 should not be callable with a schema with DecodingServices", () => {
     class MagicNumber extends Context.Service<MagicNumber, number>()("MagicNumber") {}
     const DepString = Schema.Number.pipe(Schema.decode({
-      decode: SchemaGetter.onSome((n) =>
+      decode: SchemaGetter.transformEffect((n) =>
         Effect.gen(function*() {
           const magicNumber = yield* MagicNumber
-          return Option.some(n * magicNumber)
+          return n * magicNumber
         })
       ),
       encode: SchemaGetter.passthrough()

@@ -1,9 +1,148 @@
-import { Schema, SchemaAST, SchemaGetter, SchemaTransformation } from "effect"
+import { Effect, Schema, SchemaAST, SchemaGetter, SchemaTransformation } from "effect"
 import { runInNewContext } from "node:vm"
 import { describe, it } from "vitest"
 import { deepStrictEqual, doesNotThrow, strictEqual, throws } from "../utils/assert.ts"
 
 describe("SchemaAST", () => {
+  describe("mapOrSame", () => {
+    it("returns the original array when no element changes", () => {
+      const input = [{ value: 1 }, { value: 2 }]
+      strictEqual(SchemaAST.mapOrSame(input, (value) => value), input)
+    })
+
+    it("returns all mapped elements when an element changes", () => {
+      const first = { value: 1 }
+      const second = { value: 2 }
+      const third = { value: 3 }
+      const replacement = { value: 4 }
+      const input = [first, second, third]
+      let calls = 0
+      const output = SchemaAST.mapOrSame(input, (value) => {
+        calls++
+        return value === second ? replacement : value
+      })
+
+      deepStrictEqual(output, [first, replacement, third])
+      strictEqual(output === input, false)
+      strictEqual(calls, input.length)
+    })
+  })
+
+  describe("AST updates", () => {
+    it("preserves the prototype, children and enumerable symbols when updating a frozen node", () => {
+      const marker = Symbol("marker")
+      class Objects extends SchemaAST.Objects {
+        readonly [marker] = { value: "custom" }
+      }
+      const ast = Object.freeze(new Objects([new SchemaAST.PropertySignature("a", SchemaAST.string)], []))
+      const checks: SchemaAST.Checks = [Schema.isMinProperties(1)]
+      const updated = SchemaAST.replaceChecks(ast, checks)
+
+      strictEqual(updated === ast, false)
+      strictEqual(updated instanceof Objects, true)
+      strictEqual(updated[marker], ast[marker])
+      strictEqual(updated.propertySignatures, ast.propertySignatures)
+      strictEqual(updated.indexSignatures, ast.indexSignatures)
+      strictEqual(updated.checks, checks)
+      strictEqual(ast.checks, undefined)
+      deepStrictEqual(Schema.decodeUnknownSync(Schema.make<Schema.Codec<unknown>>(updated))({ a: "value" }), {
+        a: "value"
+      })
+    })
+
+    it("keeps identity for unchanged checks, encoding and context", () => {
+      const ast = Schema.NumberFromString.check(Schema.isGreaterThan(0)).ast
+
+      strictEqual(SchemaAST.replaceChecks(ast, ast.checks), ast)
+      strictEqual(SchemaAST.replaceEncoding(ast, ast.encoding), ast)
+      strictEqual(SchemaAST.replaceContext(ast, ast.context), ast)
+    })
+
+    it("removes encoding without changing the source or its checks", () => {
+      const ast = Schema.NumberFromString.check(Schema.isGreaterThan(0)).ast
+      const encoding = ast.encoding
+      const updated = SchemaAST.replaceEncoding(ast, undefined)
+
+      strictEqual(updated.encoding, undefined)
+      strictEqual(updated.checks, ast.checks)
+      strictEqual(ast.encoding, encoding)
+      strictEqual(encoding === undefined, false)
+      strictEqual(Schema.decodeUnknownSync(Schema.make<Schema.Codec<unknown>>(updated))(1), 1)
+      throws(() => Schema.decodeUnknownSync(Schema.make<Schema.Codec<unknown>>(updated))(-1))
+    })
+
+    it("restores context owners without losing changes made to a contextual node", () => {
+      const ast = Schema.Struct({ a: Schema.String }).ast
+      const context = new SchemaAST.Context(true, false)
+      const contextual = SchemaAST.replaceContext(ast, context)
+      const checks: SchemaAST.Checks = [Schema.isMinProperties(1)]
+      const checked = SchemaAST.replaceChecks(contextual, checks)
+      const restored = SchemaAST.replaceContext(checked, undefined)
+
+      strictEqual(SchemaAST.getContextOwner(contextual), ast)
+      strictEqual(SchemaAST.replaceContext(contextual, undefined), ast)
+      strictEqual(SchemaAST.getContextOwner(checked), checked)
+      strictEqual(restored.checks, checks)
+      strictEqual(restored.context, undefined)
+      strictEqual(checked.context, context)
+      strictEqual(ast.context, undefined)
+    })
+
+    it("shares prepared template data when merging annotations", () => {
+      const ast = Schema.TemplateLiteral(["item-", Schema.String]).ast
+      const annotated = SchemaAST.annotate(ast, { title: "Item" })
+      const updated = SchemaAST.annotate(annotated, { description: "An item identifier" })
+
+      strictEqual(updated.parts, ast.parts)
+      strictEqual(updated.encodedParts, ast.encodedParts)
+      strictEqual(updated.literals, ast.literals)
+      strictEqual(updated.suffixLengths, ast.suffixLengths)
+      deepStrictEqual(updated.annotations, { title: "Item", description: "An item identifier" })
+      strictEqual(annotated.annotations?.description, undefined)
+      strictEqual(Schema.decodeUnknownSync(Schema.make<Schema.Codec<unknown>>(updated))("item-a"), "item-a")
+    })
+
+    it("shares the memoized suspended thunk when copying metadata", () => {
+      let calls = 0
+      const ast = new SchemaAST.Suspend(() => {
+        calls++
+        return SchemaAST.string
+      })
+      const annotated = SchemaAST.annotate(ast, { title: "Suspended string" })
+
+      strictEqual(calls, 0)
+      strictEqual(annotated.thunk, ast.thunk)
+      strictEqual(annotated.thunk(), SchemaAST.string)
+      strictEqual(ast.thunk(), SchemaAST.string)
+      strictEqual(calls, 1)
+      throws(
+        () => SchemaAST.replaceChecks(annotated, [Schema.isMinLength(1)]),
+        new Error("Cannot add checks to Suspend")
+      )
+    })
+  })
+
+  it("stores constructor defaults directly in the context", () => {
+    const defaultValue = Effect.succeed("default")
+    const ast = SchemaAST.withConstructorDefault(SchemaAST.string, defaultValue)
+    strictEqual(ast.context?.constructorDefault, defaultValue)
+  })
+
+  describe("Suspend", () => {
+    it("memoizes the thunk", () => {
+      let calls = 0
+      const ast = new SchemaAST.Suspend(() => {
+        calls++
+        return SchemaAST.string
+      })
+
+      strictEqual(calls, 0)
+      strictEqual(ast.thunk(), SchemaAST.string)
+      strictEqual(ast.thunk(), SchemaAST.string)
+      strictEqual(calls, 1)
+    })
+  })
+
   it("isJson", () => {
     strictEqual(SchemaAST.isJson(null), true)
     strictEqual(SchemaAST.isJson(undefined), false)
@@ -140,6 +279,115 @@ describe("SchemaAST", () => {
   })
 
   describe("toType", () => {
+    it("removes outer encoding and promotes checks when children are unchanged", () => {
+      const encoding: SchemaAST.Encoding = [new SchemaAST.Link(SchemaAST.unknown, SchemaTransformation.passthrough())]
+      const context = new SchemaAST.Context(true, false)
+      const check = Schema.makeFilter((value: { readonly a: string }) => value.a.length > 1)
+      const ast = Object.freeze(
+        new SchemaAST.Objects(
+          [new SchemaAST.PropertySignature("a", SchemaAST.string)],
+          [],
+          { title: "Object" },
+          undefined,
+          encoding,
+          context,
+          [check]
+        )
+      )
+      const projected = SchemaAST.toType(ast)
+      const schema = Schema.make<Schema.Codec<unknown>>(projected)
+
+      strictEqual(projected.encoding, undefined)
+      strictEqual(projected.encodingChecks, undefined)
+      strictEqual(projected.checks?.[0], check)
+      strictEqual(projected.propertySignatures, ast.propertySignatures)
+      strictEqual(projected.annotations, ast.annotations)
+      strictEqual(projected.context, context)
+      strictEqual(ast.encoding, encoding)
+      strictEqual(ast.encodingChecks?.[0], check)
+      strictEqual(SchemaAST.toType(ast), projected)
+      strictEqual(SchemaAST.toType(projected), projected)
+      deepStrictEqual(Schema.decodeUnknownSync(schema)({ a: "ab" }), { a: "ab" })
+      throws(() => Schema.decodeUnknownSync(schema)({ a: "a" }))
+    })
+
+    it("keeps only structural encoding checks when outer encoding and child encoding are removed", () => {
+      const structural = Schema.isMinProperties(1)
+      const encoded = Schema.makeFilter((value: { readonly a: string }) => value.a.length > 1)
+      const decoded = Schema.makeFilter((value: { readonly a: number }) => value.a > 0)
+      const encoding: SchemaAST.Encoding = [new SchemaAST.Link(SchemaAST.unknown, SchemaTransformation.passthrough())]
+      const ast = new SchemaAST.Objects(
+        [new SchemaAST.PropertySignature("a", Schema.NumberFromString.ast)],
+        [],
+        undefined,
+        [decoded],
+        encoding,
+        undefined,
+        [encoded.and(structural)]
+      )
+      const projected = SchemaAST.toType(ast)
+      const schema = Schema.make<Schema.Codec<unknown>>(projected)
+
+      strictEqual(projected.encoding, undefined)
+      strictEqual(projected.encodingChecks, undefined)
+      deepStrictEqual(projected.checks, [decoded, structural])
+      strictEqual(projected.propertySignatures[0].type, SchemaAST.toType(Schema.NumberFromString.ast))
+      strictEqual(ast.encoding, encoding)
+      strictEqual(ast.propertySignatures[0].type, Schema.NumberFromString.ast)
+      strictEqual(SchemaAST.toType(projected), projected)
+      deepStrictEqual(Schema.decodeUnknownSync(schema)({ a: 1 }), { a: 1 })
+      throws(() => Schema.decodeUnknownSync(schema)({ a: -1 }))
+      throws(() => Schema.decodeUnknownSync(schema)({ a: "1" }))
+    })
+
+    it("preserves lazy recursive references when removing a suspended node's encoding", () => {
+      let calls = 0
+      const encoding: SchemaAST.Encoding = [new SchemaAST.Link(SchemaAST.unknown, SchemaTransformation.passthrough())]
+      const ast: SchemaAST.Suspend = new SchemaAST.Suspend(
+        () => {
+          calls++
+          return new SchemaAST.Objects([
+            new SchemaAST.PropertySignature("value", Schema.NumberFromString.ast),
+            new SchemaAST.PropertySignature("next", new SchemaAST.Union([SchemaAST.null, ast]))
+          ], [])
+        },
+        undefined,
+        undefined,
+        encoding
+      )
+      const projected = SchemaAST.toType(ast)
+
+      strictEqual(calls, 0)
+      strictEqual(projected.encoding, undefined)
+      strictEqual(ast.encoding, encoding)
+      strictEqual(SchemaAST.toType(ast), projected)
+      strictEqual(SchemaAST.toType(projected), projected)
+      const body = projected.thunk()
+      strictEqual(calls, 1)
+      strictEqual(projected.thunk(), body)
+      if (!SchemaAST.isObjects(body)) throw new Error("Expected Objects")
+      const next = body.propertySignatures[1].type
+      if (!SchemaAST.isUnion(next)) throw new Error("Expected Union")
+      strictEqual(next.types[1], projected)
+      const input = { value: 1, next: { value: 2, next: null } }
+      deepStrictEqual(Schema.decodeUnknownSync(Schema.make<Schema.Codec<unknown>>(projected))(input), input)
+      strictEqual(calls, 1)
+    })
+
+    it("is idempotent for suspended schemas", () => {
+      const schema = Schema.suspend(() => Schema.Struct({ a: Schema.NumberFromString }))
+      const ast = SchemaAST.toType(schema.ast)
+
+      strictEqual(SchemaAST.toType(ast), ast)
+    })
+
+    it("toEncoded is idempotent for suspended schemas", () => {
+      const schema = Schema.suspend(() => Schema.Struct({ a: Schema.NumberFromString }))
+      const ast = SchemaAST.toEncoded(schema.ast)
+
+      strictEqual(SchemaAST.toEncoded(ast), ast)
+    })
+
     it("promotes encodingChecks when contained type shape is preserved", () => {
       const schema = Schema.Struct({ a: Schema.String }).pipe(
         Schema.flip,
@@ -286,8 +534,8 @@ describe("SchemaAST", () => {
       deepStrictEqual(SchemaAST.collectSentinels(ast), [{ key: "_tag", literal: "A" }])
     })
 
-    it("ErrorClass", () => {
-      class E extends Schema.ErrorClass<E>("E")({
+    it("Error", () => {
+      class E extends Schema.Error<E>("E")({
         type: Schema.Literal("E"),
         e: Schema.String
       }) {}
@@ -295,12 +543,33 @@ describe("SchemaAST", () => {
       deepStrictEqual(SchemaAST.collectSentinels(ast), [{ key: "type", literal: "E" }])
     })
 
-    it("TaggedErrorClass", () => {
-      class E extends Schema.TaggedErrorClass<E>()("E", {
+    it("TaggedError", () => {
+      class E extends Schema.TaggedError<E>()("E", {
         e: Schema.String
       }) {}
       const ast = E.ast
       deepStrictEqual(SchemaAST.collectSentinels(ast), [{ key: "_tag", literal: "E" }])
+    })
+
+    it("Union: the sentinels common to every member", () => {
+      const shared = Schema.Union([
+        Schema.Struct({ kind: Schema.Literal("a"), variant: Schema.Literal("x") }),
+        Schema.Struct({ kind: Schema.Literal("a"), variant: Schema.Literal("y") })
+      ])
+      deepStrictEqual(SchemaAST.collectSentinels(shared.ast), [{ key: "kind", literal: "a" }])
+
+      const disjoint = Schema.Union([
+        Schema.Struct({ kind: Schema.Literal("a") }),
+        Schema.Struct({ kind: Schema.Literal("b") })
+      ])
+      deepStrictEqual(SchemaAST.collectSentinels(disjoint.ast), [])
+
+      // A suspended member stays opaque, so the intersection is conservative.
+      const withSuspend = Schema.Union([
+        Schema.Struct({ kind: Schema.Literal("a") }),
+        Schema.suspend(() => Schema.Struct({ kind: Schema.Literal("a") }))
+      ])
+      deepStrictEqual(SchemaAST.collectSentinels(withSuspend.ast), [])
     })
   })
 
@@ -332,6 +601,9 @@ describe("SchemaAST", () => {
       deepStrictEqual(SchemaAST.getCandidates("c", ast.types), [ast.types[2]])
       deepStrictEqual(SchemaAST.getCandidates(1, ast.types), [])
       deepStrictEqual(SchemaAST.getCandidates(undefined, ast.types), [])
+
+      const reversed = Schema.Union([Schema.String, Schema.Literal("b")]).ast
+      deepStrictEqual(SchemaAST.getCandidates("c", reversed.types), [reversed.types[0]])
     })
 
     it("Literals", () => {
@@ -385,6 +657,19 @@ describe("SchemaAST", () => {
       deepStrictEqual(SchemaAST.getCandidates(1, ast.types), [])
     })
 
+    it("constructor mode should keep tagged candidates only when an object discriminator is missing", () => {
+      const schema = Schema.Union([
+        Schema.Struct({ _tag: Schema.tag("a"), a: Schema.String }),
+        Schema.Struct({ _tag: Schema.tag("b"), b: Schema.Number })
+      ])
+      const ast = schema.ast
+
+      deepStrictEqual(SchemaAST.getCandidates({}, ast.types, true), ast.types)
+      deepStrictEqual(SchemaAST.getCandidates({ _tag: undefined }, ast.types, true), ast.types)
+      deepStrictEqual(SchemaAST.getCandidates({ _tag: "a" }, ast.types, true), [ast.types[0]])
+      deepStrictEqual(SchemaAST.getCandidates("a", ast.types, true), [])
+    })
+
     it("should handle function-valued declarations with sentinels", () => {
       const a = Schema.declare(
         (input): input is () => void => typeof input === "function",
@@ -428,7 +713,36 @@ describe("SchemaAST", () => {
       deepStrictEqual(SchemaAST.getCandidates(input, ast.types), [ast.types[0]])
     })
 
-    it("should collect matches from different sentinel keys without duplicates", () => {
+    it("should reuse the candidates of a runtime type without literals", () => {
+      const schema = Schema.NullOr(Schema.Struct({ a: Schema.Number }))
+      const ast = schema.ast
+      const candidates = SchemaAST.getCandidates({ a: 1 }, ast.types)
+      deepStrictEqual(candidates, [ast.types[0]])
+      strictEqual(SchemaAST.getCandidates({ b: 2 }, ast.types), candidates)
+      strictEqual(Object.isFrozen(candidates), true)
+      deepStrictEqual(SchemaAST.getCandidates(null, ast.types), [ast.types[1]])
+    })
+
+    it("should reuse non-discriminated candidates of a tagged union", () => {
+      const schema = Schema.Union([
+        Schema.Struct({ _tag: Schema.tag("a"), a: Schema.String }),
+        Schema.Struct({ b: Schema.Number }),
+        Schema.String,
+        Schema.Literal(1)
+      ])
+      const ast = schema.ast
+      const strings = SchemaAST.getCandidates("x", ast.types)
+      deepStrictEqual(strings, [ast.types[2]])
+      strictEqual(SchemaAST.getCandidates("y", ast.types), strings)
+      strictEqual(Object.isFrozen(strings), true)
+      const objects = SchemaAST.getCandidates({ _tag: "c" }, ast.types)
+      deepStrictEqual(objects, [ast.types[1]])
+      strictEqual(SchemaAST.getCandidates({ _tag: "d" }, ast.types), objects)
+      strictEqual(Object.isFrozen(objects), true)
+      deepStrictEqual(SchemaAST.getCandidates({ _tag: "a" }, ast.types), [ast.types[0], ast.types[1]])
+    })
+
+    it("should handle candidates with different sentinel keys", () => {
       const schema = Schema.Union([
         Schema.Struct({
           kind: Schema.Literal("a"),
@@ -441,6 +755,14 @@ describe("SchemaAST", () => {
       deepStrictEqual(
         SchemaAST.getCandidates({ kind: "a", status: "ready", value: "value" }, ast.types),
         [ast.types[0], ast.types[1]]
+      )
+      deepStrictEqual(
+        SchemaAST.getCandidates({ kind: "b", status: "ready", value: "value" }, ast.types),
+        [ast.types[1]]
+      )
+      deepStrictEqual(
+        SchemaAST.getCandidates({ kind: undefined, status: "ready", value: "value" }, ast.types),
+        [ast.types[1]]
       )
     })
 
@@ -485,6 +807,31 @@ describe("SchemaAST", () => {
       const schema = Schema.Union([member], { mode: "oneOf" })
       const input = { kind: "a" }
       strictEqual(Schema.decodeUnknownSync(schema)(input), input)
+    })
+
+    it("should dispatch a nested union member by its common sentinel", () => {
+      const hosted = Schema.Union([
+        Schema.Struct({ kind: Schema.Literal("a"), variant: Schema.Literal("x") }),
+        Schema.Struct({ kind: Schema.Literal("a"), variant: Schema.Literal("y") })
+      ])
+      const flat = Schema.Struct({ kind: Schema.Literal("b") })
+      const ast = Schema.Union([hosted, flat]).ast
+      deepStrictEqual(SchemaAST.getCandidates({ kind: "a" }, ast.types), [ast.types[0]])
+      deepStrictEqual(SchemaAST.getCandidates({ kind: "b" }, ast.types), [ast.types[1]])
+    })
+
+    it("should exclude members whose sentinel the input contradicts", () => {
+      const schema = Schema.Union([
+        Schema.Struct({ kind: Schema.Literal("a"), variant: Schema.Literal("x"), value: Schema.String }),
+        Schema.Struct({ kind: Schema.Literal("a"), variant: Schema.Literal("y"), value: Schema.Number })
+      ])
+      const ast = schema.ast
+      deepStrictEqual(SchemaAST.getCandidates({ kind: "a", variant: "x" }, ast.types), [ast.types[0]])
+      deepStrictEqual(SchemaAST.getCandidates({ kind: "a", variant: "z" }, ast.types), [])
+      deepStrictEqual(SchemaAST.getCandidates({ kind: "a", variant: undefined }, ast.types), [])
+      // A missing sentinel key does not exclude: the member still owes the error.
+      deepStrictEqual(SchemaAST.getCandidates({ kind: "a" }, ast.types), [ast.types[0], ast.types[1]])
+      deepStrictEqual(SchemaAST.getCandidates({ kind: "a", variant: undefined }, ast.types, true), ast.types)
     })
   })
 
@@ -584,6 +931,15 @@ describe("SchemaAST", () => {
     })
   })
 
+  describe("Union options", () => {
+    it("preserves the complete options object through recur and flip", () => {
+      const unionOptions: SchemaAST.UnionOptions = { mode: "oneOf" }
+      const union = new SchemaAST.Union([Schema.NumberFromString.ast, Schema.String.ast], unionOptions)
+      strictEqual(union.recur(SchemaAST.toEncoded).options, unionOptions)
+      strictEqual(union.flip(SchemaAST.flip).options, unionOptions)
+    })
+  })
+
   describe("IndexSignature", () => {
     it("accepts valid parameters on both type and encoded side", () => {
       doesNotThrow(() => new SchemaAST.IndexSignature(Schema.String.ast, Schema.Number.ast))
@@ -613,6 +969,25 @@ describe("SchemaAST", () => {
       throws(
         () => new SchemaAST.IndexSignature(StringFromBoolean.ast, Schema.Number.ast),
         new Error("Invalid index signature parameter String")
+      )
+      throws(
+        () =>
+          new SchemaAST.IndexSignature(
+            Schema.Union([Schema.String, StringFromBoolean]).ast,
+            Schema.Number.ast
+          ),
+        new Error("Invalid index signature parameter Union")
+      )
+
+      const UnionFromBoolean = Schema.Boolean.pipe(
+        Schema.decodeTo(Schema.Union([Schema.String, Schema.Number]), {
+          decode: SchemaGetter.transform((b: boolean): string | number => b ? "true" : 0),
+          encode: SchemaGetter.transform((_value: string | number) => true)
+        })
+      )
+      throws(
+        () => new SchemaAST.IndexSignature(UnionFromBoolean.ast, Schema.Number.ast),
+        new Error("Invalid index signature parameter Union")
       )
     })
   })

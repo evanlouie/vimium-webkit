@@ -1,6 +1,7 @@
 import { LibsqlClient } from "@effect/sql-libsql"
-import { assert, describe, layer } from "@effect/vitest"
-import { Effect, Layer } from "effect"
+import { assert, describe, it, layer } from "@effect/vitest"
+import { Effect, Exit, Layer, Option } from "effect"
+import * as Reactivity from "effect/reactivity/Reactivity"
 import { LibsqlContainer } from "./util.ts"
 
 const Migrations = Layer.effectDiscard(
@@ -15,7 +16,100 @@ const Migrations = Layer.effectDiscard(
 )
 
 describe("Client", () => {
-  layer(LibsqlContainer.layerClient, { timeout: "30 seconds" })((it) => {
+  it.effect("exposes the active transaction service for each client", () =>
+    Effect.gen(function*() {
+      const a = yield* LibsqlClient.make({ url: ":memory:" })
+      const b = yield* LibsqlClient.make({ url: ":memory:" })
+      const active = Effect.all([
+        Effect.map(Effect.serviceOption(a.transactionService), Option.isSome),
+        Effect.map(Effect.serviceOption(b.transactionService), Option.isSome)
+      ])
+
+      assert.deepStrictEqual(yield* active, [false, false])
+      yield* a.withTransaction(Effect.gen(function*() {
+        assert.deepStrictEqual(yield* active, [true, false])
+        assert.deepStrictEqual(yield* b.withTransaction(active), [true, true])
+        assert.deepStrictEqual(yield* active, [true, false])
+      }))
+      assert.deepStrictEqual(yield* active, [false, false])
+    }).pipe(Effect.provide(Reactivity.layer)))
+
+  it.effect("releases completed nested savepoints", () =>
+    Effect.gen(function*() {
+      const sql = yield* LibsqlClient.make({ url: ":memory:" })
+      yield* sql`CREATE TABLE savepoint_release (value INTEGER)`
+      yield* sql.withTransaction(Effect.gen(function*() {
+        for (const rollback of [false, true]) {
+          yield* sql.withTransaction(
+            sql`INSERT INTO savepoint_release VALUES (1)`.pipe(
+              Effect.andThen(rollback ? Effect.fail("rollback") : Effect.void)
+            )
+          ).pipe(Effect.ignore)
+          const error = yield* sql`RELEASE SAVEPOINT effect_sql_1`.unprepared.pipe(Effect.flip)
+          assert.strictEqual(error._tag, "SqlError")
+        }
+      }))
+      assert.deepStrictEqual(yield* sql`SELECT value FROM savepoint_release`, [{ value: 1 }])
+      const error = yield* sql.withTransaction(
+        sql.withTransaction(sql`INSERT INTO savepoint_release VALUES (2)`).pipe(
+          Effect.andThen(Effect.fail("outer rollback"))
+        )
+      ).pipe(Effect.flip)
+      assert.strictEqual(error, "outer rollback")
+      assert.deepStrictEqual(yield* sql`SELECT value FROM savepoint_release`, [{ value: 1 }])
+    }).pipe(Effect.provide(Reactivity.layer)))
+
+  it.effect("keeps transactions isolated between clients", () =>
+    Effect.gen(function*() {
+      const a = yield* LibsqlClient.make({ url: ":memory:" })
+      const b = yield* LibsqlClient.make({ url: ":memory:" })
+
+      yield* a`CREATE TABLE marker (owner TEXT NOT NULL)`
+      yield* b`CREATE TABLE marker (owner TEXT NOT NULL)`
+      yield* a`INSERT INTO marker VALUES ('A')`
+      yield* b`INSERT INTO marker VALUES ('B')`
+
+      const rows = yield* a.withTransaction(b`SELECT owner FROM marker`)
+      assert.deepStrictEqual(rows, [{ owner: "B" }])
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(Reactivity.layer)
+    ))
+
+  it.effect("releases transaction serialization after begin fails", () => {
+    let transactionCalls = 0
+    const transaction = {
+      execute: () => Promise.resolve({ rows: [] }),
+      commit: () => Promise.resolve(),
+      rollback: () => Promise.resolve()
+    }
+    const liveClient = {
+      execute: () => Promise.resolve({ rows: [] }),
+      transaction: () => {
+        transactionCalls++
+        return transactionCalls === 1
+          ? Promise.reject(new Error("transient begin failure"))
+          : Promise.resolve(transaction)
+      }
+    }
+
+    return Effect.gen(function*() {
+      const client = yield* LibsqlClient.make({ liveClient: liveClient as any })
+      const first = yield* Effect.exit(client.withTransaction(Effect.void))
+      assert.isTrue(Exit.isFailure(first))
+
+      yield* Effect.forkChild(client.withTransaction(Effect.void))
+      yield* Effect.yieldNow
+
+      assert.strictEqual(transactionCalls, 2)
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(Reactivity.layer)
+    )
+  })
+
+  // Each test recreates the same tables.
+  layer(LibsqlContainer.layerClient, { timeout: "30 seconds", concurrent: false })("shared tables", (it) => {
     it.effect("should work", () =>
       Effect.gen(function*() {
         const sql = yield* LibsqlClient.LibsqlClient
