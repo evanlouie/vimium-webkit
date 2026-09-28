@@ -49,7 +49,7 @@ import {
   pipe,
 } from "effect";
 import { constVoid, flow } from "effect/Function";
-import { describeThrown } from "~/domain/Failure.ts";
+import { describeCause, describeThrown } from "~/domain/Failure.ts";
 import type { GroupSpec, Migration } from "~/domain/Persisted.ts";
 import {
   type FindHistory,
@@ -648,8 +648,15 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
   // Do not publish the defaults after a transport failure. They are an answer
   // for this caller, not the state of the world. An unrelated update must not
   // write them over good data later.
+  //
+  // The error keeps a fixed message and the text of the first failure, and not
+  // the `Cause`. A whole cause names every nested cause of the manager.
   const readFailed = (cause: Cause.Cause<GmError>): Effect.Effect<A> => {
-    const error = failureFrom("backend", "read", "could not read the stored value")(cause);
+    const error = failure(
+      "backend",
+      "read",
+      `could not read the stored value: ${describeCause(cause)}`,
+    );
     return pipe(
       report(error),
       Effect.andThen(setReadFailure(Option.some(error))),
