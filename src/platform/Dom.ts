@@ -131,13 +131,6 @@ export class Dom extends Context.Service<
      */
     readonly probeOrElse: <A>(read: () => A, orElse: () => A) => Effect.Effect<A>;
 
-    /**
-     * `probeOrElse` with a fallback value, which the caller builds before the
-     * read. It stays for the callers that pass a value. New code uses
-     * `probeOrElse`.
-     */
-    readonly probeOr: <A>(read: () => A, fallback: A) => Effect.Effect<A>;
-
     /** Run a synchronous DOM call, and name the failure if it throws. */
     readonly attempt: <A>(api: string, run: () => A) => Effect.Effect<A, DomError>;
 
@@ -287,7 +280,6 @@ export class Dom extends Context.Service<
         visibility: Effect.sync(() => doc.visibilityState),
         probe,
         probeOrElse,
-        probeOr: (read, fallback) => probeOrElse(read, () => fallback),
         attempt: probe,
 
         listen: (target, type, handler, options) =>
