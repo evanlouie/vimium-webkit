@@ -2,7 +2,8 @@
 
 ## Vendored Repositories
 
-This project vendors external repositories under `repos/` as git subtrees.
+This project vendors external repositories under `repos/` as snapshots of
+their upstream trees.
 
 - Use vendored repositories as read-only reference material when working with
   related libraries
@@ -35,7 +36,7 @@ This project vendors external repositories under `repos/` as git subtrees.
   dependencies.
 - Do not count a file under `repos/` as part of this application.
 
-### Update A Subtree
+### Update A Vendored Repository
 
 Run this command from the root of the repository, with a clean working tree:
 
@@ -43,4 +44,6 @@ Run this command from the root of the repository, with a clean working tree:
 npm run repos:update:effect
 ```
 
-The command collapses the upstream changes into one commit.
+The command replaces `repos/effect/` with the upstream `main` branch and records
+the update in one commit with a short message. It does not use `git subtree`, so
+no commit lists the upstream commits.

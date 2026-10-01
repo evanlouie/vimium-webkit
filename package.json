@@ -21,7 +21,7 @@
     "lint:fix": "oxlint --disable-nested-config --fix",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
-    "repos:update:effect": "git subtree pull --prefix=repos/effect https://github.com/Effect-TS/effect.git main --squash",
+    "repos:update:effect": "git fetch --no-tags https://github.com/Effect-TS/effect.git main && git rm -rq repos/effect && git read-tree --prefix=repos/effect/ -u FETCH_HEAD && git commit -m 'chore(repos): update Effect' -m \"Vendor Effect-TS/effect@$(git rev-parse --short=10 FETCH_HEAD) from main.\"",
     "verify": "npm run fmt:check && npm run lint && npm run check && npm run test && npm run build"
   },
   "dependencies": {
