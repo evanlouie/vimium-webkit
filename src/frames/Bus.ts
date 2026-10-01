@@ -556,7 +556,7 @@ const inTreeOrder = (
       Array.map((view, index) => [view, index] as const),
     ),
   );
-  const [dead, placed] = pipe(
+  const [placed, dead] = pipe(
     records,
     Array.partition((record) =>
       pipe(

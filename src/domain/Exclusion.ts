@@ -477,7 +477,7 @@ const verdictFor =
  * answer every URL in the same way.
  */
 export const makeExclusionSet = (rules: ReadonlyArray<ExclusionRule>): ExclusionSet => {
-  const [dropped, compiled] = pipe(rules, Array.map(compileRule), Array.separate);
+  const [compiled, dropped] = pipe(rules, Array.map(compileRule), Array.separate);
   return { size: compiled.length, dropped, match: verdictFor(compiled) };
 };
 
