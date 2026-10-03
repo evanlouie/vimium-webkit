@@ -40,6 +40,7 @@ import {
 } from "effect";
 import { constFalse, constTrue, flow } from "effect/Function";
 import { Settings } from "~/core/Settings.ts";
+import { compilePattern, MAX_REGEX_URL_LENGTH } from "~/domain/Exclusion.ts";
 import type { HistoryIndex as HistoryIndexData, Visit } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Storage, type StorageError } from "~/platform/Storage.ts";
@@ -48,38 +49,29 @@ import { Storage, type StorageError } from "~/platform/Storage.ts";
 // Denylist matching
 // ---------------------------------------------------------------------------
 
-const REGEXP_SPECIALS = /[.*+?^${}()|[\]\\]/gu;
-
 /**
- * A URL glob, in the shape of `exclusionRules[].pattern`.
+ * Does a pattern of `historyIndexDenylist` match the URL?
  *
- * `*` matches any run of characters, and `?` matches one character. Both ends
- * are anchored, so `https://mail.google.com/*` does not match a URL that only
- * contains it.
+ * A pattern reads as the pattern of an exclusion rule does. `*` matches any
+ * run of characters, both ends are anchored, and a pattern between two `/` is
+ * a regular expression that the safety check accepted. The glob is matched
+ * without a regular expression, so a long URL cannot make it backtrack.
+ *
+ * A pattern that gives no matcher is text from the user. It matches nothing,
+ * and it is not a reason to stop recording every page.
+ *
+ * A matcher does not read a URL longer than its limit, and a raw expression
+ * reads only `MAX_REGEX_URL_LENGTH` characters. A longer URL could therefore
+ * pass a pattern that names it. It counts as matched instead: the safe answer
+ * to "we could not tell" is "do not record".
  */
-export const globToRegExp = (pattern: string): RegExp => {
-  const source = pattern
-    .replace(REGEXP_SPECIALS, "\\$&")
-    .replaceAll("\\*", "[\\s\\S]*")
-    .replaceAll("\\?", "[\\s\\S]");
-  return new RegExp(`^${source}$`, "u");
-};
-
-/**
- * A pattern that does not compile is text from the user. It matches nothing.
- * It is not a reason to stop recording every page.
- */
-const compileGlob = Option.liftThrowable(globToRegExp);
-
-export const matchesDenylist = (url: string, patterns: readonly string[]): boolean =>
+const matchesDenylist = (url: string, patterns: readonly string[]): boolean =>
   pipe(
     patterns,
     Array.some(
       flow(
-        String.trim,
-        Option.liftPredicate(String.isNonEmpty),
-        Option.flatMap(compileGlob),
-        Option.exists((pattern) => pattern.test(url)),
+        compilePattern,
+        Option.exists((matches) => url.length > MAX_REGEX_URL_LENGTH || matches(url)),
       ),
     ),
   );
