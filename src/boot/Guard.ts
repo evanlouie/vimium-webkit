@@ -66,6 +66,17 @@ const MAX_BUFFERED_KEYS = 16;
 /** How long the top frame waits before it starts on its own. */
 const IDLE_START_MS = 1200;
 
+/**
+ * How long the guard may hold keys once the start has begun.
+ *
+ * The start reads storage, and a manager whose `GM.getValue` never settles
+ * would otherwise keep the keyboard from the page for good: no Space, no
+ * arrows, no ⌘C. Past this bound the guard lets go. Later keys reach the page,
+ * and the keys that it held are lost: the page never saw them, and a replay
+ * would act long after the user pressed them.
+ */
+const MAX_HOLD_MS = 3000;
+
 export const ActivationReason = Schema.Literals(["keydown", "wake", "idle"]);
 export type ActivationReason = typeof ActivationReason.Type;
 
@@ -79,7 +90,8 @@ export interface BootSignal {
    * This is the signal that the application is ready. Call it once the key
    * bridge is attached, and before the guard scope closes. The guard holds every
    * key until then, so a key that arrives while the application starts is not
-   * lost. From then on the key bridge takes every key.
+   * lost. From then on the key bridge takes every key. A start that takes
+   * longer than `MAX_HOLD_MS` finds the guard let go already, and no keys.
    */
   readonly drain: Effect.Effect<ReadonlyArray<KeyboardEvent>>;
 }
@@ -286,6 +298,15 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
     );
 
     const reason = yield* Deferred.await(started);
+
+    // A start that never ends must not keep the keyboard. The timer belongs
+    // to the guard scope, so a start that ends in time stops it.
+    yield* pipe(
+      hold,
+      Ref.set<Hold>(Hold.Released()),
+      Effect.delay(`${MAX_HOLD_MS} millis`),
+      Effect.forkScoped,
+    );
 
     return {
       reason,
