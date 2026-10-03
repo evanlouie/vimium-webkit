@@ -26,7 +26,6 @@
 import {
   Array,
   Boolean,
-  Context,
   Data,
   Effect,
   Exit,
@@ -1023,622 +1022,616 @@ const tierOf = (command: CommandDef): string =>
 /** The key sequences that are bound to each command, as `keysByCommand` gives them. */
 type BoundKeys = Record.ReadonlyRecord<string, Array.NonEmptyReadonlyArray<string>>;
 
-export class Dialog extends Context.Service<
-  Dialog,
-  {
-    readonly showHelp: Effect.Effect<void>;
-    readonly showSettings: Effect.Effect<void>;
-    readonly close: Effect.Effect<void>;
-  }
->()("vimium/ui/Dialog") {
-  static readonly layer: Layer.Layer<
-    Dialog,
-    never,
-    Ui | Dom | Settings | Mappings | Commands | Modes | Report | Capabilities
-  > = Layer.effect(
-    Dialog,
-    Effect.gen(function* () {
-      const ui = yield* Ui;
-      const dom = yield* Dom;
-      const settings = yield* Settings;
-      const mappings = yield* Mappings;
-      const commands = yield* Commands;
-      const modes = yield* Modes;
-      const report = yield* Report;
-      const capabilities = yield* Capabilities;
+/**
+ * The help dialog and the settings dialog.
+ *
+ * The layer provides no service. It registers `showHelp` and `showSettings`
+ * in the command registry, which is the only way that anything opens them.
+ */
+export const DialogLayer: Layer.Layer<
+  never,
+  never,
+  Ui | Dom | Settings | Mappings | Commands | Modes | Report | Capabilities
+> = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const ui = yield* Ui;
+    const dom = yield* Dom;
+    const settings = yield* Settings;
+    const mappings = yield* Mappings;
+    const commands = yield* Commands;
+    const modes = yield* Modes;
+    const report = yield* Report;
+    const capabilities = yield* Capabilities;
 
-      const doc = dom.document;
-      const dialogLayer = yield* ui.layer("dialog");
+    const doc = dom.document;
+    const dialogLayer = yield* ui.layer("dialog");
 
-      const el = <K extends keyof HTMLElementTagNameMap>(tag: K): HTMLElementTagNameMap[K] =>
-        doc.createElement(tag);
+    const el = <K extends keyof HTMLElementTagNameMap>(tag: K): HTMLElementTagNameMap[K] =>
+      doc.createElement(tag);
 
-      /** An element that holds one text. */
-      const textEl = <K extends keyof HTMLElementTagNameMap>(
-        tag: K,
-        text: string,
-      ): HTMLElementTagNameMap[K] => pipe(el(tag), withText(text));
+    /** An element that holds one text. */
+    const textEl = <K extends keyof HTMLElementTagNameMap>(
+      tag: K,
+      text: string,
+    ): HTMLElementTagNameMap[K] => pipe(el(tag), withText(text));
 
-      /** An element with a class. */
-      const classEl = <K extends keyof HTMLElementTagNameMap>(
-        tag: K,
-        className: string,
-      ): HTMLElementTagNameMap[K] => pipe(el(tag), withClass(className));
+    /** An element with a class. */
+    const classEl = <K extends keyof HTMLElementTagNameMap>(
+      tag: K,
+      className: string,
+    ): HTMLElementTagNameMap[K] => pipe(el(tag), withClass(className));
 
-      /** One button of a dialog. */
-      const button = (text: string): HTMLButtonElement =>
-        pipe(classEl("button", "vw-button"), withText(text));
+    /** One button of a dialog. */
+    const button = (text: string): HTMLButtonElement =>
+      pipe(classEl("button", "vw-button"), withText(text));
 
-      /** The box of one modal dialog, with its name for assistive technology. */
-      const dialogBox = (name: string): HTMLDivElement => {
-        const dialog = classEl("div", "vw-dialog");
-        dialog.setAttribute("role", "dialog");
-        dialog.setAttribute("aria-modal", "true");
-        dialog.setAttribute("aria-label", name);
-        return dialog;
-      };
+    /** The box of one modal dialog, with its name for assistive technology. */
+    const dialogBox = (name: string): HTMLDivElement => {
+      const dialog = classEl("div", "vw-dialog");
+      dialog.setAttribute("role", "dialog");
+      dialog.setAttribute("aria-modal", "true");
+      dialog.setAttribute("aria-label", name);
+      return dialog;
+    };
 
-      /** The scope of the open dialog. Closing it removes every part of it. */
-      const openScope = yield* Ref.make<Option.Option<Scope.Closeable>>(Option.none());
+    /** The scope of the open dialog. Closing it removes every part of it. */
+    const openScope = yield* Ref.make<Option.Option<Scope.Closeable>>(Option.none());
 
-      // One save at a time. A save reaches storage, so it cannot run on the
-      // key path; it runs in this fiber instead.
-      const saves = yield* FiberHandle.make<void, never>();
+    // One save at a time. A save reaches storage, so it cannot run on the
+    // key path; it runs in this fiber instead.
+    const saves = yield* FiberHandle.make<void, never>();
 
-      const close: Effect.Effect<void> = pipe(
-        openScope,
-        Ref.getAndSet(Option.none<Scope.Closeable>()),
-        Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: (scope) => Scope.close(scope, Exit.void),
-          }),
-        ),
+    const close: Effect.Effect<void> = pipe(
+      openScope,
+      Ref.getAndSet(Option.none<Scope.Closeable>()),
+      Effect.flatMap(
+        Option.match({
+          onNone: () => Effect.void,
+          onSome: (scope) => Scope.close(scope, Exit.void),
+        }),
+      ),
+    );
+
+    /**
+     * Move the focus to the next or the previous control of the dialog.
+     *
+     * The root is closed, so `document.activeElement` is the host from
+     * outside. `shadow.activeElement` gives the true node.
+     *
+     * `focus()` and not `focus({ preventScroll: true })`. The dialog box
+     * scrolls, and the settings form is longer than it. With `preventScroll`
+     * the ninth Tab press put the focus on a control below the box, and
+     * nothing moved: a sighted keyboard user could not find the focus.
+     */
+    const moveFocus = (dialog: HTMLElement, step: FocusStep): void => {
+      const targets = focusableIn(dialog);
+      const active = ui.shadow.activeElement;
+      const current = pipe(
+        targets,
+        Array.findFirstIndex((element) => element === active),
+      );
+      const target = pipe(
+        nextFocusIndex(targets.length, current, step),
+        Option.flatMap((index) => pipe(targets, Array.get(index))),
+        Option.getOrElse(() => dialog),
+      );
+      target.focus();
+    };
+
+    /**
+     * What the dialog mode does with one key.
+     *
+     * `SUPPRESS_PROPAGATION` keeps the event from normal mode and from the
+     * page, and keeps the default action, so the user can still type into a
+     * text area.
+     *
+     * Tab is the exception. `SUPPRESS_PROPAGATION` calls
+     * `stopImmediatePropagation` only, so the default action of Tab took the
+     * focus out of the dialog and on to the page behind it. That breaks the
+     * promise of `aria-modal="true"`, which tells a screen reader that the
+     * rest of the page is unavailable. `SUPPRESS_EVENT` takes the key, and
+     * the trap moves the focus by hand.
+     */
+    const trapKey = (dialog: HTMLElement, event: KeyboardEvent): Effect.Effect<HandlerResult> =>
+      pipe(
+        event.key === "Tab",
+        Boolean.match({
+          onFalse: () => Effect.succeed(SUPPRESS_PROPAGATION),
+          onTrue: () =>
+            pipe(
+              Effect.sync(() => moveFocus(dialog, tabStep(event))),
+              Effect.as(SUPPRESS_EVENT),
+            ),
+        }),
       );
 
-      /**
-       * Move the focus to the next or the previous control of the dialog.
-       *
-       * The root is closed, so `document.activeElement` is the host from
-       * outside. `shadow.activeElement` gives the true node.
-       *
-       * `focus()` and not `focus({ preventScroll: true })`. The dialog box
-       * scrolls, and the settings form is longer than it. With `preventScroll`
-       * the ninth Tab press put the focus on a control below the box, and
-       * nothing moved: a sighted keyboard user could not find the focus.
-       */
-      const moveFocus = (dialog: HTMLElement, step: FocusStep): void => {
-        const targets = focusableIn(dialog);
-        const active = ui.shadow.activeElement;
-        const current = pipe(
-          targets,
-          Array.findFirstIndex((element) => element === active),
-        );
-        const target = pipe(
-          nextFocusIndex(targets.length, current, step),
-          Option.flatMap((index) => pipe(targets, Array.get(index))),
-          Option.getOrElse(() => dialog),
-        );
-        target.focus();
-      };
-
-      /**
-       * What the dialog mode does with one key.
-       *
-       * `SUPPRESS_PROPAGATION` keeps the event from normal mode and from the
-       * page, and keeps the default action, so the user can still type into a
-       * text area.
-       *
-       * Tab is the exception. `SUPPRESS_PROPAGATION` calls
-       * `stopImmediatePropagation` only, so the default action of Tab took the
-       * focus out of the dialog and on to the page behind it. That breaks the
-       * promise of `aria-modal="true"`, which tells a screen reader that the
-       * rest of the page is unavailable. `SUPPRESS_EVENT` takes the key, and
-       * the trap moves the focus by hand.
-       */
-      const trapKey = (dialog: HTMLElement, event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-        pipe(
-          event.key === "Tab",
-          Boolean.match({
-            onFalse: () => Effect.succeed(SUPPRESS_PROPAGATION),
-            onTrue: () =>
-              pipe(
-                Effect.sync(() => moveFocus(dialog, tabStep(event))),
-                Effect.as(SUPPRESS_EVENT),
-              ),
-          }),
-        );
-
-      /**
-       * Give the focus back to the element that had it before the dialog.
-       *
-       * The reads stay inside the attempt, because the element belongs to the
-       * page, and page script can replace any accessor of it.
-       */
-      const focusAgain = (previous: Option.Option<Element>): Effect.Effect<void> =>
-        pipe(
-          dom.attempt("HTMLElement.focus", () =>
-            pipe(
-              previous,
-              Option.filter(
-                (element): element is HTMLElement =>
-                  element instanceof HTMLElement && element.isConnected,
-              ),
-              Option.match({
-                onNone: Function.constVoid,
-                onSome: (element) => element.focus({ preventScroll: true }),
-              }),
-            ),
-          ),
-          Effect.ignore,
-        );
-
-      /** Open a dialog that `build` draws, in a scope of its own. */
-      const open = Effect.fnUntraced(function* <A extends { readonly dialog: HTMLElement }>(
-        build: Effect.Effect<A, never, Scope.Scope>,
-      ) {
-        const scope = yield* Scope.make();
-
-        // The layer is opened before the dialog is built, so that the
-        // release steps run in the other order: the dialog leaves the tree
-        // first, and `aria-hidden` arrives on an empty layer. A layer that
-        // became hidden while it still held the focused element is the state
-        // that browsers warn about, because a screen reader loses the
-        // focused node.
-        yield* pipe(acceptPointerEvents(dialogLayer), Scope.provide(scope));
-        // The dialog is a true control, so assistive technology must reach
-        // it. The release step hides the layer again.
-        yield* pipe(ui.expose(dialogLayer), Scope.provide(scope));
-
-        const parts = yield* pipe(build, Scope.provide(scope));
-
-        const backdrop = yield* pipe(
-          Effect.acquireRelease(
-            Effect.sync(() => {
-              const element = classEl("div", "vw-dialog-backdrop");
-              element.appendChild(parts.dialog);
-              dialogLayer.appendChild(element);
-              return element;
-            }),
-            (element) =>
-              Effect.sync(() => {
-                element.remove();
-              }),
-          ),
-          Scope.provide(scope),
-        );
-
-        yield* pipe(
-          dom.listenOn(backdrop, "click", (event) =>
-            pipe(
-              event.target === backdrop,
-              Boolean.match({
-                onFalse: () => Effect.void,
-                onTrue: () => close,
-              }),
-            ),
-          ),
-          Scope.provide(scope),
-        );
-
-        // The dialog owns the keyboard. `trapKey` says how.
-        const mode = yield* pipe(
-          modes.enter(
-            {
-              name: "dialog",
-              indicator: Option.none(),
-              exitOn: [ExitTrigger.Escape()],
-              keyboard: KeyPolicy.Shared(),
-              singleton: Option.some("dialog"),
-            },
-            { keydown: (event) => trapKey(parts.dialog, event) },
-          ),
-          Scope.provide(scope),
-        );
-        yield* mode.onExit(() => close);
-
-        yield* pipe(openScope, Ref.set(Option.some(scope)));
-
-        // Acquired last, so that its release step runs first: the focus
-        // leaves the dialog before the dialog leaves the tree. A modal that
-        // drops the focus leaves the user at the top of the document.
-        yield* pipe(
-          Effect.acquireRelease(
-            dom.probeOrElse(() => Option.fromNullishOr(deepActiveElement(doc)), Option.none),
-            focusAgain,
-          ),
-          Scope.provide(scope),
-        );
-
-        yield* Effect.sync(() => {
-          parts.dialog.tabIndex = -1;
-          parts.dialog.focus({ preventScroll: true });
-        });
-      });
-
-      /**
-       * Put a dialog on screen, in a scope of its own.
-       *
-       * `build` gets the scope, so a listener that it registers goes away with
-       * the dialog.
-       */
-      const present = Effect.fn("Dialog.present")(function* <
-        A extends { readonly dialog: HTMLElement },
-      >(build: Effect.Effect<A, never, Scope.Scope>) {
-        yield* close;
-        yield* open(build);
-      });
-
-      // ---------------------------------------------------------------
-      // Help
-      // ---------------------------------------------------------------
-
-      /** The three cells of one command in the help table. */
-      const commandRow =
-        (bound: BoundKeys) =>
-        (command: CommandDef): ReadonlyArray<HTMLElement> => {
-          const cell = (className: string, text: string): HTMLSpanElement => {
-            const span = pipe(classEl("span", `${className} vw-cmd-row`), withText(text));
-            span.dataset["tier"] = tierOf(command);
-            return span;
-          };
-          const refusal = refusalOf(command);
-          const keys = pipe(
-            bound,
-            Record.get(command.name),
-            Option.map(Array.join("  ")),
-            Option.getOrElse(() => "—"),
-          );
-          const native = pipe(
-            refusal,
-            Option.flatMap(({ nativeAlternative }) => nativeAlternative),
-            Option.getOrElse(() => ""),
-          );
-          const description = cell("vw-cmd-desc", command.description);
+    /**
+     * Give the focus back to the element that had it before the dialog.
+     *
+     * The reads stay inside the attempt, because the element belongs to the
+     * page, and page script can replace any accessor of it.
+     */
+    const focusAgain = (previous: Option.Option<Element>): Effect.Effect<void> =>
+      pipe(
+        dom.attempt("HTMLElement.focus", () =>
           pipe(
-            refusal,
+            previous,
+            Option.filter(
+              (element): element is HTMLElement =>
+                element instanceof HTMLElement && element.isConnected,
+            ),
             Option.match({
               onNone: Function.constVoid,
-              onSome: ({ reason }) => {
-                description.title = reason;
-              },
+              onSome: (element) => element.focus({ preventScroll: true }),
             }),
-          );
-          return [cell("vw-cmd-keys", keys), description, cell("vw-cmd-native", native)];
-        };
-
-      const commandTable = (list: ReadonlyArray<CommandDef>, bound: BoundKeys): HTMLElement => {
-        const table = classEl("div", "vw-cmd-table");
-        const cells = pipe(
-          list,
-          Array.filter((command) => command.advanced !== true),
-          Array.flatMap(commandRow(bound)),
-        );
-        table.append(...cells);
-        return table;
-      };
-
-      /**
-       * The commands of each group, in the order of the catalogue. No group is
-       * empty. The key is a `string`, because a key of a literal union makes
-       * every group optional.
-       */
-      const commandsByGroup = pipe(
-        commands.all,
-        Array.groupBy((command): string => command.group),
+          ),
+        ),
+        Effect.ignore,
       );
 
-      /** The title and the commands of one group, when the group holds a command. */
-      const helpGroup = (group: CommandGroup) =>
-        pipe(
-          commandsByGroup,
-          Record.get(group),
-          Option.map((list) => ({ title: pipe(GROUP_TITLES, Struct.get(group)), list })),
-        );
+    /** Open a dialog that `build` draws, in a scope of its own. */
+    const open = Effect.fnUntraced(function* <A extends { readonly dialog: HTMLElement }>(
+      build: Effect.Effect<A, never, Scope.Scope>,
+    ) {
+      const scope = yield* Scope.make();
 
-      /** The heading and the table of every group that holds a command. */
-      const helpGroups = (bound: BoundKeys): ReadonlyArray<HTMLElement> =>
-        pipe(
-          GROUP_ORDER,
-          Array.map(helpGroup),
-          Array.getSomes,
-          Array.flatMap(({ title, list }) => [textEl("h2", title), commandTable(list, bound)]),
-        );
+      // The layer is opened before the dialog is built, so that the
+      // release steps run in the other order: the dialog leaves the tree
+      // first, and `aria-hidden` arrives on an empty layer. A layer that
+      // became hidden while it still held the focused element is the state
+      // that browsers warn about, because a screen reader loses the
+      // focused node.
+      yield* pipe(acceptPointerEvents(dialogLayer), Scope.provide(scope));
+      // The dialog is a true control, so assistive technology must reach
+      // it. The release step hides the layer again.
+      yield* pipe(ui.expose(dialogLayer), Scope.provide(scope));
 
-      /** The mapping problems, under a heading of their own, when there are any. */
-      const problemSection: (problems: ReadonlyArray<string>) => ReadonlyArray<HTMLElement> =
-        Array.match({
-          onEmpty: () => [],
-          onNonEmpty: (lines) => [
-            textEl("h2", "Mapping problems"),
-            pipe(classEl("div", "vw-problem"), withText(joinLines(lines))),
-          ],
-        });
+      const parts = yield* pipe(build, Scope.provide(scope));
 
-      const buildHelp = Effect.fn("Dialog.buildHelp")(function* () {
-        // `compiledUnsafe`, because a command body reaches this from the key
-        // path, which must not suspend.
-        const compiled = mappings.compiledUnsafe();
-        const bound = keysByCommand(compiled);
-
-        const parts = yield* Effect.acquireRelease(
+      const backdrop = yield* pipe(
+        Effect.acquireRelease(
           Effect.sync(() => {
-            const dialog = dialogBox("Vimium-WebKit help");
-            const diagnostics = pipe(
-              classEl("pre", "vw-diagnostics"),
-              withText(
-                joinLines([
-                  formatCapabilities(capabilities),
-                  "",
-                  `commands                 ${commands.all.length}`,
-                ]),
-              ),
-            );
-            const settingsButton = button("Settings…");
-            const closeButton = button("Close");
-            closeButton.dataset["variant"] = "primary";
-            const row = classEl("div", "vw-button-row");
-            row.append(settingsButton, closeButton);
-
-            dialog.append(
-              textEl("h1", "Vimium-WebKit"),
-              textEl(
-                "p",
-                "A grey command cannot be done by a userscript. The shortcut of " +
-                  "the browser is beside it. Press Escape to close.",
-              ),
-              ...helpGroups(bound),
-              textEl("h2", "Diagnostics"),
-              diagnostics,
-              ...problemSection(formatDiagnostics(compiled)),
-              row,
-            );
-
-            return { dialog, settingsButton, closeButton };
+            const element = classEl("div", "vw-dialog-backdrop");
+            element.appendChild(parts.dialog);
+            dialogLayer.appendChild(element);
+            return element;
           }),
-          (built) =>
+          (element) =>
             Effect.sync(() => {
-              built.dialog.remove();
+              element.remove();
             }),
-        );
-
-        yield* dom.listenOn(parts.settingsButton, "click", () => showSettings);
-        yield* dom.listenOn(parts.closeButton, "click", () => close);
-        return parts;
-      });
-
-      const showHelp: Effect.Effect<void> = present(buildHelp());
-
-      // ---------------------------------------------------------------
-      // Settings
-      // ---------------------------------------------------------------
-
-      /** Write the stored settings into the controls. */
-      const fill = (form: SettingsForm, current: SettingsData): Effect.Effect<void> =>
-        Effect.sync(() => pipe(form.controls, Array.forEach(writeControl(current))));
-
-      const readForm = (form: SettingsForm, base: SettingsData): SettingsData =>
-        pipe(form.controls, Array.reduce(base, readControl));
-
-      /** What the user offered, as text, for the refusal check. */
-      const offeredText = (form: SettingsForm): ReadonlyArray<OfferedText> =>
-        pipe(form.controls, Array.map(offeredIn));
-
-      const showProblems = (form: SettingsForm, message: string): Effect.Effect<void> =>
-        Effect.sync(() => {
-          form.problems.textContent = message;
-        });
-
-      /**
-       * Store the settings, and tell the truth about the result.
-       *
-       * The dialog stays open when the mapping source still has an error, when
-       * a control refused what the user typed, when a control brought a number
-       * into range, when a control dropped the decimals of a number, and when
-       * storage repaired a field. In each case the dialog is the only place
-       * where the user can see what happened.
-       */
-      const store = Effect.fn("Dialog.store")(
-        function* (form: SettingsForm, next: SettingsData, notes: FormNotes) {
-          const stored = yield* settings.save(next);
-          yield* fill(form, stored);
-          const compiled = yield* mappings.check(stored.keyMappings);
-          yield* pipe(
-            saveOutcome(next, stored, compiled, notes),
-            SaveOutcome.$match({
-              Kept: ({ message }) => showProblems(form, message),
-              Saved: () =>
-                pipe(
-                  showProblems(form, ""),
-                  Effect.andThen(close),
-                  Effect.andThen(report.info("Settings saved")),
-                ),
-            }),
-          );
-        },
-        // The failure goes to the user. Success must not be claimed over it,
-        // and the dialog stays open.
-        Effect.catch((error) => report.error(`Settings were not saved: ${error.detail}`)),
+        ),
+        Scope.provide(scope),
       );
 
-      /** The label of one control, with its note inside it. */
-      const labelFor = (field: SettingsField, id: string): HTMLLabelElement => {
-        const label = textEl("label", field.label);
-        label.htmlFor = id;
-        const note = pipe(
-          field.note,
-          Option.map((text) => pipe(classEl("span", "vw-cmd-native"), withText(` ${text}`))),
-          Option.toArray,
+      yield* pipe(
+        dom.listenOn(backdrop, "click", (event) =>
+          pipe(
+            event.target === backdrop,
+            Boolean.match({
+              onFalse: () => Effect.void,
+              onTrue: () => close,
+            }),
+          ),
+        ),
+        Scope.provide(scope),
+      );
+
+      // The dialog owns the keyboard. `trapKey` says how.
+      const mode = yield* pipe(
+        modes.enter(
+          {
+            name: "dialog",
+            indicator: Option.none(),
+            exitOn: [ExitTrigger.Escape()],
+            keyboard: KeyPolicy.Shared(),
+            singleton: Option.some("dialog"),
+          },
+          { keydown: (event) => trapKey(parts.dialog, event) },
+        ),
+        Scope.provide(scope),
+      );
+      yield* mode.onExit(() => close);
+
+      yield* pipe(openScope, Ref.set(Option.some(scope)));
+
+      // Acquired last, so that its release step runs first: the focus
+      // leaves the dialog before the dialog leaves the tree. A modal that
+      // drops the focus leaves the user at the top of the document.
+      yield* pipe(
+        Effect.acquireRelease(
+          dom.probeOrElse(() => Option.fromNullishOr(deepActiveElement(doc)), Option.none),
+          focusAgain,
+        ),
+        Scope.provide(scope),
+      );
+
+      yield* Effect.sync(() => {
+        parts.dialog.tabIndex = -1;
+        parts.dialog.focus({ preventScroll: true });
+      });
+    });
+
+    /**
+     * Put a dialog on screen, in a scope of its own.
+     *
+     * `build` gets the scope, so a listener that it registers goes away with
+     * the dialog.
+     */
+    const present = Effect.fn("Dialog.present")(function* <
+      A extends { readonly dialog: HTMLElement },
+    >(build: Effect.Effect<A, never, Scope.Scope>) {
+      yield* close;
+      yield* open(build);
+    });
+
+    // ---------------------------------------------------------------
+    // Help
+    // ---------------------------------------------------------------
+
+    /** The three cells of one command in the help table. */
+    const commandRow =
+      (bound: BoundKeys) =>
+      (command: CommandDef): ReadonlyArray<HTMLElement> => {
+        const cell = (className: string, text: string): HTMLSpanElement => {
+          const span = pipe(classEl("span", `${className} vw-cmd-row`), withText(text));
+          span.dataset["tier"] = tierOf(command);
+          return span;
+        };
+        const refusal = refusalOf(command);
+        const keys = pipe(
+          bound,
+          Record.get(command.name),
+          Option.map(Array.join("  ")),
+          Option.getOrElse(() => "—"),
         );
-        label.append(...note);
-        return label;
-      };
-
-      /**
-       * The id that joins the label to the control.
-       *
-       * It is unique inside our shadow root, which no page identifier can
-       * reach.
-       */
-      const controlId = (field: SettingsField): string => `vw-set-${field.key}`;
-
-      const checkControl = (field: ToggleField): BuiltControl => {
-        const id = controlId(field);
-        const input = el("input");
-        input.type = "checkbox";
-        input.id = id;
-        const row = classEl("div", "vw-field");
-        row.append(input, labelFor(field, id));
-        return { nodes: [row], control: SettingsControl.Check({ field, input }) };
-      };
-
-      const inputControl = (field: EntryField, type: "text" | "number"): BuiltControl => {
-        const id = controlId(field);
-        const input = el("input");
-        input.id = id;
-        input.type = type;
-        input.spellcheck = false;
-        const row = classEl("div", "vw-field");
-        row.append(labelFor(field, id), input);
-        return { nodes: [row], control: SettingsControl.Entry({ field, input }) };
-      };
-
-      /** A text area, below the row of its label, at the full width of the dialog. */
-      const areaControl = (field: EntryField, minHeight: string): BuiltControl => {
-        const id = controlId(field);
-        const row = classEl("div", "vw-field vw-field--block");
-        row.appendChild(labelFor(field, id));
-        const area = classEl("textarea", "vw-textarea");
-        area.id = id;
-        area.spellcheck = false;
-        area.style.minHeight = minHeight;
-        return { nodes: [row, area], control: SettingsControl.Entry({ field, input: area }) };
-      };
-
-      const entryControl = (field: EntryField): BuiltControl =>
+        const native = pipe(
+          refusal,
+          Option.flatMap(({ nativeAlternative }) => nativeAlternative),
+          Option.getOrElse(() => ""),
+        );
+        const description = cell("vw-cmd-desc", command.description);
         pipe(
-          field.input,
-          EntryInput.$match({
-            Line: () => inputControl(field, "text"),
-            Number: () => inputControl(field, "number"),
-            Block: ({ minHeight }) => areaControl(field, minHeight),
+          refusal,
+          Option.match({
+            onNone: Function.constVoid,
+            onSome: ({ reason }) => {
+              description.title = reason;
+            },
           }),
         );
+        return [cell("vw-cmd-keys", keys), description, cell("vw-cmd-native", native)];
+      };
 
-      const buildControl = SettingsField.$match({
-        Toggle: checkControl,
-        Entry: entryControl,
+    const commandTable = (list: ReadonlyArray<CommandDef>, bound: BoundKeys): HTMLElement => {
+      const table = classEl("div", "vw-cmd-table");
+      const cells = pipe(
+        list,
+        Array.filter((command) => command.advanced !== true),
+        Array.flatMap(commandRow(bound)),
+      );
+      table.append(...cells);
+      return table;
+    };
+
+    /**
+     * The commands of each group, in the order of the catalogue. No group is
+     * empty. The key is a `string`, because a key of a literal union makes
+     * every group optional.
+     */
+    const commandsByGroup = pipe(
+      commands.all,
+      Array.groupBy((command): string => command.group),
+    );
+
+    /** The title and the commands of one group, when the group holds a command. */
+    const helpGroup = (group: CommandGroup) =>
+      pipe(
+        commandsByGroup,
+        Record.get(group),
+        Option.map((list) => ({ title: pipe(GROUP_TITLES, Struct.get(group)), list })),
+      );
+
+    /** The heading and the table of every group that holds a command. */
+    const helpGroups = (bound: BoundKeys): ReadonlyArray<HTMLElement> =>
+      pipe(
+        GROUP_ORDER,
+        Array.map(helpGroup),
+        Array.getSomes,
+        Array.flatMap(({ title, list }) => [textEl("h2", title), commandTable(list, bound)]),
+      );
+
+    /** The mapping problems, under a heading of their own, when there are any. */
+    const problemSection: (problems: ReadonlyArray<string>) => ReadonlyArray<HTMLElement> =
+      Array.match({
+        onEmpty: () => [],
+        onNonEmpty: (lines) => [
+          textEl("h2", "Mapping problems"),
+          pipe(classEl("div", "vw-problem"), withText(joinLines(lines))),
+        ],
       });
 
-      /** The heading, the description and the controls of one section. */
-      const buildSection = (section: SettingsSection): BuiltSection => {
-        const built = pipe(section.fields, Array.map(buildControl));
-        const description = pipe(
-          section.description,
-          Option.map((text) => textEl("p", text)),
-          Option.toArray,
-        );
-        const fields = pipe(
-          built,
-          Array.flatMap(({ nodes }) => nodes),
-        );
-        return {
-          nodes: [textEl("h2", section.title), ...description, ...fields],
-          controls: pipe(
-            built,
-            Array.map(({ control }) => control),
-          ),
-        };
-      };
+    const buildHelp = Effect.fn("Dialog.buildHelp")(function* () {
+      // `compiledUnsafe`, because a command body reaches this from the key
+      // path, which must not suspend.
+      const compiled = mappings.compiledUnsafe();
+      const bound = keysByCommand(compiled);
 
-      /** Draw the settings form. */
-      const buildForm = (): SettingsForm => {
-        const dialog = dialogBox("Vimium-WebKit settings");
-        const sections = pipe(SETTINGS_SECTIONS, Array.map(buildSection));
+      const parts = yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const dialog = dialogBox("Vimium-WebKit help");
+          const diagnostics = pipe(
+            classEl("pre", "vw-diagnostics"),
+            withText(
+              joinLines([
+                formatCapabilities(capabilities),
+                "",
+                `commands                 ${commands.all.length}`,
+              ]),
+            ),
+          );
+          const settingsButton = button("Settings…");
+          const closeButton = button("Close");
+          closeButton.dataset["variant"] = "primary";
+          const row = classEl("div", "vw-button-row");
+          row.append(settingsButton, closeButton);
 
-        // One place for every message about the save: a refusal from
-        // storage, a mapping error, and a field that the schema repaired.
-        // `role="alert"` makes a screen reader speak it, because the
-        // dialog stays open and nothing else says that it did.
-        const problems = classEl("div", "vw-problem");
-        problems.setAttribute("role", "alert");
+          dialog.append(
+            textEl("h1", "Vimium-WebKit"),
+            textEl(
+              "p",
+              "A grey command cannot be done by a userscript. The shortcut of " +
+                "the browser is beside it. Press Escape to close.",
+            ),
+            ...helpGroups(bound),
+            textEl("h2", "Diagnostics"),
+            diagnostics,
+            ...problemSection(formatDiagnostics(compiled)),
+            row,
+          );
 
-        const reset = button("Reset to defaults");
-        const cancel = button("Cancel");
-        const save = button("Save");
-        save.dataset["variant"] = "primary";
-        const row = classEl("div", "vw-button-row");
-        row.append(reset, cancel, save);
-
-        const sectionNodes = pipe(
-          sections,
-          Array.flatMap(({ nodes }) => nodes),
-        );
-        dialog.append(
-          textEl("h1", "Settings"),
-          textEl("p", storageExplanation(capabilities.value)),
-          ...sectionNodes,
-          problems,
-          row,
-        );
-
-        return {
-          dialog,
-          controls: pipe(
-            sections,
-            Array.flatMap(({ controls }) => controls),
-          ),
-          problems,
-          reset,
-          cancel,
-          save,
-        };
-      };
-
-      const buildSettings = Effect.fn("Dialog.buildSettings")(function* () {
-        // `currentUnsafe`, because a command body reaches this from the key
-        // path, which must not suspend.
-        const current = settings.currentUnsafe();
-
-        const form = yield* Effect.acquireRelease(Effect.sync(buildForm), (built) =>
+          return { dialog, settingsButton, closeButton };
+        }),
+        (built) =>
           Effect.sync(() => {
             built.dialog.remove();
           }),
-        );
-        yield* fill(form, current);
+      );
 
-        // The store call reaches the backend, so it cannot run inside the
-        // click dispatch. One fiber holds it, and a second click replaces it.
-        const submit = (next: SettingsData, notes: FormNotes): Effect.Effect<void> =>
-          pipe(store(form, next, notes), FiberHandle.run(saves), Effect.asVoid);
+      yield* dom.listenOn(parts.settingsButton, "click", () => showSettings);
+      yield* dom.listenOn(parts.closeButton, "click", () => close);
+      return parts;
+    });
 
-        yield* dom.listenOn(
-          form.save,
-          "click",
-          // The base is read again here, and not at build time. Another frame
-          // can store a change while this dialog is open, and a field that
-          // this dialog does not edit must keep that change.
-          () => submit(readForm(form, settings.currentUnsafe()), formNotes(offeredText(form))),
-        );
-        yield* dom.listenOn(
-          form.reset,
-          "click",
-          // The defaults replace every control, so nothing of the user is
-          // refused here.
-          () => submit(defaultSettings(), NO_FORM_NOTES),
-        );
-        yield* dom.listenOn(form.cancel, "click", () => close);
-        return form;
+    const showHelp: Effect.Effect<void> = present(buildHelp());
+
+    // ---------------------------------------------------------------
+    // Settings
+    // ---------------------------------------------------------------
+
+    /** Write the stored settings into the controls. */
+    const fill = (form: SettingsForm, current: SettingsData): Effect.Effect<void> =>
+      Effect.sync(() => pipe(form.controls, Array.forEach(writeControl(current))));
+
+    const readForm = (form: SettingsForm, base: SettingsData): SettingsData =>
+      pipe(form.controls, Array.reduce(base, readControl));
+
+    /** What the user offered, as text, for the refusal check. */
+    const offeredText = (form: SettingsForm): ReadonlyArray<OfferedText> =>
+      pipe(form.controls, Array.map(offeredIn));
+
+    const showProblems = (form: SettingsForm, message: string): Effect.Effect<void> =>
+      Effect.sync(() => {
+        form.problems.textContent = message;
       });
 
-      const showSettings: Effect.Effect<void> = present(buildSettings());
+    /**
+     * Store the settings, and tell the truth about the result.
+     *
+     * The dialog stays open when the mapping source still has an error, when
+     * a control refused what the user typed, when a control brought a number
+     * into range, when a control dropped the decimals of a number, and when
+     * storage repaired a field. In each case the dialog is the only place
+     * where the user can see what happened.
+     */
+    const store = Effect.fn("Dialog.store")(
+      function* (form: SettingsForm, next: SettingsData, notes: FormNotes) {
+        const stored = yield* settings.save(next);
+        yield* fill(form, stored);
+        const compiled = yield* mappings.check(stored.keyMappings);
+        yield* pipe(
+          saveOutcome(next, stored, compiled, notes),
+          SaveOutcome.$match({
+            Kept: ({ message }) => showProblems(form, message),
+            Saved: () =>
+              pipe(
+                showProblems(form, ""),
+                Effect.andThen(close),
+                Effect.andThen(report.info("Settings saved")),
+              ),
+          }),
+        );
+      },
+      // The failure goes to the user. Success must not be claimed over it,
+      // and the dialog stays open.
+      Effect.catch((error) => report.error(`Settings were not saved: ${error.detail}`)),
+    );
 
-      // The commands that this layer owns. A feature registers its own bodies
-      // in the same way, so no feature imports another feature.
-      yield* commands.register("showHelp", () => showHelp);
-      yield* commands.register("showSettings", () => showSettings);
+    /** The label of one control, with its note inside it. */
+    const labelFor = (field: SettingsField, id: string): HTMLLabelElement => {
+      const label = textEl("label", field.label);
+      label.htmlFor = id;
+      const note = pipe(
+        field.note,
+        Option.map((text) => pipe(classEl("span", "vw-cmd-native"), withText(` ${text}`))),
+        Option.toArray,
+      );
+      label.append(...note);
+      return label;
+    };
 
-      return Dialog.of({ showHelp, showSettings, close });
-    }),
-  );
-}
+    /**
+     * The id that joins the label to the control.
+     *
+     * It is unique inside our shadow root, which no page identifier can
+     * reach.
+     */
+    const controlId = (field: SettingsField): string => `vw-set-${field.key}`;
+
+    const checkControl = (field: ToggleField): BuiltControl => {
+      const id = controlId(field);
+      const input = el("input");
+      input.type = "checkbox";
+      input.id = id;
+      const row = classEl("div", "vw-field");
+      row.append(input, labelFor(field, id));
+      return { nodes: [row], control: SettingsControl.Check({ field, input }) };
+    };
+
+    const inputControl = (field: EntryField, type: "text" | "number"): BuiltControl => {
+      const id = controlId(field);
+      const input = el("input");
+      input.id = id;
+      input.type = type;
+      input.spellcheck = false;
+      const row = classEl("div", "vw-field");
+      row.append(labelFor(field, id), input);
+      return { nodes: [row], control: SettingsControl.Entry({ field, input }) };
+    };
+
+    /** A text area, below the row of its label, at the full width of the dialog. */
+    const areaControl = (field: EntryField, minHeight: string): BuiltControl => {
+      const id = controlId(field);
+      const row = classEl("div", "vw-field vw-field--block");
+      row.appendChild(labelFor(field, id));
+      const area = classEl("textarea", "vw-textarea");
+      area.id = id;
+      area.spellcheck = false;
+      area.style.minHeight = minHeight;
+      return { nodes: [row, area], control: SettingsControl.Entry({ field, input: area }) };
+    };
+
+    const entryControl = (field: EntryField): BuiltControl =>
+      pipe(
+        field.input,
+        EntryInput.$match({
+          Line: () => inputControl(field, "text"),
+          Number: () => inputControl(field, "number"),
+          Block: ({ minHeight }) => areaControl(field, minHeight),
+        }),
+      );
+
+    const buildControl = SettingsField.$match({
+      Toggle: checkControl,
+      Entry: entryControl,
+    });
+
+    /** The heading, the description and the controls of one section. */
+    const buildSection = (section: SettingsSection): BuiltSection => {
+      const built = pipe(section.fields, Array.map(buildControl));
+      const description = pipe(
+        section.description,
+        Option.map((text) => textEl("p", text)),
+        Option.toArray,
+      );
+      const fields = pipe(
+        built,
+        Array.flatMap(({ nodes }) => nodes),
+      );
+      return {
+        nodes: [textEl("h2", section.title), ...description, ...fields],
+        controls: pipe(
+          built,
+          Array.map(({ control }) => control),
+        ),
+      };
+    };
+
+    /** Draw the settings form. */
+    const buildForm = (): SettingsForm => {
+      const dialog = dialogBox("Vimium-WebKit settings");
+      const sections = pipe(SETTINGS_SECTIONS, Array.map(buildSection));
+
+      // One place for every message about the save: a refusal from
+      // storage, a mapping error, and a field that the schema repaired.
+      // `role="alert"` makes a screen reader speak it, because the
+      // dialog stays open and nothing else says that it did.
+      const problems = classEl("div", "vw-problem");
+      problems.setAttribute("role", "alert");
+
+      const reset = button("Reset to defaults");
+      const cancel = button("Cancel");
+      const save = button("Save");
+      save.dataset["variant"] = "primary";
+      const row = classEl("div", "vw-button-row");
+      row.append(reset, cancel, save);
+
+      const sectionNodes = pipe(
+        sections,
+        Array.flatMap(({ nodes }) => nodes),
+      );
+      dialog.append(
+        textEl("h1", "Settings"),
+        textEl("p", storageExplanation(capabilities.value)),
+        ...sectionNodes,
+        problems,
+        row,
+      );
+
+      return {
+        dialog,
+        controls: pipe(
+          sections,
+          Array.flatMap(({ controls }) => controls),
+        ),
+        problems,
+        reset,
+        cancel,
+        save,
+      };
+    };
+
+    const buildSettings = Effect.fn("Dialog.buildSettings")(function* () {
+      // `currentUnsafe`, because a command body reaches this from the key
+      // path, which must not suspend.
+      const current = settings.currentUnsafe();
+
+      const form = yield* Effect.acquireRelease(Effect.sync(buildForm), (built) =>
+        Effect.sync(() => {
+          built.dialog.remove();
+        }),
+      );
+      yield* fill(form, current);
+
+      // The store call reaches the backend, so it cannot run inside the
+      // click dispatch. One fiber holds it, and a second click replaces it.
+      const submit = (next: SettingsData, notes: FormNotes): Effect.Effect<void> =>
+        pipe(store(form, next, notes), FiberHandle.run(saves), Effect.asVoid);
+
+      yield* dom.listenOn(
+        form.save,
+        "click",
+        // The base is read again here, and not at build time. Another frame
+        // can store a change while this dialog is open, and a field that
+        // this dialog does not edit must keep that change.
+        () => submit(readForm(form, settings.currentUnsafe()), formNotes(offeredText(form))),
+      );
+      yield* dom.listenOn(
+        form.reset,
+        "click",
+        // The defaults replace every control, so nothing of the user is
+        // refused here.
+        () => submit(defaultSettings(), NO_FORM_NOTES),
+      );
+      yield* dom.listenOn(form.cancel, "click", () => close);
+      return form;
+    });
+
+    const showSettings: Effect.Effect<void> = present(buildSettings());
+
+    // The commands that this layer owns. A feature registers its own bodies
+    // in the same way, so no feature imports another feature.
+    yield* commands.register("showHelp", () => showHelp);
+    yield* commands.register("showSettings", () => showSettings);
+  }),
+);

@@ -45,7 +45,7 @@ import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 import { Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
 import { Tabs } from "~/platform/Tabs.ts";
-import { Dialog } from "~/ui/Dialog.ts";
+import { DialogLayer } from "~/ui/Dialog.ts";
 import { Hud } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
 
@@ -106,7 +106,7 @@ const KeyboardLayer = pipe(Keyboard.layer, Layer.provideMerge(CoreLayer));
 
 /** The overlay. */
 const UiLayer = pipe(
-  Layer.mergeAll(Hud.layer, Dialog.layer),
+  Layer.mergeAll(Hud.layer, DialogLayer),
   Layer.provideMerge(Ui.layer),
   Layer.provideMerge(KeyboardLayer),
 );
