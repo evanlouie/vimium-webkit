@@ -696,9 +696,9 @@ export class FrameBus extends Context.Service<
     /**
      * The role of the realm, which is also its role in the session.
      *
-     * The top frame is the coordinator. It owns the session nonce, admits every
-     * other frame and relays between them. A child frame is a member, which
-     * joins the session of the coordinator.
+     * The top frame is the coordinator. It admits every other frame and relays
+     * between them. A child frame is a member, which joins the session of the
+     * coordinator.
      */
     readonly role: FrameRole;
 
@@ -757,16 +757,15 @@ export class FrameBus extends Context.Service<
       const role = realm.role;
 
       const inbox = yield* PubSub.unbounded<InboundMessage>();
-      const nonceRef = yield* Ref.make(Option.none<string>());
       const rosterRef = yield* Ref.make<ReadonlyArray<FrameId>>([realm.frameId]);
       const admitted = yield* Deferred.make<boolean>();
 
       /**
        * A random identity of 128 bits.
        *
-       * `None` when the realm has no usable random source. Every send then
-       * fails and every routed message is dropped, because a guessable nonce is
-       * worse than no session at all.
+       * `None` when the realm has no usable random source. The coordinator then
+       * issues no token, a child makes no attempt and a request fails, because
+       * a guessable identity is worse than no session at all.
        */
       const randomId = dom.probeOrElse(() => Option.some(randomHex(16)), Option.none);
 
@@ -792,13 +791,6 @@ export class FrameBus extends Context.Service<
           pipe(inbox, PubSub.publishUnsafe(inboundOf(wire)));
         });
 
-      /** The routed message in `data`, when it belongs to the session of this frame. */
-      const readWire = (data: unknown): Effect.Effect<Option.Option<FrameWire>> =>
-        pipe(
-          Ref.get(nonceRef),
-          Effect.map((nonce) => parseWire(data, nonce)),
-        );
-
       // ---------------------------------------------------------------------
       // The registry of the coordinator
       // ---------------------------------------------------------------------
@@ -814,26 +806,8 @@ export class FrameBus extends Context.Service<
         flow(Ref.getAndSet(noRecords), Effect.flatMap(releaseAll)),
       );
 
-      const wireFor = (
-        message: FrameMessage,
-        to: string,
-        requestId: string,
-      ): Effect.Effect<FrameWire, FrameError> =>
-        pipe(
-          Ref.get(nonceRef),
-          Effect.flatMap(
-            Effect.fromOption(
-              () =>
-                new FrameError({
-                  reason: "unauthenticated",
-                  detail: "this frame is not admitted to a session",
-                }),
-            ),
-          ),
-          Effect.map((nonce) =>
-            encodeMessage({ nonce, from: realm.frameId, to, requestId }, message),
-          ),
-        );
+      const wireFor = (message: FrameMessage, to: string, requestId: string): FrameWire =>
+        encodeMessage({ from: realm.frameId, to, requestId }, message);
 
       const postAll = (open: ReadonlyArray<FrameRecord>, wire: FrameWire): Effect.Effect<void> =>
         pipe(
@@ -849,11 +823,9 @@ export class FrameBus extends Context.Service<
       );
 
       const publishRoster = (open: ReadonlyArray<FrameRecord>): Effect.Effect<void> =>
-        pipe(
+        postAll(
+          open,
           wireFor({ kind: "ROSTER", frames: rosterOf(open) }, WIRE_TARGET_ALL, NO_REQUEST_ID),
-          Effect.flatMap((wire) => postAll(open, wire)),
-          // A coordinator with no nonce has no session to tell about.
-          Effect.ignore,
         );
 
       /** Keep `kept` as the registry, close the links of `gone`, and tell the frames. */
@@ -954,8 +926,23 @@ export class FrameBus extends Context.Service<
         ),
       );
 
+      /** A member speaks in the session only after its first welcome. */
+      const memberAdmitted: Effect.Effect<void, FrameError> = pipe(
+        Deferred.isDone(admitted),
+        Effect.filterOrFail(
+          (done) => done,
+          () =>
+            new FrameError({
+              reason: "unauthenticated",
+              detail: "this frame is not admitted to a session",
+            }),
+        ),
+        Effect.asVoid,
+      );
+
       /** Route one message in a child frame. The port goes to the coordinator. */
       const routeInChild = Effect.fn("FrameBus.route")(function* (wire: FrameWire) {
+        yield* memberAdmitted;
         const attempt = yield* Ref.get(attemptRef);
         return yield* pipe(
           attempt,
@@ -987,8 +974,7 @@ export class FrameBus extends Context.Service<
           requestId,
           Option.getOrElse(() => NO_REQUEST_ID),
         );
-        const wire = yield* wireFor(message, wireTarget(target), correlation);
-        yield* route(wire);
+        yield* route(wireFor(message, wireTarget(target), correlation));
       });
 
       const send = (target: FrameTarget, message: FrameMessage): Effect.Effect<void, FrameError> =>
@@ -1104,17 +1090,15 @@ export class FrameBus extends Context.Service<
        * itself. To attribute a message to a frame that did not send it would
        * break the order that every frame must agree on.
        */
-      const receiveFromChild = Effect.fnUntraced(function* (frameId: FrameId, data: unknown) {
-        const parsed = yield* readWire(data);
-        yield* pipe(
-          parsed,
+      const receiveFromChild = (frameId: FrameId, data: unknown): Effect.Effect<void> =>
+        pipe(
+          parseWire(data),
           Option.filter((wire) => wire.from === frameId),
           Option.match({
             onNone: () => Effect.void,
             onSome: actOnChild(frameId),
           }),
         );
-      });
 
       /** The link of one child, which a `messageerror` removes. */
       const childLink = Effect.fnUntraced(function* (
@@ -1160,17 +1144,11 @@ export class FrameBus extends Context.Service<
 
         const record: FrameRecord = { frameId, source, link, release };
         const next: ReadonlyArray<FrameRecord> = pipe(rest, Array.append(record));
-        yield* pipe(records, Ref.set(next));
 
-        const nonce = yield* Ref.get(nonceRef);
-        yield* pipe(
-          nonce,
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: (value) =>
-              link.send(welcomeMessage({ nonce: value, frameId, helloId, frames: rosterOf(next) })),
-          }),
-        );
+        // The welcome goes into the outbox before the record is published, so
+        // no routed message can go ahead of it on the link.
+        yield* link.send(welcomeMessage({ frameId, helloId, frames: rosterOf(next) }));
+        yield* pipe(records, Ref.set(next));
         yield* publishRoster(next);
       });
 
@@ -1240,7 +1218,7 @@ export class FrameBus extends Context.Service<
        * port the child still holds. A fiber for each join could finish them in
        * another order. The last admission would then hold a port that nobody
        * reads. The frame would stay outside the session, and it would not
-       * announce itself again, because it holds the nonce of the session.
+       * announce itself again, because it already counts itself admitted.
        *
        * The queue slides, so a full queue drops its oldest join and keeps the
        * newest one. That is the same rule again: the newest join of a window is
@@ -1408,7 +1386,6 @@ export class FrameBus extends Context.Service<
       );
 
       const joinSession = Effect.fnUntraced(function* (welcome: WelcomeMessage) {
-        yield* pipe(nonceRef, Ref.set(Option.some(welcome.nonce)));
         yield* pipe(rosterRef, Ref.set(welcome.frames));
         yield* pipe(admitted, Deferred.succeed(true));
       });
@@ -1448,16 +1425,14 @@ export class FrameBus extends Context.Service<
         yield* publishLocal(wire);
       });
 
-      const receiveRouted = Effect.fnUntraced(function* (data: unknown) {
-        const parsed = yield* readWire(data);
-        yield* pipe(
-          parsed,
+      const receiveRouted = (data: unknown): Effect.Effect<void> =>
+        pipe(
+          parseWire(data),
           Option.match({
             onNone: () => Effect.void,
             onSome: deliverFromTop,
           }),
         );
-      });
 
       /** Read one message that the top frame sent on the link of this frame. */
       const receiveFromTop = (data: unknown): Effect.Effect<void> =>
@@ -1551,9 +1526,9 @@ export class FrameBus extends Context.Service<
        */
       const onAnnounceRequest = Effect.fnUntraced(function* (source: unknown) {
         const fromAncestor = yield* realm.isAncestor(source);
-        const nonce = yield* Ref.get(nonceRef);
+        const inSession = yield* Deferred.isDone(admitted);
         yield* pipe(
-          fromAncestor && Option.isNone(nonce),
+          fromAncestor && !inSession,
           Boolean.match({
             onFalse: () => Effect.void,
             onTrue: () => announce,
@@ -1604,15 +1579,11 @@ export class FrameBus extends Context.Service<
       // ---------------------------------------------------------------------
 
       const startCoordinator = Effect.gen(function* () {
-        // The coordinator owns the session nonce. It never travels except in a
-        // `WELCOME`, which is the first sealed message of a link. A page that
-        // holds a copy of the port cannot open it. The credential of the
-        // session already exists here: `FrameAuth` creates or loads it when its
-        // layer is built. That layer is built before this one, so the first
-        // child that answers a challenge finds a frame that can verify a proof.
-        const created = yield* randomId;
-        yield* pipe(nonceRef, Ref.set(created));
-
+        // The credential of the session already exists here: `FrameAuth`
+        // creates or loads it when its layer is built. That layer is built
+        // before this one, so the first child that answers a challenge finds a
+        // frame that can verify a proof.
+        //
         // One fiber admits the joins, one at a time and in order. See
         // `pendingJoins` for why the order is a requirement, and not a taste.
         yield* pipe(

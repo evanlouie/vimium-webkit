@@ -38,9 +38,10 @@
  *    associated data and into the initialisation vector. Page code that holds
  *    a copy of the port therefore reads nothing, forges nothing, and cannot
  *    play a message again or send it back.
- * 4. **Authorise, then validate.** `preauthorize` checks the envelope and the
- *    session nonce with a direct property read, before any schema decode. An
- *    unauthorised sender can then not make us validate a large payload.
+ * 4. **Authenticate, then validate.** A routed message travels on a sealed
+ *    port only, and the schema decodes it only after the link opened it. A
+ *    sender without the credential can then not make us validate a large
+ *    payload.
  * 5. **Nothing with a side effect crosses the wire.** Settings never travel.
  *    Every frame reads its own storage. What travels is the exclusion verdict,
  *    which is two fields, and which must come from the URL of the top frame.
@@ -51,11 +52,18 @@
  *
  * ## What changed against the earlier protocol
  *
- * The magic value, the version and the message kinds are the same. The routing
- * fields are now common to every message that travels after the handshake:
- * `from`, `to` and `requestId` sit beside `nonce` in one envelope. The bus can
- * therefore relay any message between two frames without a rule for each kind,
- * which is what keeps the hint logic out of the transport.
+ * The magic value and the message kinds are the same. The routing fields are
+ * common to every message that travels after the handshake: `from`, `to` and
+ * `requestId` sit in one envelope. The bus can therefore relay any message
+ * between two frames without a rule for each kind, which is what keeps the hint
+ * logic out of the transport.
+ *
+ * Version 4 removes the session nonce from the `WELCOME` and from that
+ * envelope. A routed message travels on a sealed port only, and only a holder
+ * of the credential opens one. Such a holder could also derive the key of any
+ * link from the three values of its handshake, which the page can read, and
+ * open the `WELCOME` that carried the nonce. The nonce therefore proved
+ * nothing that the seal had not already proved.
  *
  * ## What the hints service must do
  *
@@ -103,7 +111,7 @@ export const PROTOCOL_MAGIC = "vimium-webkit/frames";
  * does not match must therefore be a clean drop, and not a parse failure
  * somewhere deeper.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /** The number of Vimium, for the reason of Vimium: a dead frame must not hold a mode. */
 export const REQUEST_DEADLINE_MS = 3000;
@@ -216,7 +224,7 @@ const frameIdSchema = FrameId.check(Schema.isMaxLength(MAX_ID_LENGTH));
  */
 const HANDSHAKE_ID = /^[0-9a-f]{8,64}$/;
 
-/** A token, a hello id or a session nonce. */
+/** A token or a hello id. */
 const handshakeIdSchema = Schema.String.check(Schema.isPattern(HANDSHAKE_ID));
 
 /** A frame id in the handshake, which decodes into the brand. */
@@ -540,8 +548,8 @@ export const helloSchema = pipe(
  * Top to child, over `window.postMessage`, addressed to one window.
  *
  * The token is one-shot, and it is bound to the window that it was posted to.
- * It is not the session nonce. To read it is not enough, because a `JOIN` must
- * also prove possession of the manager-private credential.
+ * To read it is not enough, because a `JOIN` must also prove possession of the
+ * manager-private credential.
  */
 export const challengeSchema = pipe(
   envelopeSchema,
@@ -585,7 +593,6 @@ export const welcomeSchema = pipe(
   envelopeSchema,
   Schema.fieldsAssign({
     kind: Schema.Literal("WELCOME"),
-    nonce: handshakeIdSchema,
     /** The identity that the coordinator recorded, which the `JOIN` claimed. */
     frameId: handshakeFrameIdSchema,
     /** It gives back the `JOIN` that earned it. Anything else is a race or a spoof. */
@@ -710,7 +717,7 @@ export const sealedAad = (link: string, direction: SealDirection, seq: number): 
  */
 const routedSchema = pipe(
   envelopeSchema,
-  Schema.fieldsAssign({ nonce: idSchema, from: frameIdSchema, to: idSchema, requestId: idSchema }),
+  Schema.fieldsAssign({ from: frameIdSchema, to: idSchema, requestId: idSchema }),
 );
 
 const define = <F extends Schema.Struct.Fields>(fields: F) => ({
@@ -883,7 +890,7 @@ const goodbye = define({ kind: Schema.Literal("GOODBYE") });
  * does not weaken the bound that this file cares about. The envelope fields
  * come first, so a member whose `kind` does not match is abandoned at that
  * literal, before the decoder reads `descriptors`. Hostile traffic does not
- * come here at all, because `preauthorize` drops it first.
+ * come here at all, because the link must open a message before it is decoded.
  */
 export const frameMessageSchema = Schema.Union([
   settingsPush.payload,
@@ -939,7 +946,6 @@ export type MessageOf<K extends MessageKind> = Extract<FrameMessage, { kind: K }
 
 /** The fields that the bus fills in for the sender. */
 export interface WireEnvelope {
-  readonly nonce: string;
   readonly from: FrameId;
   readonly to: string;
   readonly requestId: string;
@@ -1022,40 +1028,17 @@ export const peekKind: (data: unknown) => Option.Option<string> = flow(
 );
 
 /**
- * Decide whether a payload is worth a validation, with a direct property read.
+ * Parse a routed message.
  *
- * This runs before the schema decodes the message, and that order is the point.
- * An array of descriptors has a bound, but it is still large, and to validate
- * one for a sender that we were always going to reject gives an attacker our
- * main thread for free. It reads three properties and compares three values.
- *
- * The comparison is not constant time. It does not need to be. The attacker is
- * in the same page, and can already observe our timing more directly.
+ * The caller has already opened it with the key of its link, which proves that
+ * the sender holds the credential.
  */
-export const preauthorize = (data: unknown, expectedNonce: Option.Option<string>): boolean =>
-  pipe(
-    Option.all([readEnvelope(data), expectedNonce]),
-    Option.exists(([raw, nonce]) => raw["nonce"] === nonce),
-  );
+export const parseWire: (data: unknown) => Option.Option<FrameWire> = flow(
+  readEnvelope,
+  Option.flatMap(decodeWire),
+);
 
-/**
- * Parse a routed message, and check the session nonce.
- *
- * `expectedNonce` is `None` until this frame is admitted. Every routed message
- * is then rejected, which is correct: a frame that is not admitted has no
- * session to talk in.
- */
-export const parseWire = (
-  data: unknown,
-  expectedNonce: Option.Option<string>,
-): Option.Option<FrameWire> =>
-  pipe(
-    data,
-    Option.liftPredicate((raw) => preauthorize(raw, expectedNonce)),
-    Option.flatMap(decodeWire),
-  );
-
-/** Parse a `HELLO` or a `JOIN`. Both come before any nonce exists. */
+/** Parse a `HELLO` or a `JOIN`. Both come before the link exists. */
 export const parseWindowToTop: (data: unknown) => Option.Option<WindowToTopMessage> = flow(
   readEnvelope,
   Option.flatMap(decodeWindowToTop),

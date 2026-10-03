@@ -33,7 +33,6 @@ import {
   parseWindowToTop,
   parseWire,
   peekKind,
-  preauthorize,
   PROTOCOL_MAGIC,
   PROTOCOL_VERSION,
   sealedAad,
@@ -45,14 +44,12 @@ import {
 import { EffectiveRule } from "~/domain/Exclusion.ts";
 import { FrameId } from "~/domain/FrameId.ts";
 
-const NONCE = "abcdef0123456789";
 const ROUND_ID = "round-1";
 
 /** The frame that sends every routed message of these tests. */
 const SENDER = FrameId.make("1111111111111111");
 
 const envelope = {
-  nonce: NONCE,
   from: SENDER,
   to: WIRE_TARGET_TOP,
   requestId: NO_REQUEST_ID,
@@ -86,7 +83,7 @@ describe("FrameMessage", () => {
           exclusion: EffectiveRule.cases.Enabled.make({ passKeys: "jk" }),
         }),
         encodeLinkMessage,
-        Option.flatMap((encoded) => parseWire(encoded, Option.some(NONCE))),
+        Option.flatMap((encoded) => parseWire(encoded)),
       );
       assert.deepEqual(kindOf(parsed), Option.some("EXCLUSION_RESULT"));
     }),
@@ -102,7 +99,6 @@ describe("FrameMessage", () => {
           mode: "activate",
           descriptors: [descriptor("1111111111111111", 0)],
         }),
-        Option.some(NONCE),
       );
       assert.isTrue(Option.isSome(parsed));
     }),
@@ -116,10 +112,7 @@ describe("FrameMessage", () => {
     { magic: "somebody-else", v: PROTOCOL_VERSION, kind: "GOODBYE" },
   ])("refuses %j, which is not our envelope", (data) =>
     Effect.sync(() => {
-      assert.isTrue(
-        Option.isNone(parseWire(data, Option.some(NONCE))),
-        `${JSON.stringify(data)} was accepted`,
-      );
+      assert.isTrue(Option.isNone(parseWire(data)), `${JSON.stringify(data)} was accepted`);
     }),
   );
 
@@ -130,14 +123,14 @@ describe("FrameMessage", () => {
         Struct.assign(envelope),
         Struct.assign({ kind: "GOODBYE" }),
       );
-      assert.isTrue(Option.isNone(parseWire(foreign, Option.some(NONCE))));
+      assert.isTrue(Option.isNone(parseWire(foreign)));
     }),
   );
 
   it.effect("refuses an unknown kind", () =>
     Effect.sync(() => {
       const unknown = raw({ kind: "NO_SUCH_KIND" });
-      assert.isTrue(Option.isNone(parseWire(unknown, Option.some(NONCE))));
+      assert.isTrue(Option.isNone(parseWire(unknown)));
     }),
   );
 
@@ -147,15 +140,15 @@ describe("FrameMessage", () => {
       // notation.
       const withoutExclusion = raw({ kind: "EXCLUSION_RESULT" });
       const withoutNotation = raw({ kind: "KEYSTROKE" });
-      assert.isTrue(Option.isNone(parseWire(withoutExclusion, Option.some(NONCE))));
-      assert.isTrue(Option.isNone(parseWire(withoutNotation, Option.some(NONCE))));
+      assert.isTrue(Option.isNone(parseWire(withoutExclusion)));
+      assert.isTrue(Option.isNone(parseWire(withoutNotation)));
     }),
   );
 
   it.effect("refuses a payload that is past its bound", () =>
     Effect.sync(() => {
       const tooLong = raw({ kind: "KEYSTROKE", notation: "k".repeat(1000) });
-      assert.isTrue(Option.isNone(parseWire(tooLong, Option.some(NONCE))));
+      assert.isTrue(Option.isNone(parseWire(tooLong)));
 
       const negativeIndex = raw({
         kind: "ACTIVATE_HINT",
@@ -163,27 +156,7 @@ describe("FrameMessage", () => {
         localIndex: -1,
         mode: "activate",
       });
-      assert.isTrue(Option.isNone(parseWire(negativeIndex, Option.some(NONCE))));
-    }),
-  );
-
-  it.effect("drops a message whose nonce is wrong or absent", () =>
-    Effect.sync(() => {
-      const data = wire({ kind: "GOODBYE" });
-      assert.isTrue(Option.isSome(parseWire(data, Option.some(NONCE))));
-      assert.isTrue(Option.isNone(parseWire(data, Option.some("other"))));
-      // A frame that is not yet admitted has no session to talk in.
-      assert.isTrue(Option.isNone(parseWire(data, Option.none())));
-    }),
-  );
-
-  it.effect("checks the nonce before it decodes", () =>
-    Effect.sync(() => {
-      const data = wire({ kind: "GOODBYE" });
-      assert.isTrue(preauthorize(data, Option.some(NONCE)));
-      assert.isFalse(preauthorize(data, Option.some("other")));
-      assert.isFalse(preauthorize(data, Option.none()));
-      assert.isFalse(preauthorize({ nonce: NONCE }, Option.some(NONCE)));
+      assert.isTrue(Option.isNone(parseWire(negativeIndex)));
     }),
   );
 
@@ -195,7 +168,7 @@ describe("FrameMessage", () => {
     }),
   );
 
-  it.effect("lets the handshake through with no nonce", () =>
+  it.effect("parses a HELLO as a handshake", () =>
     Effect.sync(() => {
       const hello = pipe(ENVELOPE, Struct.assign({ kind: "HELLO" }));
       assert.deepEqual(kindOf(parseWindowToTop(hello)), Option.some("HELLO"));
@@ -327,7 +300,6 @@ describe("FrameMessage", () => {
         ENVELOPE,
         Struct.assign({
           kind: "WELCOME",
-          nonce: NONCE,
           frameId: "1111111111111111",
           helloId: "fedcba9876543210",
           frames: ["1111111111111111"],
@@ -382,7 +354,6 @@ describe("FrameMessage", () => {
           originFrameId: SENDER,
           mode,
         }),
-        Option.some(NONCE),
       );
       assert.isTrue(Option.isSome(parsed), `${mode} did not survive`);
     }),
@@ -451,7 +422,6 @@ describe("the descriptors of a round", () => {
                     roundId: ROUND_ID,
                     descriptors: listFor(frameId, 2000),
                   }),
-                  Option.some(NONCE),
                 ),
               ),
             );
@@ -467,7 +437,6 @@ describe("the descriptors of a round", () => {
               droppedDescriptors: 0,
               descriptors: merged,
             }),
-            Option.some(NONCE),
           ),
         ),
       );
@@ -481,7 +450,6 @@ describe("the descriptors of a round", () => {
               mode: "activate",
               descriptors: merged,
             }),
-            Option.some(NONCE),
           ),
         ),
       );
@@ -499,7 +467,6 @@ describe("the descriptors of a round", () => {
               roundId: ROUND_ID,
               descriptors: tooMany,
             }),
-            Option.some(NONCE),
           ),
         ),
       );
@@ -588,7 +555,7 @@ describe("the descriptors of a round", () => {
         parseSealed,
       );
       assert.isTrue(Option.isSome(sealed));
-      assert.isTrue(Option.isSome(parseWire(message, Option.some(NONCE))));
+      assert.isTrue(Option.isSome(parseWire(message)));
     }),
   );
 

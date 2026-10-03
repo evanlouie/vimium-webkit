@@ -497,7 +497,7 @@ describe("FrameAuth", () => {
         Effect.gen(function* () {
           const frame = yield* FrameAuth;
           const cipher = yield* frame.cipher(HANDSHAKE);
-          const sealed = yield* cipher.seal("down", 0, "the session nonce");
+          const sealed = yield* cipher.seal("down", 0, "a true welcome");
 
           yield* pipe(
             Effect.gen(function* () {
