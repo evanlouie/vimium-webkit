@@ -38,8 +38,8 @@ You should get an acknowledgement within a week. There is no bounty.
 **Page-world injection.** Tampermonkey infers the injection world from the
 `@grant` list and does not honour `@inject-into`, so on some managers the script
 shares a realm with the page. In that configuration the page can read anything
-the script can, including the frame-protocol session nonce, and no in-script
-measure changes that. The frame protocol is designed so the _content-world_ case
+the script can, including the credential of the cross-frame session, and no
+in-script measure changes that. The frame protocol is designed so the _content-world_ case
 is sound; the page-world case is documented rather than defended.
 
 **A page that writes a rule on the root element.** The overlay host is a child
@@ -74,32 +74,12 @@ _Class 2: a rule that prevents `html` from painting._ The overlay and the page
 disappear together. The user sees a blank page, and not a hidden interface over
 a readable page.
 
-`ui.visibilityFault` uses a second measurement for this class. It reads the
-computed paint properties of the host and its ancestor chain. The check detects
-these measured effects:
-
-- `display: none`;
-- `visibility: hidden`;
-- `content-visibility: hidden`;
-- `opacity: 0`;
-- `filter: opacity(0)`;
-- a full inset clip, such as `clip-path: inset(100%)`.
-
-This is an effect list, and not a complete list of CSS properties. A mask or a
-future paint property can give the same blank-page result. The script does not
-write a counter-rule on `html`, because that rule would break an honest page. A
-top-layer element is not an answer. `showModal` makes the page inert, and a
-`popover` stays inside the same ancestor paint effects.
-
-**The invariant for the measured cases.** A dialog never holds the keyboard
-while these checks report that the overlay is hidden. The check first repairs
-the host style, its parent and its position. It then measures the box and the
-computed paint properties. A fault closes the dialog and gives every key back.
-
-Only the dialogs ask today. Link hints, the find prompt and the omnibar also
-hold the keyboard.
-[Issue #62](https://github.com/evanlouie/vimium-webkit/issues/62) records the
-work that adds the same check to those three modes.
+The script does not answer this class. It does not write a counter-rule on
+`html`, because that rule would break an honest page. A top-layer element is not
+an answer either. `showModal` makes the page inert, and a `popover` stays inside
+the same ancestor paint effects. A dialog, a prompt or another mode can
+therefore hold the keyboard while nothing of the overlay is visible. Escape
+still ends that mode and gives every key back to the page.
 
 What the script does defend is the host itself. Every inline declaration on the
 host carries the important priority. The guard in `src/ui/Ui.ts` compares these
@@ -117,11 +97,11 @@ That repair has a budget of 32 writes for each quiet second, because a page that
 removes the host inside its own mutation observer would otherwise fight us in a
 loop of microtasks, and that loop would starve the page. The loop needs our
 write, so the guard stops writing when the budget is gone. It does **not** stop
-watching, and it does not stay silent: it says in the console that the overlay
-is not visible, the overlay gives the keyboard back, and one quiet second gives
-back both the count and the repair. A page that spends more than the budget
-therefore keeps the host until it stops, and it never keeps a user who cannot
-leave.
+watching, and one quiet second gives back both the count and the repair. The
+guard says nothing while it waits, and a mode that holds the keyboard keeps it.
+Escape still ends that mode and gives every key back. A page that spends more
+than the budget therefore keeps the host until it stops, and it never keeps a
+user who cannot leave.
 
 **Detectability.** The overlay is an element in the page's own DOM and the
 script installs `keydown` listeners on `window`. A page can tell it is there.
@@ -141,9 +121,11 @@ is not.
 
 ## Design notes a reporter may find useful
 
-- `src/frames/protocol.ts` documents the trust model in full: admission is
-  challenge-response, the port is transferred to a known origin, and
-  authorization precedes validation so an unauthorized sender cannot make the
-  top frame parse a payload.
-- No settings ever cross a frame boundary. Only the exclusion decision does, and
-  it is two booleans' worth of information.
+- `src/domain/FrameMessage.ts` documents the trust model in full: admission is
+  challenge-response, the port is transferred to a known origin, every message
+  on the port is sealed, and authentication precedes validation so a sender
+  without the credential cannot make a frame parse a payload.
+  `src/frames/Auth.ts` and `src/frames/Bus.ts` implement it.
+- No settings ever cross a frame boundary. The message that asks a frame to
+  read its settings again carries nothing. Only the exclusion verdict travels:
+  `Disabled`, or `Enabled` with a string of at most 1024 pass keys.
