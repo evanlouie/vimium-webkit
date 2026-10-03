@@ -47,7 +47,7 @@ import {
   Struct,
 } from "effect";
 import { Keyboard } from "~/core/Keyboard.ts";
-import { Modes } from "~/core/Modes.ts";
+import { isEscape, Modes } from "~/core/Modes.ts";
 import { Report, type UserMessage } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -163,7 +163,7 @@ interface LivePrompt {
 }
 
 export interface HudState {
-  /** A message from `show` or `error` that is still inside its timer. */
+  /** A message that is still inside its timer. */
   readonly transient: Option.Option<HudLine>;
   /** The indicator of the innermost mode. */
   readonly indicator: Option.Option<string>;
@@ -289,16 +289,13 @@ const asKeyboardEvent: (event: Event) => Option.Option<KeyboardEvent> = Option.l
   (event: Event): event is KeyboardEvent => event instanceof KeyboardEvent,
 );
 
-/** Escape, and the `<c-[>` synonym that Vim and upstream Vimium accept. */
-const cancelsPrompt = (event: KeyboardEvent): boolean =>
-  event.key === "Escape" || (event.ctrlKey && event.key === "[");
-
 /** What a key that the caller did not take does to the prompt. */
 const promptKey = (event: KeyboardEvent): PromptKey =>
   pipe(
     Match.value(event),
     Match.when({ key: "Enter" }, () => PromptKey.Submit()),
-    Match.when(cancelsPrompt, () => PromptKey.Cancel()),
+    // Escape, and the `<c-[>` synonym that every mode accepts.
+    Match.when(isEscape, () => PromptKey.Cancel()),
     Match.orElse(() => PromptKey.Pass()),
   );
 
@@ -307,7 +304,6 @@ export class Hud extends Context.Service<
   {
     /** Show a message for `duration`. */
     readonly show: (text: string, duration: HudDuration) => Effect.Effect<void>;
-    readonly error: (text: string) => Effect.Effect<void>;
     readonly hide: Effect.Effect<void>;
     /** Ask the user for a line of text. `None` when the user cancels. */
     readonly prompt: <R>(
@@ -715,7 +711,6 @@ export class Hud extends Context.Service<
 
         return Hud.of({
           show,
-          error,
           hide,
           prompt,
           /**
