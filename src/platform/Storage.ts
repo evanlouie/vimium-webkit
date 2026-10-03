@@ -40,8 +40,6 @@ import {
   Layer,
   MutableRef,
   Option,
-  Order,
-  Ordering,
   Queue,
   Result,
   Schema,
@@ -52,7 +50,7 @@ import {
 } from "effect";
 import { constVoid, flow } from "effect/Function";
 import { describeCause, describeThrown } from "~/domain/Failure.ts";
-import type { GroupSpec, Migration } from "~/domain/Persisted.ts";
+import type { GroupSpec } from "~/domain/Persisted.ts";
 import {
   type FindHistory,
   findHistoryGroup,
@@ -80,10 +78,8 @@ export const StorageFailureReason = Schema.Literals([
   "backend",
   /** The stored bytes were not JSON. */
   "malformed",
-  /** The stored JSON did not match the schema, even after migration. */
+  /** The stored JSON did not match the schema, or a newer build wrote it. */
   "invalid",
-  /** A migration step failed. */
-  "migration",
 ]);
 
 export type StorageFailureReason = typeof StorageFailureReason.Type;
@@ -293,7 +289,7 @@ const writePolicy = (setUnsafe: Option.Option<SetUnsafe>, debounceMs: number): W
  * The stored wrapper.
  *
  * `data` stays `unknown` here. It is the group's own payload, and it is decoded
- * against the group schema after migration.
+ * against the group schema.
  */
 const Envelope = Schema.Struct({ schemaVersion: Schema.Finite, data: Schema.Unknown });
 
@@ -306,11 +302,6 @@ const toEnvelope = (parsed: unknown): Envelope =>
     Schema.decodeUnknownOption(Envelope),
     Option.getOrElse(() => ({ schemaVersion: 0, data: parsed })),
   );
-
-const byTarget: Order.Order<Migration> = pipe(
-  Order.Number,
-  Order.mapInput((step: Migration) => step.to),
-);
 
 /**
  * Build one value group over the value store.
@@ -382,49 +373,28 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
 
   // -- decoding ------------------------------------------------------------
 
-  const migrate = (data: unknown, from: number): Result.Result<unknown, StorageError> => {
-    const start: Result.Result<unknown, StorageError> = Result.succeed(data);
-    return pipe(
-      spec.migrations,
-      Array.filter((step) => step.to > from),
-      Array.sort(byTarget),
-      Array.reduce(start, (migrated, step) =>
-        pipe(
-          migrated,
-          Result.flatMap((current) =>
-            Result.try({
-              try: () => step.migrate(current),
-              catch: failureFrom(
-                "migration",
-                "read",
-                `migration to v${step.to} (${step.describe}) failed`,
-              ),
-            }),
-          ),
-        ),
-      ),
-    );
-  };
-
-  /** The payload in this build's version, or why it cannot be brought there. */
-  const upgrade = ({ schemaVersion, data }: Envelope): Result.Result<unknown, StorageError> =>
+  /**
+   * The payload, when this build can read its version.
+   *
+   * An older version is decoded as it is, because no group has needed a step
+   * yet. A newer build in another tab wrote a newer version. Do not try to go
+   * backwards. Use the defaults for this frame and leave the stored value
+   * alone.
+   */
+  const payload = (envelope: Envelope): Result.Result<unknown, StorageError> =>
     pipe(
-      Order.Number(schemaVersion, spec.schemaVersion),
-      Ordering.match({
-        onLessThan: () => migrate(data, schemaVersion),
-        onEqual: () => Result.succeed(data),
-        // A newer build in another tab wrote this. Do not try to go backwards.
-        // Use the defaults for this frame and leave the stored value alone.
-        onGreaterThan: () =>
-          Result.fail(
-            failure(
-              "invalid",
-              "read",
-              `the stored schema version ${schemaVersion} is newer ` +
-                `than this build's ${spec.schemaVersion}`,
-            ),
+      envelope,
+      Result.liftPredicate(
+        ({ schemaVersion }) => schemaVersion <= spec.schemaVersion,
+        ({ schemaVersion }) =>
+          failure(
+            "invalid",
+            "read",
+            `the stored schema version ${schemaVersion} is newer ` +
+              `than this build's ${spec.schemaVersion}`,
           ),
-      }),
+      ),
+      Result.map(({ data }) => data),
     );
 
   const read = (raw: string): Result.Result<A, StorageError> =>
@@ -434,7 +404,7 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
         catch: failureFrom("malformed", "read", "the stored value is not JSON"),
       }),
       Result.map(toEnvelope),
-      Result.flatMap(upgrade),
+      Result.flatMap(payload),
       Result.flatMap(
         flow(
           decodeUnknown(spec.schema),

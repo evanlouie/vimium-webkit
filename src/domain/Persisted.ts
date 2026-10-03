@@ -19,8 +19,10 @@
  *    object decodes to. There is no second list that can move away from the
  *    first.
  *
- * To change or remove a field, write a migration and increase the
- * `*_SCHEMA_VERSION` of its group.
+ * There are no migrations. The stored envelope carries the
+ * `*_SCHEMA_VERSION` of its group, and a build refuses to read a version that
+ * is newer than its own. A change that the fallbacks cannot absorb needs a new
+ * version and code that reads the old one.
  */
 
 import {
@@ -40,22 +42,12 @@ import { hintCharacterCount, readHintCharacters } from "~/domain/HintString.ts";
 // Group specifications
 // ---------------------------------------------------------------------------
 
-/** One ordered transformation of persisted data. It must be idempotent. */
-export interface Migration {
-  /** The `schemaVersion` that this step produces. */
-  readonly to: number;
-  readonly describe: string;
-  readonly migrate: (data: unknown) => unknown;
-}
-
 /** Everything that `platform/Storage.ts` needs to hold one group. */
 export interface GroupSpec<A> {
   readonly name: string;
   readonly schema: Schema.Codec<A, unknown>;
   readonly defaults: () => A;
   readonly schemaVersion: number;
-  /** In any order. A step runs when its `to` is newer than the stored version. */
-  readonly migrations: readonly Migration[];
   /** Join rapid writes. `0` writes at once. */
   readonly writeDebounceMs: number;
 }
@@ -263,7 +255,6 @@ export const settingsGroup: GroupSpec<Settings> = {
   schema: settingsSchema,
   defaults: defaultSettings,
   schemaVersion: SETTINGS_SCHEMA_VERSION,
-  migrations: [],
   writeDebounceMs: 250,
 };
 
@@ -399,7 +390,6 @@ export const marksGroup: GroupSpec<Marks> = {
   schema: marksSchema,
   defaults: (): Marks => ({ local: {}, global: {} }),
   schemaVersion: MARKS_SCHEMA_VERSION,
-  migrations: [],
   writeDebounceMs: 100,
 };
 
@@ -422,7 +412,6 @@ export const findHistoryGroup: GroupSpec<FindHistory> = {
   schema: findHistorySchema,
   defaults: (): FindHistory => ({ queries: [] }),
   schemaVersion: FIND_HISTORY_SCHEMA_VERSION,
-  migrations: [],
   writeDebounceMs: 500,
 };
 
@@ -451,7 +440,6 @@ export const historyGroup: GroupSpec<HistoryIndex> = {
   schema: historyIndexSchema,
   defaults: (): HistoryIndex => ({ visits: [] }),
   schemaVersion: HISTORY_SCHEMA_VERSION,
-  migrations: [],
   writeDebounceMs: 2000,
 };
 
@@ -501,7 +489,6 @@ export const sessionGroup: GroupSpec<SessionState> = {
     zoomByOrigin: {},
   }),
   schemaVersion: SESSION_SCHEMA_VERSION,
-  migrations: [],
   // A heartbeat and a zoom factor are small, and another tab reads them. A
   // write that waits would show the user a stale list of tabs.
   writeDebounceMs: 0,
@@ -536,7 +523,6 @@ export const frameCredentialGroup: GroupSpec<FrameCredential> = {
   schema: frameCredentialSchema,
   defaults: (): FrameCredential => ({ secret: "" }),
   schemaVersion: FRAME_CREDENTIAL_SCHEMA_VERSION,
-  migrations: [],
   // The credential must reach a sibling frame before the first handshake. The
   // write is one small value, and it happens once for each installation.
   writeDebounceMs: 0,

@@ -1015,8 +1015,8 @@ describe("the exit path of Storage", () => {
         Effect.gen(function* () {
           const storage = yield* Storage;
           yield* directBackend.seed(SETTINGS_KEY, envelope(0, { scrollStepSize: 120 }));
-          const migrated = yield* storage.settings.hydrate;
-          assert.strictEqual(migrated.scrollStepSize, 120);
+          const hydrated = yield* storage.settings.hydrate;
+          assert.strictEqual(hydrated.scrollStepSize, 120);
 
           yield* leavePending(storage, 90);
           yield* Effect.sync(() => storage.flushAllUnsafe());
@@ -1031,9 +1031,9 @@ describe("the exit path of Storage", () => {
         Effect.gen(function* () {
           const storage = yield* Storage;
           yield* actorBackend.seed(SETTINGS_KEY, envelope(0, { scrollStepSize: 120 }));
-          const migrated = yield* storage.settings.hydrate;
+          const hydrated = yield* storage.settings.hydrate;
           const writing = yield* pipe(
-            migrated,
+            hydrated,
             Struct.assign({ scrollStepSize: 90 }),
             storage.settings.write,
             Effect.forkChild({ startImmediately: true }),
