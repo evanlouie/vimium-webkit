@@ -1254,7 +1254,7 @@ const readHex: (text: string) => Option.Option<number> = flow(
 );
 
 /** The text of one group of a match, or `""` when it matched nothing. */
-const groupText = (match: RegExpMatchArray, group: number): string =>
+export const groupText = (match: RegExpMatchArray, group: number): string =>
   pipe(
     match,
     Array.get(group),

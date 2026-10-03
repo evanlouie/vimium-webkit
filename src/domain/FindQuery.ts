@@ -27,7 +27,7 @@ import {
   Result,
   String as Str,
 } from "effect";
-import { regexSafetyError } from "~/domain/RegexSafety.ts";
+import { groupText, regexSafetyError } from "~/domain/RegexSafety.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -190,15 +190,6 @@ export interface Directives {
 
 /** `\r`, `\R`, `\i` and `\I`, and the same four with a doubled backslash. */
 const DIRECTIVE = /(\\{1,2})([rRiI])/g;
-
-/** The text of one group of a match, or `""` when it matched nothing. */
-const groupText = (match: RegExpMatchArray, group: number): string =>
-  pipe(
-    match,
-    Array.get(group),
-    Option.flatMap(Option.fromNullishOr),
-    Option.getOrElse(() => ""),
-  );
 
 /** What the last of the letters `on` and `off` sets, when one of them is there. */
 const lastSetting = (
