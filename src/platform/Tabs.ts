@@ -89,7 +89,7 @@ const openFailure = (cause: GmError): TabError =>
       Match.value(cause.reason),
       Match.withReturnType<TabFailureReason>(),
       Match.when("unavailable", () => "unavailable"),
-      Match.whenOr("failed", "invalid", () => "blocked"),
+      Match.when("failed", () => "blocked"),
       Match.exhaustive,
     ),
     detail: cause.detail,
@@ -107,9 +107,8 @@ const closeFailure = (cause: GmError): TabError =>
           nativeAlternative: Option.some("⌘W"),
         }),
     ),
-    Match.whenOr(
+    Match.when(
       "failed",
-      "invalid",
       () =>
         new TabError({
           reason: "failed",

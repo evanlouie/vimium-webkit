@@ -33,17 +33,8 @@ import { describeCause, describeThrown } from "~/domain/Failure.ts";
 // Errors
 // ---------------------------------------------------------------------------
 
-export const DomFailureReason = Schema.Literals([
-  /** The API is not in this realm. */
-  "missing",
-  /** The API is present, and it threw. */
-  "denied",
-]);
-
-export type DomFailureReason = typeof DomFailureReason.Type;
-
+/** A DOM call that threw. `api` names the call, so a caller can name it to the user. */
 export class DomError extends Schema.TaggedError<DomError>()("DomError", {
-  reason: DomFailureReason,
   api: Schema.String,
   detail: Schema.String,
   cause: Schema.optional(Schema.Defect()),
@@ -216,7 +207,6 @@ export class Dom extends Context.Service<
           try: read,
           catch: (cause) =>
             new DomError({
-              reason: "denied",
               api,
               detail: describeThrown(cause),
               cause,

@@ -147,7 +147,7 @@ export const makeSuggester: Effect.Effect<Suggester, never, Gm | Settings | Scop
       pipe(
         Match.value(error.reason),
         Match.when("unavailable", () => pipe(Ref.set(available, false), Effect.as(NO_SUGGESTIONS))),
-        Match.whenOr("failed", "invalid", () => Effect.succeed(NO_SUGGESTIONS)),
+        Match.when("failed", () => Effect.succeed(NO_SUGGESTIONS)),
         Match.exhaustive,
       );
 

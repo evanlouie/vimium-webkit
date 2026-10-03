@@ -48,17 +48,15 @@ import type {
 /**
  * Why a manager call gave no value.
  *
- * A `reason` field and not three classes. Almost every caller treats the three
- * the same way: tell the user that the function is off. The two callers that do
- * care use `Effect.catchReason` to take one out.
+ * A `reason` field and not two classes. Almost every caller treats the two
+ * the same way: tell the user that the function is off. The callers that do
+ * care match the reason.
  */
 export const GmFailureReason = Schema.Literals([
   /** The manager does not have this API. */
   "unavailable",
   /** The API is present, and it failed. */
   "failed",
-  /** The API gave something that we cannot read. */
-  "invalid",
 ]);
 
 export type GmFailureReason = typeof GmFailureReason.Type;
