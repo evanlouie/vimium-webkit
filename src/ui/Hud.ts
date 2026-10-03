@@ -804,21 +804,30 @@ export class Hud extends Context.Service<
               settle(Option.none()),
             );
 
-            // A press anywhere else on the layer cancels the prompt, and goes
-            // no further. The layer covers the page, so the default action
-            // would move the focus and then the selection: WebKit puts a caret
-            // into our layer after the selection was given back.
+            // A press goes no further than the prompt, except in the field,
+            // where it places the caret. The layer covers the page, so the
+            // default action would move the focus and then the selection:
+            // WebKit puts a caret into our layer after the selection was given
+            // back. A press on the rest of the bar, such as on its label, keeps
+            // the prompt open, and the field keeps the focus. A press anywhere
+            // else cancels the prompt.
             yield* dom.listenOn(hudLayer, "mousedown", (event) =>
               pipe(
-                event.target === parts.input,
-                Boolean.match({
-                  onTrue: () => Effect.void,
-                  onFalse: () =>
-                    pipe(
-                      Effect.sync(() => event.preventDefault()),
-                      Effect.andThen(settle(Option.none())),
-                    ),
-                }),
+                Match.value(event.target),
+                Match.when(
+                  (target) => target === parts.input,
+                  () => Effect.void,
+                ),
+                Match.when(
+                  (target) => target instanceof Node && element.contains(target),
+                  () => Effect.sync(() => event.preventDefault()),
+                ),
+                Match.orElse(() =>
+                  pipe(
+                    Effect.sync(() => event.preventDefault()),
+                    Effect.andThen(settle(Option.none())),
+                  ),
+                ),
               ),
             );
 
