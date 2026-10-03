@@ -579,7 +579,6 @@ export class Ui extends Context.Service<
     readonly addStyle: (css: string) => Effect.Effect<void>;
     /** Install or replace a stylesheet under a key, for anything derived from a live setting. */
     readonly setStyle: (key: string, css: string) => Effect.Effect<void>;
-    readonly syncColorScheme: Effect.Effect<void>;
     readonly owns: (target: EventTarget | null) => boolean;
     readonly viewport: Effect.Effect<ViewportRect>;
   }
@@ -1238,9 +1237,10 @@ export class Ui extends Context.Service<
       /**
        * Calculate the scheme again and publish it on the host.
        *
-       * Run this after anything that can change the answer: a settings
-       * change, a change of the system appearance, or a navigation that
-       * replaced the theme of the page.
+       * This runs at start, when the system appearance changes and when the
+       * setting changes. The scheme of the page is read at those moments
+       * only, so a page that changes its own theme afterwards keeps the
+       * overlay in the old scheme until one of them happens.
        */
       const syncColorScheme = Effect.gen(function* () {
         const scheme = yield* resolveScheme();
@@ -1480,7 +1480,6 @@ export class Ui extends Context.Service<
         expose,
         addStyle,
         setStyle,
-        syncColorScheme,
         owns,
         viewport,
       });
