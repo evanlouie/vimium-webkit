@@ -308,16 +308,15 @@ builds the guard only, until a hint round wakes it. The guard layer holds
 
 The guard holds each key that starts the application, up to 16 of them, from
 the first key until the application takes the keyboard. It suppresses each one,
-so the page does not act on it, and it takes the release of each one as well.
-A release that comes after the guard lets go goes to `Modes`, which takes it
-too. A chord with Control or ⌘ starts the
-application but goes on to the page, because a held key cannot get its default
-action back, and ⌘C must still copy. A binding on such a chord misses that
-press. The guard holds for three seconds at most:
-a start that takes longer gives the page its keyboard back, and the held keys
-are lost. A held key that the application gives to the page is lost as well.
-This includes each key that starts a page that the settings exclude, because
-the guard reads no settings.
+so the page does not act on it, and it takes the release of each one as well,
+until the application takes over the releases that have not come. A chord with
+Control or ⌘ starts the application but goes on to the page, because a held key
+cannot get its default action back, and ⌘C must still copy. A binding on such a
+chord misses that press. The guard holds for three seconds at most: a start that
+takes longer gives the page its keyboard back, and the held keys are lost, but
+not their releases. A held key that the application gives to the page is lost
+as well. This includes each key that starts a page that the settings exclude,
+because the guard reads no settings.
 `BootstrapLayer` attaches the key bridge and takes the keyboard at once. A
 later key reaches normal mode, which gives it to the page while the verdict is
 pending.
