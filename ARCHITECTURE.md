@@ -343,10 +343,14 @@ matters:
 - **wake** starts a frame that has not started. Only an ancestor may send it.
   The top frame sends it to every frame of the page at the start of each hint
   round, whichever frame starts the round. A frame that is joining or has
-  joined ignores it. When the page holds a frame that no round has waited for,
-  the top frame waits for every frame to join before it collects the hints,
-  for 400 ms at most. On its first round, a child frame waits as long for its
-  own admission. `JOIN_GRACE_MS` in `features/hints/Hints.ts` sets that bound.
+  joined ignores it. Before it collects the hints, the top frame waits until
+  each frame that no earlier round waited for has joined, for 400 ms at most.
+  It counts only the frames that can run the script, and it matches them by
+  their window, so an `about:blank` advertisement or a sandbox costs no wait.
+  A top frame that cannot hold a session, as on a page with no Web Crypto,
+  keeps the round to itself, and wakes and waits for no frame. On its first
+  round, a child frame waits as long for its own admission. `JOIN_GRACE_MS` in
+  `features/hints/Hints.ts` sets that bound.
 - **announce** asks a frame that is _already_ running to say so again. The
   coordinator sweeps with this when it starts, because a frame that started
   before its listener existed hears nothing. The guard ignores it.
