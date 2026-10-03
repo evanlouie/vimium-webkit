@@ -70,8 +70,8 @@ export const UrlClipboardLayer: Layer.Layer<
      *
      * The prompt is the primary path, and not a fallback. WebKit shows a
      * native paste control, or refuses outright, unless this origin wrote the
-     * clipboard. The read below is only an attempt to fill the prompt, and it
-     * starts first, so that it races the user and not the other way round.
+     * clipboard. The read below only previews the clipboard in the HUD, and it
+     * starts after the prompt is on screen.
      */
     const openPasted = Effect.fn("UrlClipboard.openPasted")(function* (destination: Destination) {
       // Scheduled, and not started at once, so the prompt is on screen before

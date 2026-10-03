@@ -9,8 +9,8 @@
  * owns `localStorage`, and every group that this application keeps is private:
  * the settings hold the exclusion patterns and the key mappings of the user,
  * the marks and the history hold the pages that the user visited, and the
- * session group holds the credential that admits a frame to the cross-frame
- * session. A page that can read that credential can join the session and drive
+ * frame-credential group holds the credential that admits a frame to the
+ * cross-frame session. A page that can read that credential can join the session and drive
  * a click inside a document of another origin. `localStorage` is also a poor
  * store on WebKit: intelligent tracking prevention erases all script-writable
  * storage after seven days without user interaction on the site, and the store

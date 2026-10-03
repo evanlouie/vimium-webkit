@@ -511,9 +511,9 @@ export class Keyboard extends Context.Service<
        * returns at once. The fiber belongs to the layer scope, so a command
        * that still runs when the scope closes stops with it.
        *
-       * A plain `yield*` here would be wrong. The listener runs the key path
-       * with `runSyncExit`, and a command that suspends would then fail as a
-       * defect instead of running.
+       * A plain `yield*` here would be wrong. `Dom.listen` runs the key path
+       * with `Effect.runSyncExitWith`, and a command that suspends would then
+       * fail as a defect instead of running.
        */
       const runCommand = Effect.fnUntraced(function* (
         { command }: KeyBinding,

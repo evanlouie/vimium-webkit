@@ -3,8 +3,8 @@
  *
  * Everything on this path runs inside the browser's own dispatch, because
  * `preventDefault` works nowhere else. `Dom.listen` gives that guarantee: it
- * runs the handler with `runSyncExit`, so the whole effect completes before the
- * browser continues.
+ * runs the handler with `Effect.runSyncExitWith`, so the whole effect completes
+ * before the browser continues.
  *
  * The rule that comes with the guarantee: nothing that this file can reach may
  * suspend. Read the section "The keyboard path is synchronous" of
