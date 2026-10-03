@@ -366,10 +366,6 @@ const historyStep = (event: KeyboardEvent): Option.Option<number> =>
     Match.option,
   );
 
-/** Our own HUD input. It lives in our realm, so `instanceof` answers for it. */
-const isInput = (target: EventTarget | null): target is HTMLInputElement =>
-  target instanceof HTMLInputElement;
-
 // ---------------------------------------------------------------------------
 // The service
 // ---------------------------------------------------------------------------
@@ -846,66 +842,31 @@ export const FindLayer: Layer.Layer<
       yield* scrollToCurrent();
     });
 
-    /**
-     * Build the options of the HUD prompt for one session.
-     *
-     * History cycling writes straight into `event.target`. That looks like a
-     * break of the layers, and it is a deliberate one: `onKeydown` can only
-     * *take* a key, and it cannot change the text of the field, and the field
-     * is our own element inside our own closed shadow root. Widening the
-     * interface of the HUD for one feature would cost more.
-     */
+    /** Build the options of the HUD prompt for one session. */
     const promptOptions = Effect.fn("Find.promptOptions")(function* (
       prompt: Heading,
       history: ReadonlyArray<string>,
     ) {
       const browsing = yield* Ref.make(NOT_BROWSING);
 
-      const applyHistory = (
-        input: HTMLInputElement,
-        entries: Array.NonEmptyReadonlyArray<string>,
-        delta: number,
-        value: string,
-      ): Effect.Effect<void> =>
+      /**
+       * A history key is taken, even with no history. A step to an entry
+       * gives the field that entry, and the prompt runs the incremental
+       * search for it.
+       */
+      const takeHistoryKey = (delta: number, value: string): Effect.Effect<KeyClaim> =>
         pipe(
-          browsing,
-          Ref.modify(browse(entries, delta, value)),
-          Effect.flatMap(
-            whenSome((entry) =>
-              pipe(
-                Effect.sync(() => {
-                  input.value = entry;
-                }),
-                // The `input` listener of the HUD does not fire for a
-                // write from a script, so the incremental search is
-                // started by hand.
-                Effect.andThen(runIncremental(entry)),
-              ),
-            ),
-          ),
-        );
-
-      /** A history key that is aimed at our own input is taken, even with no history. */
-      const takeHistoryKey = (
-        event: KeyboardEvent,
-        delta: number,
-        value: string,
-      ): Effect.Effect<KeyClaim> =>
-        pipe(
-          event.target,
-          Option.liftPredicate(isInput),
-          Option.match({
-            onNone: () => Effect.succeed(KeyClaim.Pass()),
-            onSome: (input) =>
-              pipe(
-                history,
-                Array.match({
-                  onEmpty: () => Effect.void,
-                  onNonEmpty: (entries) => applyHistory(input, entries, delta, value),
-                }),
-                Effect.as(KeyClaim.Taken()),
-              ),
+          history,
+          Array.match({
+            onEmpty: () => Effect.succeed(Option.none<string>()),
+            onNonEmpty: (entries) => pipe(browsing, Ref.modify(browse(entries, delta, value))),
           }),
+          Effect.map(
+            Option.match({
+              onNone: () => KeyClaim.Taken(),
+              onSome: (text) => KeyClaim.Replace({ text }),
+            }),
+          ),
         );
 
       return {
@@ -918,7 +879,7 @@ export const FindLayer: Layer.Layer<
             historyStep(event),
             Option.match({
               onNone: () => Effect.succeed(KeyClaim.Pass()),
-              onSome: (delta) => takeHistoryKey(event, delta, value),
+              onSome: (delta) => takeHistoryKey(delta, value),
             }),
           ),
       } satisfies HudPromptOptions;

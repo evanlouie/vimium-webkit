@@ -5,15 +5,15 @@
  * so the input below is a *true in-page element* that takes part in the focus
  * of the page. Two results of that are designed for here:
  *
- * - An open prompt enters a mode that owns the keyboard. The mode gives the
- *   keys that are aimed at the input to the input, takes every other key, and
- *   keeps insert mode from treating a focus of ours as an entry into insert
- *   mode.
- * - A key event that is aimed at this input would bubble out to the page,
- *   retargeted to the shadow host, so the input stops each one. A listener of
- *   the page in the capture phase on `window` or `document` runs before the
- *   input, and still sees it. Without an iframe of our own origin there is no
- *   way to prevent that, and we accept it.
+ * - An open prompt enters a mode that owns the keyboard. The mode acts on the
+ *   keys that are aimed at the input, takes every other key, and keeps insert
+ *   mode from treating a focus of ours as an entry into insert mode.
+ * - The mode stops a key that the input types where the key bridge sees it,
+ *   in the capture phase on `window`, and keeps its default action. The input
+ *   types the key, and the page does not see it, though the page would see it
+ *   retargeted to the shadow host otherwise. A capture listener that the page
+ *   added to `window` before ours still sees the key. Without an iframe of our
+ *   own origin there is no way to prevent that, and we accept it.
  *
  * Four rules hold this service together:
  *
@@ -56,7 +56,6 @@ import { Keyboard } from "~/core/Keyboard.ts";
 import {
   CONTINUE_BUBBLING,
   type HandlerResult,
-  PASS_EVENT_TO_PAGE,
   SUPPRESS_EVENT,
   SUPPRESS_PROPAGATION,
 } from "~/core/HandlerStack.ts";
@@ -98,6 +97,11 @@ export type HudTone = "info" | "error";
 export type KeyClaim = Data.TaggedEnum<{
   /** The caller took the key. The prompt calls `preventDefault` and does nothing more with it. */
   Taken: NoFields;
+  /**
+   * The caller took the key, and the field shows `text` instead, as for a
+   * step through the history. The prompt runs `onInput` for the new text.
+   */
+  Replace: { readonly text: string };
   /** The prompt acts on the key: Enter submits, Escape cancels, and the field takes the rest. */
   Pass: NoFields;
 }>;
@@ -119,11 +123,13 @@ export interface HudPromptOptions<R = never> {
   /** Run for every change of the text. A new run interrupts the one before. */
   readonly onInput?: (value: string) => Effect.Effect<void, never, R>;
   /**
-   * Run for every key press, before the prompt acts on it.
+   * Run for every key press in the field, before the prompt acts on it.
    *
-   * The claim says whether the caller took the key. This body must not
-   * suspend, because `preventDefault` works only inside the dispatch of the
-   * browser.
+   * The prompt sees the key where the key bridge does, on `window`, so the
+   * target of the event is our shadow host and not the field. `value` is the
+   * text of the field. The claim says whether the caller took the key. This
+   * body must not suspend, because `preventDefault` works only inside the
+   * dispatch of the browser.
    */
   readonly onKeydown?: (event: KeyboardEvent, value: string) => Effect.Effect<KeyClaim, never, R>;
 }
@@ -290,6 +296,8 @@ const hudFrame = (state: HudState): HudFrame =>
 type PromptKey = Data.TaggedEnum<{
   /** The caller took the key, so the prompt only stops its default action. */
   Taken: NoFields;
+  /** The caller took the key, and gave the field new text. */
+  Replace: { readonly text: string };
   /** Enter ends the prompt with the text. */
   Submit: NoFields;
   /** Escape ends the prompt with "the user cancelled". */
@@ -298,10 +306,6 @@ type PromptKey = Data.TaggedEnum<{
   Pass: NoFields;
 }>;
 const PromptKey = Data.taggedEnum<PromptKey>();
-
-const asKeyboardEvent: (event: Event) => Option.Option<KeyboardEvent> = Option.liftPredicate(
-  (event: Event): event is KeyboardEvent => event instanceof KeyboardEvent,
-);
 
 /** What a key that the caller did not take does to the prompt. */
 const promptKey = (event: KeyboardEvent): PromptKey =>
@@ -636,24 +640,25 @@ export class Hud extends Context.Service<
           );
 
         /**
-         * Give a key to our own input, and take every other key.
+         * Let our own input have a key, and nobody else, and take a key from
+         * anywhere else.
          *
-         * `PASS_EVENT_TO_PAGE` stops the walk of the stack without touching
-         * the event, which is exactly "our input types this, and nothing else
-         * acts". The input then stops the key, so that it does not bubble out
-         * to the page.
+         * `SUPPRESS_PROPAGATION` stops the event where the stack sees it, in
+         * the capture phase on `window`, and leaves its default action alone.
+         * The input types the key, and neither the modes below nor a listener
+         * of the page on `document` or `window` sees it. The omnibar keeps
+         * its keys in the same way.
          *
-         * The prompt must claim these keys. The key bridge listens on `window`
-         * in the capture phase, so it sees every key before the input does.
-         * Without this claim, `hemisphere` typed into find would run `h`,
-         * `m`, `i` and `s` as commands, and an `x` typed into the prompt
-         * for a URL would close the tab.
+         * The prompt must claim these keys. The key bridge sees every key
+         * before the input does. Without this claim, `hemisphere` typed into
+         * find would run `h`, `m`, `i` and `s` as commands, and an `x` typed
+         * into the prompt for a URL would close the tab.
          */
-        const passIfOurs = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
+        const keepIfOurs = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
           pipe(
             ui.owns(event.target),
             Boolean.match({
-              onTrue: () => PASS_EVENT_TO_PAGE,
+              onTrue: () => SUPPRESS_PROPAGATION,
               onFalse: () => SUPPRESS_EVENT,
             }),
             Effect.succeed,
@@ -676,7 +681,7 @@ export class Hud extends Context.Service<
         const promptMode: ModeOptions = {
           name: "prompt",
           indicator: Option.none(),
-          // The input owns Escape: it has to settle the prompt, and an exit at
+          // The prompt acts on Escape itself: it has to settle, and an exit at
           // the level of the mode would leave the prompt open.
           exitOn: [],
           keyboard: KeyPolicy.Owned(),
@@ -690,28 +695,6 @@ export class Hud extends Context.Service<
             const done = yield* Deferred.make<Option.Option<string>>();
             const settle = (value: Option.Option<string>): Effect.Effect<void> =>
               pipe(done, Deferred.succeed(value), Effect.asVoid);
-
-            // The prompt owns the keyboard from here until it closes. A mode can
-            // also end without the prompt, as `exitAll` does on a navigation.
-            // The prompt then closes too, and does not leave a field open that
-            // no mode gives the keys to.
-            const mode = yield* modes.enter(promptMode, {
-              keydown: passIfOurs,
-              keypress: passIfOurs,
-              keyup: passIfOurs,
-              focus: claimOurFocus,
-            });
-            yield* mode.onExit(() => settle(Option.none()));
-
-            // A second prompt replaces the first one. Each prompt owns its own
-            // container, so the removal of the old one cannot take the new one
-            // with it.
-            const { prompt: previous } = yield* Ref.get(state);
-            yield* pipe(
-              previous,
-              whenSome(({ cancel }) => cancel),
-            );
-            yield* FiberHandle.clear(timer);
 
             const id = yield* pipe(
               nextPromptId,
@@ -779,6 +762,94 @@ export class Hud extends Context.Service<
                 }),
             );
 
+            const inputFiber = yield* FiberHandle.make<void, never>();
+
+            /**
+             * Give new text to the caller. Forked, because a body such as the
+             * live search of find can suspend. A newer change interrupts the
+             * older search.
+             */
+            const changed = (text: string): Effect.Effect<void, never, R> =>
+              pipe(
+                options.onInput,
+                Option.fromNullishOr,
+                whenSome((onInput) =>
+                  pipe(onInput(text), FiberHandle.run(inputFiber), Effect.asVoid),
+                ),
+              );
+
+            /** Let the caller see the key first, and then decide what it does. */
+            const keyAction = (key: KeyboardEvent): Effect.Effect<PromptKey, never, R> =>
+              pipe(
+                options.onKeydown,
+                Option.fromNullishOr,
+                Option.match({
+                  onNone: () => Effect.succeed(KeyClaim.Pass()),
+                  onSome: (onKeydown) => onKeydown(key, parts.input.value),
+                }),
+                Effect.map(
+                  KeyClaim.$match({
+                    Taken: () => PromptKey.Taken(),
+                    Replace: ({ text }) => PromptKey.Replace({ text }),
+                    Pass: () => promptKey(key),
+                  }),
+                ),
+              );
+
+            /**
+             * Carry out what a key press does, and say what happens to the key.
+             * `SUPPRESS_EVENT` calls `preventDefault`, so the input does not
+             * type a key that the prompt used.
+             */
+            const perform = PromptKey.$match({
+              Taken: () => Effect.succeed(SUPPRESS_EVENT),
+              Replace: ({ text }) =>
+                pipe(
+                  Effect.sync(() => {
+                    parts.input.value = text;
+                  }),
+                  // A write from a script fires no `input` event.
+                  Effect.andThen(changed(text)),
+                  Effect.as(SUPPRESS_EVENT),
+                ),
+              Submit: () => pipe(settle(Option.some(parts.input.value)), Effect.as(SUPPRESS_EVENT)),
+              Cancel: () => pipe(settle(Option.none()), Effect.as(SUPPRESS_EVENT)),
+              Pass: () => Effect.succeed(SUPPRESS_PROPAGATION),
+            });
+
+            /** Act on a key press aimed at the input, and take every other one. */
+            const onKeydown = (event: KeyboardEvent): Effect.Effect<HandlerResult, never, R> =>
+              pipe(
+                ui.owns(event.target),
+                Boolean.match({
+                  onTrue: () => pipe(keyAction(event), Effect.flatMap(perform)),
+                  onFalse: () => Effect.succeed(SUPPRESS_EVENT),
+                }),
+              );
+
+            // The prompt owns the keyboard from here until it closes. A mode can
+            // also end without the prompt, as `exitAll` does on a navigation.
+            // The prompt then closes too, and does not leave a field open that
+            // no mode gives the keys to.
+            const mode = yield* modes.enter(promptMode, {
+              keydown: onKeydown,
+              keypress: keepIfOurs,
+              keyup: keepIfOurs,
+              focus: claimOurFocus,
+            });
+            yield* mode.onExit(() => settle(Option.none()));
+
+            // A second prompt replaces the first one. Each prompt owns its own
+            // container, so the removal of the old one cannot take the new one
+            // with it. This comes after the mode, because the clear of the timer
+            // can wait, and a key typed meanwhile must not reach a binding.
+            const { prompt: previous } = yield* Ref.get(state);
+            yield* pipe(
+              previous,
+              whenSome(({ cancel }) => cancel),
+            );
+            yield* FiberHandle.clear(timer);
+
             // The HUD layer must take pointer events while the prompt is live,
             // so that a click into the field does not fall through to the page.
             yield* acceptPointerEvents(hudLayer);
@@ -795,89 +866,7 @@ export class Hud extends Context.Service<
 
             yield* Effect.addFinalizer(() => patch(withoutPrompt(id)));
 
-            const inputFiber = yield* FiberHandle.make<void, never>();
-
-            yield* pipe(
-              options.onInput,
-              Option.fromNullishOr,
-              whenSome((onInput) =>
-                dom.listenOn(parts.input, "input", () =>
-                  // Forked, because a body such as the live search of find can
-                  // suspend. A newer keystroke interrupts the older search.
-                  pipe(onInput(parts.input.value), FiberHandle.run(inputFiber), Effect.asVoid),
-                ),
-              ),
-            );
-
-            /** Let the caller see the key first, and then decide what it does. */
-            const keyAction = (key: KeyboardEvent): Effect.Effect<PromptKey, never, R> =>
-              pipe(
-                options.onKeydown,
-                Option.fromNullishOr,
-                Option.match({
-                  onNone: () => Effect.succeed(KeyClaim.Pass()),
-                  onSome: (onKeydown) => onKeydown(key, parts.input.value),
-                }),
-                Effect.map(
-                  KeyClaim.$match({
-                    Taken: () => PromptKey.Taken(),
-                    Pass: () => promptKey(key),
-                  }),
-                ),
-              );
-
-            /** What a key press does. Any other event does nothing. */
-            const actionFor = (event: Event): Effect.Effect<PromptKey, never, R> =>
-              pipe(
-                asKeyboardEvent(event),
-                Option.match({
-                  onNone: () => Effect.succeed(PromptKey.Pass()),
-                  onSome: keyAction,
-                }),
-              );
-
-            /** Carry out what a key press does. */
-            const perform = (event: Event) =>
-              PromptKey.$match({
-                Taken: () => Effect.sync(() => event.preventDefault()),
-                Submit: () =>
-                  pipe(
-                    Effect.sync(() => event.preventDefault()),
-                    Effect.andThen(settle(Option.some(parts.input.value))),
-                  ),
-                Cancel: () =>
-                  pipe(
-                    Effect.sync(() => event.preventDefault()),
-                    Effect.andThen(settle(Option.none())),
-                  ),
-                Pass: () => Effect.void,
-              });
-
-            // The capture phase, and `stopPropagation` for every key: the prompt
-            // owns the keyboard while it is open. A key event in the field
-            // bubbles out to the page as an event of our host, which is not
-            // editable, so a shortcut of the page would fire on typing. A
-            // listener of the page in the capture phase on `window` or
-            // `document` runs before the field and still sees the key. The
-            // key bridge does as well, and the mode of the prompt gives the key
-            // to the field.
-            yield* dom.listenOn(
-              parts.input,
-              "keydown",
-              (event) =>
-                pipe(
-                  Effect.sync(() => event.stopPropagation()),
-                  Effect.flatMap(() => actionFor(event)),
-                  Effect.flatMap(perform(event)),
-                ),
-              { capture: true },
-            );
-
-            // The press and the release of a key go no further than the field
-            // either, for the same reason.
-            const stopHere = (event: Event) => Effect.sync(() => event.stopPropagation());
-            yield* dom.listenOn(parts.input, "keypress", stopHere, { capture: true });
-            yield* dom.listenOn(parts.input, "keyup", stopHere, { capture: true });
+            yield* dom.listenOn(parts.input, "input", () => changed(parts.input.value));
 
             yield* dom.listenOn(parts.input, "blur", () =>
               // The page or the user moved on. Treat it as a cancel, and do not
