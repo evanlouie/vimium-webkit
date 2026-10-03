@@ -20,6 +20,7 @@ import {
   Context,
   Data,
   Effect,
+  FiberSet,
   HashSet,
   Layer,
   Match,
@@ -484,6 +485,8 @@ export class Keyboard extends Context.Service<
       // keyed on `code` and not on `key`, because the modifier state can change
       // between the press and the release.
       const suppressedCodes = yield* Ref.make(HashSet.empty<string>());
+      // The command bodies that still run. They start at once, on the key task.
+      const running = yield* FiberSet.make();
 
       /** Show the half-typed sequence in the HUD. `None` shows nothing. */
       const show = (text: Option.Option<string>): Effect.Effect<void> =>
@@ -524,12 +527,13 @@ export class Keyboard extends Context.Service<
       /**
        * Run a command from inside the key task.
        *
-       * `startImmediately` is what makes this correct. The fiber runs on this
-       * stack until it suspends, so a command that only calls the manager — a
-       * clipboard write, for example — completes inside the browser's
-       * activation window. A command that must wait for storage or for another
-       * frame continues on its own afterwards, and the key task returns at
-       * once.
+       * The fiber starts at once, and that is what makes this correct. It runs
+       * on this stack until it suspends, so a command that only calls the
+       * manager — a clipboard write, for example — completes inside the
+       * browser's activation window. A command that must wait for storage or
+       * for another frame continues on its own afterwards, and the key task
+       * returns at once. The fiber belongs to the layer scope, so a command
+       * that still runs when the scope closes stops with it.
        *
        * A plain `yield*` here would be wrong. The listener runs the key path
        * with `runSyncExit`, and a command that suspends would then fail as a
@@ -543,7 +547,7 @@ export class Keyboard extends Context.Service<
         yield* pipe(
           commands.run(command, { count, event: Option.some(event) }),
           Effect.catch((error) => report.error(error.detail)),
-          Effect.forkDetach({ startImmediately: true }),
+          FiberSet.run(running),
         );
       });
 

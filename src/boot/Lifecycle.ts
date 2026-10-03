@@ -58,6 +58,7 @@ import {
   Data,
   Effect,
   Fiber,
+  FiberSet,
   Layer,
   Option,
   PubSub,
@@ -272,12 +273,19 @@ export class Lifecycle extends Context.Service<
       yield* dom.listen("window", "hashchange", () => check);
 
       // Passive, and in the capture phase. We only read the URL afterwards, and
-      // we must never change the page's own handling of the click.
+      // we must never change the page's own handling of the click. The check
+      // belongs to the layer scope.
+      const settling = yield* FiberSet.make();
       yield* dom.listen(
         "window",
         "click",
         () =>
-          pipe(check, Effect.delay(`${CLICK_SETTLE_MS} millis`), Effect.forkDetach, Effect.asVoid),
+          pipe(
+            check,
+            Effect.delay(`${CLICK_SETTLE_MS} millis`),
+            FiberSet.run(settling),
+            Effect.asVoid,
+          ),
         { capture: true, passive: true },
       );
 
