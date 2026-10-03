@@ -5,7 +5,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Array, Effect, Record, Result, Struct, pipe } from "effect";
+import { Array, Effect, Record, Result, Schema, Struct, pipe } from "effect";
 import {
   defaultSettings,
   LOCAL_MARK_TTL_MS,
@@ -15,10 +15,9 @@ import {
   pruneMarks,
   settingsSchema,
 } from "~/domain/Persisted.ts";
-import { decodeUnknown } from "~/platform/SchemaIo.ts";
 
 /** Decode untrusted input and keep the detail of a failure. It never throws. */
-const decodeSettings = decodeUnknown(settingsSchema);
+const decodeSettings = Schema.decodeUnknownResult(settingsSchema);
 
 /** A fixed instant, so no test reads the clock. */
 const NOW = 1_800_000_000_000;

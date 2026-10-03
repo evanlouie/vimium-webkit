@@ -64,7 +64,6 @@ import {
   settingsGroup,
 } from "~/domain/Persisted.ts";
 import type { GmError } from "./Gm.ts";
-import { decodeUnknown, describeSchemaError } from "./SchemaIo.ts";
 import { KeyValueStore, STORAGE_PREFIX } from "./KeyValueStore.ts";
 
 // ---------------------------------------------------------------------------
@@ -407,12 +406,9 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
       Result.flatMap(payload),
       Result.flatMap(
         flow(
-          decodeUnknown(spec.schema),
+          Schema.decodeUnknownResult(spec.schema),
           Result.mapError(
-            flow(
-              describeSchemaError,
-              failureFrom("invalid", "read", "the stored value failed schema validation"),
-            ),
+            failureFrom("invalid", "read", "the stored value failed schema validation"),
           ),
         ),
       ),
@@ -461,12 +457,9 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
    * two differ.
    */
   const validate = flow(
-    decodeUnknown(spec.schema),
+    Schema.decodeUnknownResult(spec.schema),
     Result.mapError(
-      flow(
-        describeSchemaError,
-        failureFrom("invalid", "write", "refusing to persist a value that fails its own schema"),
-      ),
+      failureFrom("invalid", "write", "refusing to persist a value that fails its own schema"),
     ),
   );
 
