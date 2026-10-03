@@ -130,7 +130,7 @@ and `?` shows the native Safari shortcut beside the command.
 | `t`            | `createTab`                                      | Uses `GM_openInTab`; without it, `window.open`, which the browser can block                                    |
 | `x`            | `removeTab`                                      | Needs `@grant window.close` — **unavailable on quoid and Stay**                                                |
 | `<a-m>`        | `toggleMuteTab`                                  | Mutes `<audio>`/`<video>` elements only; WebAudio keeps playing                                                |
-| `zi` `zo` `z0` | `zoomIn` `zoomOut` `zoomReset`                   | CSS zoom, not browser zoom. Off by default; breaks `position: fixed` on some sites. Each origin keeps its zoom |
+| `zi` `zo` `z0` | `zoomIn` `zoomOut` `zoomReset`                   | CSS zoom, not browser zoom, and only for the top frame. Off by default; breaks `position: fixed` on some sites |
 | `gs`           | `toggleViewSource`                               | Some managers refuse to open `view-source:`                                                                    |
 | `o` `O`        | `Vomnibar.activate`, `…InNewTab`                 | The omnibar opens in this page. `O` opens the chosen row in a new tab, as ⇧⏎ does after `o`                    |
 | `:`            | `Vomnibar.activateCommands`                      | Full parity — the command palette needs no browser API                                                         |
@@ -186,6 +186,11 @@ page. Escape puts back the scroll position. When the prompt closes, it gives
 back the selection that the page had before the prompt opened, unless the page
 or you placed another one in the meantime. Enter then selects the match, if
 there is one.
+
+The prompt owns the keyboard while it is open, as the prompt of `p` and `P`
+does. Every key that you type goes into it, a mapped key too, and the page does
+not see it. Neither does the Enter or the Escape that closes the prompt. A
+capture listener that the page added to `window` before ours still sees them.
 
 ### A focused video player keeps its own keys
 
@@ -252,7 +257,7 @@ configuration and no config file.
 | `userDefinedLinkHintCss`       | empty                  | Extra CSS for hint markers, inside our shadow root. Refused when it holds `@import`, `@charset`, `url()`, `src()`, `image()` or `image-set()`, escaped or not.             |
 | `regexFindMode`                | `false`                | Treat a bare find query as a regular expression. See the note below.                                                                                                       |
 | `ignoreKeyboardLayout`         | `false`                | Bind physical key positions, so Dvorak and Cyrillic drive QWERTY bindings.                                                                                                 |
-| `shadowNativeFind`             | `false`                | ⌘F opens find instead of the browser's own. Ctrl+F too, if you unmap its default. Not in a text field or on an excluded page. iOS may not allow it (WebKit bug 191768).    |
+| `shadowNativeFind`             | `false`                | ⌘F opens find instead of the browser's own. Ctrl+F too, if you unmap its default. Not in a text field, on an excluded page or before we start. iOS may not allow it.       |
 | `previousPatterns`             | `prev,previous,back,…` | Link text `[` looks for.                                                                                                                                                   |
 | `nextPatterns`                 | `next,more,newer,…`    | Link text `]` looks for.                                                                                                                                                   |
 | `searchUrl`                    | Google                 | Default search template. Must contain `%s`.                                                                                                                                |
@@ -263,15 +268,37 @@ configuration and no config file.
 | `followPageColorScheme`        | `true`                 | Match the overlay to the page's theme rather than your system appearance.                                                                                                  |
 | `grabBackFocus`                | `false`                | Blur a field the page autofocused on load — unless you have already typed.                                                                                                 |
 | `passMediaKeys`                | `true`                 | Leave the arrow keys and space to a focused `<video>`/`<audio>` player.                                                                                                    |
-| `enableCssZoom`                | `false`                | Enable `zi`/`zo`. CSS zoom, not browser zoom; breaks `position: fixed` sites. While on, each origin's zoom comes back on load. Off puts pages back at 100%.                |
+| `enableCssZoom`                | `false`                | Enable `zi`/`zo`, top frame only. CSS zoom, not browser zoom; breaks `position: fixed` sites. While on, the origin's zoom comes back on load. Off puts pages back at 100%. |
 | `enableHistoryIndex`           | **`false`**            | Build a local frecency index for the omnibar. See [Privacy](./PRIVACY.md).                                                                                                 |
 | `historyIndexDenylist`         | empty                  | URL patterns never recorded in that index, written as the patterns of `exclusionRules` are. The settings dialog names each refused pattern. See the note below.            |
 | `historyIndexLimit`            | `5000`                 | Entries kept before LRU eviction. `0` disables recording.                                                                                                                  |
-| `exclusionRules`               | empty                  | URL glob → pass-key set. `*` is the only wildcard. An empty pass-key set disables us on matching pages. A pattern between two `/` is a raw expression. See the note below. |
+| `exclusionRules`               | empty                  | URL glob → pass-key set. `*` is the only wildcard. An empty set disables us on matching pages once we start. A raw expression goes between two `/`. See the notes below.   |
 | `keyMappings`                  | empty                  | Your `map`/`unmap`/`unmapAll`/`mapkey` lines, applied over the defaults.                                                                                                   |
 
 A value the script cannot make sense of falls back to its own default — that one
 setting, not the whole configuration.
+
+### The keys that start the script
+
+The script starts in a frame at the first key that you press there outside a
+text field, or when a hint round wakes the frame. The top frame also starts on
+its own 1.2 seconds after the script loads. The start reads your settings. Until
+it ends, the script holds the keys that you press, up to 16 of them, so that the
+page does not act on them. Then it acts on them itself. Three things follow:
+
+- The script cannot read your exclusion rules before the start. A key that it
+  held does not reach the page, even on a page that a rule excludes, and even
+  when the key is a pass key. Press the key again.
+- A frame inside the page learns the exclusion verdict from the top frame. It
+  acts on the held keys once it hears, and it drops them when it hears nothing
+  for three seconds. A key that you press while it waits goes to the page.
+- A start that takes longer than three seconds gives the page its keyboard back,
+  and the held keys are lost.
+
+A chord with Control or ⌘ is not held, so that ⌘C still copies. It starts the
+script and goes on to the page. A binding on such a chord, such as `<c-d>`,
+misses that first press. With `shadowNativeFind` on, that first ⌘F opens the
+browser's own find.
 
 ### An Option chord on macOS names your own key
 
