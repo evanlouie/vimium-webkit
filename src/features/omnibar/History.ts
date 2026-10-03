@@ -316,15 +316,6 @@ export const detectPrivateBrowsing: Effect.Effect<PrivacyProbe, never, Dom> = Ef
 // The interface
 // ---------------------------------------------------------------------------
 
-/** Why recording is off now. */
-export type RecordingBlock =
-  | "disabled"
-  | "private"
-  | "denylisted"
-  | "noindex"
-  | "unsupported-url"
-  | "limit-zero";
-
 export interface HistoryIndex {
   /** Record this document, subject to every gate above. */
   readonly record: Effect.Effect<void>;
@@ -332,8 +323,6 @@ export interface HistoryIndex {
   readonly visits: Effect.Effect<readonly Visit[]>;
   /** Erase the stored index. The failure is for the caller to report. */
   readonly clear: Effect.Effect<void, StorageError>;
-  /** `None` when recording proceeds. Otherwise why it does not. */
-  readonly blockedBy: Effect.Effect<Option.Option<RecordingBlock>>;
 }
 
 /** `<meta name="robots" content="noindex">`, and the same for `googlebot`. */
@@ -343,12 +332,6 @@ const hasNoIndexDirective = (document: Document): boolean =>
     Array.fromIterable,
     Array.some((meta) => meta.content.toLowerCase().includes("noindex")),
   );
-
-/** What a recording writes, once every gate has let it through. */
-interface Recordable {
-  readonly url: string;
-  readonly limit: number;
-}
 
 /**
  * Build the index for this frame.
@@ -371,55 +354,35 @@ export const makeHistoryIndex: Effect.Effect<
   const privacy = yield* Deferred.make<PrivacyProbe>();
   yield* pipe(detectPrivateBrowsing, Deferred.into(privacy), Effect.forkScoped);
 
-  /** The page and the limit, or the first gate that stops the recording. */
-  const recordable = Effect.fnUntraced(function* (): Effect.fn.Return<Recordable, RecordingBlock> {
+  /** The page and the limit. It fails at the first gate that stops the recording. */
+  const recordable = Effect.fnUntraced(function* () {
     // Gate 1. Read on every call, and not captured once, so that the setting
     // takes effect on the very next navigation after the user turns it off.
     const current = yield* pipe(
       settings.current,
       Effect.filterOrFail(
-        ({ enableHistoryIndex }) => enableHistoryIndex,
-        (): RecordingBlock => "disabled",
-      ),
-      Effect.filterOrFail(
-        ({ historyIndexLimit }) => historyIndexLimit > 0,
-        (): RecordingBlock => "limit-zero",
+        ({ enableHistoryIndex, historyIndexLimit }) => enableHistoryIndex && historyIndexLimit > 0,
       ),
     );
     yield* pipe(
       Deferred.await(privacy),
       Effect.timeoutOption(PRIVACY_PROBE_TIMEOUT),
-      Effect.filterOrFail(Option.contains<PrivacyProbe>("clear"), (): RecordingBlock => "private"),
+      Effect.filterOrFail(Option.contains<PrivacyProbe>("clear")),
     );
     const url = yield* pipe(
       dom.href,
       Effect.map(canonicaliseUrl),
-      Effect.flatMap(Effect.fromOption((): RecordingBlock => "unsupported-url")),
-      Effect.filterOrFail(
-        (canonical) => !matchesDenylist(canonical, current.historyIndexDenylist),
-        (): RecordingBlock => "denylisted",
-      ),
+      Effect.flatMap(Effect.fromOption),
+      Effect.filterOrFail((canonical) => !matchesDenylist(canonical, current.historyIndexDenylist)),
     );
     yield* pipe(
       // A document that refuses the read is not recorded. The safe answer to
       // "we could not tell" is "do not record".
       dom.probeOrElse(() => hasNoIndexDirective(dom.document), constTrue),
-      Effect.filterOrFail(
-        (noindex) => !noindex,
-        (): RecordingBlock => "noindex",
-      ),
+      Effect.filterOrFail((noindex) => !noindex),
     );
     return { url, limit: current.historyIndexLimit };
   });
-
-  const blockedBy = pipe(
-    recordable(),
-    Effect.match({
-      onFailure: Option.some,
-      onSuccess: () => Option.none<RecordingBlock>(),
-    }),
-    Effect.withSpan("HistoryIndex.blockedBy"),
-  );
 
   const record = Effect.fn("HistoryIndex.record")(
     function* () {
@@ -450,6 +413,5 @@ export const makeHistoryIndex: Effect.Effect<
     // leave a hole in the shape of this script in the storage list of the
     // manager either.
     clear: pipe(storage.history.reset, Effect.asVoid),
-    blockedBy,
   };
 });
