@@ -19,13 +19,14 @@ import {
   Option,
   Record,
   Ref,
+  Stream,
   flow,
   pipe,
 } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Report } from "~/core/Report.ts";
-import { Settings } from "~/core/Settings.ts";
-import { withZoom } from "~/domain/Persisted.ts";
+import { Settings, type SettingsData } from "~/core/Settings.ts";
+import { type SessionState, withZoom } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Storage } from "~/platform/Storage.ts";
 import { type TabError, Tabs } from "~/platform/Tabs.ts";
@@ -50,6 +51,25 @@ type ZoomChange = Data.TaggedEnum<{
   Scale: { readonly factor: number };
 }>;
 const ZoomChange = Data.taggedEnum<ZoomChange>();
+
+/** The zoom that the store keeps for an origin. 100% when it keeps none. */
+const storedZoom =
+  (origin: string) =>
+  (session: SessionState): number =>
+    pipe(
+      session.zoomByOrigin,
+      Record.get(origin),
+      Option.getOrElse(() => 1),
+    );
+
+/** The zoom that a page of the origin shows: the stored one while CSS zoom is on. */
+const pageZoom =
+  (origin: string) =>
+  ([current, session]: readonly [SettingsData, SessionState]): number =>
+    pipe(
+      current.enableCssZoom,
+      Boolean.match({ onFalse: () => 1, onTrue: () => storedZoom(origin)(session) }),
+    );
 
 /** The zoom after a change, from the zoom that the origin has now. */
 const zoomAfter = (current: number): ((change: ZoomChange) => number) =>
@@ -131,6 +151,23 @@ export class TabControl extends Context.Service<
 
       const muted = yield* Ref.make(false);
 
+      // A frame does not change its origin, so it is read once.
+      const origin = yield* dom.probeOrElse(
+        () => dom.window.location.origin,
+        () => "",
+      );
+
+      // `zoom` on the root element, and not the browser's own zoom. It does
+      // not change the address bar, it does not survive a manager change,
+      // and it breaks `position: fixed` on some sites. It is off by default.
+      const setZoom = (zoom: number): Effect.Effect<void> =>
+        pipe(
+          dom.attempt("documentElement.style.zoom", () => {
+            dom.document.documentElement.style.zoom = zoomStyle(zoom);
+          }),
+          Effect.ignore,
+        );
+
       const mediaElements = (): ReadonlyArray<HTMLMediaElement> => mediaBelow(dom.document);
 
       const setAllMuted = (value: boolean): Effect.Effect<void> =>
@@ -188,28 +225,10 @@ export class TabControl extends Context.Service<
       });
 
       const applyZoom = Effect.fn("TabControl.applyZoom")(function* (change: ZoomChange) {
-        const origin = yield* dom.probeOrElse(
-          () => dom.window.location.origin,
-          () => "",
-        );
         const session = yield* storage.session.current;
-        const current = pipe(
-          session.zoomByOrigin,
-          Record.get(origin),
-          Option.getOrElse(() => 1),
-        );
-        const next = pipe(change, zoomAfter(current));
+        const next = pipe(change, zoomAfter(storedZoom(origin)(session)));
 
-        // `zoom` on the root element, and not the browser's own zoom. It does
-        // not change the address bar, it does not survive a manager change,
-        // and it breaks `position: fixed` on some sites. It is off by
-        // default.
-        yield* pipe(
-          dom.attempt("documentElement.style.zoom", () => {
-            dom.document.documentElement.style.zoom = zoomStyle(next);
-          }),
-          Effect.ignore,
-        );
+        yield* setZoom(next);
 
         yield* pipe(
           storage.session.update(withZoom(origin, next)),
@@ -233,6 +252,21 @@ export class TabControl extends Context.Service<
           }),
         );
       });
+
+      // Put the stored zoom back on the page. The store answers only after the
+      // layer is built, and another tab of this origin can change it later, so
+      // this follows the store. Every page starts at 100%, and a page that was
+      // never zoomed keeps its own style: the first zoom written is the first
+      // one that is not 100%.
+      yield* pipe(
+        settings.changes,
+        Stream.zipLatest(storage.session.changes),
+        Stream.map(pageZoom(origin)),
+        Stream.changes,
+        Stream.dropWhile((zoom) => zoom === 1),
+        Stream.runForEach(setZoom),
+        Effect.forkScoped,
+      );
 
       yield* commands.registerAll({
         createTab: () =>
