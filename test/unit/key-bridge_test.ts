@@ -249,6 +249,7 @@ const withBridge = (
         },
         {
           keydown: record("keydown"),
+          keypress: record("keypress"),
           keyup: record("keyup"),
           click: record("click"),
           focus: record("focus"),
@@ -269,11 +270,19 @@ describe("the key bridge", () => {
     withBridge((attached, seen) =>
       Effect.gen(function* () {
         yield* fire(attached, { window: { keydown: byUser("keydown") } });
+        yield* fire(attached, { window: { keypress: byUser("keypress") } });
         yield* fire(attached, { window: { keyup: byUser("keyup") } });
         yield* fire(attached, { window: { click: byUser("click") } });
         yield* fire(attached, { window: { focus: byUser("focus") } });
         yield* fire(attached, { window: { blur: byUser("blur") } });
-        assert.deepEqual(yield* Ref.get(seen), ["keydown", "keyup", "click", "focus", "blur"]);
+        assert.deepEqual(yield* Ref.get(seen), [
+          "keydown",
+          "keypress",
+          "keyup",
+          "click",
+          "focus",
+          "blur",
+        ]);
       }),
     ),
   );
@@ -282,6 +291,7 @@ describe("the key bridge", () => {
     withBridge((attached, seen) =>
       Effect.gen(function* () {
         yield* fire(attached, { window: { keydown: byPage("keydown") } });
+        yield* fire(attached, { window: { keypress: byPage("keypress") } });
         yield* fire(attached, { window: { keyup: byPage("keyup") } });
 
         assert.deepEqual(yield* Ref.get(seen), []);

@@ -35,8 +35,7 @@ const fromUser = <E extends Event, R>(
  * something only once modes exist. `focus` and `blur` also occur constantly on
  * a busy page.
  *
- * A `keydown`, a `keyup`, a `focus` or a `blur` that the page made is dropped
- * here. The page can dispatch a `KeyboardEvent` that names any key. A mapped
+ * A key event, a `focus` or a `blur` that the page made is dropped here. The page can dispatch a `KeyboardEvent` that names any key. A mapped
  * key then runs a command, and a command can open a tab, navigate or write the
  * clipboard. `isTrusted` separates the user from the page, and only the browser
  * can set it.
@@ -45,6 +44,11 @@ const fromUser = <E extends Event, R>(
  * that names the focused field leaves insert mode. The next true key of the
  * user then runs a command inside a text field. A `focus` on any text field
  * starts insert mode and stops every binding.
+ *
+ * `keypress` goes through the stack as well. A mode that owns the keyboard
+ * takes it, and the find prompt and the omnibar take every `keypress` that is
+ * not aimed at their own field. The browser sends no `keypress` for a
+ * `keydown` that a mode suppressed.
  *
  * `click` keeps every event. Hint activation dispatches its own pointer events,
  * and a mode that exits on a click must see them.
@@ -72,6 +76,7 @@ export const attachKeyBridge: Effect.Effect<void, never, Dom | Keyboard | Modes 
         Effect.asVoid(modes.bubble(name, event));
 
     yield* dom.listen("window", "keydown", fromUser(bubble("keydown")), CAPTURE);
+    yield* dom.listen("window", "keypress", fromUser(bubble("keypress")), CAPTURE);
     yield* dom.listen("window", "keyup", fromUser(bubble("keyup")), CAPTURE);
     yield* dom.listen("window", "click", bubble("click"), CAPTURE);
     yield* dom.listen("window", "focus", fromUser(bubble("focus")), CAPTURE);
