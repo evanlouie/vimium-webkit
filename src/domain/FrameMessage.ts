@@ -69,11 +69,12 @@
  * settings again: `VERDICT` carries the verdict, and `SETTINGS` carries
  * nothing and goes out only once a save has reached storage.
  *
- * ## What the hints service must do
+ * ## What the hints layer must do
  *
  * The transport does not know what a hint round is. It checks the envelope, the
- * session and the sender, and it stops there. The hints service answers all
- * hint messages with `FrameBus.serve`. It also owns these round rules:
+ * session and the sender, and it stops there. The hints layer,
+ * `features/hints/Hints.ts`, answers all hint messages with `FrameBus.serve`. It
+ * also owns these round rules:
  *
  * - One live round for the whole page, with a limit on its age. An admitted
  *   frame could otherwise start detection passes without a limit.
@@ -295,7 +296,7 @@ const byLocalIndex: Order.Order<HintDescriptor> = pipe(
  *
  * Each frame sorts the merged set of descriptors on its own, and then works out
  * its hint strings from the result. A comparator that differs by one position
- * means that two frames do not agree about what `sa` selects. The hints service
+ * means that two frames do not agree about what `sa` selects. The hints layer
  * must use this function, and no other.
  */
 export const compareDescriptors: Order.Order<HintDescriptor> = pipe(
@@ -428,14 +429,14 @@ const keepQuota = (
  * Share a bound between the frames, and cut what does not fit.
  *
  * Every frame must end with the same list, because the hint strings come from
- * the position in that list. A frame does not see the whole round: the top
- * frame takes the descriptors of the receiver out of each copy that it sends,
- * and the receiver puts its own back. This function therefore gives the same
- * answer for both views, and the proof is in the shape of the quota:
+ * the position in that list. The top frame limits the merged list of the round
+ * and sends it whole, and each frame that receives it runs this function on it
+ * again. A list that this function already limited must therefore come back
+ * unchanged, and the proof is in the shape of the quota:
  *
  * - A frame keeps a prefix of its own descriptors, in `localIndex` order.
- * - A frame that fits inside its share keeps everything, so its list is the
- *   same in both views.
+ * - A frame that fits inside its share keeps everything, so a second run keeps
+ *   everything too.
  * - A frame that is cut keeps `level` descriptors, or `level + 1` when it is
  *   one of the first frames in the canonical order that needed more. Running
  *   this function again on that result gives the same `level` and the same
@@ -731,10 +732,10 @@ const hints = define({
 /**
  * Top to the origin frame, in answer to `REQUEST_HINTS`.
  *
- * The descriptors of the origin are removed from this payload. The origin
- * already holds its heavy local hints, and it works its own descriptors out
- * again from them. Upstream measured that removal as a large gain on a page
- * with many links.
+ * The payload is the whole bounded list of the round, with the descriptors of
+ * the origin in it. Every frame then works its hint strings out from the same
+ * list, and the origin pairs its own descriptors with the local hints that it
+ * already holds.
  *
  * The frame that merges the answers must accept a descriptor from the frame
  * that produced it only. A descriptor that is given to the wrong frame breaks
@@ -781,7 +782,10 @@ const activateHint = define({
   mode: hintModeSchema,
 });
 
-/** Any frame to every participant: stop one round and remove its state. */
+/**
+ * The origin to the top frame, and the top frame on to every frame: stop one
+ * round and remove its state.
+ */
 const cancelHints = define({
   kind: Schema.Literal("CANCEL_HINTS"),
   roundId: idSchema,
@@ -957,11 +961,10 @@ export const encodeLinkMessage = Schema.encodeOption(linkMessageSchema);
 /**
  * The decoders are built once, at module load, and used for every message.
  *
- * `Schema.decodeUnknownOption`, and not the `Result` form of
- * `platform/SchemaIo.ts`. Both are synchronous and neither one throws, but this
- * boundary drops the diagnosis in any case. The `Option` form takes `unknown`
- * directly, and it never builds an error message that a hostile page would be
- * paying us to produce.
+ * `Schema.decodeUnknownOption`, and not `Schema.decodeUnknownResult`. Both are
+ * synchronous and neither one throws, but this boundary drops the diagnosis in
+ * any case. The `Option` form takes `unknown` directly, and it never builds an
+ * error message that a hostile page would be paying us to produce.
  */
 const decodeWire = Schema.decodeUnknownOption(frameWireSchema);
 const decodeWindowToTop = Schema.decodeUnknownOption(windowToTopSchema);
