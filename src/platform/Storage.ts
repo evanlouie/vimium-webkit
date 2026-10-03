@@ -161,8 +161,30 @@ export interface ValueGroup<A> {
 // The commands that the group fiber runs
 // ---------------------------------------------------------------------------
 
-/** A caller that waits for a write to reach the backend. */
+/** A caller of `write` or `flush`, which waits for a write to reach the backend. */
 type WriteReply = Deferred.Deferred<void, StorageError>;
+
+/**
+ * A caller that waits for a write to reach the backend, as the effect that
+ * answers it.
+ *
+ * A function and not a `Deferred`, so that `update` can answer with the value
+ * that it made, and no fiber has to wait for the write in between.
+ */
+type Waiter = (outcome: Exit.Exit<void, StorageError>) => Effect.Effect<void>;
+
+/** The waiter of a caller of `write`. */
+const replyTo =
+  (reply: WriteReply): Waiter =>
+  (outcome) =>
+    pipe(reply, Deferred.done(outcome));
+
+/** The waiter of a caller of `update`. It gets the value that it made, once the write is done. */
+const replyWith = <A>(reply: Deferred.Deferred<A, StorageError>, value: A): Waiter =>
+  flow(
+    Exit.map(() => value),
+    (answer) => Deferred.done(reply, answer),
+  );
 
 type Command<A> = Data.TaggedEnum<{
   Hydrate: { readonly reply: Deferred.Deferred<A> };
@@ -195,12 +217,12 @@ type Held<A> = Data.TaggedEnum<{
   /** Nothing is held, and nobody waits. */
   Empty: Record<never, never>;
   /** A value waits for the window to close. It is the last write of the window. */
-  Holding: { readonly value: A; readonly waiters: Array.NonEmptyReadonlyArray<WriteReply> };
+  Holding: { readonly value: A; readonly waiters: Array.NonEmptyReadonlyArray<Waiter> };
   /**
    * The exit path wrote the held value. The callers still wait for the actor,
    * which answers them on its next turn.
    */
-  Written: { readonly waiters: Array.NonEmptyReadonlyArray<WriteReply> };
+  Written: { readonly waiters: Array.NonEmptyReadonlyArray<Waiter> };
 }>;
 
 interface HeldDefinition extends Data.TaggedEnum.WithGenerics<1> {
@@ -211,7 +233,7 @@ const Held = Data.taggedEnum<HeldDefinition>();
 
 type Holding<A> = Data.TaggedEnum.Value<Held<A>, "Holding">;
 
-const waitersOf = <A>(held: Held<A>): ReadonlyArray<WriteReply> =>
+const waitersOf = <A>(held: Held<A>): ReadonlyArray<Waiter> =>
   pipe(
     held,
     Held.$match({
@@ -234,9 +256,9 @@ const holdingOf = <A>(held: Held<A>): Option.Option<Holding<A>> =>
 
 /** Put a value in the window. It replaces the held value, and every caller keeps waiting. */
 const hold =
-  <A>(value: A, reply: WriteReply) =>
+  <A>(value: A, waiter: Waiter) =>
   (held: Held<A>): Held<A> =>
-    Held.Holding({ value, waiters: pipe(waitersOf(held), Array.append(reply)) });
+    Held.Holding({ value, waiters: pipe(waitersOf(held), Array.append(waiter)) });
 
 /** How a group writes an accepted value. */
 type WritePolicy = Data.TaggedEnum<{
@@ -508,15 +530,7 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
       Effect.fromResult,
       Effect.tapError(report),
       Effect.flatMap((bytes) =>
-        pipe(
-          kv.set(key, bytes),
-          Effect.mapError(backendWriteFailure),
-          Effect.tapError(report),
-          // Not interruptible. A promise inside the backend keeps running after
-          // its fiber is interrupted, so an interrupted `set` could still land
-          // after a later `remove`.
-          Effect.uninterruptible,
-        ),
+        pipe(kv.set(key, bytes), Effect.mapError(backendWriteFailure), Effect.tapError(report)),
       ),
       Effect.andThen(setReadFailure(Option.none())),
     );
@@ -529,7 +543,7 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
     });
 
   /** The exit path wrote the held value. The actor answers its callers later. */
-  const markWritten = (waiters: Array.NonEmptyReadonlyArray<WriteReply>): void => {
+  const markWritten = (waiters: Array.NonEmptyReadonlyArray<Waiter>): void => {
     pipe(held, MutableRef.set<Held<A>>(Held.Written({ waiters })));
     pipe(readFailure, MutableRef.set(Option.none()));
   };
@@ -603,10 +617,13 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
   const takeHeld = Effect.sync(() => pipe(held, MutableRef.getAndSet<Held<A>>(Held.Empty())));
 
   const settle = (
-    waiters: ReadonlyArray<WriteReply>,
+    waiters: ReadonlyArray<Waiter>,
     outcome: Exit.Exit<void, StorageError>,
   ): Effect.Effect<void> =>
-    pipe(waiters, Effect.forEach(Deferred.done(outcome), { discard: true }));
+    pipe(
+      waiters,
+      Effect.forEach((answer) => answer(outcome), { discard: true }),
+    );
 
   /** Write whatever is inside the debounce window, if anything is. */
   const commitHeld: Effect.Effect<Exit.Exit<void, StorageError>> = Effect.gen(function* () {
@@ -632,47 +649,41 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
     pipe(Effect.sleep(delay), Effect.andThen(elapsed), FiberHandle.run(timer));
 
   /** Write an accepted value now, and give the caller the outcome. */
-  const commitNow = (accepted: A, reply: WriteReply): Effect.Effect<void> =>
-    pipe(
-      commit(accepted),
-      Effect.exit,
-      Effect.flatMap((outcome) => pipe(reply, Deferred.done(outcome))),
-    );
+  const commitNow = (accepted: A, waiter: Waiter): Effect.Effect<void> =>
+    pipe(commit(accepted), Effect.exit, Effect.flatMap(waiter));
 
   /** Hold an accepted value until the window closes. The caller waits for that write. */
-  const holdFor = (delay: Duration.Duration, accepted: A, reply: WriteReply): Effect.Effect<void> =>
+  const holdFor = (delay: Duration.Duration, accepted: A, waiter: Waiter): Effect.Effect<void> =>
     pipe(
       Effect.sync(() => {
-        pipe(held, MutableRef.update(hold(accepted, reply)));
+        pipe(held, MutableRef.update(hold(accepted, waiter)));
       }),
       Effect.andThen(armTimer(delay)),
     );
 
-  const persist = (accepted: A, reply: WriteReply): Effect.Effect<void> =>
+  const persist = (accepted: A, waiter: Waiter): Effect.Effect<void> =>
     pipe(
       policy,
       WritePolicy.$match({
-        Immediate: () => commitNow(accepted, reply),
-        Debounced: ({ delay }) => holdFor(delay, accepted, reply),
+        Immediate: () => commitNow(accepted, waiter),
+        Debounced: ({ delay }) => holdFor(delay, accepted, waiter),
       }),
     );
 
   /** Report a refused value, and give the caller the same failure. */
-  const refuse = (error: StorageError, reply: WriteReply): Effect.Effect<void> => {
-    const answer = pipe(reply, Deferred.fail(error));
-    return pipe(report(error), Effect.andThen(answer));
-  };
+  const refuse = (error: StorageError, waiter: Waiter): Effect.Effect<void> =>
+    pipe(report(error), Effect.andThen(waiter(Exit.fail(error))));
 
   // Validated before it is published, and the *decoded* value is what gets
   // published. Publishing the raw value would leave memory holding a value
   // that storage does not have, and the setting would appear to revert on the
   // next page load.
-  const applyWrite = (next: A, reply: WriteReply): Effect.Effect<void> =>
+  const applyWrite = (next: A, waiter: Waiter): Effect.Effect<void> =>
     pipe(
       validate(next),
       Result.match({
-        onFailure: (error) => refuse(error, reply),
-        onSuccess: (accepted) => pipe(publish(accepted), Effect.andThen(persist(accepted, reply))),
+        onFailure: (error) => refuse(error, waiter),
+        onSuccess: (accepted) => pipe(publish(accepted), Effect.andThen(persist(accepted, waiter))),
       }),
     );
 
@@ -699,22 +710,31 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
     yield* pipe(reply, Deferred.succeed(value));
   });
 
-  const changeAndWrite = Effect.fnUntraced(function* (
+  /**
+   * Make the change, and write what it made.
+   *
+   * A change that throws is a defect of its caller. That caller gets a
+   * failure, and the actor goes on to the next command.
+   */
+  const changeAndWrite = (
     change: (current: A) => A,
     reply: Deferred.Deferred<A, StorageError>,
-  ) {
-    const next = change(yield* SubscriptionRef.get(memory));
-    const written = yield* Deferred.make<void, StorageError>();
-    yield* applyWrite(next, written);
-    yield* pipe(
-      Deferred.await(written),
-      Effect.matchEffect({
-        onFailure: (error) => pipe(reply, Deferred.fail(error)),
-        onSuccess: () => pipe(reply, Deferred.succeed(next)),
-      }),
-      Effect.forkDetach,
+  ): Effect.Effect<void> =>
+    pipe(
+      SubscriptionRef.get(memory),
+      Effect.map((current) =>
+        Result.try({
+          try: () => change(current),
+          catch: failureFrom("invalid", "write", "the change of the value failed"),
+        }),
+      ),
+      Effect.flatMap(
+        Result.match({
+          onFailure: (error) => pipe(reply, Deferred.fail(error), Effect.andThen(report(error))),
+          onSuccess: (next) => applyWrite(next, replyWith(reply, next)),
+        }),
+      ),
     );
-  });
 
   // The defaults are not a safe base for a read, change and write. Refuse
   // until a later read or reset succeeds, or until the caller replaces the
@@ -750,7 +770,6 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
       kv.remove(key),
       Effect.mapError(backendWriteFailure),
       Effect.tapError(report),
-      Effect.uninterruptible,
       Effect.exit,
     );
     yield* pipe(
@@ -795,7 +814,7 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
       command,
       Command.$match({
         Hydrate: ({ reply }) => hydrate(reply),
-        Write: ({ value, reply }) => applyWrite(value, reply),
+        Write: ({ value, reply }) => applyWrite(value, replyTo(reply)),
         Update: ({ change, reply }) => update(change, reply),
         Reset: ({ reply }) => reset(reply),
         Flush: ({ reply }) => flush(reply),
@@ -804,7 +823,63 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
       }),
     );
 
-  yield* pipe(Queue.take(mailbox), Effect.flatMap(handle), Effect.forever, Effect.forkScoped);
+  /** The answer for a caller that still waits when the group closes. */
+  const closed = failure(
+    "cancelled",
+    "write",
+    "the storage closed before the write reached the backend",
+  );
+
+  /** Answer a command that the actor never took. */
+  const cancel = (command: Command<A>): Effect.Effect<void> =>
+    pipe(
+      command,
+      Command.$match({
+        Hydrate: ({ reply }) => Deferred.interrupt(reply),
+        Write: ({ reply }) => pipe(reply, Deferred.fail(closed)),
+        Update: ({ reply }) => pipe(reply, Deferred.fail(closed)),
+        Reset: ({ reply }) => pipe(reply, Deferred.fail(closed)),
+        Flush: ({ reply }) => pipe(reply, Deferred.fail(closed)),
+        Elapsed: () => Effect.void,
+        Remote: () => Effect.void,
+      }),
+    );
+
+  /**
+   * Answer every caller that still waits when the group closes.
+   *
+   * It runs after the actor stops, so nothing else touches the window or the
+   * mailbox. A value that the exit path wrote reached the backend, and any
+   * other held value did not.
+   */
+  const close = Effect.gen(function* () {
+    const taken = yield* takeHeld;
+    yield* pipe(
+      taken,
+      Held.$match({
+        Empty: () => Effect.void,
+        Holding: ({ waiters }) => settle(waiters, Exit.fail(closed)),
+        Written: ({ waiters }) => settle(waiters, Exit.void),
+      }),
+    );
+    const unanswered = yield* Queue.clear(mailbox);
+    yield* pipe(unanswered, Effect.forEach(cancel, { discard: true }));
+  });
+
+  // Added before the actor starts, so that the scope runs it after the actor
+  // stops.
+  yield* Effect.addFinalizer(() => close);
+
+  // The actor finishes every command that it takes, so every caller whose
+  // command it took gets an answer. It stops only while it waits for the next
+  // command. That also keeps a write and a later remove in order: a promise of
+  // the backend keeps running after its fiber is interrupted, so an
+  // interrupted `set` could otherwise land after a later `remove`.
+  const serve = Effect.uninterruptibleMask((restore) =>
+    pipe(restore(Queue.take(mailbox)), Effect.flatMap(handle)),
+  );
+
+  yield* pipe(serve, Effect.forever, Effect.forkScoped);
 
   // Another tab's writes enter through the same queue, so they take their
   // turn like everything else.
