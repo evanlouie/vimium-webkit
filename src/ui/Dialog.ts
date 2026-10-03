@@ -27,8 +27,8 @@ import {
   Array,
   Boolean,
   Data,
+  Deferred,
   Effect,
-  Exit,
   FiberHandle,
   flow,
   Function,
@@ -36,7 +36,6 @@ import {
   Match,
   Option,
   Record,
-  Ref,
   Scope,
   pipe,
   Struct,
@@ -45,6 +44,7 @@ import { Commands } from "~/core/Commands.ts";
 import { type HandlerResult, SUPPRESS_EVENT, SUPPRESS_PROPAGATION } from "~/core/HandlerStack.ts";
 import { Mappings } from "~/core/Mappings.ts";
 import { ExitTrigger, KeyPolicy, Modes } from "~/core/Modes.ts";
+import { recoverUnlessInterrupted } from "~/core/Recovery.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import {
@@ -968,6 +968,11 @@ interface BuiltSection {
   readonly controls: ReadonlyArray<SettingsControl>;
 }
 
+/** What every dialog gives the session that shows it. */
+interface DialogParts {
+  readonly dialog: HTMLElement;
+}
+
 /** The parts of the settings dialog that the save step writes back to. */
 interface SettingsForm {
   readonly dialog: HTMLElement;
@@ -1074,23 +1079,21 @@ export const DialogLayer: Layer.Layer<
       return dialog;
     };
 
-    /** The scope of the open dialog. Closing it removes every part of it. */
-    const openScope = yield* Ref.make<Option.Option<Scope.Closeable>>(Option.none());
+    // One dialog at a time. Its fiber holds the scope of the dialog, so the
+    // end of the fiber removes every part of it, whatever ends the fiber.
+    const sessions = yield* FiberHandle.make<void, never>();
 
     // One save at a time. A save reaches storage, so it cannot run on the
     // key path; it runs in this fiber instead.
     const saves = yield* FiberHandle.make<void, never>();
 
-    const close: Effect.Effect<void> = pipe(
-      openScope,
-      Ref.getAndSet(Option.none<Scope.Closeable>()),
-      Effect.flatMap(
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: (scope) => Scope.close(scope, Exit.void),
-        }),
-      ),
-    );
+    /**
+     * Close the open dialog, if there is one.
+     *
+     * The fiber of the dialog waits for its mode to exit, so the interruption
+     * and every release step run at once, and nothing here suspends.
+     */
+    const close: Effect.Effect<void> = FiberHandle.clear(sessions);
 
     /**
      * Move the focus to the next or the previous control of the dialog.
@@ -1169,100 +1172,104 @@ export const DialogLayer: Layer.Layer<
         Effect.ignore,
       );
 
-    /** Open a dialog that `build` draws, in a scope of its own. */
-    const open = Effect.fnUntraced(function* <A extends { readonly dialog: HTMLElement }>(
-      build: Effect.Effect<A, never, Scope.Scope>,
+    /**
+     * Show a dialog that `build` draws, until its mode exits.
+     *
+     * Every part is acquired in the scope of the session, and `build` gets
+     * that scope too, so a listener that it registers goes away with the
+     * dialog.
+     */
+    const session = Effect.fnUntraced(function* (
+      build: Effect.Effect<DialogParts, never, Scope.Scope>,
     ) {
-      const scope = yield* Scope.make();
-
       // The layer is opened before the dialog is built, so that the
       // release steps run in the other order: the dialog leaves the tree
       // first, and `aria-hidden` arrives on an empty layer. A layer that
       // became hidden while it still held the focused element is the state
       // that browsers warn about, because a screen reader loses the
       // focused node.
-      yield* pipe(acceptPointerEvents(dialogLayer), Scope.provide(scope));
+      yield* acceptPointerEvents(dialogLayer);
       // The dialog is a true control, so assistive technology must reach
       // it. The release step hides the layer again.
-      yield* pipe(ui.expose(dialogLayer), Scope.provide(scope));
+      yield* ui.expose(dialogLayer);
 
-      const parts = yield* pipe(build, Scope.provide(scope));
+      const parts = yield* build;
 
-      const backdrop = yield* pipe(
-        Effect.acquireRelease(
+      const backdrop = yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const element = classEl("div", "vw-dialog-backdrop");
+          element.appendChild(parts.dialog);
+          dialogLayer.appendChild(element);
+          return element;
+        }),
+        (element) =>
           Effect.sync(() => {
-            const element = classEl("div", "vw-dialog-backdrop");
-            element.appendChild(parts.dialog);
-            dialogLayer.appendChild(element);
-            return element;
+            element.remove();
           }),
-          (element) =>
-            Effect.sync(() => {
-              element.remove();
-            }),
-        ),
-        Scope.provide(scope),
       );
 
-      yield* pipe(
-        dom.listenOn(backdrop, "click", (event) =>
-          pipe(
-            event.target === backdrop,
-            Boolean.match({
-              onFalse: () => Effect.void,
-              onTrue: () => close,
-            }),
-          ),
+      yield* dom.listenOn(backdrop, "click", (event) =>
+        pipe(
+          event.target === backdrop,
+          Boolean.match({
+            onFalse: () => Effect.void,
+            onTrue: () => close,
+          }),
         ),
-        Scope.provide(scope),
       );
 
       // The dialog owns the keyboard. `trapKey` says how.
-      const mode = yield* pipe(
-        modes.enter(
-          {
-            name: "dialog",
-            indicator: Option.none(),
-            exitOn: [ExitTrigger.Escape()],
-            keyboard: KeyPolicy.Shared(),
-            singleton: Option.some("dialog"),
-          },
-          { keydown: (event) => trapKey(parts.dialog, event) },
-        ),
-        Scope.provide(scope),
+      const mode = yield* modes.enter(
+        {
+          name: "dialog",
+          indicator: Option.none(),
+          exitOn: [ExitTrigger.Escape()],
+          keyboard: KeyPolicy.Shared(),
+          singleton: Option.some("dialog"),
+        },
+        { keydown: (event) => trapKey(parts.dialog, event) },
       );
-      yield* mode.onExit(() => close);
-
-      yield* pipe(openScope, Ref.set(Option.some(scope)));
+      // The exit of the mode ends the session. An exit body also runs while
+      // this scope closes, on this fiber, so it signals the end instead of
+      // calling `close`, which would wait for this fiber.
+      const exited = yield* Deferred.make<void>();
+      yield* mode.onExit(() => pipe(exited, Deferred.succeed<void>(undefined), Effect.asVoid));
 
       // Acquired last, so that its release step runs first: the focus
       // leaves the dialog before the dialog leaves the tree. A modal that
       // drops the focus leaves the user at the top of the document.
-      yield* pipe(
-        Effect.acquireRelease(
-          dom.probeOrElse(() => Option.fromNullishOr(deepActiveElement(doc)), Option.none),
-          focusAgain,
-        ),
-        Scope.provide(scope),
+      yield* Effect.acquireRelease(
+        dom.probeOrElse(() => Option.fromNullishOr(deepActiveElement(doc)), Option.none),
+        focusAgain,
       );
 
       yield* Effect.sync(() => {
         parts.dialog.tabIndex = -1;
         parts.dialog.focus({ preventScroll: true });
       });
+
+      yield* Deferred.await(exited);
     });
 
     /**
-     * Put a dialog on screen, in a scope of its own.
+     * Put a dialog on screen, in place of the one that is open.
      *
-     * `build` gets the scope, so a listener that it registers goes away with
-     * the dialog.
+     * The open dialog closes first. Its release steps give back the pointer,
+     * the exposure of the layer and the focus, so they must run before the
+     * new dialog takes them. `FiberHandle.run` starts the session at once,
+     * so the dialog holds the keyboard before the key that asked for it is
+     * done.
      */
-    const present = Effect.fn("Dialog.present")(function* <
-      A extends { readonly dialog: HTMLElement },
-    >(build: Effect.Effect<A, never, Scope.Scope>) {
+    const present = Effect.fn("Dialog.present")(function* (
+      build: Effect.Effect<DialogParts, never, Scope.Scope>,
+    ) {
       yield* close;
-      yield* open(build);
+      yield* pipe(
+        session(build),
+        Effect.scoped,
+        recoverUnlessInterrupted("Dialog.session", Effect.void),
+        FiberHandle.run(sessions),
+      );
     });
 
     // ---------------------------------------------------------------
