@@ -34,8 +34,8 @@ import { Marks } from "~/features/Marks.ts";
 import { Navigation } from "~/features/Navigation.ts";
 import { Omnibar } from "~/features/omnibar/Omnibar.ts";
 import { Scroller } from "~/features/Scroller.ts";
-import { TabControl } from "~/features/TabControl.ts";
-import { UrlClipboard } from "~/features/UrlClipboard.ts";
+import { TabControlLayer } from "~/features/TabControl.ts";
+import { UrlClipboardLayer } from "~/features/UrlClipboard.ts";
 import { Visual } from "~/features/visual/Visual.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
@@ -124,7 +124,7 @@ const MarksLayer = pipe(Marks.layer, Layer.provide(Scroller.layer));
 // `UrlClipboard` opens a URL that the user pasted, which is the same step that
 // `Navigation` takes for a typed URL. It asks for that service rather than
 // repeating the rule about what a bare word means.
-const UrlClipboardLayer = pipe(UrlClipboard.layer, Layer.provide(Navigation.layer));
+const UrlClipboardWithNavigation = pipe(UrlClipboardLayer, Layer.provide(Navigation.layer));
 
 /**
  * The features.
@@ -143,8 +143,8 @@ const FeatureLayer = pipe(
     Find.layer,
     Visual.layer,
     Omnibar.layer,
-    TabControl.layer,
-    UrlClipboardLayer,
+    TabControlLayer,
+    UrlClipboardWithNavigation,
     Navigation.layer,
   ),
   Layer.provideMerge(FramesLayer),

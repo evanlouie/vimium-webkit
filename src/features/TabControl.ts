@@ -10,7 +10,6 @@
 import {
   Array,
   Boolean,
-  Context,
   Data,
   Effect,
   FiberHandle,
@@ -127,177 +126,163 @@ const muteAdded = (record: MutationRecord): void =>
     Array.forEach(setMuted(true)),
   );
 
-export class TabControl extends Context.Service<
-  TabControl,
-  {
-    /** True while the media elements of this page are muted by us. */
-    readonly isMuted: Effect.Effect<boolean>;
-  }
->()("vimium/features/TabControl") {
-  static readonly layer: Layer.Layer<
-    TabControl,
-    never,
-    Commands | Dom | Hud | Report | Settings | Storage | Tabs
-  > = Layer.effect(
-    TabControl,
-    Effect.gen(function* () {
-      const commands = yield* Commands;
-      const dom = yield* Dom;
-      const hud = yield* Hud;
-      const report = yield* Report;
-      const settings = yield* Settings;
-      const storage = yield* Storage;
-      const tabs = yield* Tabs;
+/** The commands of a tab. The layer registers them, and gives no service. */
+export const TabControlLayer: Layer.Layer<
+  never,
+  never,
+  Commands | Dom | Hud | Report | Settings | Storage | Tabs
+> = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const commands = yield* Commands;
+    const dom = yield* Dom;
+    const hud = yield* Hud;
+    const report = yield* Report;
+    const settings = yield* Settings;
+    const storage = yield* Storage;
+    const tabs = yield* Tabs;
 
-      const muted = yield* Ref.make(false);
+    const muted = yield* Ref.make(false);
 
-      // A frame does not change its origin, so it is read once.
-      const origin = yield* dom.probeOrElse(
-        () => dom.window.location.origin,
-        () => "",
-      );
+    // A frame does not change its origin, so it is read once.
+    const origin = yield* dom.probeOrElse(
+      () => dom.window.location.origin,
+      () => "",
+    );
 
-      // `zoom` on the root element, and not the browser's own zoom. It does
-      // not change the address bar, it does not survive a manager change,
-      // and it breaks `position: fixed` on some sites. It is off by default.
-      const setZoom = (zoom: number): Effect.Effect<void> =>
-        pipe(
-          dom.attempt("documentElement.style.zoom", () => {
-            dom.document.documentElement.style.zoom = zoomStyle(zoom);
-          }),
-          Effect.ignore,
-        );
-
-      const mediaElements = (): ReadonlyArray<HTMLMediaElement> => mediaBelow(dom.document);
-
-      const setAllMuted = (value: boolean): Effect.Effect<void> =>
-        Effect.sync(() => pipe(mediaElements(), Array.forEach(setMuted(value))));
-
-      const observeAdditions = Effect.sync(() => {
-        const observer = new MutationObserver(Array.forEach(muteAdded));
-        observer.observe(dom.document.documentElement, {
-          childList: true,
-          subtree: true,
-        });
-        return observer;
-      });
-
-      /**
-       * Mute every media element, and keep muting the ones that arrive.
-       *
-       * Only media *elements* are affected. A WebAudio graph keeps playing, and
-       * a userscript has no page-level mute.
-       *
-       * The observer belongs to the fiber in `muteFiber`. Interrupting that
-       * fiber closes its scope and disconnects the observer, so a soft
-       * navigation cannot leave it watching elements that no longer exist.
-       */
-      const keepMuting = pipe(
-        Effect.gen(function* () {
-          yield* setAllMuted(true);
-
-          yield* Effect.acquireRelease(observeAdditions, (observer) =>
-            Effect.sync(() => {
-              observer.disconnect();
-            }),
-          );
-
-          yield* hud.show("Muted media elements (WebAudio is unaffected)", BRIEFLY);
-          // Hold the scope open. The interruption below closes it.
-          return yield* Effect.never;
+    // `zoom` on the root element, and not the browser's own zoom. It does
+    // not change the address bar, it does not survive a manager change,
+    // and it breaks `position: fixed` on some sites. It is off by default.
+    const setZoom = (zoom: number): Effect.Effect<void> =>
+      pipe(
+        dom.attempt("documentElement.style.zoom", () => {
+          dom.document.documentElement.style.zoom = zoomStyle(zoom);
         }),
-        Effect.scoped,
+        Effect.ignore,
       );
 
-      const muteFiber = yield* FiberHandle.make<void, never>();
+    const mediaElements = (): ReadonlyArray<HTMLMediaElement> => mediaBelow(dom.document);
 
-      const mute = pipe(keepMuting, FiberHandle.run(muteFiber), Effect.asVoid);
+    const setAllMuted = (value: boolean): Effect.Effect<void> =>
+      Effect.sync(() => pipe(mediaElements(), Array.forEach(setMuted(value))));
 
-      const unmute = pipe(
-        FiberHandle.clear(muteFiber),
-        Effect.andThen(setAllMuted(false)),
-        Effect.andThen(hud.show("Unmuted", BRIEFLY)),
-      );
-
-      const toggleMute = Effect.fn("TabControl.toggleMute")(function* () {
-        const wasMuted = yield* pipe(muted, Ref.getAndUpdate(Boolean.not));
-        yield* pipe(wasMuted, Boolean.match({ onFalse: () => mute, onTrue: () => unmute }));
+    const observeAdditions = Effect.sync(() => {
+      const observer = new MutationObserver(Array.forEach(muteAdded));
+      observer.observe(dom.document.documentElement, {
+        childList: true,
+        subtree: true,
       });
+      return observer;
+    });
 
-      const applyZoom = Effect.fn("TabControl.applyZoom")(function* (change: ZoomChange) {
-        const session = yield* storage.session.current;
-        const next = pipe(change, zoomAfter(storedZoom(origin)(session)));
+    /**
+     * Mute every media element, and keep muting the ones that arrive.
+     *
+     * Only media *elements* are affected. A WebAudio graph keeps playing, and
+     * a userscript has no page-level mute.
+     *
+     * The observer belongs to the fiber in `muteFiber`. Interrupting that
+     * fiber closes its scope and disconnects the observer, so a soft
+     * navigation cannot leave it watching elements that no longer exist.
+     */
+    const keepMuting = pipe(
+      Effect.gen(function* () {
+        yield* setAllMuted(true);
 
-        yield* setZoom(next);
-
-        yield* pipe(
-          storage.session.update(withZoom(origin, next)),
-          Effect.ignore,
-          Effect.forkDetach,
-        );
-
-        yield* hud.show(`Zoom ${Math.round(next * 100)}%`, BRIEFLY);
-      });
-
-      const zoomIfEnabled = Effect.fnUntraced(function* (factor: number) {
-        const { enableCssZoom } = yield* settings.current;
-        yield* pipe(
-          enableCssZoom,
-          Boolean.match({
-            onFalse: () =>
-              report.error(
-                "CSS zoom is off; turn it on in Settings. It is not the browser's own zoom.",
-              ),
-            onTrue: () => applyZoom(ZoomChange.Scale({ factor })),
+        yield* Effect.acquireRelease(observeAdditions, (observer) =>
+          Effect.sync(() => {
+            observer.disconnect();
           }),
         );
-      });
 
-      // Put the stored zoom back on the page. The store answers only after the
-      // layer is built, and another tab of this origin can change it later, so
-      // this follows the store. Every page starts at 100%, and a page that was
-      // never zoomed keeps its own style: the first zoom written is the first
-      // one that is not 100%.
+        yield* hud.show("Muted media elements (WebAudio is unaffected)", BRIEFLY);
+        // Hold the scope open. The interruption below closes it.
+        return yield* Effect.never;
+      }),
+      Effect.scoped,
+    );
+
+    const muteFiber = yield* FiberHandle.make<void, never>();
+
+    const mute = pipe(keepMuting, FiberHandle.run(muteFiber), Effect.asVoid);
+
+    const unmute = pipe(
+      FiberHandle.clear(muteFiber),
+      Effect.andThen(setAllMuted(false)),
+      Effect.andThen(hud.show("Unmuted", BRIEFLY)),
+    );
+
+    const toggleMute = Effect.fn("TabControl.toggleMute")(function* () {
+      const wasMuted = yield* pipe(muted, Ref.getAndUpdate(Boolean.not));
+      yield* pipe(wasMuted, Boolean.match({ onFalse: () => mute, onTrue: () => unmute }));
+    });
+
+    const applyZoom = Effect.fn("TabControl.applyZoom")(function* (change: ZoomChange) {
+      const session = yield* storage.session.current;
+      const next = pipe(change, zoomAfter(storedZoom(origin)(session)));
+
+      yield* setZoom(next);
+
+      yield* pipe(storage.session.update(withZoom(origin, next)), Effect.ignore, Effect.forkDetach);
+
+      yield* hud.show(`Zoom ${Math.round(next * 100)}%`, BRIEFLY);
+    });
+
+    const zoomIfEnabled = Effect.fnUntraced(function* (factor: number) {
+      const { enableCssZoom } = yield* settings.current;
       yield* pipe(
-        settings.changes,
-        Stream.zipLatest(storage.session.changes),
-        Stream.map(pageZoom(origin)),
-        Stream.changes,
-        Stream.dropWhile((zoom) => zoom === 1),
-        Stream.runForEach(setZoom),
-        Effect.forkScoped,
-      );
-
-      yield* commands.registerAll({
-        createTab: () =>
-          pipe(
-            settings.current,
-            // `internal` trust: the new-tab URL is the user's own setting, and
-            // its default, `about:blank`, is outside the set that a
-            // page-supplied URL may use.
-            Effect.flatMap((current) =>
-              tabs.open(current.newTabUrl, {
-                active: true,
-                trust: "internal",
-              }),
+        enableCssZoom,
+        Boolean.match({
+          onFalse: () =>
+            report.error(
+              "CSS zoom is off; turn it on in Settings. It is not the browser's own zoom.",
             ),
-            Effect.asVoid,
-            Effect.catch((error) => report.error(error.detail)),
+          onTrue: () => applyZoom(ZoomChange.Scale({ factor })),
+        }),
+      );
+    });
+
+    // Put the stored zoom back on the page. The store answers only after the
+    // layer is built, and another tab of this origin can change it later, so
+    // this follows the store. Every page starts at 100%, and a page that was
+    // never zoomed keeps its own style: the first zoom written is the first
+    // one that is not 100%.
+    yield* pipe(
+      settings.changes,
+      Stream.zipLatest(storage.session.changes),
+      Stream.map(pageZoom(origin)),
+      Stream.changes,
+      Stream.dropWhile((zoom) => zoom === 1),
+      Stream.runForEach(setZoom),
+      Effect.forkScoped,
+    );
+
+    yield* commands.registerAll({
+      createTab: () =>
+        pipe(
+          settings.current,
+          // `internal` trust: the new-tab URL is the user's own setting, and
+          // its default, `about:blank`, is outside the set that a
+          // page-supplied URL may use.
+          Effect.flatMap((current) =>
+            tabs.open(current.newTabUrl, {
+              active: true,
+              trust: "internal",
+            }),
           ),
+          Effect.asVoid,
+          Effect.catch((error) => report.error(error.detail)),
+        ),
 
-        removeTab: () =>
-          pipe(
-            tabs.closeCurrent,
-            Effect.catch((error) => report.error(closeFailureText(error))),
-          ),
+      removeTab: () =>
+        pipe(
+          tabs.closeCurrent,
+          Effect.catch((error) => report.error(closeFailureText(error))),
+        ),
 
-        toggleMuteTab: () => toggleMute(),
-        zoomIn: () => zoomIfEnabled(ZOOM_STEP),
-        zoomOut: () => zoomIfEnabled(1 / ZOOM_STEP),
-        zoomReset: () => applyZoom(ZoomChange.Reset()),
-      });
-
-      return TabControl.of({ isMuted: Ref.get(muted) });
-    }),
-  );
-}
+      toggleMuteTab: () => toggleMute(),
+      zoomIn: () => zoomIfEnabled(ZOOM_STEP),
+      zoomOut: () => zoomIfEnabled(1 / ZOOM_STEP),
+      zoomReset: () => applyZoom(ZoomChange.Reset()),
+    });
+  }),
+);
