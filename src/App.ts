@@ -28,7 +28,7 @@ import { FrameAuth } from "~/frames/Auth.ts";
 import { FrameBus } from "~/frames/Bus.ts";
 import { FrameLink, topFrameVerdictLayer } from "~/frames/Link.ts";
 import { FindLayer } from "~/features/find/Find.ts";
-import { Hints } from "~/features/hints/Hints.ts";
+import { HintsLayer } from "~/features/hints/Hints.ts";
 import { Insert } from "~/features/Insert.ts";
 import { MarksLayer } from "~/features/Marks.ts";
 import { Navigation } from "~/features/Navigation.ts";
@@ -147,7 +147,7 @@ export const AppLayer = pipe(
     Scroller.layer,
     Insert.layer,
     MarksWithScroller,
-    Hints.layer,
+    HintsLayer,
     FindLayer,
     VisualLayer,
     Omnibar.layer,

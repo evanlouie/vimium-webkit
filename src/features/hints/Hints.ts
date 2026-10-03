@@ -1176,1205 +1176,1215 @@ const coordinate = Effect.gen(function* () {
  * the hint commands and answers the hint messages of the frame bus for as long
  * as its scope is open.
  */
-export const Hints = {
-  layer: Layer.effectDiscard(
-    Effect.gen(function* () {
-      const dom = yield* Dom;
-      const ui = yield* Ui;
-      const hud = yield* Hud;
-      const settings = yield* Settings;
-      const modes = yield* Modes;
-      const commands = yield* Commands;
-      const report = yield* Report;
-      const capabilities = yield* Capabilities;
-      const bus = yield* FrameBus;
-      const realm = yield* Realm;
-      const tabs = yield* Tabs;
-      const clipboard = yield* Clipboard;
+export const HintsLayer: Layer.Layer<
+  never,
+  never,
+  | Dom
+  | Ui
+  | Hud
+  | Settings
+  | Modes
+  | Commands
+  | Report
+  | Capabilities
+  | FrameBus
+  | Realm
+  | Tabs
+  | Clipboard
+> = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const dom = yield* Dom;
+    const ui = yield* Ui;
+    const hud = yield* Hud;
+    const settings = yield* Settings;
+    const modes = yield* Modes;
+    const commands = yield* Commands;
+    const report = yield* Report;
+    const capabilities = yield* Capabilities;
+    const bus = yield* FrameBus;
+    const realm = yield* Realm;
+    const tabs = yield* Tabs;
+    const clipboard = yield* Clipboard;
 
-      /**
-       * The services that the detection and the markers need.
-       *
-       * A session runs in a fiber of its own, and the functions of this layer
-       * give effects with nothing left to supply. The context is therefore
-       * captured once here and given to those effects.
-       */
-      const browser = yield* Effect.context<Dom | Ui>();
+    /**
+     * The services that the detection and the markers need.
+     *
+     * A session runs in a fiber of its own, and the functions of this layer
+     * give effects with nothing left to supply. The context is therefore
+     * captured once here and given to those effects.
+     */
+    const browser = yield* Effect.context<Dom | Ui>();
 
-      // ---------------------------------------------------------------------
-      // State
-      // ---------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // State
+    // ---------------------------------------------------------------------
 
-      /** The stylesheet that is installed, so it is not written again. */
-      const cssRef = yield* Ref.make(Option.none<string>());
-      /** The hints of the last detection pass of this frame. */
-      const localRef = yield* Ref.make<readonly LocalHint[]>([]);
-      /**
-       * Where the hit target of each local hint stood at the detection pass.
-       *
-       * The index is the local index of the hint, which is the index that a
-       * descriptor and an `ACTIVATE_HINT` carry.
-       */
-      const anchorsRef = yield* Ref.make<readonly HintRect[]>([]);
-      /** What the last draw of each local marker knew about its target. */
-      const placementsRef = yield* Ref.make<readonly Placement[]>([]);
-      const warnedRef = yield* Ref.make(false);
-      /**
-       * The element that we pointed at last.
-       *
-       * A `WeakRef`, because the page can remove it at any time, and a strong
-       * reference to an arbitrary node for the life of the session is a leak on
-       * a page that scrolls without end.
-       */
-      const hoverRef = yield* Ref.make(Option.none<WeakRef<Element>>());
-      const roundRef = yield* Ref.make(Option.none<LocalRound>());
-      const sessionRef = yield* Ref.make(Option.none<LiveSession>());
-      const sessionSeq = yield* Ref.make(0);
-      const roundSeq = yield* Ref.make(0);
-      const pendingActivationRef = yield* Ref.make(Option.none<PendingActivation>());
-      /** The rounds that ended, oldest first. */
-      const cancelledRoundsRef = yield* Ref.make<readonly string[]>([]);
-      const rememberCancelled = (roundId: string): Effect.Effect<void> =>
-        pipe(cancelledRoundsRef, Ref.update(withRound(roundId)));
-      /** A message for a round that ended is dropped, and gets no reply. */
-      const unlessCancelled = (roundId: string) =>
-        pipe(
-          cancelledRoundsRef,
-          Ref.get,
-          Effect.filterOrFail((rounds) => !pipe(rounds, Array.contains(roundId))),
-          Effect.asVoid,
-        );
-      /** One session at a time. A new one interrupts the one before it. */
-      const sessionFiber = yield* FiberHandle.make<void, never>();
-      /**
-       * The activations of this frame. They belong to the layer and not to the
-       * session, because the session ends before its activation does.
-       */
-      const activations = yield* FiberSet.make();
+    /** The stylesheet that is installed, so it is not written again. */
+    const cssRef = yield* Ref.make(Option.none<string>());
+    /** The hints of the last detection pass of this frame. */
+    const localRef = yield* Ref.make<readonly LocalHint[]>([]);
+    /**
+     * Where the hit target of each local hint stood at the detection pass.
+     *
+     * The index is the local index of the hint, which is the index that a
+     * descriptor and an `ACTIVATE_HINT` carry.
+     */
+    const anchorsRef = yield* Ref.make<readonly HintRect[]>([]);
+    /** What the last draw of each local marker knew about its target. */
+    const placementsRef = yield* Ref.make<readonly Placement[]>([]);
+    const warnedRef = yield* Ref.make(false);
+    /**
+     * The element that we pointed at last.
+     *
+     * A `WeakRef`, because the page can remove it at any time, and a strong
+     * reference to an arbitrary node for the life of the session is a leak on
+     * a page that scrolls without end.
+     */
+    const hoverRef = yield* Ref.make(Option.none<WeakRef<Element>>());
+    const roundRef = yield* Ref.make(Option.none<LocalRound>());
+    const sessionRef = yield* Ref.make(Option.none<LiveSession>());
+    const sessionSeq = yield* Ref.make(0);
+    const roundSeq = yield* Ref.make(0);
+    const pendingActivationRef = yield* Ref.make(Option.none<PendingActivation>());
+    /** The rounds that ended, oldest first. */
+    const cancelledRoundsRef = yield* Ref.make<readonly string[]>([]);
+    const rememberCancelled = (roundId: string): Effect.Effect<void> =>
+      pipe(cancelledRoundsRef, Ref.update(withRound(roundId)));
+    /** A message for a round that ended is dropped, and gets no reply. */
+    const unlessCancelled = (roundId: string) =>
+      pipe(
+        cancelledRoundsRef,
+        Ref.get,
+        Effect.filterOrFail((rounds) => !pipe(rounds, Array.contains(roundId))),
+        Effect.asVoid,
+      );
+    /** One session at a time. A new one interrupts the one before it. */
+    const sessionFiber = yield* FiberHandle.make<void, never>();
+    /**
+     * The activations of this frame. They belong to the layer and not to the
+     * session, because the session ends before its activation does.
+     */
+    const activations = yield* FiberSet.make();
 
-      /** Warn about unreachable hosts once for each frame. */
-      const firstWarning = (unreachableHosts: number): Effect.Effect<boolean> =>
-        pipe(
-          warnedRef,
-          Ref.modify(
-            (warned) => [unreachableHosts > 0 && !warned, warned || unreachableHosts > 0] as const,
-          ),
-        );
+    /** Warn about unreachable hosts once for each frame. */
+    const firstWarning = (unreachableHosts: number): Effect.Effect<boolean> =>
+      pipe(
+        warnedRef,
+        Ref.modify(
+          (warned) => [unreachableHosts > 0 && !warned, warned || unreachableHosts > 0] as const,
+        ),
+      );
 
-      // ---------------------------------------------------------------------
-      // Activation
-      // ---------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // Activation
+    // ---------------------------------------------------------------------
 
-      const eventInit = (x: number, y: number): MouseEventInit => ({
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        // `document.defaultView`, and not the global: the initialiser wants a
-        // true `Window`, and this is the one that the event is seen in.
-        view: dom.document.defaultView,
-        detail: 1,
-        clientX: x,
-        clientY: y,
-        screenX: x,
-        screenY: y,
-      });
+    const eventInit = (x: number, y: number): MouseEventInit => ({
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      // `document.defaultView`, and not the global: the initialiser wants a
+      // true `Window`, and this is the one that the event is seen in.
+      view: dom.document.defaultView,
+      detail: 1,
+      clientX: x,
+      clientY: y,
+      screenX: x,
+      screenY: y,
+    });
 
-      /** The events of a pointer at the centre of `element`. */
-      const eventInitAt = (element: Element): Effect.Effect<MouseEventInit> =>
-        pipe(
-          dom.probeOrElse(
-            () => centreOf(element),
-            () => ({ x: 0, y: 0 }),
-          ),
-          Effect.map(({ x, y }) => eventInit(x, y)),
-        );
+    /** The events of a pointer at the centre of `element`. */
+    const eventInitAt = (element: Element): Effect.Effect<MouseEventInit> =>
+      pipe(
+        dom.probeOrElse(
+          () => centreOf(element),
+          () => ({ x: 0, y: 0 }),
+        ),
+        Effect.map(({ x, y }) => eventInit(x, y)),
+      );
 
-      /**
-       * Measure the target of every local hint again.
-       *
-       * The result is the shift of each marker against the detection pass. A
-       * hint whose element has left the document is marked, so that its marker
-       * is hidden and its activation is refused.
-       */
-      const remeasure: Effect.Effect<void> = Effect.gen(function* () {
-        const hints = yield* Ref.get(localRef);
+    /**
+     * Measure the target of every local hint again.
+     *
+     * The result is the shift of each marker against the detection pass. A
+     * hint whose element has left the document is marked, so that its marker
+     * is hidden and its activation is refused.
+     */
+    const remeasure: Effect.Effect<void> = Effect.gen(function* () {
+      const hints = yield* Ref.get(localRef);
+      const anchors = yield* Ref.get(anchorsRef);
+      const next = yield* dom.probeOrElse(() => measurePlacements(hints, anchors), Array.empty);
+      yield* pipe(placementsRef, Ref.set(next));
+    });
+
+    /**
+     * Is this hint still the element that the user saw at that place?
+     *
+     * Read the section "Revalidation" above for the reasoning. Nothing here
+     * suspends, so a copy mode still writes the clipboard inside the
+     * activation window of the key press.
+     */
+    const stillTheSameTarget = (localIndex: number, hint: LocalHint): Effect.Effect<boolean> =>
+      Effect.gen(function* () {
         const anchors = yield* Ref.get(anchorsRef);
-        const next = yield* dom.probeOrElse(() => measurePlacements(hints, anchors), Array.empty);
-        yield* pipe(placementsRef, Ref.set(next));
-      });
-
-      /**
-       * Is this hint still the element that the user saw at that place?
-       *
-       * Read the section "Revalidation" above for the reasoning. Nothing here
-       * suspends, so a copy mode still writes the clipboard inside the
-       * activation window of the key press.
-       */
-      const stillTheSameTarget = (localIndex: number, hint: LocalHint): Effect.Effect<boolean> =>
-        Effect.gen(function* () {
-          const anchors = yield* Ref.get(anchorsRef);
-          const placements = yield* Ref.get(placementsRef);
-          const host = ui.shadow.host;
-          // No measurement of our own means that no round of ours drew this
-          // marker. Refuse, because we cannot say what the user saw. A target
-          // that is gone is refused as well.
-          return yield* pipe(
-            Option.all({
-              anchor: pipe(anchors, Array.get(localIndex)),
-              shift: shiftAt(placements, localIndex),
-            }),
-            Option.match({
-              onNone: () => Effect.succeed(false),
-              onSome: ({ anchor, shift }) =>
-                dom.probeOrElse(
-                  () => targetStillMatches(dom.document, host, hint, anchor, shift),
-                  constFalse,
-                ),
-            }),
-          );
-        });
-
-      const confirmTarget = (
-        localIndex: number,
-        hint: LocalHint,
-      ): Effect.Effect<void, HintRefused> =>
-        pipe(
-          stillTheSameTarget(localIndex, hint),
-          Effect.filterOrFail(identity, () => new HintRefused({ detail: MOVED_DETAIL })),
-          Effect.asVoid,
-        );
-
-      /**
-       * Focus before the click, and record the hover target.
-       *
-       * The record lets a later Escape undo the hover.
-       */
-      const prepare = Effect.fnUntraced(function* (element: Element) {
-        yield* pipe(
-          dom.attempt("Element.focus", () => focusBeforeClick(element)),
-          Effect.ignore,
-        );
-        yield* pipe(hoverRef, Ref.set(Option.some(new WeakRef(element))));
-      });
-
-      /** Send one event without letting page code become our defect. */
-      const dispatchOne = (
-        element: Element,
-        type: string,
-        init: MouseEventInit,
-      ): Effect.Effect<void> =>
-        pipe(
-          dom.attempt("Element.dispatchEvent", () => {
-            element.dispatchEvent(syntheticEvent(type, init));
+        const placements = yield* Ref.get(placementsRef);
+        const host = ui.shadow.host;
+        // No measurement of our own means that no round of ours drew this
+        // marker. Refuse, because we cannot say what the user saw. A target
+        // that is gone is refused as well.
+        return yield* pipe(
+          Option.all({
+            anchor: pipe(anchors, Array.get(localIndex)),
+            shift: shiftAt(placements, localIndex),
           }),
-          Effect.ignore,
-        );
-
-      const dispatchAll = (
-        element: Element,
-        types: readonly string[],
-        init: MouseEventInit,
-      ): Effect.Effect<void> =>
-        pipe(
-          types,
-          Effect.forEach((type) => dispatchOne(element, type, init), { discard: true }),
-        );
-
-      /** End a partial sequence and remove the hover that it started. */
-      const cancelSequence = (
-        element: Element,
-        init: MouseEventInit,
-        undo: readonly string[],
-      ): Effect.Effect<void> =>
-        Effect.gen(function* () {
-          yield* dispatchAll(element, undo, init);
-          yield* pipe(hoverRef, Ref.set(Option.none()));
-        });
-
-      /**
-       * Send a click and check after page handlers can change its target.
-       *
-       * Check before `mousedown` and before `click`. A failed check balances a
-       * started press, removes hover, and does not send the click.
-       */
-      const simulateClick = Effect.fnUntraced(function* (localIndex: number, hint: LocalHint) {
-        const element = hint.element;
-        yield* prepare(element);
-        const init = yield* eventInitAt(element);
-        yield* pipe(
-          CLICK_STAGES,
-          Effect.forEach(
-            ({ send, undo }) =>
-              pipe(
-                dispatchAll(element, send, init),
-                Effect.andThen(confirmTarget(localIndex, hint)),
-                Effect.tapError(() => cancelSequence(element, init, undo)),
+          Option.match({
+            onNone: () => Effect.succeed(false),
+            onSome: ({ anchor, shift }) =>
+              dom.probeOrElse(
+                () => targetStillMatches(dom.document, host, hint, anchor, shift),
+                constFalse,
               ),
-            { discard: true },
-          ),
-        );
-        yield* dispatchOne(element, "click", init);
-      });
-
-      const simulateHover = Effect.fnUntraced(function* (element: Element) {
-        yield* prepare(element);
-        const init = yield* eventInitAt(element);
-        yield* dispatchAll(element, HOVER_SEQUENCE, init);
-      });
-
-      /** Move the pointer off an element that it hovered. */
-      const leaveElement = Effect.fnUntraced(function* (element: Element) {
-        const init = yield* eventInitAt(element);
-        yield* pipe(
-          dom.attempt("Element.dispatchEvent", () => {
-            element.dispatchEvent(syntheticEvent("pointerout", init));
-            element.dispatchEvent(syntheticEvent("mouseout", init));
           }),
-          Effect.ignore,
         );
       });
 
-      /**
-       * Undo the last hover.
-       *
-       * Without this, an Escape after a hover over a navigation item leaves the
-       * large menu of the site open, because the page never saw a `mouseout`.
-       */
-      const releaseHover: Effect.Effect<void> = Effect.gen(function* () {
-        const held = yield* pipe(hoverRef, Ref.getAndSet(Option.none()));
+    const confirmTarget = (localIndex: number, hint: LocalHint): Effect.Effect<void, HintRefused> =>
+      pipe(
+        stillTheSameTarget(localIndex, hint),
+        Effect.filterOrFail(identity, () => new HintRefused({ detail: MOVED_DETAIL })),
+        Effect.asVoid,
+      );
+
+    /**
+     * Focus before the click, and record the hover target.
+     *
+     * The record lets a later Escape undo the hover.
+     */
+    const prepare = Effect.fnUntraced(function* (element: Element) {
+      yield* pipe(
+        dom.attempt("Element.focus", () => focusBeforeClick(element)),
+        Effect.ignore,
+      );
+      yield* pipe(hoverRef, Ref.set(Option.some(new WeakRef(element))));
+    });
+
+    /** Send one event without letting page code become our defect. */
+    const dispatchOne = (
+      element: Element,
+      type: string,
+      init: MouseEventInit,
+    ): Effect.Effect<void> =>
+      pipe(
+        dom.attempt("Element.dispatchEvent", () => {
+          element.dispatchEvent(syntheticEvent(type, init));
+        }),
+        Effect.ignore,
+      );
+
+    const dispatchAll = (
+      element: Element,
+      types: readonly string[],
+      init: MouseEventInit,
+    ): Effect.Effect<void> =>
+      pipe(
+        types,
+        Effect.forEach((type) => dispatchOne(element, type, init), { discard: true }),
+      );
+
+    /** End a partial sequence and remove the hover that it started. */
+    const cancelSequence = (
+      element: Element,
+      init: MouseEventInit,
+      undo: readonly string[],
+    ): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        yield* dispatchAll(element, undo, init);
+        yield* pipe(hoverRef, Ref.set(Option.none()));
+      });
+
+    /**
+     * Send a click and check after page handlers can change its target.
+     *
+     * Check before `mousedown` and before `click`. A failed check balances a
+     * started press, removes hover, and does not send the click.
+     */
+    const simulateClick = Effect.fnUntraced(function* (localIndex: number, hint: LocalHint) {
+      const element = hint.element;
+      yield* prepare(element);
+      const init = yield* eventInitAt(element);
+      yield* pipe(
+        CLICK_STAGES,
+        Effect.forEach(
+          ({ send, undo }) =>
+            pipe(
+              dispatchAll(element, send, init),
+              Effect.andThen(confirmTarget(localIndex, hint)),
+              Effect.tapError(() => cancelSequence(element, init, undo)),
+            ),
+          { discard: true },
+        ),
+      );
+      yield* dispatchOne(element, "click", init);
+    });
+
+    const simulateHover = Effect.fnUntraced(function* (element: Element) {
+      yield* prepare(element);
+      const init = yield* eventInitAt(element);
+      yield* dispatchAll(element, HOVER_SEQUENCE, init);
+    });
+
+    /** Move the pointer off an element that it hovered. */
+    const leaveElement = Effect.fnUntraced(function* (element: Element) {
+      const init = yield* eventInitAt(element);
+      yield* pipe(
+        dom.attempt("Element.dispatchEvent", () => {
+          element.dispatchEvent(syntheticEvent("pointerout", init));
+          element.dispatchEvent(syntheticEvent("mouseout", init));
+        }),
+        Effect.ignore,
+      );
+    });
+
+    /**
+     * Undo the last hover.
+     *
+     * Without this, an Escape after a hover over a navigation item leaves the
+     * large menu of the site open, because the page never saw a `mouseout`.
+     */
+    const releaseHover: Effect.Effect<void> = Effect.gen(function* () {
+      const held = yield* pipe(hoverRef, Ref.getAndSet(Option.none()));
+      yield* pipe(
+        held,
+        Option.flatMap((reference) => Option.fromNullishOr(reference.deref())),
+        Option.filter((element) => element.isConnected),
+        whenSome(leaveElement),
+      );
+    });
+
+    const focusElement = (element: Element): Effect.Effect<void> =>
+      pipe(
+        dom.attempt("Element.focus", () => focusQuietly(element)),
+        Effect.ignore,
+      );
+
+    /**
+     * `window.open` cannot put a tab in the background. Say so, instead of
+     * letting the user believe that the setting was honoured.
+     */
+    const noteForeground: (active: boolean) => Effect.Effect<void> = Boolean.match({
+      onFalse: () => hud.show("Opened in the foreground: there is no GM.openInTab.", BRIEFLY),
+      onTrue: () => Effect.void,
+    });
+
+    const openInNewTab = Effect.fn("Hints.openInNewTab")(
+      function* (url: string, active: boolean) {
+        const { opened } = yield* tabs.open(url, { active });
         yield* pipe(
-          held,
-          Option.flatMap((reference) => Option.fromNullishOr(reference.deref())),
-          Option.filter((element) => element.isConnected),
-          whenSome(leaveElement),
+          opened,
+          OpenInTabResult.$match({
+            Manager: () => Effect.void,
+            Window: () => noteForeground(active),
+          }),
         );
-      });
+      },
+      Effect.catch((error) => report.error(error.detail)),
+    );
 
-      const focusElement = (element: Element): Effect.Effect<void> =>
-        pipe(
-          dom.attempt("Element.focus", () => focusQuietly(element)),
-          Effect.ignore,
-        );
+    /**
+     * Write text to the clipboard.
+     *
+     * The first attempt inside `Clipboard.write` does not suspend, so the
+     * write still happens inside the activation window of WebKit, as long as
+     * nothing in front of this call suspends.
+     */
+    const copy = Effect.fn("Hints.copy")(
+      function* (text: string, label: string) {
+        yield* clipboard.write(text);
+        yield* hud.show(`Copied ${label}`, BRIEFLY);
+      },
+      Effect.catch((error) => report.error(`Copy failed: ${error.detail}`)),
+    );
 
-      /**
-       * `window.open` cannot put a tab in the background. Say so, instead of
-       * letting the user believe that the setting was honoured.
-       */
-      const noteForeground: (active: boolean) => Effect.Effect<void> = Boolean.match({
-        onFalse: () => hud.show("Opened in the foreground: there is no GM.openInTab.", BRIEFLY),
-        onTrue: () => Effect.void,
-      });
-
-      const openInNewTab = Effect.fn("Hints.openInNewTab")(
-        function* (url: string, active: boolean) {
-          const { opened } = yield* tabs.open(url, { active });
-          yield* pipe(
-            opened,
-            OpenInTabResult.$match({
-              Manager: () => Effect.void,
-              Window: () => noteForeground(active),
-            }),
-          );
-        },
+    const openOmnibar = Effect.fnUntraced(function* (href: Option.Option<string>) {
+      yield* pipe(
+        href,
+        whenSome((text) => hud.show(text, BRIEFLY)),
+      );
+      yield* pipe(
+        commands.run("Vomnibar.activate", {
+          count: 1,
+          event: Option.none(),
+        }),
         Effect.catch((error) => report.error(error.detail)),
       );
+    });
 
-      /**
-       * Write text to the clipboard.
-       *
-       * The first attempt inside `Clipboard.write` does not suspend, so the
-       * write still happens inside the activation window of WebKit, as long as
-       * nothing in front of this call suspends.
-       */
-      const copy = Effect.fn("Hints.copy")(
-        function* (text: string, label: string) {
-          yield* clipboard.write(text);
-          yield* hud.show(`Copied ${label}`, BRIEFLY);
-        },
-        Effect.catch((error) => report.error(`Copy failed: ${error.detail}`)),
-      );
-
-      const openOmnibar = Effect.fnUntraced(function* (href: Option.Option<string>) {
-        yield* pipe(
-          href,
-          whenSome((text) => hud.show(text, BRIEFLY)),
-        );
-        yield* pipe(
-          commands.run("Vomnibar.activate", {
-            count: 1,
-            event: Option.none(),
-          }),
-          Effect.catch((error) => report.error(error.detail)),
-        );
-      });
-
-      /** Carry out the plan for one hint. */
-      const perform = (
-        localIndex: number,
-        hint: LocalHint,
-      ): ((activation: Activation) => Effect.Effect<void, HintRefused>) =>
-        Activation.$match({
-          Click: () => simulateClick(localIndex, hint),
-          ClickHere: () =>
-            pipe(
-              simulateClick(localIndex, hint),
-              Effect.andThen(hud.show("No link URL: activated in this tab.", BRIEFLY)),
-            ),
-          OpenTab: ({ url, active }) => openInNewTab(url, active),
-          Hover: () => simulateHover(hint.element),
-          Focus: () => focusElement(hint.element),
-          Copy: ({ text, label }) => copy(text, label),
-          Omnibar: ({ href }) => openOmnibar(href),
-          Refuse: ({ detail }) => Effect.fail(new HintRefused({ detail })),
-        });
-
-      /** A local refusal is the line of the user. A remote one goes back to the origin. */
-      const reportRefusal = (origin: ActivationOrigin, detail: string): Effect.Effect<void> =>
-        pipe(
-          Match.value(origin),
-          Match.when("local", () => report.error(detail)),
-          Match.when("remote", () => Effect.void),
-          Match.exhaustive,
-        );
-
-      /**
-       * Act on a hint that belongs to *this* frame, and give back why it was
-       * refused.
-       *
-       * `origin` exists because a remote activation is an action that another
-       * document asked for, and two of the modes here are capabilities that a
-       * page must not spend for the user.
-       */
-      const activateLocal = Effect.fn("Hints.activateLocal")(
-        function* (localIndex: number, hint: LocalHint, mode: HintMode, origin: ActivationOrigin) {
-          yield* Effect.fromResult(admitOrigin(mode, origin));
-          yield* confirmTarget(localIndex, hint);
-          yield* pipe(planActivation(mode, hint), perform(localIndex, hint));
-          return Option.none<string>();
-        },
-        (activation, _localIndex, _hint, _mode, origin) =>
+    /** Carry out the plan for one hint. */
+    const perform = (
+      localIndex: number,
+      hint: LocalHint,
+    ): ((activation: Activation) => Effect.Effect<void, HintRefused>) =>
+      Activation.$match({
+        Click: () => simulateClick(localIndex, hint),
+        ClickHere: () =>
           pipe(
-            activation,
-            Effect.catchTag("HintRefused", ({ detail }) =>
-              pipe(reportRefusal(origin, detail), Effect.as(Option.some(detail))),
-            ),
+            simulateClick(localIndex, hint),
+            Effect.andThen(hud.show("No link URL: activated in this tab.", BRIEFLY)),
           ),
+        OpenTab: ({ url, active }) => openInNewTab(url, active),
+        Hover: () => simulateHover(hint.element),
+        Focus: () => focusElement(hint.element),
+        Copy: ({ text, label }) => copy(text, label),
+        Omnibar: ({ href }) => openOmnibar(href),
+        Refuse: ({ detail }) => Effect.fail(new HintRefused({ detail })),
+      });
+
+    /** A local refusal is the line of the user. A remote one goes back to the origin. */
+    const reportRefusal = (origin: ActivationOrigin, detail: string): Effect.Effect<void> =>
+      pipe(
+        Match.value(origin),
+        Match.when("local", () => report.error(detail)),
+        Match.when("remote", () => Effect.void),
+        Match.exhaustive,
       );
 
-      // ---------------------------------------------------------------------
-      // Styles and detection
-      // ---------------------------------------------------------------------
-
-      // CSSOM only. A `<style>` element here obeys the `style-src` of the
-      // page, and it is dropped in silence on a site with a strict policy.
-      // Keyed, and not appended: the user CSS can change, and every earlier
-      // version would otherwise stay in effect beside the current one.
-      const installStyles = Effect.fnUntraced(function* (css: string) {
-        yield* ui.setStyle("hints", css);
-        yield* pipe(cssRef, Ref.set(Option.some(css)));
-      });
-
-      const ensureStyles = Effect.gen(function* () {
-        const current = yield* settings.current;
-        const css = hintCss(current.userDefinedLinkHintCss);
-        const installed = yield* Ref.get(cssRef);
-        yield* pipe(
-          installed,
-          Option.filter((installed) => installed === css),
-          Option.match({ onNone: () => installStyles(css), onSome: () => Effect.void }),
-        );
-      });
-
-      const detectLocal = Effect.fn("Hints.detect")(function* (mode: HintMode) {
-        const viewport = yield* ui.viewport;
-        const result = yield* pipe(
-          detectHints({
-            window: dom.window,
-            document: dom.document,
-            capabilities,
-            viewport,
-            targets: targetsFor(mode),
-            overlayHost: Option.some(ui.shadow.host),
-          }),
-          Effect.provideContext(browser),
-        );
-
-        // A closed shadow root gives `null` from `element.shadowRoot` by
-        // design, and a patch of `attachShadow` needs a reliable
-        // `document-start` that WebKit does not give a userscript. To tell the
-        // user is better than a silent gap.
-        yield* pipe(
-          hud.show("Some elements on this page cannot be reached (closed shadow DOM).", BRIEFLY),
-          Effect.when(firstWarning(result.unreachableHosts)),
-        );
-
-        yield* pipe(localRef, Ref.set(result.hints));
-        // The anchors of this pass. They are measured now, and not from the
-        // rects of the detection, because a hint rect is cropped to the visible
-        // region and an `<area>` takes its geometry from its image.
-        const anchors: readonly HintRect[] = yield* dom.probeOrElse(
-          () => pipe(result.hints, Array.map(flow(targetOf, rectOf))),
-          Array.empty,
-        );
-        yield* pipe(anchorsRef, Ref.set(anchors));
-        yield* pipe(placementsRef, Ref.set(NO_PLACEMENTS));
-        return result.hints;
-      });
-
-      /** Merge our own hints with those of the other frames, in one order. */
-      const merge = (
-        local: readonly LocalHint[],
-        remote: readonly HintDescriptor[],
-      ): readonly HintEntry[] =>
+    /**
+     * Act on a hint that belongs to *this* frame, and give back why it was
+     * refused.
+     *
+     * `origin` exists because a remote activation is an action that another
+     * document asked for, and two of the modes here are capabilities that a
+     * page must not spend for the user.
+     */
+    const activateLocal = Effect.fn("Hints.activateLocal")(
+      function* (localIndex: number, hint: LocalHint, mode: HintMode, origin: ActivationOrigin) {
+        yield* Effect.fromResult(admitOrigin(mode, origin));
+        yield* confirmTarget(localIndex, hint);
+        yield* pipe(planActivation(mode, hint), perform(localIndex, hint));
+        return Option.none<string>();
+      },
+      (activation, _localIndex, _hint, _mode, origin) =>
         pipe(
-          remote,
-          // A cross-frame payload contains the complete bounded list. This
-          // keeps the byte decision identical in every frame. A local round
-          // builds its list from its own detection result.
-          Array.match({
-            onEmpty: () => descriptorsFor(bus.frameId, local),
-            onNonEmpty: identity,
-          }),
-          limitDescriptors,
-          Array.map(entryFor(bus.frameId, local)),
-        );
+          activation,
+          Effect.catchTag("HintRefused", ({ detail }) =>
+            pipe(reportRefusal(origin, detail), Effect.as(Option.some(detail))),
+          ),
+        ),
+    );
 
-      // ---------------------------------------------------------------------
-      // The session
-      // ---------------------------------------------------------------------
+    // ---------------------------------------------------------------------
+    // Styles and detection
+    // ---------------------------------------------------------------------
 
-      const runSession = Effect.fnUntraced(function* (config: SessionConfig) {
-        const current = yield* settings.current;
-        const keyContext = keyContextFor(current, capabilities.applePlatform);
-        const initial = initialState(current, config.entries);
-        const own = ownHints(config.entries);
-        const state = yield* Ref.make(initial);
+    // CSSOM only. A `<style>` element here obeys the `style-src` of the
+    // page, and it is dropped in silence on a site with a strict policy.
+    // Keyed, and not appended: the user CSS can change, and every earlier
+    // version would otherwise stay in effect beside the current one.
+    const installStyles = Effect.fnUntraced(function* (css: string) {
+      yield* ui.setStyle("hints", css);
+      yield* pipe(cssRef, Ref.set(Option.some(css)));
+    });
 
-        const markers = yield* pipe(makeMarkerLayer, Effect.provideContext(browser));
-        const done = yield* Deferred.make<void>();
-        const finish = signal(done);
-        const confirm = yield* FiberHandle.make<void, never>();
+    const ensureStyles = Effect.gen(function* () {
+      const current = yield* settings.current;
+      const css = hintCss(current.userDefinedLinkHintCss);
+      const installed = yield* Ref.get(cssRef);
+      yield* pipe(
+        installed,
+        Option.filter((installed) => installed === css),
+        Option.match({ onNone: () => installStyles(css), onSome: () => Effect.void }),
+      );
+    });
 
-        /**
-         * Take away the confirmation that waits.
-         *
-         * `FiberHandle.run` with an effect that does nothing, and not
-         * `FiberHandle.clear`. `clear` waits for the interruption of the
-         * fiber, and this runs inside a `keydown`, where nothing may
-         * suspend. `run` replaces the fiber and does not wait.
-         */
-        const cancelConfirm: Effect.Effect<void> = pipe(
-          Effect.void,
-          FiberHandle.run(confirm),
-          Effect.asVoid,
-        );
-        const handleRef = yield* Ref.make(Option.none<ModeHandle>());
-        const id = yield* pipe(
-          sessionSeq,
-          Ref.modify((n) => [n, n + 1] as const),
-        );
+    const detectLocal = Effect.fn("Hints.detect")(function* (mode: HintMode) {
+      const viewport = yield* ui.viewport;
+      const result = yield* pipe(
+        detectHints({
+          window: dom.window,
+          document: dom.document,
+          capabilities,
+          viewport,
+          targets: targetsFor(mode),
+          overlayHost: Option.some(ui.shadow.host),
+        }),
+        Effect.provideContext(browser),
+      );
 
-        const exitSession = (reason: ExitReason): Effect.Effect<void> =>
-          pipe(
-            handleRef,
-            Ref.get,
-            Effect.flatMap(
-              Option.match({ onNone: () => finish, onSome: (handle) => handle.exit(reason) }),
-            ),
-          );
+      // A closed shadow root gives `null` from `element.shadowRoot` by
+      // design, and a patch of `attachShadow` needs a reliable
+      // `document-start` that WebKit does not give a userscript. To tell the
+      // user is better than a silent gap.
+      yield* pipe(
+        hud.show("Some elements on this page cannot be reached (closed shadow DOM).", BRIEFLY),
+        Effect.when(firstWarning(result.unreachableHosts)),
+      );
 
-        const isLive: Effect.Effect<boolean> = pipe(
+      yield* pipe(localRef, Ref.set(result.hints));
+      // The anchors of this pass. They are measured now, and not from the
+      // rects of the detection, because a hint rect is cropped to the visible
+      // region and an `<area>` takes its geometry from its image.
+      const anchors: readonly HintRect[] = yield* dom.probeOrElse(
+        () => pipe(result.hints, Array.map(flow(targetOf, rectOf))),
+        Array.empty,
+      );
+      yield* pipe(anchorsRef, Ref.set(anchors));
+      yield* pipe(placementsRef, Ref.set(NO_PLACEMENTS));
+      return result.hints;
+    });
+
+    /** Merge our own hints with those of the other frames, in one order. */
+    const merge = (
+      local: readonly LocalHint[],
+      remote: readonly HintDescriptor[],
+    ): readonly HintEntry[] =>
+      pipe(
+        remote,
+        // A cross-frame payload contains the complete bounded list. This
+        // keeps the byte decision identical in every frame. A local round
+        // builds its list from its own detection result.
+        Array.match({
+          onEmpty: () => descriptorsFor(bus.frameId, local),
+          onNonEmpty: identity,
+        }),
+        limitDescriptors,
+        Array.map(entryFor(bus.frameId, local)),
+      );
+
+    // ---------------------------------------------------------------------
+    // The session
+    // ---------------------------------------------------------------------
+
+    const runSession = Effect.fnUntraced(function* (config: SessionConfig) {
+      const current = yield* settings.current;
+      const keyContext = keyContextFor(current, capabilities.applePlatform);
+      const initial = initialState(current, config.entries);
+      const own = ownHints(config.entries);
+      const state = yield* Ref.make(initial);
+
+      const markers = yield* pipe(makeMarkerLayer, Effect.provideContext(browser));
+      const done = yield* Deferred.make<void>();
+      const finish = signal(done);
+      const confirm = yield* FiberHandle.make<void, never>();
+
+      /**
+       * Take away the confirmation that waits.
+       *
+       * `FiberHandle.run` with an effect that does nothing, and not
+       * `FiberHandle.clear`. `clear` waits for the interruption of the
+       * fiber, and this runs inside a `keydown`, where nothing may
+       * suspend. `run` replaces the fiber and does not wait.
+       */
+      const cancelConfirm: Effect.Effect<void> = pipe(
+        Effect.void,
+        FiberHandle.run(confirm),
+        Effect.asVoid,
+      );
+      const handleRef = yield* Ref.make(Option.none<ModeHandle>());
+      const id = yield* pipe(
+        sessionSeq,
+        Ref.modify((n) => [n, n + 1] as const),
+      );
+
+      const exitSession = (reason: ExitReason): Effect.Effect<void> =>
+        pipe(
           handleRef,
           Ref.get,
           Effect.flatMap(
-            Option.match({
-              onNone: () => Effect.succeed(false),
-              onSome: (handle) => handle.isActive,
-            }),
+            Option.match({ onNone: () => finish, onSome: (handle) => handle.exit(reason) }),
           ),
         );
 
-        // -- rendering ---------------------------------------------------
+      const isLive: Effect.Effect<boolean> = pipe(
+        handleRef,
+        Ref.get,
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.succeed(false),
+            onSome: (handle) => handle.isActive,
+          }),
+        ),
+      );
 
-        const render: Effect.Effect<void> = Effect.gen(function* () {
-          const snapshot = yield* Ref.get(state);
-          const placements = yield* Ref.get(placementsRef);
-          yield* markers.render(markerSpecs(snapshot, own, placements));
-        });
+      // -- rendering ---------------------------------------------------
 
-        /**
-         * Draw the markers again where their targets are now.
-         *
-         * The layer translation follows a scroll of the page only. A
-         * container that scrolls inside the page, a resize and a reflow move
-         * one target and not the layer. The targets are therefore measured
-         * again, the layer takes the scroll position of now, and the markers
-         * are drawn at the new rects.
-         */
-        const refresh: Effect.Effect<void> = Effect.gen(function* () {
-          yield* remeasure;
-          yield* markers.reanchor;
-          yield* render;
-        });
+      const render: Effect.Effect<void> = Effect.gen(function* () {
+        const snapshot = yield* Ref.get(state);
+        const placements = yield* Ref.get(placementsRef);
+        yield* markers.render(markerSpecs(snapshot, own, placements));
+      });
 
-        // One pass for each animation frame. A scroll arrives far more often
-        // than we can usefully measure and draw again.
-        const layout = yield* FiberHandle.make<void, never>();
-        const onLayoutChange = pipe(
-          dom.nextFrame,
-          Effect.andThen(refresh),
-          FiberHandle.run(layout),
+      /**
+       * Draw the markers again where their targets are now.
+       *
+       * The layer translation follows a scroll of the page only. A
+       * container that scrolls inside the page, a resize and a reflow move
+       * one target and not the layer. The targets are therefore measured
+       * again, the layer takes the scroll position of now, and the markers
+       * are drawn at the new rects.
+       */
+      const refresh: Effect.Effect<void> = Effect.gen(function* () {
+        yield* remeasure;
+        yield* markers.reanchor;
+        yield* render;
+      });
+
+      // One pass for each animation frame. A scroll arrives far more often
+      // than we can usefully measure and draw again.
+      const layout = yield* FiberHandle.make<void, never>();
+      const onLayoutChange = pipe(
+        dom.nextFrame,
+        Effect.andThen(refresh),
+        FiberHandle.run(layout),
+        Effect.asVoid,
+      );
+
+      // The capture phase: a scroll does not bubble from the element that
+      // scrolls, and a hint inside an inner scroller must follow it.
+      yield* dom.listen("document", "scroll", () => onLayoutChange, {
+        capture: true,
+        passive: true,
+      });
+      yield* dom.listen("window", "resize", () => onLayoutChange, {
+        passive: true,
+      });
+      yield* dom.listenOn(dom.document.fonts, "loadingdone", () => onLayoutChange, {
+        passive: true,
+      });
+
+      // -- activation --------------------------------------------------
+
+      /** The origin asks the frame that owns the entry to act. */
+      const activateRemote = Effect.fnUntraced(function* (entry: HintEntry) {
+        yield* pipe(
+          pendingActivationRef,
+          Ref.set(Option.some({ roundId: config.roundId, owner: entry.frameId })),
+        );
+        yield* pipe(
+          bus.send(toFrame(entry.frameId), {
+            kind: "ACTIVATE_HINT",
+            roundId: config.roundId,
+            localIndex: entry.localIndex,
+            mode: config.mode,
+          }),
+          Effect.ignore,
+        );
+      });
+
+      /**
+       * Started at once in a fiber of the layer, so that the clipboard write
+       * of a copy mode still happens inside the activation window, and so
+       * that a mode which must wait does not suspend the key path.
+       */
+      const activateHere = (entry: HintEntry, hint: LocalHint): Effect.Effect<void> =>
+        pipe(
+          activateLocal(entry.localIndex, hint, config.mode, "local"),
+          FiberSet.run(activations),
           Effect.asVoid,
         );
 
-        // The capture phase: a scroll does not bubble from the element that
-        // scrolls, and a hint inside an inner scroller must follow it.
-        yield* dom.listen("document", "scroll", () => onLayoutChange, {
-          capture: true,
-          passive: true,
-        });
-        yield* dom.listen("window", "resize", () => onLayoutChange, {
-          passive: true,
-        });
-        yield* dom.listenOn(dom.document.fonts, "loadingdone", () => onLayoutChange, {
-          passive: true,
-        });
-
-        // -- activation --------------------------------------------------
-
-        /** The origin asks the frame that owns the entry to act. */
-        const activateRemote = Effect.fnUntraced(function* (entry: HintEntry) {
-          yield* pipe(
-            pendingActivationRef,
-            Ref.set(Option.some({ roundId: config.roundId, owner: entry.frameId })),
-          );
-          yield* pipe(
-            bus.send(toFrame(entry.frameId), {
-              kind: "ACTIVATE_HINT",
-              roundId: config.roundId,
-              localIndex: entry.localIndex,
-              mode: config.mode,
-            }),
-            Effect.ignore,
-          );
-        });
-
-        /**
-         * Started at once in a fiber of the layer, so that the clipboard write
-         * of a copy mode still happens inside the activation window, and so
-         * that a mode which must wait does not suspend the key path.
-         */
-        const activateHere = (entry: HintEntry, hint: LocalHint): Effect.Effect<void> =>
-          pipe(
-            activateLocal(entry.localIndex, hint, config.mode, "local"),
-            FiberSet.run(activations),
-            Effect.asVoid,
-          );
-
-        // A participant draws and follows, and the origin is the frame that
-        // acts. It acts here, or it addresses the frame that owns the entry,
-        // which can be this frame as well.
-        const act = (entry: HintEntry): Effect.Effect<void> =>
-          pipe(
-            config.role,
-            SessionRole.$match({
-              Origin: () =>
-                pipe(
-                  entry.hint,
-                  Option.match({
-                    onNone: () => activateRemote(entry),
-                    onSome: (hint) => activateHere(entry, hint),
-                  }),
-                ),
-              Participant: () => Effect.void,
-            }),
-          );
-
-        const activateIndex = (index: number): Effect.Effect<void> =>
-          pipe(
-            config.entries,
-            Array.get(index),
-            // The overlay goes first: activation can move the focus, and a
-            // marker that is still drawn would be visible for one frame after
-            // a navigation starts.
-            whenSome((entry) => pipe(exitSession("explicit"), Effect.andThen(act(entry)))),
-          );
-
-        // -- keys --------------------------------------------------------
-
-        /** Only the origin speaks: one HUD message for the page, and not one for each frame. */
-        const say = (text: string, duration: HudDuration): Effect.Effect<void> =>
-          pipe(
-            config.role,
-            SessionRole.$match({
-              Origin: () => hud.show(text, duration),
-              Participant: () => Effect.void,
-            }),
-          );
-
-        const run = SessionCommand.$match({
-          CancelConfirm: () => cancelConfirm,
-          Render: () => render,
-          Say: ({ text, duration }) => say(text, hudDurationOf(duration)),
-          Exit: ({ reason }) => exitSession(reason),
-          Activate: ({ index }) => activateIndex(index),
-          Confirm: ({ index }) =>
-            pipe(
-              Effect.sleep(FILTER_CONFIRM_DELAY_MS),
-              Effect.andThen(activateIndex(index)),
-              FiberHandle.run(confirm),
-              Effect.asVoid,
-            ),
-        });
-
-        const applyKey = Effect.fnUntraced(function* (notation: string) {
-          const before = yield* Ref.get(state);
-          const { state: after, commands } = step(before, readKey(notation));
-          yield* pipe(state, Ref.set(after));
-          yield* pipe(commands, Effect.forEach(run, { discard: true }));
-        });
-
-        const handleKey = (notation: string): Effect.Effect<void> =>
-          pipe(applyKey(notation), Effect.when(isLive), Effect.asVoid);
-
-        const broadcastKey = (notation: string): Effect.Effect<void> =>
-          pipe(
-            bus.broadcast({ kind: "KEYSTROKE", roundId: config.roundId, notation }),
-            Effect.ignore,
-          );
-
-        const relay = (notation: string): Effect.Effect<void> =>
-          pipe(
-            config.role,
-            SessionRole.$match({
-              Origin: ({ crossFrame }) =>
-                pipe(
-                  crossFrame,
-                  Boolean.match({
-                    onFalse: () => Effect.void,
-                    onTrue: () => broadcastKey(notation),
-                  }),
-                ),
-              // A key reaches a participant over the relay. To send it back
-              // would loop.
-              Participant: () => Effect.void,
-            }),
-          );
-
-        // Escape tears the origin session down. Relay it first, while the
-        // round is still live, so that a participant removes its markers as
-        // well. An activation key stays local first, because a copy mode needs
-        // the activation of this keystroke.
-        const dispatchKey = (key: string): Effect.Effect<void> =>
-          pipe(
-            key === "<esc>",
-            Boolean.match({
-              onFalse: () => pipe(handleKey(key), Effect.andThen(relay(key))),
-              onTrue: () => pipe(relay(key), Effect.andThen(handleKey(key))),
-            }),
-          );
-
-        const onKeydown = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-          pipe(
-            event,
-            // A keystroke in the middle of a composition belongs to the input
-            // method, and not to us.
-            Option.liftPredicate(Predicate.not(isComposing)),
-            Option.flatMap((event) => keyNotation(event, keyContext)),
-            whenSome(dispatchKey),
-            Effect.as(SUPPRESS_EVENT),
-          );
-
-        // -- the mode ----------------------------------------------------
-
-        const handle = yield* modes.enter(
-          {
-            name: "hints",
-            indicator: pipe(INDICATORS, Struct.get(config.mode), Option.some),
-            // Hint mode handles Escape itself, because the origin must relay it
-            // before the teardown. The generic exit would run first.
-            exitOn: [],
-            // Hint mode owns the keyboard: a key that we do not use must not
-            // reach the page, or `j` scrolls while the user picks a link.
-            keyboard: KeyPolicy.Owned(),
-            singleton: Option.some("hints"),
-          },
-          { keydown: onKeydown },
-        );
-
-        yield* pipe(handleRef, Ref.set(Option.some(handle)));
-
-        const onExit = Effect.fnUntraced(function* (reason: ExitReason) {
-          yield* cancelConfirm;
-          yield* markers.clear;
-          // Escape means "undo what I was pointing at". An explicit
-          // activation means that the hover was wanted, and it must stay.
-          yield* pipe(reason, whenEscaped(releaseHover));
-          yield* finish;
-        });
-        yield* handle.onExit(onExit);
-
-        const session: LiveSession = {
-          id,
-          roundId: config.roundId,
-          mode: config.mode,
-          role: config.role,
-          key: handleKey,
-        };
-
-        /** The origin keeps the HUD while it waits for the frame that it asked to act. */
-        const awaitsActivation: Effect.Effect<boolean> = pipe(
+      // A participant draws and follows, and the origin is the frame that
+      // acts. It acts here, or it addresses the frame that owns the entry,
+      // which can be this frame as well.
+      const act = (entry: HintEntry): Effect.Effect<void> =>
+        pipe(
           config.role,
           SessionRole.$match({
             Origin: () =>
               pipe(
-                pendingActivationRef,
-                Ref.get,
-                Effect.map(Option.exists((pending) => pending.roundId === config.roundId)),
+                entry.hint,
+                Option.match({
+                  onNone: () => activateRemote(entry),
+                  onSome: (hint) => activateHere(entry, hint),
+                }),
               ),
-            Participant: () => Effect.succeed(false),
+            Participant: () => Effect.void,
           }),
         );
 
-        // The HUD goes here, and not in the exit body of the mode. `Hud.hide`
-        // waits for the timer fiber of the message before it, and the exit
-        // body of the mode runs inside a `keydown`, where nothing may
-        // suspend. A finaliser runs in the fiber of the session.
-        yield* Effect.addFinalizer(() =>
-          pipe(
-            awaitsActivation,
-            Effect.flatMap(Boolean.match({ onFalse: () => hud.hide, onTrue: () => Effect.void })),
-          ),
+      const activateIndex = (index: number): Effect.Effect<void> =>
+        pipe(
+          config.entries,
+          Array.get(index),
+          // The overlay goes first: activation can move the focus, and a
+          // marker that is still drawn would be visible for one frame after
+          // a navigation starts.
+          whenSome((entry) => pipe(exitSession("explicit"), Effect.andThen(act(entry)))),
         );
 
-        const publish = pipe(sessionRef, Ref.set(Option.some(session)));
-        yield* Effect.acquireRelease(publish, () =>
-          pipe(sessionRef, Ref.update(Option.filter((live) => live.id !== id))),
-        );
+      // -- keys --------------------------------------------------------
 
-        // The first draw measures the targets, because the page can move
-        // between the detection pass and this moment. Every later draw uses
-        // the measurements of the last layout change.
-        yield* refresh;
-
-        // A key after the end of the session does nothing, so the replay
-        // stops there.
-        const replay = pipe(
+      /** Only the origin speaks: one HUD message for the page, and not one for each frame. */
+      const say = (text: string, duration: HudDuration): Effect.Effect<void> =>
+        pipe(
           config.role,
           SessionRole.$match({
-            Origin: ({ buffered }) => replayable(initial, buffered),
-            Participant: () => Array.empty<string>(),
+            Origin: () => hud.show(text, duration),
+            Participant: () => Effect.void,
           }),
         );
-        yield* pipe(replay, Effect.forEach(handleKey, { discard: true }));
 
-        yield* Deferred.await(done);
-      });
-
-      const beginSession = (config: SessionConfig): Effect.Effect<void> =>
-        pipe(runSession(config), Effect.scoped, FiberHandle.run(sessionFiber), Effect.asVoid);
-
-      // ---------------------------------------------------------------------
-      // The round, as the origin frame runs it
-      // ---------------------------------------------------------------------
-
-      /**
-       * Swallow and record the keys while the hints are collected.
-       *
-       * Collection is time-boxed, and a user who has already typed `fab` must
-       * not lose the `ab`. The safety timer exists because the other failure —
-       * a page whose keyboard is dead because a frame hangs — is far worse than
-       * a few keystrokes that are dropped.
-       */
-      const bufferKeys = Effect.fnUntraced(function* (
-        keys: Ref.Ref<readonly string[]>,
-        abort: Deferred.Deferred<void>,
-      ) {
-        const current = yield* settings.current;
-        const keyContext = keyContextFor(current, capabilities.applePlatform);
-        const handle = yield* modes.enter(
-          {
-            name: "hints/buffer",
-            indicator: Option.none(),
-            exitOn: [ExitTrigger.Escape()],
-            keyboard: KeyPolicy.Owned(),
-            singleton: Option.some("hints"),
-          },
-          {
-            keydown: (event) =>
-              pipe(
-                keyNotation(event, keyContext),
-                Option.filter((key) => key !== "<esc>"),
-                whenSome((key) => pipe(keys, Ref.update(Array.append(key)))),
-                Effect.as(SUPPRESS_EVENT),
-              ),
-          },
-        );
-
-        yield* handle.onExit(whenEscaped(signal(abort)));
-
-        const giveUp = pipe(
-          handle.exit("explicit"),
-          Effect.andThen(hud.show(HINTS_STOPPED, BRIEFLY)),
-        );
-        yield* pipe(abortAfterSafety(abort, giveUp), Effect.forkScoped);
-      });
-
-      const collectRemote = Effect.fn("Hints.collectRemote")(function* (
-        roundId: string,
-        mode: HintMode,
-      ) {
-        const peers = yield* bus.peers;
-        return yield* pipe(
-          peers.length <= 1,
-          Boolean.match({
-            // One frame is this frame. There is nobody to ask.
-            onTrue: () =>
-              Effect.succeedSome<HintsResult>({
-                descriptors: Array.empty<HintDescriptor>(),
-                dropped: 0,
-              }),
-            onFalse: () =>
-              pipe(
-                bus.request(
-                  toTop,
-                  { kind: "REQUEST_HINTS", roundId, mode },
-                  readHintsResult(roundId),
-                  COLLECT_DEADLINE_MS,
-                ),
-                Effect.option,
-              ),
-          }),
-        );
-      });
-
-      /** Collect the hints of every frame, and buffer the keys meanwhile. */
-      const collectRound = Effect.fnUntraced(function* (
-        roundId: string,
-        mode: HintMode,
-        buffered: Ref.Ref<readonly string[]>,
-        abort: Deferred.Deferred<void>,
-      ) {
-        yield* bufferKeys(buffered, abort);
-        const local = yield* detectLocal(mode);
-        const remote = yield* collectRemote(roundId, mode);
-        return pipe(
-          remote,
-          Option.match({
-            onNone: (): Collection => Collection.Unanswered(),
-            onSome: ({ descriptors, dropped }): Collection =>
-              Collection.Collected({ local, remote: descriptors, dropped }),
-          }),
-          Option.some,
-        );
-      });
-
-      /**
-       * Tell the top frame that a round of this frame is over.
-       *
-       * The top frame then forgets the one live round of the page, and it
-       * tells every frame to drop its record and its session of the round.
-       * The top frame sends this to itself as well, through the bus, so the
-       * end of a round is the same message in every frame.
-       */
-      const endRound = (roundId: string): Effect.Effect<void> =>
-        pipe(bus.send(toTop, { kind: "CANCEL_HINTS", roundId }), Effect.ignore);
-
-      /** Open the session of a round that this frame collected. */
-      const openRound = Effect.fnUntraced(function* (
-        roundId: string,
-        mode: HintMode,
-        buffered: Ref.Ref<readonly string[]>,
-        { local, remote, dropped }: Collected,
-      ) {
-        const entries = merge(local, remote);
-        const start = Effect.gen(function* () {
-          yield* pipe(
-            omittedNotice(dropped),
-            whenSome((text) => hud.show(text, BRIEFLY)),
-          );
-          const keys = yield* Ref.get(buffered);
-          yield* pipe(
-            runSession({
-              roundId,
-              mode,
-              entries,
-              role: SessionRole.Origin({ crossFrame: remote.length > 0, buffered: keys }),
-            }),
-            Effect.scoped,
-          );
-        });
-        yield* pipe(
-          entries,
-          Array.match({
-            onEmpty: () => hud.show("No links to select", BRIEFLY),
-            onNonEmpty: () => start,
-          }),
-        );
-      });
-
-      /** Collect the hints of a round, and open its session when the frames answered. */
-      const runRound = Effect.fnUntraced(function* (roundId: string, mode: HintMode) {
-        const buffered = yield* Ref.make<readonly string[]>([]);
-        const abort = yield* Deferred.make<void>();
-
-        // The buffer starts at the first moment: detection is chunked, and so
-        // it is asynchronous even in one frame, and a fast typist gets ahead of
-        // it.
-        const collect = pipe(collectRound(roundId, mode, buffered, abort), Effect.scoped);
-
-        // Escape during the collection ends the round, and so does the safety
-        // timer. The loser of the race is interrupted, which stops the
-        // detection at its next slice.
-        const collection = yield* pipe(
-          raceUntilAbort(collect, abort),
-          Effect.map(Option.getOrElse((): Collection => Collection.Aborted())),
-        );
-        yield* pipe(
-          collection,
-          Collection.$match({
-            Aborted: () => Effect.void,
-            Unanswered: () => hud.show(HINTS_STOPPED, BRIEFLY),
-            Collected: (collected) => openRound(roundId, mode, buffered, collected),
-          }),
-        );
-      });
-
-      const startRound = Effect.fn("Hints.startRound")(function* (mode: HintMode) {
-        // A child frame starts only when something wakes it, so a round must
-        // wake the frames below this one, whatever started the round: a key,
-        // the command list or another command.
-        yield* realm.wakeDescendants;
-        yield* ensureStyles;
-        yield* pipe(pendingActivationRef, Ref.set(Option.none()));
-
-        const sequence = yield* pipe(
-          roundSeq,
-          Ref.modify((n) => [n, n + 1] as const),
-        );
-        const roundId = `${bus.frameId}-${sequence}`;
-        // Whatever ends the round, the top frame must hear of it. A round
-        // that it still counts as live keeps every other frame out.
-        yield* pipe(runRound(roundId, mode), Effect.ensuring(endRound(roundId)));
-      });
-
-      // ---------------------------------------------------------------------
-      // The messages that every frame answers
-      // ---------------------------------------------------------------------
-
-      // `FrameBus.serve` gives each handler the messages of its kind only. A
-      // handler that drops a message fails with `NoSuchElementError`, and
-      // `Effect.option` turns that into no reply.
-
-      const answerCollectHints = Effect.fnUntraced(function* ({
-        message: { roundId, mode, originFrameId },
-        from,
-      }: InboundOf<"COLLECT_HINTS">) {
-        yield* unlessCancelled(roundId);
-        const hints = yield* detectLocal(mode);
-        yield* unlessCancelled(roundId);
-        const now = yield* dom.now;
-        // The round of this frame opens here, and its age is bounded. It is
-        // bounded by time and not by "a mode is live", because the origin
-        // frame tears its own mode down before it acts.
-        yield* pipe(
-          roundRef,
-          Ref.set(
-            Option.some({
-              roundId,
-              coordinator: from,
-              mode,
-              openedAt: now,
-              origin: originFrameId,
-            }),
+      const run = SessionCommand.$match({
+        CancelConfirm: () => cancelConfirm,
+        Render: () => render,
+        Say: ({ text, duration }) => say(text, hudDurationOf(duration)),
+        Exit: ({ reason }) => exitSession(reason),
+        Activate: ({ index }) => activateIndex(index),
+        Confirm: ({ index }) =>
+          pipe(
+            Effect.sleep(FILTER_CONFIRM_DELAY_MS),
+            Effect.andThen(activateIndex(index)),
+            FiberHandle.run(confirm),
+            Effect.asVoid,
           ),
-        );
-        return {
-          kind: "HINTS" as const,
-          roundId,
-          descriptors: descriptorsFor(bus.frameId, hints),
-        };
-      }, Effect.option);
-
-      /** Join the session of a round that another frame drives. */
-      const joinRound = Effect.fnUntraced(function* (payload: MessageOf<"ACTIVATE">) {
-        yield* ensureStyles;
-        const local = yield* Ref.get(localRef);
-        // `local` is the answer of this frame to `COLLECT_HINTS`. The
-        // complete descriptor list gives every frame the same byte limit.
-        const entries = merge(local, payload.descriptors);
-        const participate = beginSession({
-          roundId: payload.roundId,
-          mode: payload.mode,
-          entries,
-          role: SessionRole.Participant({ driver: payload.originFrameId }),
-        });
-        yield* pipe(
-          entries,
-          Array.match({ onEmpty: () => Effect.void, onNonEmpty: () => participate }),
-        );
       });
 
-      const onActivate = Effect.fnUntraced(function* ({ message: payload }: InboundOf<"ACTIVATE">) {
-        const round = yield* Ref.get(roundRef);
-        const now = yield* dom.now;
-        yield* pipe(
-          round,
-          Option.filter(joinsRound(payload, bus.frameId, now)),
-          whenSome(() => joinRound(payload)),
-        );
-      }, noReply);
+      const applyKey = Effect.fnUntraced(function* (notation: string) {
+        const before = yield* Ref.get(state);
+        const { state: after, commands } = step(before, readKey(notation));
+        yield* pipe(state, Ref.set(after));
+        yield* pipe(commands, Effect.forEach(run, { discard: true }));
+      });
 
-      /** Act on a hint of this frame for the origin, and tell the origin how it went. */
-      const actForOrigin = Effect.fnUntraced(function* (
-        payload: MessageOf<"ACTIVATE_HINT">,
-        hint: LocalHint,
-      ) {
-        // One activation for each round, so that one authorised request
-        // cannot be replayed into a click on every element that this frame
-        // ever hinted.
-        yield* pipe(roundRef, Ref.set(Option.none()));
-        const refusal = yield* activateLocal(payload.localIndex, hint, payload.mode, "remote");
-        yield* pipe(
-          bus.broadcast({
-            kind: "ACTIVATION_RESULT",
-            roundId: payload.roundId,
-            detail: pipe(
-              refusal,
-              Option.getOrElse(() => ""),
-            ),
-          }),
+      const handleKey = (notation: string): Effect.Effect<void> =>
+        pipe(applyKey(notation), Effect.when(isLive), Effect.asVoid);
+
+      const broadcastKey = (notation: string): Effect.Effect<void> =>
+        pipe(
+          bus.broadcast({ kind: "KEYSTROKE", roundId: config.roundId, notation }),
           Effect.ignore,
         );
-      });
 
-      const admitHintRequest = Effect.fnUntraced(function* (payload: MessageOf<"ACTIVATE_HINT">) {
-        const hints = yield* Ref.get(localRef);
-        yield* pipe(
-          hints,
-          Array.get(payload.localIndex),
-          whenSome((hint) => actForOrigin(payload, hint)),
-        );
-      });
-
-      const onActivateHint = Effect.fnUntraced(function* ({
-        message: payload,
-        from,
-      }: InboundOf<"ACTIVATE_HINT">) {
-        const round = yield* Ref.get(roundRef);
-        const now = yield* dom.now;
-        yield* pipe(
-          judgeHintRequest(round, payload, from, now),
-          HintRequest.$match({
-            Ignore: () => Effect.void,
-            Expire: () => pipe(roundRef, Ref.set(Option.none())),
-            Admit: () => admitHintRequest(payload),
+      const relay = (notation: string): Effect.Effect<void> =>
+        pipe(
+          config.role,
+          SessionRole.$match({
+            Origin: ({ crossFrame }) =>
+              pipe(
+                crossFrame,
+                Boolean.match({
+                  onFalse: () => Effect.void,
+                  onTrue: () => broadcastKey(notation),
+                }),
+              ),
+            // A key reaches a participant over the relay. To send it back
+            // would loop.
+            Participant: () => Effect.void,
           }),
         );
-      }, noReply);
 
-      /**
-       * End a round in this frame.
-       *
-       * The origin sends this to the top frame when its round ends, for any
-       * reason, and the coordinator sends it on to every frame.
-       */
-      const onCancelHints = Effect.fnUntraced(function* ({
-        message: { roundId },
-        from,
-      }: InboundOf<"CANCEL_HINTS">) {
-        yield* rememberCancelled(roundId);
-
-        const localRound = yield* Ref.get(roundRef);
-        yield* pipe(
-          localRound,
-          Option.filter(cancelsLocalRound(roundId, from)),
-          whenSome(() => pipe(roundRef, Ref.set(Option.none()))),
+      // Escape tears the origin session down. Relay it first, while the
+      // round is still live, so that a participant removes its markers as
+      // well. An activation key stays local first, because a copy mode needs
+      // the activation of this keystroke.
+      const dispatchKey = (key: string): Effect.Effect<void> =>
+        pipe(
+          key === "<esc>",
+          Boolean.match({
+            onFalse: () => pipe(handleKey(key), Effect.andThen(relay(key))),
+            onTrue: () => pipe(relay(key), Effect.andThen(handleKey(key))),
+          }),
         );
 
-        const session = yield* Ref.get(sessionRef);
-        yield* pipe(
-          session,
-          Option.filter(cancelsSession(roundId, from, localRound)),
-          whenSome(() => FiberHandle.clear(sessionFiber)),
+      const onKeydown = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
+        pipe(
+          event,
+          // A keystroke in the middle of a composition belongs to the input
+          // method, and not to us.
+          Option.liftPredicate(Predicate.not(isComposing)),
+          Option.flatMap((event) => keyNotation(event, keyContext)),
+          whenSome(dispatchKey),
+          Effect.as(SUPPRESS_EVENT),
         );
-      }, noReply);
 
-      const settled = Effect.gen(function* () {
-        yield* pipe(pendingActivationRef, Ref.set(Option.none()));
-        yield* hud.hide;
-      });
+      // -- the mode ----------------------------------------------------
 
-      /** An empty detail is a success. Anything else is the refusal of the owner. */
-      const settleActivation: (detail: string) => Effect.Effect<void> = flow(
-        Option.liftPredicate(String.isNonEmpty),
-        Option.match({ onNone: () => settled, onSome: (refusal) => report.error(refusal) }),
+      const handle = yield* modes.enter(
+        {
+          name: "hints",
+          indicator: pipe(INDICATORS, Struct.get(config.mode), Option.some),
+          // Hint mode handles Escape itself, because the origin must relay it
+          // before the teardown. The generic exit would run first.
+          exitOn: [],
+          // Hint mode owns the keyboard: a key that we do not use must not
+          // reach the page, or `j` scrolls while the user picks a link.
+          keyboard: KeyPolicy.Owned(),
+          singleton: Option.some("hints"),
+        },
+        { keydown: onKeydown },
       );
 
-      const onActivationResult = Effect.fnUntraced(function* ({
-        message: { roundId, detail },
-        from,
-        requestId,
-      }: InboundOf<"ACTIVATION_RESULT">) {
-        const pending = yield* Ref.get(pendingActivationRef);
-        yield* pipe(
-          pending,
-          Option.filter(
-            (pending) =>
-              Option.isNone(requestId) && pending.roundId === roundId && pending.owner === from,
-          ),
-          whenSome(() => settleActivation(detail)),
-        );
-      }, noReply);
+      yield* pipe(handleRef, Ref.set(Option.some(handle)));
 
-      const onKeystroke = Effect.fnUntraced(function* ({
-        message: { roundId, notation },
-        from,
-      }: InboundOf<"KEYSTROKE">) {
-        // A keystroke means something inside a round only, and only from the
-        // frame that the user types into.
-        const live = yield* Ref.get(sessionRef);
-        yield* pipe(
-          live,
-          Option.filter(followsKeysOf(from, roundId)),
-          whenSome((session) => session.key(notation)),
-        );
-      }, noReply);
+      const onExit = Effect.fnUntraced(function* (reason: ExitReason) {
+        yield* cancelConfirm;
+        yield* markers.clear;
+        // Escape means "undo what I was pointing at". An explicit
+        // activation means that the hover was wanted, and it must stay.
+        yield* pipe(reason, whenEscaped(releaseHover));
+        yield* finish;
+      });
+      yield* handle.onExit(onExit);
 
-      // The top frame is the broker of the rounds of the page. A frame asks
-      // it for a round, and it fans the request out to every frame.
-      yield* pipe(
-        bus.role,
-        FrameRole.$match({
-          Top: () => coordinate,
-          Child: () => Effect.void,
+      const session: LiveSession = {
+        id,
+        roundId: config.roundId,
+        mode: config.mode,
+        role: config.role,
+        key: handleKey,
+      };
+
+      /** The origin keeps the HUD while it waits for the frame that it asked to act. */
+      const awaitsActivation: Effect.Effect<boolean> = pipe(
+        config.role,
+        SessionRole.$match({
+          Origin: () =>
+            pipe(
+              pendingActivationRef,
+              Ref.get,
+              Effect.map(Option.exists((pending) => pending.roundId === config.roundId)),
+            ),
+          Participant: () => Effect.succeed(false),
         }),
       );
-      yield* bus.serve("COLLECT_HINTS", answerCollectHints);
-      yield* bus.serve("ACTIVATE", onActivate);
-      yield* bus.serve("ACTIVATE_HINT", onActivateHint);
-      yield* bus.serve("CANCEL_HINTS", onCancelHints);
-      yield* bus.serve("ACTIVATION_RESULT", onActivationResult);
-      yield* bus.serve("KEYSTROKE", onKeystroke);
 
-      // ---------------------------------------------------------------------
-      // The commands
-      // ---------------------------------------------------------------------
+      // The HUD goes here, and not in the exit body of the mode. `Hud.hide`
+      // waits for the timer fiber of the message before it, and the exit
+      // body of the mode runs inside a `keydown`, where nothing may
+      // suspend. A finaliser runs in the fiber of the session.
+      yield* Effect.addFinalizer(() =>
+        pipe(
+          awaitsActivation,
+          Effect.flatMap(Boolean.match({ onFalse: () => hud.hide, onTrue: () => Effect.void })),
+        ),
+      );
 
-      /** Start a hint round in this frame. A second call replaces the first. */
-      const activate = (mode: HintMode): Effect.Effect<void> =>
-        pipe(startRound(mode), FiberHandle.run(sessionFiber), Effect.asVoid);
+      const publish = pipe(sessionRef, Ref.set(Option.some(session)));
+      yield* Effect.acquireRelease(publish, () =>
+        pipe(sessionRef, Ref.update(Option.filter((live) => live.id !== id))),
+      );
 
-      yield* commands.registerAll({
-        "LinkHints.activateMode": () => activate("activate"),
-        "LinkHints.activateModeToOpenInNewTab": () => activate("activate-new-tab-background"),
-        "LinkHints.activateModeToOpenInNewForegroundTab": () => activate("activate-new-tab"),
-        "LinkHints.activateModeToHover": () => activate("hover"),
-        "LinkHints.activateModeToFocus": () => activate("focus"),
-        "LinkHints.activateModeToCopyLinkUrl": () => activate("copy-link-url"),
-        "LinkHints.activateModeToCopyLinkText": () => activate("copy-link-text"),
-        "LinkHints.activateModeWithOmnibar": () => activate("open-with-omnibar"),
+      // The first draw measures the targets, because the page can move
+      // between the detection pass and this moment. Every later draw uses
+      // the measurements of the last layout change.
+      yield* refresh;
+
+      // A key after the end of the session does nothing, so the replay
+      // stops there.
+      const replay = pipe(
+        config.role,
+        SessionRole.$match({
+          Origin: ({ buffered }) => replayable(initial, buffered),
+          Participant: () => Array.empty<string>(),
+        }),
+      );
+      yield* pipe(replay, Effect.forEach(handleKey, { discard: true }));
+
+      yield* Deferred.await(done);
+    });
+
+    const beginSession = (config: SessionConfig): Effect.Effect<void> =>
+      pipe(runSession(config), Effect.scoped, FiberHandle.run(sessionFiber), Effect.asVoid);
+
+    // ---------------------------------------------------------------------
+    // The round, as the origin frame runs it
+    // ---------------------------------------------------------------------
+
+    /**
+     * Swallow and record the keys while the hints are collected.
+     *
+     * Collection is time-boxed, and a user who has already typed `fab` must
+     * not lose the `ab`. The safety timer exists because the other failure —
+     * a page whose keyboard is dead because a frame hangs — is far worse than
+     * a few keystrokes that are dropped.
+     */
+    const bufferKeys = Effect.fnUntraced(function* (
+      keys: Ref.Ref<readonly string[]>,
+      abort: Deferred.Deferred<void>,
+    ) {
+      const current = yield* settings.current;
+      const keyContext = keyContextFor(current, capabilities.applePlatform);
+      const handle = yield* modes.enter(
+        {
+          name: "hints/buffer",
+          indicator: Option.none(),
+          exitOn: [ExitTrigger.Escape()],
+          keyboard: KeyPolicy.Owned(),
+          singleton: Option.some("hints"),
+        },
+        {
+          keydown: (event) =>
+            pipe(
+              keyNotation(event, keyContext),
+              Option.filter((key) => key !== "<esc>"),
+              whenSome((key) => pipe(keys, Ref.update(Array.append(key)))),
+              Effect.as(SUPPRESS_EVENT),
+            ),
+        },
+      );
+
+      yield* handle.onExit(whenEscaped(signal(abort)));
+
+      const giveUp = pipe(
+        handle.exit("explicit"),
+        Effect.andThen(hud.show(HINTS_STOPPED, BRIEFLY)),
+      );
+      yield* pipe(abortAfterSafety(abort, giveUp), Effect.forkScoped);
+    });
+
+    const collectRemote = Effect.fn("Hints.collectRemote")(function* (
+      roundId: string,
+      mode: HintMode,
+    ) {
+      const peers = yield* bus.peers;
+      return yield* pipe(
+        peers.length <= 1,
+        Boolean.match({
+          // One frame is this frame. There is nobody to ask.
+          onTrue: () =>
+            Effect.succeedSome<HintsResult>({
+              descriptors: Array.empty<HintDescriptor>(),
+              dropped: 0,
+            }),
+          onFalse: () =>
+            pipe(
+              bus.request(
+                toTop,
+                { kind: "REQUEST_HINTS", roundId, mode },
+                readHintsResult(roundId),
+                COLLECT_DEADLINE_MS,
+              ),
+              Effect.option,
+            ),
+        }),
+      );
+    });
+
+    /** Collect the hints of every frame, and buffer the keys meanwhile. */
+    const collectRound = Effect.fnUntraced(function* (
+      roundId: string,
+      mode: HintMode,
+      buffered: Ref.Ref<readonly string[]>,
+      abort: Deferred.Deferred<void>,
+    ) {
+      yield* bufferKeys(buffered, abort);
+      const local = yield* detectLocal(mode);
+      const remote = yield* collectRemote(roundId, mode);
+      return pipe(
+        remote,
+        Option.match({
+          onNone: (): Collection => Collection.Unanswered(),
+          onSome: ({ descriptors, dropped }): Collection =>
+            Collection.Collected({ local, remote: descriptors, dropped }),
+        }),
+        Option.some,
+      );
+    });
+
+    /**
+     * Tell the top frame that a round of this frame is over.
+     *
+     * The top frame then forgets the one live round of the page, and it
+     * tells every frame to drop its record and its session of the round.
+     * The top frame sends this to itself as well, through the bus, so the
+     * end of a round is the same message in every frame.
+     */
+    const endRound = (roundId: string): Effect.Effect<void> =>
+      pipe(bus.send(toTop, { kind: "CANCEL_HINTS", roundId }), Effect.ignore);
+
+    /** Open the session of a round that this frame collected. */
+    const openRound = Effect.fnUntraced(function* (
+      roundId: string,
+      mode: HintMode,
+      buffered: Ref.Ref<readonly string[]>,
+      { local, remote, dropped }: Collected,
+    ) {
+      const entries = merge(local, remote);
+      const start = Effect.gen(function* () {
+        yield* pipe(
+          omittedNotice(dropped),
+          whenSome((text) => hud.show(text, BRIEFLY)),
+        );
+        const keys = yield* Ref.get(buffered);
+        yield* pipe(
+          runSession({
+            roundId,
+            mode,
+            entries,
+            role: SessionRole.Origin({ crossFrame: remote.length > 0, buffered: keys }),
+          }),
+          Effect.scoped,
+        );
       });
-    }),
-  ),
-};
+      yield* pipe(
+        entries,
+        Array.match({
+          onEmpty: () => hud.show("No links to select", BRIEFLY),
+          onNonEmpty: () => start,
+        }),
+      );
+    });
+
+    /** Collect the hints of a round, and open its session when the frames answered. */
+    const runRound = Effect.fnUntraced(function* (roundId: string, mode: HintMode) {
+      const buffered = yield* Ref.make<readonly string[]>([]);
+      const abort = yield* Deferred.make<void>();
+
+      // The buffer starts at the first moment: detection is chunked, and so
+      // it is asynchronous even in one frame, and a fast typist gets ahead of
+      // it.
+      const collect = pipe(collectRound(roundId, mode, buffered, abort), Effect.scoped);
+
+      // Escape during the collection ends the round, and so does the safety
+      // timer. The loser of the race is interrupted, which stops the
+      // detection at its next slice.
+      const collection = yield* pipe(
+        raceUntilAbort(collect, abort),
+        Effect.map(Option.getOrElse((): Collection => Collection.Aborted())),
+      );
+      yield* pipe(
+        collection,
+        Collection.$match({
+          Aborted: () => Effect.void,
+          Unanswered: () => hud.show(HINTS_STOPPED, BRIEFLY),
+          Collected: (collected) => openRound(roundId, mode, buffered, collected),
+        }),
+      );
+    });
+
+    const startRound = Effect.fn("Hints.startRound")(function* (mode: HintMode) {
+      // A child frame starts only when something wakes it, so a round must
+      // wake the frames below this one, whatever started the round: a key,
+      // the command list or another command.
+      yield* realm.wakeDescendants;
+      yield* ensureStyles;
+      yield* pipe(pendingActivationRef, Ref.set(Option.none()));
+
+      const sequence = yield* pipe(
+        roundSeq,
+        Ref.modify((n) => [n, n + 1] as const),
+      );
+      const roundId = `${bus.frameId}-${sequence}`;
+      // Whatever ends the round, the top frame must hear of it. A round
+      // that it still counts as live keeps every other frame out.
+      yield* pipe(runRound(roundId, mode), Effect.ensuring(endRound(roundId)));
+    });
+
+    // ---------------------------------------------------------------------
+    // The messages that every frame answers
+    // ---------------------------------------------------------------------
+
+    // `FrameBus.serve` gives each handler the messages of its kind only. A
+    // handler that drops a message fails with `NoSuchElementError`, and
+    // `Effect.option` turns that into no reply.
+
+    const answerCollectHints = Effect.fnUntraced(function* ({
+      message: { roundId, mode, originFrameId },
+      from,
+    }: InboundOf<"COLLECT_HINTS">) {
+      yield* unlessCancelled(roundId);
+      const hints = yield* detectLocal(mode);
+      yield* unlessCancelled(roundId);
+      const now = yield* dom.now;
+      // The round of this frame opens here, and its age is bounded. It is
+      // bounded by time and not by "a mode is live", because the origin
+      // frame tears its own mode down before it acts.
+      yield* pipe(
+        roundRef,
+        Ref.set(
+          Option.some({
+            roundId,
+            coordinator: from,
+            mode,
+            openedAt: now,
+            origin: originFrameId,
+          }),
+        ),
+      );
+      return {
+        kind: "HINTS" as const,
+        roundId,
+        descriptors: descriptorsFor(bus.frameId, hints),
+      };
+    }, Effect.option);
+
+    /** Join the session of a round that another frame drives. */
+    const joinRound = Effect.fnUntraced(function* (payload: MessageOf<"ACTIVATE">) {
+      yield* ensureStyles;
+      const local = yield* Ref.get(localRef);
+      // `local` is the answer of this frame to `COLLECT_HINTS`. The
+      // complete descriptor list gives every frame the same byte limit.
+      const entries = merge(local, payload.descriptors);
+      const participate = beginSession({
+        roundId: payload.roundId,
+        mode: payload.mode,
+        entries,
+        role: SessionRole.Participant({ driver: payload.originFrameId }),
+      });
+      yield* pipe(
+        entries,
+        Array.match({ onEmpty: () => Effect.void, onNonEmpty: () => participate }),
+      );
+    });
+
+    const onActivate = Effect.fnUntraced(function* ({ message: payload }: InboundOf<"ACTIVATE">) {
+      const round = yield* Ref.get(roundRef);
+      const now = yield* dom.now;
+      yield* pipe(
+        round,
+        Option.filter(joinsRound(payload, bus.frameId, now)),
+        whenSome(() => joinRound(payload)),
+      );
+    }, noReply);
+
+    /** Act on a hint of this frame for the origin, and tell the origin how it went. */
+    const actForOrigin = Effect.fnUntraced(function* (
+      payload: MessageOf<"ACTIVATE_HINT">,
+      hint: LocalHint,
+    ) {
+      // One activation for each round, so that one authorised request
+      // cannot be replayed into a click on every element that this frame
+      // ever hinted.
+      yield* pipe(roundRef, Ref.set(Option.none()));
+      const refusal = yield* activateLocal(payload.localIndex, hint, payload.mode, "remote");
+      yield* pipe(
+        bus.broadcast({
+          kind: "ACTIVATION_RESULT",
+          roundId: payload.roundId,
+          detail: pipe(
+            refusal,
+            Option.getOrElse(() => ""),
+          ),
+        }),
+        Effect.ignore,
+      );
+    });
+
+    const admitHintRequest = Effect.fnUntraced(function* (payload: MessageOf<"ACTIVATE_HINT">) {
+      const hints = yield* Ref.get(localRef);
+      yield* pipe(
+        hints,
+        Array.get(payload.localIndex),
+        whenSome((hint) => actForOrigin(payload, hint)),
+      );
+    });
+
+    const onActivateHint = Effect.fnUntraced(function* ({
+      message: payload,
+      from,
+    }: InboundOf<"ACTIVATE_HINT">) {
+      const round = yield* Ref.get(roundRef);
+      const now = yield* dom.now;
+      yield* pipe(
+        judgeHintRequest(round, payload, from, now),
+        HintRequest.$match({
+          Ignore: () => Effect.void,
+          Expire: () => pipe(roundRef, Ref.set(Option.none())),
+          Admit: () => admitHintRequest(payload),
+        }),
+      );
+    }, noReply);
+
+    /**
+     * End a round in this frame.
+     *
+     * The origin sends this to the top frame when its round ends, for any
+     * reason, and the coordinator sends it on to every frame.
+     */
+    const onCancelHints = Effect.fnUntraced(function* ({
+      message: { roundId },
+      from,
+    }: InboundOf<"CANCEL_HINTS">) {
+      yield* rememberCancelled(roundId);
+
+      const localRound = yield* Ref.get(roundRef);
+      yield* pipe(
+        localRound,
+        Option.filter(cancelsLocalRound(roundId, from)),
+        whenSome(() => pipe(roundRef, Ref.set(Option.none()))),
+      );
+
+      const session = yield* Ref.get(sessionRef);
+      yield* pipe(
+        session,
+        Option.filter(cancelsSession(roundId, from, localRound)),
+        whenSome(() => FiberHandle.clear(sessionFiber)),
+      );
+    }, noReply);
+
+    const settled = Effect.gen(function* () {
+      yield* pipe(pendingActivationRef, Ref.set(Option.none()));
+      yield* hud.hide;
+    });
+
+    /** An empty detail is a success. Anything else is the refusal of the owner. */
+    const settleActivation: (detail: string) => Effect.Effect<void> = flow(
+      Option.liftPredicate(String.isNonEmpty),
+      Option.match({ onNone: () => settled, onSome: (refusal) => report.error(refusal) }),
+    );
+
+    const onActivationResult = Effect.fnUntraced(function* ({
+      message: { roundId, detail },
+      from,
+      requestId,
+    }: InboundOf<"ACTIVATION_RESULT">) {
+      const pending = yield* Ref.get(pendingActivationRef);
+      yield* pipe(
+        pending,
+        Option.filter(
+          (pending) =>
+            Option.isNone(requestId) && pending.roundId === roundId && pending.owner === from,
+        ),
+        whenSome(() => settleActivation(detail)),
+      );
+    }, noReply);
+
+    const onKeystroke = Effect.fnUntraced(function* ({
+      message: { roundId, notation },
+      from,
+    }: InboundOf<"KEYSTROKE">) {
+      // A keystroke means something inside a round only, and only from the
+      // frame that the user types into.
+      const live = yield* Ref.get(sessionRef);
+      yield* pipe(
+        live,
+        Option.filter(followsKeysOf(from, roundId)),
+        whenSome((session) => session.key(notation)),
+      );
+    }, noReply);
+
+    // The top frame is the broker of the rounds of the page. A frame asks
+    // it for a round, and it fans the request out to every frame.
+    yield* pipe(
+      bus.role,
+      FrameRole.$match({
+        Top: () => coordinate,
+        Child: () => Effect.void,
+      }),
+    );
+    yield* bus.serve("COLLECT_HINTS", answerCollectHints);
+    yield* bus.serve("ACTIVATE", onActivate);
+    yield* bus.serve("ACTIVATE_HINT", onActivateHint);
+    yield* bus.serve("CANCEL_HINTS", onCancelHints);
+    yield* bus.serve("ACTIVATION_RESULT", onActivationResult);
+    yield* bus.serve("KEYSTROKE", onKeystroke);
+
+    // ---------------------------------------------------------------------
+    // The commands
+    // ---------------------------------------------------------------------
+
+    /** Start a hint round in this frame. A second call replaces the first. */
+    const activate = (mode: HintMode): Effect.Effect<void> =>
+      pipe(startRound(mode), FiberHandle.run(sessionFiber), Effect.asVoid);
+
+    yield* commands.registerAll({
+      "LinkHints.activateMode": () => activate("activate"),
+      "LinkHints.activateModeToOpenInNewTab": () => activate("activate-new-tab-background"),
+      "LinkHints.activateModeToOpenInNewForegroundTab": () => activate("activate-new-tab"),
+      "LinkHints.activateModeToHover": () => activate("hover"),
+      "LinkHints.activateModeToFocus": () => activate("focus"),
+      "LinkHints.activateModeToCopyLinkUrl": () => activate("copy-link-url"),
+      "LinkHints.activateModeToCopyLinkText": () => activate("copy-link-text"),
+      "LinkHints.activateModeWithOmnibar": () => activate("open-with-omnibar"),
+    });
+  }),
+);

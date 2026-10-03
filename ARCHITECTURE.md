@@ -12,7 +12,7 @@ The reference for the Effect idiom is
    holds state, touches the DOM or can fail, is a `Context.Service` with a
    `static layer`. A feature that only registers commands and answers frame
    messages provides no service. It is a `Layer.effectDiscard`, as
-   `BootstrapLayer` is. `Hints.layer`, `FindLayer`, `VisualLayer`,
+   `BootstrapLayer` is. `HintsLayer`, `FindLayer`, `VisualLayer`,
    `MarksLayer`, `TabControlLayer`, `UrlClipboardLayer` and `DialogLayer`
    are layers of that kind.
 2. **Every fallible operation returns an `Effect`.** Pure code returns a
