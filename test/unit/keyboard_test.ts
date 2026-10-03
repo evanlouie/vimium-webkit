@@ -1,14 +1,14 @@
 /**
  * Normal mode: the dispatch path from one key to one command.
  *
- * The tests build the real `Keyboard`, `Modes`, `HandlerStack`, `Commands` and
- * `Report` layers. `Settings`, `Mappings` and `Exclusions` are stubs, because a
- * test decides what the user configured. Nothing here writes to a global.
+ * The tests build the real `Keyboard`, `Modes`, `Commands` and `Report`
+ * layers. `Settings`, `Mappings` and `Exclusions` are stubs, because a test
+ * decides what the user configured. Nothing here writes to a global.
  *
  * Node has no `KeyboardEvent`, and no script can make a trusted one, so a test
  * presses a double of its own. The double is a whole `KeyboardEvent`. A test
  * chooses the fields that the key path reads, and the rest are the values of a
- * plain event. The handler stack only calls `preventDefault` and
+ * plain event. The mode stack only calls `preventDefault` and
  * `stopImmediatePropagation`, and the double records both.
  */
 
@@ -16,7 +16,6 @@ import { assert, describe, it } from "@effect/vitest";
 import { Array, Effect, Layer, Option, Ref, Stream, SubscriptionRef, pipe } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Exclusions } from "~/core/Exclusions.ts";
-import { HandlerStack } from "~/core/HandlerStack.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
 import { Mappings } from "~/core/Mappings.ts";
 import { Modes } from "~/core/Modes.ts";
@@ -49,7 +48,7 @@ interface PressOptions {
 /**
  * Every member of a `UIEvent`, with the values of a plain event.
  *
- * `defaultPrevented` and `propagationStopped` record what the handler stack
+ * `defaultPrevented` and `propagationStopped` record what the mode stack
  * did to the event.
  */
 class UiEventDouble implements UIEvent {
@@ -225,17 +224,17 @@ interface Options {
 }
 
 /**
- * `Keyboard` over its dependencies, with `HandlerStack` and `Commands` exposed.
+ * `Keyboard` over its dependencies, with `Modes` and `Commands` exposed.
  *
- * A test needs the stack to deliver a key, and the registry to record what the
+ * A test needs the mode stack to deliver a key, and the registry to record what the
  * key ran.
  */
-const layerFor = (options: Options): Layer.Layer<Commands | HandlerStack | Keyboard | Modes> => {
+const layerFor = (options: Options): Layer.Layer<Commands | Keyboard | Modes> => {
   const support = Layer.mergeAll(
     Commands.layer,
     Report.layer,
     capabilitiesOf(options.applePlatform ?? false),
-    Layer.provideMerge(Modes.layer, HandlerStack.layer),
+    Modes.layer,
     Layer.provideMerge(Realm.layer, Dom.layer),
     settingsOf(options.settings ?? defaultSettings()),
     exclusionsOf(options.exclusion ?? FULLY_ENABLED),
@@ -273,7 +272,7 @@ describe("Keyboard", () => {
     it.effect("runs the command for the F key of a Dvorak layout", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollDown"]);
 
           // The F key of a Dvorak layout sits at the US Y position.
@@ -282,7 +281,7 @@ describe("Keyboard", () => {
             keyCode: 70,
             altKey: true,
           });
-          yield* stack.bubble("keydown", press);
+          yield* modes.bubble("keydown", press);
 
           assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
         }),
@@ -298,7 +297,7 @@ describe("Keyboard", () => {
     it.effect("leaves a Cyrillic Alt chord to its own letter", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollDown", "scrollUp"]);
 
           // `Alt+\u0444` on Linux. The letter of the user must win, and the
@@ -308,7 +307,7 @@ describe("Keyboard", () => {
             keyCode: 65,
             altKey: true,
           });
-          yield* stack.bubble("keydown", press);
+          yield* modes.bubble("keydown", press);
 
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
         }),
@@ -326,11 +325,11 @@ describe("Keyboard", () => {
     it.effect("ignores a keydown that the page dispatched", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollDown"]);
 
           const press = new Press("j", { isTrusted: false });
-          const toPage = yield* stack.bubble("keydown", press);
+          const toPage = yield* modes.bubble("keydown", press);
 
           assert.deepEqual(yield* Ref.get(calls), []);
           // The page made the event, so the page keeps it.
@@ -344,15 +343,15 @@ describe("Keyboard", () => {
     it.effect("ignores a synthetic key in the middle of a sequence", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollToTop"]);
 
-          yield* stack.bubble("keydown", new Press("g"));
-          yield* stack.bubble("keydown", new Press("g", { isTrusted: false }));
+          yield* modes.bubble("keydown", new Press("g"));
+          yield* modes.bubble("keydown", new Press("g", { isTrusted: false }));
           assert.deepEqual(yield* Ref.get(calls), []);
 
           // The true key still completes the sequence that the user typed.
-          yield* stack.bubble("keydown", new Press("g"));
+          yield* modes.bubble("keydown", new Press("g"));
           assert.deepEqual(yield* Ref.get(calls), ["scrollToTop:1"]);
         }),
         Effect.provide(layerFor({ mappings: "map gg scrollToTop" })),
@@ -362,14 +361,14 @@ describe("Keyboard", () => {
     it.effect("ignores a keyup that the page dispatched", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           yield* recorder(["scrollDown"]);
 
           // A true press, so that the release of `KeyJ` is one that we took.
-          yield* stack.bubble("keydown", new Press("j"));
+          yield* modes.bubble("keydown", new Press("j"));
 
           const release = new Press("j", { isTrusted: false });
-          const toPage = yield* stack.bubble("keyup", release);
+          const toPage = yield* modes.bubble("keyup", release);
 
           assert.isTrue(toPage);
           assert.isFalse(release.propagationStopped);
@@ -381,11 +380,11 @@ describe("Keyboard", () => {
     it.effect("still runs a command for a key that the user pressed", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollDown"]);
 
           const press = new Press("j");
-          const toPage = yield* stack.bubble("keydown", press);
+          const toPage = yield* modes.bubble("keydown", press);
 
           assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
           assert.isFalse(toPage);
@@ -399,11 +398,11 @@ describe("Keyboard", () => {
   it.effect("leaves every key to a page that the user excluded", () =>
     pipe(
       Effect.gen(function* () {
-        const stack = yield* HandlerStack;
+        const modes = yield* Modes;
         const calls = yield* recorder(["scrollDown"]);
 
         const press = new Press("j");
-        const toPage = yield* stack.bubble("keydown", press);
+        const toPage = yield* modes.bubble("keydown", press);
 
         assert.deepEqual(yield* Ref.get(calls), []);
         assert.isTrue(toPage);
@@ -433,13 +432,13 @@ describe("Keyboard", () => {
     it.effect("runs the longer mapping when the user completes it", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollUp", "scrollToTop", "scrollDown"]);
 
-          yield* stack.bubble("keydown", new Press("g"));
+          yield* modes.bubble("keydown", new Press("g"));
           assert.deepEqual(yield* Ref.get(calls), []);
 
-          yield* stack.bubble("keydown", new Press("g"));
+          yield* modes.bubble("keydown", new Press("g"));
           assert.deepEqual(yield* Ref.get(calls), ["scrollToTop:1"]);
         }),
         Effect.provide(prefixLayer),
@@ -449,11 +448,11 @@ describe("Keyboard", () => {
     it.effect("runs the prefix when a mapped key follows it", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollUp", "scrollToTop", "scrollDown"]);
 
-          yield* stack.bubble("keydown", new Press("g"));
-          yield* stack.bubble("keydown", new Press("j"));
+          yield* modes.bubble("keydown", new Press("g"));
+          yield* modes.bubble("keydown", new Press("j"));
 
           // `g` ran, and `j` then started a sequence of its own.
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1", "scrollDown:1"]);
@@ -465,12 +464,12 @@ describe("Keyboard", () => {
     it.effect("runs the prefix when an unmapped key follows it", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollUp", "scrollToTop", "scrollDown"]);
 
-          yield* stack.bubble("keydown", new Press("g"));
+          yield* modes.bubble("keydown", new Press("g"));
           const stray = new Press("x");
-          const toPage = yield* stack.bubble("keydown", stray);
+          const toPage = yield* modes.bubble("keydown", stray);
 
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
           // The sequence is over, so the key that ended it belongs to the page.
@@ -483,17 +482,17 @@ describe("Keyboard", () => {
     it.effect("gives the prefix the count that the user typed", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollUp", "scrollToTop", "scrollDown"]);
 
-          yield* stack.bubble(
+          yield* modes.bubble(
             "keydown",
             new Press("3", {
               code: "Digit3",
             }),
           );
-          yield* stack.bubble("keydown", new Press("g"));
-          yield* stack.bubble("keydown", new Press("j"));
+          yield* modes.bubble("keydown", new Press("g"));
+          yield* modes.bubble("keydown", new Press("j"));
 
           // The count belongs to the binding that the user typed it in front of.
           // The key that ends the sequence starts a count of its own.
@@ -506,11 +505,11 @@ describe("Keyboard", () => {
     it.effect("lets a digit start a count again after the prefix ran", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollUp", "scrollToTop", "scrollDown"]);
 
-          yield* stack.bubble("keydown", new Press("g"));
-          yield* stack.bubble(
+          yield* modes.bubble("keydown", new Press("g"));
+          yield* modes.bubble(
             "keydown",
             new Press("2", {
               code: "Digit2",
@@ -518,7 +517,7 @@ describe("Keyboard", () => {
           );
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
 
-          yield* stack.bubble("keydown", new Press("j"));
+          yield* modes.bubble("keydown", new Press("j"));
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1", "scrollDown:2"]);
         }),
         Effect.provide(prefixLayer),
@@ -528,14 +527,14 @@ describe("Keyboard", () => {
     it.effect("drops the count when the focus moves", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollUp", "scrollToTop", "scrollDown"]);
 
           // The count and the focus reset meet here. The indicator showed `5`,
           // and the reset takes the count away with the keys.
-          yield* stack.bubble("keydown", new Press("5", { code: "Digit5" }));
-          yield* stack.bubble("focus", new Focus());
-          yield* stack.bubble("keydown", new Press("j"));
+          yield* modes.bubble("keydown", new Press("5", { code: "Digit5" }));
+          yield* modes.bubble("focus", new Focus());
+          yield* modes.bubble("keydown", new Press("j"));
 
           assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
         }),
@@ -546,14 +545,14 @@ describe("Keyboard", () => {
     it.effect("drops the accepted binding when the focus moves", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollUp", "scrollToTop", "scrollDown"]);
 
-          yield* stack.bubble("keydown", new Press("g"));
+          yield* modes.bubble("keydown", new Press("g"));
           // The user clicks a text field. Insert mode takes the keys, and this
           // half-typed sequence is over.
-          yield* stack.bubble("focus", new Focus());
-          yield* stack.bubble("keydown", new Press("j"));
+          yield* modes.bubble("focus", new Focus());
+          yield* modes.bubble("keydown", new Press("j"));
 
           assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
         }),
@@ -564,16 +563,16 @@ describe("Keyboard", () => {
     it.effect("keeps a binding that a deeper step accepted none", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollUp", "scrollToTop"]);
 
           // `ab` is a prefix of `abc` and carries no binding of its own, so the
           // binding on `a` must survive the second key.
-          yield* stack.bubble("keydown", new Press("a"));
-          yield* stack.bubble("keydown", new Press("b"));
+          yield* modes.bubble("keydown", new Press("a"));
+          yield* modes.bubble("keydown", new Press("b"));
           assert.deepEqual(yield* Ref.get(calls), []);
 
-          yield* stack.bubble("keydown", new Press("x"));
+          yield* modes.bubble("keydown", new Press("x"));
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
         }),
         Effect.provide(
@@ -600,12 +599,12 @@ describe("Keyboard", () => {
       it.effect("runs the binding that the first key accepted", () =>
         pipe(
           Effect.gen(function* () {
-            const stack = yield* HandlerStack;
+            const modes = yield* Modes;
             const calls = yield* recorder(names);
 
-            yield* stack.bubble("keydown", new Press("a"));
-            yield* stack.bubble("keydown", new Press("b"));
-            yield* stack.bubble("keydown", new Press("x"));
+            yield* modes.bubble("keydown", new Press("a"));
+            yield* modes.bubble("keydown", new Press("b"));
+            yield* modes.bubble("keydown", new Press("x"));
 
             // `b` was part of the attempt at `abc`, so only `a` runs.
             assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
@@ -617,12 +616,12 @@ describe("Keyboard", () => {
       it.effect("still runs the longest sequence when the user finishes it", () =>
         pipe(
           Effect.gen(function* () {
-            const stack = yield* HandlerStack;
+            const modes = yield* Modes;
             const calls = yield* recorder(names);
 
-            yield* stack.bubble("keydown", new Press("a"));
-            yield* stack.bubble("keydown", new Press("b"));
-            yield* stack.bubble("keydown", new Press("c"));
+            yield* modes.bubble("keydown", new Press("a"));
+            yield* modes.bubble("keydown", new Press("b"));
+            yield* modes.bubble("keydown", new Press("c"));
 
             assert.deepEqual(yield* Ref.get(calls), ["scrollToTop:1"]);
           }),
@@ -633,10 +632,10 @@ describe("Keyboard", () => {
       it.effect("still runs the new sequence when nothing is accepted", () =>
         pipe(
           Effect.gen(function* () {
-            const stack = yield* HandlerStack;
+            const modes = yield* Modes;
             const calls = yield* recorder(names);
 
-            yield* stack.bubble("keydown", new Press("b"));
+            yield* modes.bubble("keydown", new Press("b"));
 
             assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
           }),
@@ -647,14 +646,14 @@ describe("Keyboard", () => {
       it.effect("gives the accepted binding the count that came first", () =>
         pipe(
           Effect.gen(function* () {
-            const stack = yield* HandlerStack;
+            const modes = yield* Modes;
             const calls = yield* recorder(names);
 
             // The count, the accepted binding and the root restart meet here.
-            yield* stack.bubble("keydown", new Press("2", { code: "Digit2" }));
-            yield* stack.bubble("keydown", new Press("a"));
-            yield* stack.bubble("keydown", new Press("b"));
-            yield* stack.bubble("keydown", new Press("x"));
+            yield* modes.bubble("keydown", new Press("2", { code: "Digit2" }));
+            yield* modes.bubble("keydown", new Press("a"));
+            yield* modes.bubble("keydown", new Press("b"));
+            yield* modes.bubble("keydown", new Press("x"));
 
             // The count belongs to `a`, and `b` did not start a count of its own.
             assert.deepEqual(yield* Ref.get(calls), ["scrollUp:2"]);
@@ -666,20 +665,20 @@ describe("Keyboard", () => {
       it.effect("lets Escape cancel the accepted binding", () =>
         pipe(
           Effect.gen(function* () {
-            const stack = yield* HandlerStack;
+            const modes = yield* Modes;
             const calls = yield* recorder(names);
 
-            yield* stack.bubble("keydown", new Press("a"));
-            yield* stack.bubble("keydown", new Press("b"));
+            yield* modes.bubble("keydown", new Press("a"));
+            yield* modes.bubble("keydown", new Press("b"));
             const escape = new Press("Escape", { code: "Escape" });
-            const toPage = yield* stack.bubble("keydown", escape);
+            const toPage = yield* modes.bubble("keydown", escape);
 
             // Escape ends the attempt. It runs nothing, and it stays with us.
             assert.deepEqual(yield* Ref.get(calls), []);
             assert.isFalse(toPage);
 
             // The state is clean, so the next key starts a sequence of its own.
-            yield* stack.bubble("keydown", new Press("b"));
+            yield* modes.bubble("keydown", new Press("b"));
             assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
           }),
           Effect.provide(overlappingLayer),
@@ -701,15 +700,15 @@ describe("Keyboard", () => {
       it.effect("keeps the binding of the branch that lived longest", () =>
         pipe(
           Effect.gen(function* () {
-            const stack = yield* HandlerStack;
+            const modes = yield* Modes;
             const calls = yield* recorder(names);
 
             // `c` opens `bc`, which is one key deep and carries `scrollLeft`. The
             // attempt at `abcd` is deeper, and it accepted `scrollUp` at `ab`.
-            yield* stack.bubble("keydown", new Press("a"));
-            yield* stack.bubble("keydown", new Press("b"));
-            yield* stack.bubble("keydown", new Press("c"));
-            yield* stack.bubble("keydown", new Press("x"));
+            yield* modes.bubble("keydown", new Press("a"));
+            yield* modes.bubble("keydown", new Press("b"));
+            yield* modes.bubble("keydown", new Press("c"));
+            yield* modes.bubble("keydown", new Press("x"));
 
             assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
           }),
@@ -734,13 +733,13 @@ describe("Keyboard", () => {
         it.effect("does not run two keys later", () =>
           pipe(
             Effect.gen(function* () {
-              const stack = yield* HandlerStack;
+              const modes = yield* Modes;
               const calls = yield* recorder(names);
 
-              yield* stack.bubble("keydown", new Press("a"));
-              yield* stack.bubble("keydown", new Press("b"));
-              yield* stack.bubble("keydown", new Press("c"));
-              yield* stack.bubble("keydown", new Press("x"));
+              yield* modes.bubble("keydown", new Press("a"));
+              yield* modes.bubble("keydown", new Press("b"));
+              yield* modes.bubble("keydown", new Press("c"));
+              yield* modes.bubble("keydown", new Press("x"));
 
               // `scrollUp` died at `c`, and `bcd` accepted nothing.
               assert.deepEqual(yield* Ref.get(calls), []);
@@ -752,13 +751,13 @@ describe("Keyboard", () => {
         it.effect("leaves the live branch to finish its own mapping", () =>
           pipe(
             Effect.gen(function* () {
-              const stack = yield* HandlerStack;
+              const modes = yield* Modes;
               const calls = yield* recorder(names);
 
-              yield* stack.bubble("keydown", new Press("a"));
-              yield* stack.bubble("keydown", new Press("b"));
-              yield* stack.bubble("keydown", new Press("c"));
-              yield* stack.bubble("keydown", new Press("d"));
+              yield* modes.bubble("keydown", new Press("a"));
+              yield* modes.bubble("keydown", new Press("b"));
+              yield* modes.bubble("keydown", new Press("c"));
+              yield* modes.bubble("keydown", new Press("d"));
 
               // The single slot gave this answer as well, so this test holds
               // before the branch model and after it. It is here because the two
@@ -789,13 +788,13 @@ describe("Keyboard", () => {
         it.effect("drops a shallower dead branch that holds a binding", () =>
           pipe(
             Effect.gen(function* () {
-              const stack = yield* HandlerStack;
+              const modes = yield* Modes;
               const calls = yield* recorder(unevenNames);
 
-              yield* stack.bubble("keydown", new Press("a"));
-              yield* stack.bubble("keydown", new Press("b"));
+              yield* modes.bubble("keydown", new Press("a"));
+              yield* modes.bubble("keydown", new Press("b"));
               const stray = new Press("x");
-              yield* stack.bubble("keydown", stray);
+              yield* modes.bubble("keydown", stray);
 
               // The deepest dead branch decides, and it accepted nothing.
               assert.deepEqual(yield* Ref.get(calls), []);
@@ -809,14 +808,14 @@ describe("Keyboard", () => {
         it.effect("runs the shallower binding when it is the only branch", () =>
           pipe(
             Effect.gen(function* () {
-              const stack = yield* HandlerStack;
+              const modes = yield* Modes;
               const calls = yield* recorder(unevenNames);
 
               // The same keys with no `a` in front. The branch `b` is then the
               // only one, so its binding runs. The pair of tests shows that the
               // depth alone decides in the test above.
-              yield* stack.bubble("keydown", new Press("b"));
-              yield* stack.bubble("keydown", new Press("x"));
+              yield* modes.bubble("keydown", new Press("b"));
+              yield* modes.bubble("keydown", new Press("x"));
 
               assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
             }),
@@ -837,12 +836,12 @@ describe("Keyboard", () => {
     it.effect("keeps a stray key away from the page", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollDown"]);
 
-          yield* stack.bubble("keydown", new Press("5", { code: "Digit5" }));
+          yield* modes.bubble("keydown", new Press("5", { code: "Digit5" }));
           const stray = new Press("x");
-          const toPage = yield* stack.bubble("keydown", stray);
+          const toPage = yield* modes.bubble("keydown", stray);
 
           // The count made this key part of a half-typed command. The user is
           // in the middle of a sequence, so the page must not see the key.
@@ -851,7 +850,7 @@ describe("Keyboard", () => {
           assert.deepEqual(yield* Ref.get(calls), []);
 
           // The stray key ended the count, so the next key counts as one.
-          yield* stack.bubble("keydown", new Press("j"));
+          yield* modes.bubble("keydown", new Press("j"));
           assert.deepEqual(yield* Ref.get(calls), ["scrollDown:1"]);
         }),
         Effect.provide(layerFor({ mappings: "map j scrollDown" })),
@@ -861,18 +860,18 @@ describe("Keyboard", () => {
     it.effect("takes a pass key that a count starts", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollDown"]);
 
           // The user gave `j` to the page, so `j` alone goes to the page.
           const promised = new Press("j");
-          assert.isTrue(yield* stack.bubble("keydown", promised));
+          assert.isTrue(yield* modes.bubble("keydown", promised));
           assert.isFalse(promised.defaultPrevented);
           assert.deepEqual(yield* Ref.get(calls), []);
 
-          yield* stack.bubble("keydown", new Press("3", { code: "Digit3" }));
+          yield* modes.bubble("keydown", new Press("3", { code: "Digit3" }));
           const ours = new Press("j");
-          const toPage = yield* stack.bubble("keydown", ours);
+          const toPage = yield* modes.bubble("keydown", ours);
 
           // The count started a sequence, so the pass rule no longer applies.
           assert.deepEqual(yield* Ref.get(calls), ["scrollDown:3"]);
@@ -900,12 +899,12 @@ describe("Keyboard", () => {
     it.effect("goes to the page when the exclusion names it", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollUp", "scrollToTop", "scrollDown"]);
 
-          yield* stack.bubble("keydown", new Press("g"));
+          yield* modes.bubble("keydown", new Press("g"));
           const promised = new Press("j");
-          const toPage = yield* stack.bubble("keydown", promised);
+          const toPage = yield* modes.bubble("keydown", promised);
 
           // `g` ran, because the sequence ended. `j` belongs to the page, and
           // the user promised it before any of this.
@@ -925,7 +924,7 @@ describe("Keyboard", () => {
     it.effect("is the key that a deferred passNextKey passes", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const keyboard = yield* Keyboard;
           const commands = yield* Commands;
           const calls = yield* recorder(["scrollToTop", "scrollDown"]);
@@ -940,9 +939,9 @@ describe("Keyboard", () => {
             ),
           );
 
-          yield* stack.bubble("keydown", new Press("g"));
+          yield* modes.bubble("keydown", new Press("g"));
           const passed = new Press("x");
-          const toPage = yield* stack.bubble("keydown", passed);
+          const toPage = yield* modes.bubble("keydown", passed);
 
           // `x` is the key after the command, so `x` is the key that passes.
           assert.deepEqual(yield* Ref.get(calls), ["passNextKey:1"]);
@@ -950,7 +949,7 @@ describe("Keyboard", () => {
           assert.isFalse(passed.defaultPrevented);
 
           // The counter held one pass, and `x` used it.
-          yield* stack.bubble("keydown", new Press("x"));
+          yield* modes.bubble("keydown", new Press("x"));
           assert.deepEqual(yield* Ref.get(calls), ["passNextKey:1", "scrollDown:1"]);
         }),
         Effect.provide(
@@ -964,7 +963,7 @@ describe("Keyboard", () => {
     it.effect("passes as many keys as the count in front of the command", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const keyboard = yield* Keyboard;
           const commands = yield* Commands;
           const calls = yield* recorder(["scrollToTop", "scrollDown"]);
@@ -978,18 +977,18 @@ describe("Keyboard", () => {
           );
 
           // The count, the accepted binding and the pass counter meet here.
-          yield* stack.bubble("keydown", new Press("2", { code: "Digit2" }));
-          yield* stack.bubble("keydown", new Press("g"));
+          yield* modes.bubble("keydown", new Press("2", { code: "Digit2" }));
+          yield* modes.bubble("keydown", new Press("g"));
 
           // `x` ends the sequence, so it is the first of the two keys that pass.
           const first = new Press("x");
-          assert.isTrue(yield* stack.bubble("keydown", first));
+          assert.isTrue(yield* modes.bubble("keydown", first));
           assert.isFalse(first.defaultPrevented);
-          assert.isTrue(yield* stack.bubble("keydown", new Press("x")));
+          assert.isTrue(yield* modes.bubble("keydown", new Press("x")));
           assert.deepEqual(yield* Ref.get(calls), ["passNextKey:2"]);
 
           // The counter is spent, so the third `x` is ours again.
-          yield* stack.bubble("keydown", new Press("x"));
+          yield* modes.bubble("keydown", new Press("x"));
           assert.deepEqual(yield* Ref.get(calls), ["passNextKey:2", "scrollDown:1"]);
         }),
         Effect.provide(
@@ -1003,20 +1002,20 @@ describe("Keyboard", () => {
     it.effect("keeps the promise to pass when the focus moves", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const keyboard = yield* Keyboard;
           const commands = yield* Commands;
           const calls = yield* recorder(["scrollDown"]);
 
           yield* commands.register("passNextKey", ({ count }) => keyboard.passNextKey(count));
 
-          yield* stack.bubble("keydown", new Press("p"));
+          yield* modes.bubble("keydown", new Press("p"));
           // The focus reset ends a half-typed sequence. The promise to give one
           // key to the page is not a half-typed sequence, so it stands.
-          yield* stack.bubble("focus", new Focus());
+          yield* modes.bubble("focus", new Focus());
 
           const promised = new Press("j");
-          const toPage = yield* stack.bubble("keydown", promised);
+          const toPage = yield* modes.bubble("keydown", promised);
           assert.isTrue(toPage);
           assert.isFalse(promised.defaultPrevented);
           assert.deepEqual(yield* Ref.get(calls), []);
@@ -1043,11 +1042,11 @@ describe("Keyboard", () => {
     it.effect("still goes to the page when the exclusion names it", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollUp", "scrollDown"]);
 
           const press = new Press("j");
-          const toPage = yield* stack.bubble("keydown", press);
+          const toPage = yield* modes.bubble("keydown", press);
 
           assert.deepEqual(yield* Ref.get(calls), []);
           assert.isTrue(toPage);
@@ -1065,16 +1064,16 @@ describe("Keyboard", () => {
     it.effect("runs its command when the exclusion names the target key", () =>
       pipe(
         Effect.gen(function* () {
-          const stack = yield* HandlerStack;
+          const modes = yield* Modes;
           const calls = yield* recorder(["scrollUp", "scrollDown"]);
 
           // The user gave `k` to the page, and `j` is not `k`.
-          yield* stack.bubble("keydown", new Press("j"));
+          yield* modes.bubble("keydown", new Press("j"));
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
 
           // The physical `k` is the one that the page keeps.
           const kept = new Press("k");
-          const toPage = yield* stack.bubble("keydown", kept);
+          const toPage = yield* modes.bubble("keydown", kept);
           assert.deepEqual(yield* Ref.get(calls), ["scrollUp:1"]);
           assert.isTrue(toPage);
         }),

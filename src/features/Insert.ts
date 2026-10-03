@@ -36,7 +36,7 @@ import {
   PASS_EVENT_TO_PAGE,
   SUPPRESS_EVENT,
 } from "~/core/HandlerStack.ts";
-import { isEscape, KeyPolicy, type ModeHandle, Modes } from "~/core/Modes.ts";
+import { isEscape, KeyPolicy, type ModeHandle, Modes, ModeTier } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -216,9 +216,6 @@ export class Insert extends Context.Service<
 
     /** Give the focus back to the page, unless the user is already typing. */
     readonly grabBackFocus: (userHasTyped: boolean) => Effect.Effect<void>;
-
-    /** Keep insert mode entered while the exclusion allows it. */
-    readonly ensureEntered: Effect.Effect<void>;
   }
 >()("vimium/features/Insert") {
   static readonly layer: Layer.Layer<Insert, never, Commands | Dom | Modes | Report | Settings> =
@@ -232,12 +229,11 @@ export class Insert extends Context.Service<
         const settings = yield* Settings;
 
         const state = yield* Ref.make<InsertState>(IDLE);
-        const base = yield* Ref.make(Option.none<ModeHandle>());
         const badge = yield* Ref.make(Option.none<ModeHandle>());
 
-        // Both frames belong to the layer scope, which exits them when the
-        // runtime stops. Each one owns a scope inside it, so a frame that
-        // `ensureEntered` replaces leaves nothing behind there.
+        // The indicator frame belongs to the layer scope, which exits it when
+        // the runtime stops. It owns a scope inside that one, so a frame that
+        // closes leaves nothing behind there.
         const layerScope = yield* Scope.Scope;
 
         const isOpen = (cell: Ref.Ref<Option.Option<ModeHandle>>): Effect.Effect<boolean> =>
@@ -303,6 +299,7 @@ export class Insert extends Context.Service<
               exitOn: [],
               keyboard: KeyPolicy.Shared(),
               singleton: Option.some("insert-indicator"),
+              tier: ModeTier.Insert(),
             }),
           );
         });
@@ -399,35 +396,7 @@ export class Insert extends Context.Service<
           return CONTINUE_BUBBLING;
         });
 
-        /**
-         * Make sure that the stack frame of insert mode is live.
-         *
-         * A soft navigation exits every mode, and this service survives it. The
-         * frame must therefore be reachable again from outside, because nothing
-         * builds the service a second time (CORE-01).
-         */
-        const ensureEntered = Effect.fn("Insert.ensureEntered")(function* () {
-          yield* ensureFrame(
-            base,
-            modes.enter(
-              {
-                name: "insert",
-                indicator: Option.none(),
-                exitOn: [],
-                keyboard: KeyPolicy.Shared(),
-                singleton: Option.some("insert"),
-              },
-              {
-                keydown: onKeydown,
-                focus: onFocus,
-                blur: onBlur,
-              },
-            ),
-          );
-        });
-
         const enterGlobal = Effect.fn("Insert.enter")(function* () {
-          yield* ensureEntered();
           yield* pipe(state, Ref.update(Struct.assign({ global: true })));
           yield* showIndicator();
         });
@@ -561,9 +530,23 @@ export class Insert extends Context.Service<
           );
         });
 
-        // The base frame belongs to the layer scope. A caller that survives a
-        // navigation uses `ensureEntered` to open it again.
-        yield* ensureEntered();
+        // Insert mode lives as long as the layer. It sits above normal mode,
+        // and a navigation leaves it there.
+        yield* modes.enter(
+          {
+            name: "insert",
+            indicator: Option.none(),
+            exitOn: [],
+            keyboard: KeyPolicy.Shared(),
+            singleton: Option.none(),
+            tier: ModeTier.Insert(),
+          },
+          {
+            keydown: onKeydown,
+            focus: onFocus,
+            blur: onBlur,
+          },
+        );
 
         const service = Insert.of({
           enter: enterGlobal(),
@@ -572,7 +555,6 @@ export class Insert extends Context.Service<
           focusInput,
           seedFromFocus: seedFromFocus(),
           grabBackFocus,
-          ensureEntered: ensureEntered(),
         });
 
         yield* commands.registerAll({

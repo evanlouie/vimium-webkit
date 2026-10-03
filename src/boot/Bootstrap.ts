@@ -20,7 +20,6 @@ import {
 } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Exclusions } from "~/core/Exclusions.ts";
-import { HandlerStack } from "~/core/HandlerStack.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
@@ -202,7 +201,6 @@ export const BootstrapLayer: Layer.Layer<
   | Exclusions
   | FrameBus
   | FrameLink
-  | HandlerStack
   | Insert
   | Keyboard
   | Lifecycle
@@ -259,7 +257,6 @@ export const BootstrapLayer: Layer.Layer<
     const refresh = Effect.gen(function* () {
       yield* settings.reload;
       yield* resolveExclusion;
-      yield* insert.ensureEntered;
     });
 
     const wantsFocusBack = pipe(
@@ -312,7 +309,6 @@ export const BootstrapLayer: Layer.Layer<
     // from live events only, and the page has long since focused its search box
     // by the time that the application starts.
     yield* insert.seedFromFocus;
-    yield* insert.ensureEntered;
 
     yield* inTopFrame(grabBackFocus);
     yield* inTopFrame(omnibar.noteVisit);

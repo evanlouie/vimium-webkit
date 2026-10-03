@@ -1,5 +1,5 @@
 /**
- * The bridge from the browser's dispatch into the handler stack.
+ * The bridge from the browser's dispatch into the mode stack.
  *
  * Only the browser can set `isTrusted`. The bridge is the one door into the
  * mode stack, so it is where a page-made event must stop. A key that the page
@@ -24,8 +24,9 @@ import {
   pipe,
 } from "effect";
 import { attachKeyBridge } from "~/boot/KeyBridge.ts";
-import { CONTINUE_BUBBLING, HandlerStack } from "~/core/HandlerStack.ts";
+import { CONTINUE_BUBBLING } from "~/core/HandlerStack.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
+import { KeyPolicy, Modes } from "~/core/Modes.ts";
 import { Dom, type Listener, type TargetEventMap } from "~/platform/Dom.ts";
 
 // ---------------------------------------------------------------------------
@@ -226,14 +227,10 @@ const withBridge = (
   Effect.gen(function* () {
     const attached = yield* Ref.make<ReadonlyArray<Attached>>([]);
     const forgotten = yield* Ref.make(0);
-    const layer = Layer.mergeAll(
-      recordingDom(attached),
-      HandlerStack.layer,
-      stubKeyboard(forgotten),
-    );
+    const layer = Layer.mergeAll(recordingDom(attached), Modes.layer, stubKeyboard(forgotten));
 
     const run = Effect.gen(function* () {
-      const stack = yield* HandlerStack;
+      const modes = yield* Modes;
       const seen = yield* Ref.make<ReadonlyArray<string>>([]);
       const record = (name: string) => () =>
         pipe(
@@ -242,14 +239,22 @@ const withBridge = (
           Effect.as(CONTINUE_BUBBLING),
         );
 
-      yield* stack.push({
-        name: "probe",
-        keydown: record("keydown"),
-        keyup: record("keyup"),
-        click: record("click"),
-        focus: record("focus"),
-        blur: record("blur"),
-      });
+      yield* modes.enter(
+        {
+          name: "probe",
+          indicator: Option.none(),
+          exitOn: [],
+          keyboard: KeyPolicy.Shared(),
+          singleton: Option.none(),
+        },
+        {
+          keydown: record("keydown"),
+          keyup: record("keyup"),
+          click: record("click"),
+          focus: record("focus"),
+          blur: record("blur"),
+        },
+      );
 
       yield* attachKeyBridge;
       const listeners = yield* Ref.get(attached);

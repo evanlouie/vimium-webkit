@@ -18,7 +18,6 @@ import { Layer, Logger, ManagedRuntime, References, pipe } from "effect";
 import { Lifecycle } from "~/boot/Lifecycle.ts";
 import { Commands } from "~/core/Commands.ts";
 import { Exclusions } from "~/core/Exclusions.ts";
-import { HandlerStack } from "~/core/HandlerStack.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
 import { Mappings } from "~/core/Mappings.ts";
 import { Modes } from "~/core/Modes.ts";
@@ -86,11 +85,9 @@ const StorageLayer = pipe(
   Layer.provideMerge(PlatformLayer),
 );
 
-const ModeLayer = pipe(Modes.layer, Layer.provideMerge(HandlerStack.layer));
-
 /** Settings, the key trie, modes and the command registry. */
 const CoreLayer = pipe(
-  Layer.mergeAll(Mappings.layer, Exclusions.layer, ModeLayer, Commands.layer, Report.layer),
+  Layer.mergeAll(Mappings.layer, Exclusions.layer, Modes.layer, Commands.layer, Report.layer),
   Layer.provideMerge(Settings.layer),
   Layer.provideMerge(StorageLayer),
 );

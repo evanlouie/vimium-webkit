@@ -1,15 +1,21 @@
 /**
- * Modes: stack frames with a lifecycle.
+ * Modes: the handler stack, and the lifecycle of each of its frames.
  *
- * A mode is a handler plus the standard exit conditions — escape, blur, click
- * and focus — and an optional singleton group. Entering find mode therefore
- * leaves visual mode without either one knowing about the other.
+ * A mode is one frame of the stack. It answers the events that the key bridge
+ * gives it, it has the standard exit conditions — escape, click and focus —
+ * and it has an optional singleton group and an indicator. Entering find mode
+ * therefore leaves visual mode without either one knowing about the other.
  *
- * The design comes from upstream Vimium's `content_scripts/mode.js` (MIT).
+ * The design comes from upstream Vimium's `content_scripts/mode.js` and
+ * `lib/handler_stack.js` (MIT).
  *
- * The old version kept the live modes and the singleton table in two mutable
- * module-level variables. Two frames in one page shared them, and a test could
- * not reset them. Both now live in this service.
+ * The list of live modes is the stack. A mode takes its place by its tier, and
+ * not by the moment that it was entered, so normal mode stays below insert mode
+ * and insert mode stays below everything that a command opens.
+ *
+ * A body of a mode is an `Effect`, and it must not suspend. `bubble` runs
+ * inside the browser's own dispatch, because `preventDefault` works nowhere
+ * else. Read `ARCHITECTURE.md` section 3.
  */
 
 import {
@@ -20,20 +26,22 @@ import {
   Effect,
   Exit,
   Layer,
+  Match,
   Option,
   Record,
   Ref,
   Scope,
+  Struct,
   SubscriptionRef,
   flow,
   pipe,
 } from "effect";
 import {
   CONTINUE_BUBBLING,
-  type Handler,
-  type HandlerId,
+  type HandlerEventMap,
+  type HandlerEventName,
   type HandlerResult,
-  HandlerStack,
+  type Handlers,
   SUPPRESS_EVENT,
 } from "./HandlerStack.ts";
 import { recoverEvenIfInterrupted } from "./Recovery.ts";
@@ -44,12 +52,11 @@ export type ModeIndicator = Option.Option<string>;
 export type ExitReason =
   | "explicit"
   | "escape"
-  | "blur"
   | "click"
   | "focus"
   | "singleton"
   | "navigation"
-  /** A body of the mode handler failed, so the stack dropped the frame. */
+  /** A body of the mode failed, so the stack dropped the mode. */
   | "defect";
 
 /** A variant that carries no data. */
@@ -66,14 +73,12 @@ export type ExitTrigger = Data.TaggedEnum<{
   Click: NoFields;
   /** Any focus. */
   Focus: NoFields;
-  /** The blur of one target. */
-  Blur: { readonly target: EventTarget };
 }>;
 export const ExitTrigger = Data.taggedEnum<ExitTrigger>();
 
 /** Who gets a keyboard event that the bodies of the mode leave unanswered. */
 export type KeyPolicy = Data.TaggedEnum<{
-  /** The handlers below the mode, and then the page. */
+  /** The modes below this one, and then the page. */
   Shared: NoFields;
   /**
    * Nobody. The mode takes every keyboard event while it is live.
@@ -85,6 +90,32 @@ export type KeyPolicy = Data.TaggedEnum<{
 }>;
 export const KeyPolicy = Data.taggedEnum<KeyPolicy>();
 
+/**
+ * Where a mode sits on the stack.
+ *
+ * A mode sees an event before every mode of a lower tier. Inside one tier, the
+ * mode that was entered last sees it first.
+ */
+export type ModeTier = Data.TaggedEnum<{
+  /** Normal mode. It lives as long as the application. */
+  Base: NoFields;
+  /**
+   * Insert mode. It sits above normal mode, so that a key that the user types
+   * into a text field never reaches a binding.
+   */
+  Insert: NoFields;
+  /** A mode that a command or a feature opens. A navigation ends it. */
+  Transient: NoFields;
+}>;
+export const ModeTier = Data.taggedEnum<ModeTier>();
+
+/** The height of a tier on the stack. */
+const rankOf: (tier: ModeTier) => number = ModeTier.$match({
+  Base: () => 0,
+  Insert: () => 1,
+  Transient: () => 2,
+});
+
 export interface ModeOptions {
   readonly name: string;
   /** Text that the HUD shows while the mode is live. */
@@ -94,6 +125,8 @@ export interface ModeOptions {
   readonly keyboard: KeyPolicy;
   /** Only one mode per group may be live. A second one exits the first. */
   readonly singleton: Option.Option<string>;
+  /** Where the mode sits on the stack. A mode with no tier is transient. */
+  readonly tier?: ModeTier;
 }
 
 /**
@@ -111,12 +144,6 @@ export interface ModeHandle {
   readonly onExit: (body: (reason: ExitReason) => Effect.Effect<void>) => Effect.Effect<void>;
 }
 
-/** A mode that is on the stack, and the text that the HUD shows for it. */
-interface LiveMode {
-  readonly handle: ModeHandle;
-  readonly indicator: Option.Option<string>;
-}
-
 /**
  * Escape detection.
  *
@@ -126,7 +153,22 @@ interface LiveMode {
 export const isEscape = (event: KeyboardEvent): boolean =>
   event.key === "Escape" || (event.ctrlKey && (event.key === "[" || event.code === "BracketLeft"));
 
+/** The body of a mode for one event, with its services already supplied. */
+type Body<K extends HandlerEventName> = (event: HandlerEventMap[K]) => Effect.Effect<HandlerResult>;
+
+/** A body for every event. A mode answers the events that it does not handle as well. */
+type Bodies = { readonly [K in HandlerEventName]: Body<K> };
+
+/** A mode on the stack. */
+interface LiveMode {
+  readonly handle: ModeHandle;
+  readonly tier: ModeTier;
+  readonly indicator: Option.Option<string>;
+  readonly bodies: Bodies;
+}
+
 interface ModeState {
+  /** The stack, from the bottom to the top. */
   readonly active: ReadonlyArray<LiveMode>;
   /** The mode that holds each singleton group. */
   readonly singletons: Record.ReadonlyRecord<string, ModeHandle>;
@@ -136,23 +178,13 @@ type ExitBody = (reason: ExitReason) => Effect.Effect<void>;
 
 /** The life of one mode. A mode that exited never comes back. */
 type Life = Data.TaggedEnum<{
-  /**
-   * The mode is live. It knows its frame on the stack once the stack gives it
-   * one, and it holds the bodies that its exit runs.
-   */
-  Live: { readonly handler: Option.Option<HandlerId>; readonly bodies: ReadonlyArray<ExitBody> };
+  /** The mode is live, and it holds the bodies that its exit runs. */
+  Live: { readonly bodies: ReadonlyArray<ExitBody> };
   Exited: NoFields;
 }>;
 const Life = Data.taggedEnum<Life>();
 
 const EXITED: Life = Life.Exited();
-
-/** The live mode knows its frame on the stack. */
-const attached = (id: HandlerId): ((life: Life) => Life) =>
-  Life.$match({
-    Live: ({ bodies }) => Life.Live({ handler: Option.some(id), bodies }),
-    Exited: (exited) => exited,
-  });
 
 /**
  * Keep an exit body. A mode that already exited runs it at once instead.
@@ -161,9 +193,9 @@ const attached = (id: HandlerId): ((life: Life) => Life) =>
  */
 const keptBody = (body: ExitBody): ((life: Life) => readonly [Effect.Effect<void>, Life]) =>
   Life.$match({
-    Live: ({ handler, bodies }): readonly [Effect.Effect<void>, Life] => [
+    Live: ({ bodies }): readonly [Effect.Effect<void>, Life] => [
       Effect.void,
-      Life.Live({ handler, bodies: pipe(bodies, Array.append(body)) }),
+      Life.Live({ bodies: pipe(bodies, Array.append(body)) }),
     ],
     Exited: (exited): readonly [Effect.Effect<void>, Life] => [body("explicit"), exited],
   });
@@ -177,11 +209,22 @@ const holderOf =
       Option.flatMap((name) => pipe(singletons, Record.get(name))),
     );
 
+/** Put a mode above every mode of its tier, and below every mode of a higher tier. */
+const placed =
+  (mode: LiveMode) =>
+  (active: ReadonlyArray<LiveMode>): ReadonlyArray<LiveMode> => {
+    const [below, above] = pipe(
+      active,
+      Array.span((live) => rankOf(live.tier) <= rankOf(mode.tier)),
+    );
+    return pipe(below, Array.append(mode), Array.appendAll(above));
+  };
+
 /** Add a live mode. A mode in a singleton group takes the group. */
 const joined =
   (mode: LiveMode, group: Option.Option<string>) =>
   ({ active, singletons }: ModeState): ModeState => ({
-    active: pipe(active, Array.append(mode)),
+    active: pipe(active, placed(mode)),
     singletons: pipe(
       group,
       Option.match({
@@ -218,6 +261,31 @@ const innermostIndicator = ({ active }: ModeState): ModeIndicator =>
     Array.findLast((mode) => mode.indicator),
   );
 
+/** Is this mode still on the stack? */
+const isOnStack =
+  (mode: LiveMode) =>
+  ({ active }: ModeState): boolean =>
+    pipe(
+      active,
+      Array.some((live) => live === mode),
+    );
+
+/**
+ * `stopImmediatePropagation`, and not `stopPropagation`.
+ *
+ * We can lose the race to register a listener, because `document-start` is not
+ * reliable on WebKit. A page listener that was registered before ours on the
+ * same target would still run under plain `stopPropagation`.
+ */
+const suppressPropagation = (event: Event): void => {
+  event.stopImmediatePropagation();
+};
+
+const suppressEvent = (event: Event): void => {
+  event.preventDefault();
+  event.stopImmediatePropagation();
+};
+
 export class Modes extends Context.Service<
   Modes,
   {
@@ -231,11 +299,26 @@ export class Modes extends Context.Service<
      */
     readonly enter: <R>(
       options: ModeOptions,
-      handlers?: Omit<Handler<R>, "name" | "onDefect">,
+      handlers?: Handlers<R>,
     ) => Effect.Effect<ModeHandle, never, R | Scope.Scope>;
 
-    /** Exit every live mode. For a navigation and for `pagehide`. */
+    /**
+     * Exit every transient mode. For a navigation and for `pagehide`.
+     *
+     * Normal mode and insert mode stay. They belong to the page, and not to
+     * what the user was doing on it.
+     */
     readonly exitAll: (reason?: ExitReason) => Effect.Effect<void>;
+
+    /**
+     * Give each mode, from the top, a chance at the event.
+     *
+     * Answers `true` when the event may continue to the page.
+     */
+    readonly bubble: <K extends HandlerEventName>(
+      name: K,
+      event: HandlerEventMap[K],
+    ) => Effect.Effect<boolean>;
 
     /** The indicator of the innermost live mode that has one. */
     readonly indicator: SubscriptionRef.SubscriptionRef<ModeIndicator>;
@@ -244,10 +327,9 @@ export class Modes extends Context.Service<
     readonly activeNames: Effect.Effect<ReadonlyArray<string>>;
   }
 >()("vimium/core/Modes") {
-  static readonly layer: Layer.Layer<Modes, never, HandlerStack> = Layer.effect(
+  static readonly layer: Layer.Layer<Modes> = Layer.effect(
     Modes,
     Effect.gen(function* () {
-      const stack = yield* HandlerStack;
       const state = yield* Ref.make<ModeState>({ active: [], singletons: Record.empty() });
       const indicator = yield* SubscriptionRef.make<ModeIndicator>(Option.none());
 
@@ -260,20 +342,18 @@ export class Modes extends Context.Service<
 
       const enter = <R>(
         options: ModeOptions,
-        handlers?: Omit<Handler<R>, "name" | "onDefect">,
+        handlers: Handlers<R> = {},
       ): Effect.Effect<ModeHandle, never, R | Scope.Scope> =>
         Effect.gen(function* () {
           const group = options.singleton;
-          const life = yield* Ref.make<Life>(Life.Live({ handler: Option.none(), bodies: [] }));
+          const life = yield* Ref.make<Life>(Life.Live({ bodies: [] }));
           const owner = yield* Scope.Scope;
           const scope = yield* Scope.fork(owner);
 
           const close = Effect.fnUntraced(function* (
-            handler: Option.Option<HandlerId>,
             bodies: ReadonlyArray<ExitBody>,
             reason: ExitReason,
           ) {
-            yield* pipe(handler, Option.match({ onNone: () => Effect.void, onSome: stack.remove }));
             yield* pipe(state, Ref.update(left(handle, group)));
             // One body that fails must not keep the others from running.
             yield* pipe(
@@ -302,7 +382,7 @@ export class Modes extends Context.Service<
               Ref.getAndSet(EXITED),
               Effect.flatMap(
                 Life.$match({
-                  Live: ({ handler, bodies }) => close(handler, bodies, reason),
+                  Live: ({ bodies }) => close(bodies, reason),
                   Exited: () => Effect.void,
                 }),
               ),
@@ -315,8 +395,8 @@ export class Modes extends Context.Service<
             onExit: (body) => pipe(life, Ref.modify(keptBody(body)), Effect.flatten),
           };
 
-          // A singleton group holds one mode. Push a second one, and the first
-          // one exits.
+          // A singleton group holds one mode. Enter a second one, and the
+          // first one exits.
           yield* pipe(
             Ref.get(state),
             Effect.map(holderOf(group)),
@@ -328,7 +408,8 @@ export class Modes extends Context.Service<
             ),
           );
 
-          const own = handlers ?? {};
+          // The services of the bodies are captured once, so a body needs
+          // nothing when the key path runs it.
           const services = yield* Effect.context<R>();
 
           const provided = <A extends Event>(
@@ -367,45 +448,42 @@ export class Modes extends Context.Service<
               Boolean.match({ onFalse: () => Effect.void, onTrue: () => exit(reason) }),
             );
 
-          const keydown = keyEvent(provided(own.keydown));
-          const click = other(provided(own.click));
-          const focus = other(provided(own.focus));
-          const blur = other(provided(own.blur));
+          const keydown = keyEvent(provided(handlers.keydown));
+          const click = other(provided(handlers.click));
+          const focus = other(provided(handlers.focus));
           const escapeExits = pipe(options.exitOn, Array.some(ExitTrigger.$is("Escape")));
           const clickExit = exitWhen(ExitTrigger.$is("Click"), "click");
           const focusExit = exitWhen(ExitTrigger.$is("Focus"), "focus");
-          const blurExit = (target: EventTarget | null): Effect.Effect<void> =>
-            exitWhen(
-              (trigger) => ExitTrigger.$is("Blur")(trigger) && trigger.target === target,
-              "blur",
-            );
 
-          const id = yield* stack.push<never>({
-            name: options.name,
-            // The stack drops a frame whose body failed. Only the mode can
-            // release the rest: the singleton group, the indicator and the
-            // exit bodies that hold the overlay of a feature.
-            onDefect: exit("defect"),
-            keydown: (event) =>
-              pipe(
-                escapeExits && isEscape(event),
-                Boolean.match({
-                  onFalse: () => keydown(event),
-                  // Suppressed, so that the page does not also act. This is
-                  // what upstream does, and what a user who pressed Escape to
-                  // leave our mode expects.
-                  onTrue: () => pipe(exit("escape"), Effect.as(SUPPRESS_EVENT)),
-                }),
-              ),
-            keypress: keyEvent(provided(own.keypress)),
-            keyup: keyEvent(provided(own.keyup)),
-            click: (event) => pipe(clickExit, Effect.andThen(click(event))),
-            focus: (event) => pipe(focusExit, Effect.andThen(focus(event))),
-            blur: (event) => pipe(blurExit(event.target), Effect.andThen(blur(event))),
-          });
+          const mode: LiveMode = {
+            handle,
+            tier: pipe(
+              options.tier,
+              Option.fromUndefinedOr,
+              Option.getOrElse(() => ModeTier.Transient()),
+            ),
+            indicator: options.indicator,
+            bodies: {
+              keydown: (event) =>
+                pipe(
+                  escapeExits && isEscape(event),
+                  Boolean.match({
+                    onFalse: () => keydown(event),
+                    // Suppressed, so that the page does not also act. This is
+                    // what upstream does, and what a user who pressed Escape to
+                    // leave our mode expects.
+                    onTrue: () => pipe(exit("escape"), Effect.as(SUPPRESS_EVENT)),
+                  }),
+                ),
+              keypress: keyEvent(provided(handlers.keypress)),
+              keyup: keyEvent(provided(handlers.keyup)),
+              click: (event) => pipe(clickExit, Effect.andThen(click(event))),
+              focus: (event) => pipe(focusExit, Effect.andThen(focus(event))),
+              blur: other(provided(handlers.blur)),
+            },
+          };
 
-          yield* pipe(life, Ref.update(attached(id)));
-          yield* pipe(state, Ref.update(joined({ handle, indicator: options.indicator }, group)));
+          yield* pipe(state, Ref.update(joined(mode, group)));
           yield* refreshIndicator;
 
           // The scope owns the mode. Nothing has to remember to exit it.
@@ -420,15 +498,104 @@ export class Modes extends Context.Service<
           Effect.flatMap(({ active }) =>
             pipe(
               active,
+              Array.filter((mode) => ModeTier.$is("Transient")(mode.tier)),
               Array.reverse,
               Effect.forEach((mode) => mode.handle.exit(reason), { discard: true }),
             ),
           ),
         );
 
+      /**
+       * A mode that fails must not block the key path for the whole page. It
+       * exits, which releases its singleton group, its indicator and the exit
+       * bodies that hold the overlay of a feature, and the walk continues.
+       */
+      const dropDefective = (mode: LiveMode): Effect.Effect<HandlerResult> =>
+        pipe(
+          mode.handle.exit("defect"),
+          recoverEvenIfInterrupted(`the exit of the "${mode.handle.name}" mode`, Effect.void),
+          Effect.as(CONTINUE_BUBBLING),
+        );
+
+      const bubble = <K extends HandlerEventName>(
+        name: K,
+        event: HandlerEventMap[K],
+      ): Effect.Effect<boolean> => {
+        /**
+         * The answer of one mode of the snapshot.
+         *
+         * The snapshot is fixed. The stack is not. A mode that left the stack
+         * after the snapshot must not still see the event.
+         */
+        const answer = (mode: LiveMode): Effect.Effect<HandlerResult> =>
+          pipe(
+            Ref.get(state),
+            Effect.map(isOnStack(mode)),
+            Effect.flatMap(
+              Boolean.match({
+                onFalse: () => Effect.succeed(CONTINUE_BUBBLING),
+                onTrue: () =>
+                  pipe(
+                    event,
+                    pipe(mode.bodies, Struct.get(name)),
+                    recoverEvenIfInterrupted(
+                      `the "${mode.handle.name}" mode during ${name}`,
+                      dropDefective(mode),
+                    ),
+                  ),
+              }),
+            ),
+          );
+
+        /** Give the event to each mode, from the top, until one decides. */
+        const walk: (modes: ReadonlyArray<LiveMode>) => Effect.Effect<boolean> = Array.matchRight({
+          onEmpty: () => Effect.succeed(true),
+          onNonEmpty: (below, mode) =>
+            pipe(
+              answer(mode),
+              Effect.flatMap((result) => decide(result, below)),
+            ),
+        });
+
+        const decide = (
+          result: HandlerResult,
+          below: ReadonlyArray<LiveMode>,
+        ): Effect.Effect<boolean> =>
+          pipe(
+            Match.value(result),
+            Match.when("continue", () => walk(below)),
+            Match.when("pass-to-page", () => Effect.succeed(true)),
+            Match.when("suppress", () =>
+              pipe(
+                Effect.sync(() => suppressEvent(event)),
+                Effect.as(false),
+              ),
+            ),
+            Match.when("suppress-propagation", () =>
+              pipe(
+                Effect.sync(() => suppressPropagation(event)),
+                Effect.as(false),
+              ),
+            ),
+            Match.exhaustive,
+          );
+
+        /**
+         * A real snapshot. Modes enter and exit while the walk is in progress,
+         * and indexing into the live array while it changes skips frames: a
+         * mode that exited moved every mode below it up by one, so the next step
+         * went over one of them.
+         */
+        return pipe(
+          Ref.get(state),
+          Effect.flatMap(({ active }) => walk(active)),
+        );
+      };
+
       return Modes.of({
         enter,
         exitAll,
+        bubble,
         indicator,
         activeNames: pipe(
           Ref.get(state),
