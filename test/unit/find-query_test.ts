@@ -9,7 +9,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Effect, Option, pipe } from "effect";
 import {
-  escapeRegExp,
   type FindQueryOptions,
   hasUpperCase,
   literalSource,
@@ -140,7 +139,7 @@ describe("FindQuery", () => {
 
   it.effect("neutralises a metacharacter", () =>
     Effect.sync(() => {
-      const escaped = escapeRegExp("a.c*[x]");
+      const escaped = literalSource("a.c*[x]");
       assert.isTrue(new RegExp(escaped).test("a.c*[x]"));
       assert.isFalse(new RegExp(escaped).test("abc*[x]"));
     }),

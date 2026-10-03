@@ -23,6 +23,7 @@ import {
   Option,
   pipe,
   Predicate,
+  RegExp as RegExp_,
   Result,
   String as Str,
 } from "effect";
@@ -100,18 +101,6 @@ const caseFlag: (ignoreCase: boolean) => string = Boolean.match({
 // Escaping
 // ---------------------------------------------------------------------------
 
-/** The characters that mean something in a regular expression. */
-const METACHARACTERS = /[.*+?^${}()|[\]\\]/g;
-
-/**
- * Escape `text` for literal use inside a regular expression.
- *
- * `-` is not escaped, on purpose. `\-` is a syntax error under the `u` flag,
- * and this module never sets `u`, so that a pattern with a single escape such
- * as `\d` behaves as a user of Vim expects.
- */
-export const escapeRegExp: (text: string) => string = Str.replace(METACHARACTERS, "\\$&");
-
 /** The engine changes each whitespace character in the page to U+0020. */
 const WHITESPACE_RUN = /\s+/;
 
@@ -126,7 +115,7 @@ const WHITESPACE_RUN = /\s+/;
  */
 export const literalSource: (pattern: string) => string = flow(
   Str.split(WHITESPACE_RUN),
-  Array.map(escapeRegExp),
+  Array.map(RegExp_.escape),
   Array.join(" +"),
 );
 
