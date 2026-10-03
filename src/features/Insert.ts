@@ -485,7 +485,6 @@ export class Insert extends Context.Service<
                 pipe(
                   commands.run("LinkHints.activateModeToFocus", {
                     count: 1,
-                    options: {},
                     event: Option.none(),
                   }),
                   Effect.catch(() => focusNth(nthInput(inputs, count))),

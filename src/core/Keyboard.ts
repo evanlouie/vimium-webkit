@@ -526,7 +526,7 @@ export class Keyboard extends Context.Service<
        * defect instead of running.
        */
       const runCommand = Effect.fnUntraced(function* (
-        { command, options }: KeyBinding,
+        { command }: KeyBinding,
         count: number,
         event: KeyboardEvent,
       ) {
@@ -540,7 +540,7 @@ export class Keyboard extends Context.Service<
           }),
         );
         yield* pipe(
-          commands.run(command, { count, options, event: Option.some(event) }),
+          commands.run(command, { count, event: Option.some(event) }),
           Effect.catch((error) => report.error(error.detail)),
           Effect.forkDetach({ startImmediately: true }),
         );

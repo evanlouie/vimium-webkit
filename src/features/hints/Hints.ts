@@ -1879,7 +1879,6 @@ export class Hints extends Context.Service<
         yield* pipe(
           commands.run("Vomnibar.activate", {
             count: 1,
-            options: {},
             event: Option.none(),
           }),
           Effect.catch((error) => report.error(error.detail)),

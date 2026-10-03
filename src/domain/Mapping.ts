@@ -31,7 +31,6 @@ export interface KeyBinding {
   /** The canonical notation of each key in the sequence. */
   readonly keys: Array.NonEmptyReadonlyArray<string>;
   readonly command: string;
-  readonly options: Record.ReadonlyRecord<string, string | boolean>;
   /** The source line, for the error message and for the help dialog. */
   readonly source: string;
   /** The raw line number in the compiled source. See `ParseOptions.lineOffset`. */
@@ -205,25 +204,6 @@ const splitTokens = (text: string): ReadonlyArray<string> =>
   pipe(
     text.split(/\s+/),
     Array.filter((token) => token.length > 0),
-  );
-
-const optionValue = (value: string): string | boolean =>
-  pipe(
-    Match.value(value),
-    Match.when("true", () => true),
-    Match.when("false", () => false),
-    Match.orElse(() => value),
-  );
-
-/** `swap=true` gives `["swap", true]`. A bare `swap` gives `["swap", true]`. */
-const parseOption = (token: string): readonly [string, string | boolean] =>
-  pipe(
-    token.indexOf("="),
-    Option.liftPredicate((equals) => equals >= 0),
-    Option.match({
-      onNone: () => [token, true] as const,
-      onSome: (equals) => [token.slice(0, equals), optionValue(token.slice(equals + 1))] as const,
-    }),
   );
 
 // ---------------------------------------------------------------------------
@@ -401,10 +381,12 @@ const mapStep = (rules: Rules, line: LogicalLine, args: ReadonlyArray<string>): 
       ),
     );
     const findings = yield* sequenceFindings(rules, keys);
+    // A token after the command is an option of upstream, such as
+    // `swap=true`. No command here reads one, so the token is ignored, and a
+    // configuration of upstream still compiles.
     const binding: KeyBinding = {
       keys,
       command,
-      options: pipe(args, Array.drop(2), Array.map(parseOption), Record.fromEntries),
       source: line.text,
       line: line.number,
     };

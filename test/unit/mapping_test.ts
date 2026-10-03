@@ -173,19 +173,13 @@ describe("Mapping", () => {
     }),
   );
 
-  it.effect("reads the options of a map line", () =>
+  it.effect("ignores the options of a map line", () =>
     Effect.sync(() => {
+      // Upstream reads `swap=true` and the like. No command here does, and a
+      // configuration of upstream must still paste in.
       const result = compile("map j scrollDown swap=true count=3 flag");
-      const options = pipe(
-        lookup(result.trie, ["j"]),
-        Option.flatMap((node) => node.binding),
-        Option.map((binding) => binding.options),
-      );
-      assert.deepEqual(Option.getOrNull(options), {
-        swap: true,
-        count: "3",
-        flag: true,
-      });
+      assert.strictEqual(command(result.trie, ["j"]), "scrollDown");
+      assert.lengthOf(result.diagnostics, 0);
     }),
   );
 

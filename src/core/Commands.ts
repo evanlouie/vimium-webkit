@@ -65,8 +65,6 @@ export class CommandError extends Schema.TaggedError<CommandError>()("CommandErr
 export interface CommandInvocation {
   /** The count prefix. It is 1 when the user typed no count. */
   readonly count: number;
-  /** Options from the `map` line, for example `LinkHints.activate swap=true`. */
-  readonly options: Record.ReadonlyRecord<string, string | boolean>;
   /** The key event that started this, when there is one. The scroller reads it. */
   readonly event: Option.Option<KeyboardEvent>;
 }
