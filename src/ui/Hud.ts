@@ -842,6 +842,20 @@ export class Hud extends Context.Service<
                 Effect.as(SUPPRESS_EVENT),
               );
 
+            /**
+             * Act on a key press that missed the input: Enter and Escape still
+             * end the prompt, and a character types into the input. `/foo⏎`
+             * typed during the load searches for `foo`.
+             */
+            const onMissed = (
+              event: KeyboardEvent,
+            ): Effect.Effect<HandlerResult, never, Unscoped<R>> =>
+              pipe(
+                promptKey(event),
+                Option.liftPredicate((key) => !PromptKey.$is("Pass")(key)),
+                Option.match({ onNone: () => typeMissed(event), onSome: perform }),
+              );
+
             /** Act on a key press aimed at the input, and take every other one. */
             const onKeydown = (
               event: KeyboardEvent,
@@ -850,7 +864,7 @@ export class Hud extends Context.Service<
                 ui.owns(event.target),
                 Boolean.match({
                   onTrue: () => pipe(keyAction(event), Effect.flatMap(perform)),
-                  onFalse: () => typeMissed(event),
+                  onFalse: () => onMissed(event),
                 }),
               );
 
