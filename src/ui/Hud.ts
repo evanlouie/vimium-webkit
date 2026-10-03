@@ -62,6 +62,7 @@ import {
 import { isEscape, KeyPolicy, type ModeOptions, Modes } from "~/core/Modes.ts";
 import { Report, type UserMessage } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
+import { isComposing } from "~/domain/Key.ts";
 import { type NoFields, type Unscoped, whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
@@ -310,10 +311,17 @@ type PromptKey = Data.TaggedEnum<{
 }>;
 const PromptKey = Data.taggedEnum<PromptKey>();
 
-/** What a key that the caller did not take does to the prompt. */
+/**
+ * What a key that the caller did not take does to the prompt.
+ *
+ * While an input method composes, every key belongs to the composition. Its
+ * Enter confirms the composition and its Escape cancels it, and neither one
+ * ends the prompt.
+ */
 const promptKey = (event: KeyboardEvent): PromptKey =>
   pipe(
     Match.value(event),
+    Match.when(isComposing, () => PromptKey.Pass()),
     Match.when({ key: "Enter" }, () => PromptKey.Submit()),
     // Escape, and the `<c-[>` synonym that every mode accepts.
     Match.when(isEscape, () => PromptKey.Cancel()),
