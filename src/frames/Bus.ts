@@ -105,7 +105,14 @@ import {
   WIRE_TARGET_TOP,
 } from "~/domain/FrameMessage.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { ANNOUNCE_MESSAGE, FrameRole, Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
+import {
+  ANNOUNCE_MESSAGE,
+  descendantFrames,
+  FrameRole,
+  randomHex,
+  Realm,
+  WAKE_MESSAGE,
+} from "~/platform/Realm.ts";
 import { FrameAuth, type FrameCipher } from "./Auth.ts";
 
 // ---------------------------------------------------------------------------
@@ -151,16 +158,6 @@ export const MAX_PENDING_JOINS = 16;
  * the receiver only asks the counter to rise.
  */
 export const MAILBOX_CAPACITY = 256;
-
-/**
- * The ceilings for the walk of the frames tree.
- *
- * A page with many advertisements nests frames without limit, and this walk
- * runs whenever the roster is read. Bounded work is better than a walk that is
- * complete but has no limit.
- */
-const MAX_TREE_DEPTH = 16;
-const MAX_TREE_NODES = 512;
 
 /** The deadline of a request, in the form that `Effect.timeout` takes. */
 export const REQUEST_DEADLINE: Duration.Input = REQUEST_DEADLINE_MS;
@@ -247,57 +244,6 @@ const targetOrigin = (origin: string): string =>
     Match.whenOr("null", "", () => "*"),
     Match.orElse(() => origin),
   );
-
-/**
- * Every window that `root` can reach, in document order.
- *
- * `window.frames.length` and `window.frames[index]` are readable across
- * origins, which few things are, so this walk works when every child has a
- * different origin. A frame that we can never talk to is in this list as well.
- * It simply never sends a `HELLO`, which is the "absent, and not blocking"
- * behaviour that we want.
- *
- * The root itself is not in the list. The coordinator once treated its own
- * window as known, and a page could then post itself a `HELLO` and be admitted
- * as a frame, with the session nonce delivered straight back to it.
- *
- * This is an imperative loop on purpose. The coordinator walks the tree for
- * every message that it routes, and a keystroke that a hint round relays is
- * one of those, so the walk runs inside a `keydown` listener. A throwaway
- * benchmark on fake frame trees measured the loop at 0.4 µs for 20 frames and
- * 5.6 µs for 512 frames. The fastest version built from `Array` or `Iterable`
- * stages, with a `Result.try` for each read, took 28 µs and 760 µs.
- */
-const collectFrameWindows = (root: Window): readonly Window[] => {
-  const out: Window[] = [];
-
-  const walk = (parent: Window, depth: number): void => {
-    if (depth >= MAX_TREE_DEPTH || out.length >= MAX_TREE_NODES) return;
-    let count = 0;
-    try {
-      count = parent.frames.length;
-    } catch {
-      // A frame can become unreachable during the walk, if the page detaches
-      // it while the browser lays the page out.
-      return;
-    }
-    for (let index = 0; index < count; index++) {
-      if (out.length >= MAX_TREE_NODES) return;
-      let child: Window | undefined;
-      try {
-        child = parent.frames[index];
-      } catch {
-        continue;
-      }
-      if (child === undefined) continue;
-      out.push(child);
-      walk(child, depth + 1);
-    }
-  };
-
-  walk(root, 0);
-  return out;
-};
 
 /**
  * Is this an order to announce ourselves again?
@@ -822,17 +768,7 @@ export class FrameBus extends Context.Service<
        * fails and every routed message is dropped, because a guessable nonce is
        * worse than no session at all.
        */
-      const randomId = dom.probeOrElse(() => {
-        const bytes = new Uint8Array(16);
-        crypto.getRandomValues(bytes);
-        return pipe(
-          bytes,
-          Array.fromIterable,
-          Array.map((byte) => byte.toString(16).padStart(2, "0")),
-          Array.join(""),
-          Option.some,
-        );
-      }, Option.none);
+      const randomId = dom.probeOrElse(() => Option.some(randomHex(16)), Option.none);
 
       const freshId: Effect.Effect<string, FrameError> = pipe(
         randomId,
@@ -941,7 +877,7 @@ export class FrameBus extends Context.Service<
        * exactly when the answer matters.
        */
       const sweep: Effect.Effect<ReadonlyArray<FrameRecord>> = Effect.gen(function* () {
-        const windows = collectFrameWindows(dom.window);
+        const windows = descendantFrames(dom.window);
         const current = yield* Ref.get(records);
         const { live, dead } = inTreeOrder(current, windows);
         yield* pipe(
@@ -1080,7 +1016,7 @@ export class FrameBus extends Context.Service<
               Option.fromNullishOr,
               Option.flatMap((sender) =>
                 pipe(
-                  collectFrameWindows(dom.window),
+                  descendantFrames(dom.window),
                   Array.findFirst((candidate) => candidate === sender),
                 ),
               ),
