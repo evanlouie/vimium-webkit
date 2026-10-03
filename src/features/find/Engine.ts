@@ -15,6 +15,17 @@
  * is only ever built *inside* one run, because a `Range` whose two boundaries
  * are in different node trees is not a range: `setEnd` collapses it without a
  * word.
+ *
+ * A search reads the text of a run in windows, so that it can stop at a
+ * deadline. It still finds the matches that one search over the whole text
+ * finds, at the same places, whatever the size of the windows, as long as the
+ * pattern reads no more than `LONGEST_SURE_MATCH` (1024) characters ahead of
+ * a position where it tries to match, and no more than `LEADING_CONTEXT` (256)
+ * characters behind it. The safety check caps a pattern at 512 characters, so a
+ * literal query fits with room for the runs of whitespace that it crosses. A
+ * longer match is found when a part of it reaches the end of the text that the
+ * search read, as `.+` does: the search then reads more, up to
+ * `MAX_MATCH_LENGTH`, or reports a stop. Any other longer match can be missed.
  */
 
 import { Array, Boolean, Data, HashSet, Match, Number, Option, Result, flow, pipe } from "effect";
@@ -114,17 +125,30 @@ const FIRST_WINDOW = 32;
 const WINDOW_BUDGET_MS = 8;
 
 /**
- * The text that each window keeps on both sides.
+ * The text that each window keeps before it.
  *
- * A window is a slice of the haystack, so `\b`, a lookbehind and a lookahead
- * need the text beside it. A match that reaches the end of the slice grows the
- * slice instead, so no match is lost or moved.
- *
- * The text after the window always has `WINDOW_CONTEXT` characters when they
- * exist. An assertion can read this text when the first window is small. The
- * text before the window holds no start position, so it costs one copy.
+ * A window is a slice of the haystack, so `\b` and a lookbehind need the text
+ * before it. That text holds no start position, so it costs one copy.
  */
-const WINDOW_CONTEXT = 256;
+const LEADING_CONTEXT = 256;
+
+/**
+ * The longest match that a search finds whole wherever it starts, and the text
+ * that each window keeps after it.
+ *
+ * A match that starts in a window therefore has this much text ahead of it,
+ * whatever the size of the window, and an `exec` on the slice gives what an
+ * `exec` on the whole text gives. With less, a match that started late in a
+ * window and needed more text did not match in the slice, and the next window
+ * began after its start: it was lost, and nothing said so.
+ *
+ * Twice the longest pattern. The price is the text that each `exec` reads
+ * again in the next window. A literal query costs about a fifth more. A
+ * pattern whose cost grows with the square of the text, such as `[a-z]*x`,
+ * costs about two and a half times as much, so it reaches the deadline
+ * sooner, and the search reports the stop.
+ */
+export const LONGEST_SURE_MATCH = 1024;
 
 /**
  * How much longer a slice becomes when a match reaches its end.
@@ -159,10 +183,11 @@ const NOTHING_FOUND: SpanSearch = { spans: [], stopped: false };
  * expression is state that changes, and a caller that used one expression for
  * two searches would lose the first half of the second search.
  *
- * The text is read in windows. Each window also holds `WINDOW_CONTEXT`
- * characters of the text on both sides, so that a word boundary and a
- * lookaround still see what is beside them. A match belongs to the window that
- * holds its first character, so no match is counted twice.
+ * The text is read in windows. Each window also holds `LEADING_CONTEXT`
+ * characters of the text before it and `LONGEST_SURE_MATCH` characters after
+ * it, so that a word boundary, a lookaround and a long match still see what is
+ * beside them. A match belongs to the window that holds its first character,
+ * so no match is counted twice.
  *
  * Two limits bound the work:
  *
@@ -229,8 +254,8 @@ const scanWindows = (
 
     const started = readClock();
     const windowEnd = Math.min(cursor + window, haystack.length);
-    const sliceStart = Math.max(0, cursor - WINDOW_CONTEXT);
-    let sliceEnd = Math.min(haystack.length, windowEnd + WINDOW_CONTEXT);
+    const sliceStart = Math.max(0, cursor - LEADING_CONTEXT);
+    let sliceEnd = Math.min(haystack.length, windowEnd + LONGEST_SURE_MATCH);
     let slice = haystack.slice(sliceStart, sliceEnd);
     regex.lastIndex = cursor - sliceStart;
 

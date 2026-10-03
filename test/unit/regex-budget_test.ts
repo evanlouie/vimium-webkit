@@ -13,6 +13,7 @@ import { compilePattern, MAX_REGEX_URL_LENGTH } from "~/domain/Exclusion.ts";
 import {
   collectSpans,
   DEFAULT_MATCH_LIMIT,
+  LONGEST_SURE_MATCH,
   MAX_MATCH_LENGTH,
   SEARCH_WINDOW,
 } from "~/features/find/Engine.ts";
@@ -154,24 +155,48 @@ describe("the find budget", () => {
     }),
   );
 
-  describe("gives the whole span of a match of 400 characters", () => {
-    // The window kept 256 characters of text on each side, and a match that
-    // reached the end of that text was dropped. The next window began after
-    // it, so the match was lost or moved, and nothing said so. A wrong span
-    // is worse than a stop.
-    const length = 400;
+  describe("gives the whole span of a long match, whatever the windows", () => {
+    // Each window read 256 characters past its end. A match that started late
+    // in a window and needed more text did not match in that window, and the
+    // next window began after its start, so the match was lost and nothing
+    // said so. The size of a window follows the clock, so the loss came and
+    // went with the load of the machine. A window budget of -1 keeps every
+    // window at its smallest, and no budget lets each window double up to
+    // `SEARCH_WINDOW`. Either way the guarantee must hold, up to its bound.
+    const WINDOWS = [
+      { windows: "the smallest windows", windowBudget: -1 },
+      { windows: "the largest windows", windowBudget: Number.POSITIVE_INFINITY },
+    ];
+    const cases = pipe(
+      Array.cartesian(WINDOWS, [400, LONGEST_SURE_MATCH]),
+      Array.cartesian([800, 1000, 1023, 1024, 1900, 2000, 2015]),
+      Array.map(([[{ windows, windowBudget }, length], at]) => ({
+        windows,
+        windowBudget,
+        length,
+        at,
+      })),
+    );
 
-    it.effect.each([800, 1000, 1023, 1024])("at %i", (at) =>
-      Effect.sync(() => {
-        const haystack = `${"a".repeat(at)}${"b".repeat(length)}${"a".repeat(4096)}`;
-        const passed = collectSpans(haystack, new RegExp(`b{${length}}`, "g"));
-        assert.isFalse(passed.stopped, `the search at ${at} stopped`);
-        assert.deepEqual(
-          passed.spans,
-          [{ start: at, end: at + length }],
-          `the match at ${at} moved`,
-        );
-      }),
+    it.effect.each(cases)(
+      "$length characters at $at, with $windows",
+      ({ windowBudget, length, at }) =>
+        Effect.sync(() => {
+          const haystack = `${"a".repeat(at)}${"b".repeat(length)}${"a".repeat(4096)}`;
+          const passed = collectSpans(
+            haystack,
+            new RegExp(`b{${length}}`, "g"),
+            DEFAULT_MATCH_LIMIT,
+            Number.POSITIVE_INFINITY,
+            windowBudget,
+          );
+          assert.isFalse(passed.stopped, "the search stopped");
+          assert.deepEqual(
+            passed.spans,
+            [{ start: at, end: at + length }],
+            "the match was lost or moved",
+          );
+        }),
     );
   });
 
