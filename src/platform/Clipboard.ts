@@ -197,9 +197,6 @@ export class Clipboard extends Context.Service<
      * at the call site with `Effect.timeoutTo`.
      */
     readonly read: Effect.Effect<string, ClipboardError>;
-
-    readonly canRead: boolean;
-    readonly canWrite: boolean;
   }
 >()("vimium/platform/Clipboard") {
   static readonly layer: Layer.Layer<Clipboard, never, Gm | Dom> = Layer.effect(
@@ -292,12 +289,7 @@ export class Clipboard extends Context.Service<
       // Plain delegation, and not `Effect.fn`. The span costs about 3 µs for
       // each call, and nothing exports the spans in a release build. On the
       // key path that is cost with no result.
-      return Clipboard.of({
-        write,
-        read,
-        canRead: Option.isSome(reader),
-        canWrite: gm.canSetClipboard || Option.isSome(writer) || Option.isSome(execDocument),
-      });
+      return Clipboard.of({ write, read });
     }),
   );
 }

@@ -6,12 +6,9 @@
  * nothing quietly.
  */
 
-import { Array, Boolean, Context, Effect, Layer, Match, Option, Schema, pipe } from "effect";
+import { Array, Context, Effect, Layer, Match, Option, Schema, pipe } from "effect";
 import { Dom } from "./Dom.ts";
-import { Gm, type GmError, OpenInTabResult } from "./Gm.ts";
-
-/** How a tab was opened, as the manager reports it. `Tabs.open` gives it back. */
-export { OpenInTabResult };
+import { Gm, type GmError, type OpenInTabResult } from "./Gm.ts";
 
 export const TabFailureReason = Schema.Literals(["unavailable", "blocked", "failed", "unsafe-url"]);
 
@@ -122,8 +119,6 @@ const closeFailure = (cause: GmError): TabError =>
 export interface OpenTabOptions {
   /** `false` asks for a background tab. Violentmonkey and Tampermonkey obey. */
   readonly active?: boolean;
-  /** Put the new tab immediately after this one. */
-  readonly insert?: boolean;
   /** It defaults to `"page"`. Pass `"internal"` only for a URL that we built. */
   readonly trust?: UrlTrust;
 }
@@ -161,7 +156,7 @@ export class Tabs extends Context.Service<
     /** Go to a URL in this tab. One place decides what a safe URL is. */
     readonly navigate: (
       url: string,
-      options?: { readonly replace?: boolean; readonly trust?: UrlTrust },
+      options?: { readonly trust?: UrlTrust },
     ) => Effect.Effect<void, TabError>;
   }
 >()("vimium/platform/Tabs") {
@@ -192,7 +187,8 @@ export class Tabs extends Context.Service<
         const opened = yield* pipe(
           gm.openInTab(target.href, {
             active,
-            insert: options.insert ?? true,
+            // Put the new tab immediately after this one.
+            insert: true,
             setParent: true,
             // Tampermonkey's older spelling. Others ignore it.
             loadInBackground: !active,
@@ -207,19 +203,11 @@ export class Tabs extends Context.Service<
 
       const navigate = Effect.fn("Tabs.navigate")(function* (
         url: string,
-        options: { readonly replace?: boolean; readonly trust?: UrlTrust } = {},
+        options: { readonly trust?: UrlTrust } = {},
       ) {
         yield* checked(url, options.trust ?? "page", "refusing to go to");
         return yield* pipe(
-          dom.attempt("location.assign", () =>
-            pipe(
-              options.replace === true,
-              Boolean.match({
-                onFalse: () => dom.window.location.assign(url),
-                onTrue: () => dom.window.location.replace(url),
-              }),
-            ),
-          ),
+          dom.attempt("location.assign", () => dom.window.location.assign(url)),
           Effect.mapError((cause) => new TabError({ reason: "failed", detail: cause.detail })),
         );
       });

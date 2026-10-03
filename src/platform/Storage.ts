@@ -107,8 +107,6 @@ export class StorageError extends Schema.TaggedError<StorageError>()("StorageErr
 // ---------------------------------------------------------------------------
 
 export interface ValueGroup<A> {
-  readonly name: string;
-
   /** The value in memory. The defaults until the first read completes. */
   readonly current: Effect.Effect<A>;
 
@@ -862,7 +860,6 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
     );
 
   return {
-    name: spec.name,
     current: SubscriptionRef.get(memory),
     currentUnsafe: () => SubscriptionRef.getUnsafe(memory),
     changes: SubscriptionRef.changes(memory),
