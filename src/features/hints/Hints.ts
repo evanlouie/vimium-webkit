@@ -149,28 +149,35 @@ import { hintCss, makeMarkerLayer, MarkerSpec } from "./Markers.ts";
 // ---------------------------------------------------------------------------
 
 /**
- * How long the whole collection may take.
+ * How long a round waits at most for frames to join.
  *
- * It is longer than the deadline of one frame on purpose. With the same value,
- * one frame that never answers costs the descriptors of *every* frame, because
- * the outer wait ends at the same moment as the inner one. A frame that hangs
- * must cost its own hints, and no more.
+ * The top frame waits for the frames that it woke, and a child frame that a
+ * key started waits for its own welcome.
  */
-export const COLLECT_DEADLINE_MS = REQUEST_DEADLINE_MS + 500;
-
-/** How long a pause in the typing counts as confirmation of one match. */
-export const FILTER_CONFIRM_DELAY_MS = 200;
-
-/** How long a round of the top frame waits at most for the frames that it woke to join. */
 const JOIN_GRACE_MS = 400;
 
 /** How often a round that waits for frames looks again. */
 const JOIN_POLL_MS = 25;
 
 /**
+ * How long the whole collection may take.
+ *
+ * It is longer than the deadline of one frame on purpose. With the same value,
+ * one frame that never answers costs the descriptors of *every* frame, because
+ * the outer wait ends at the same moment as the inner one. A frame that hangs
+ * must cost its own hints, and no more. The top frame waits for the frames
+ * that it woke before it asks them, so that wait is inside this one.
+ */
+export const COLLECT_DEADLINE_MS = REQUEST_DEADLINE_MS + JOIN_GRACE_MS + 500;
+
+/** How long a pause in the typing counts as confirmation of one match. */
+export const FILTER_CONFIRM_DELAY_MS = 200;
+
+/**
  * Give the keyboard back after this long, and do not eat the keys of the user.
  *
- * The wait for the frames comes before the collection, so this covers both.
+ * A child frame waits for its welcome before the collection, so this covers
+ * both.
  */
 export const KEY_BUFFER_SAFETY_MS = COLLECT_DEADLINE_MS + JOIN_GRACE_MS + 500;
 
@@ -1027,7 +1034,44 @@ const endPageRound =
 const coordinate = Effect.gen(function* () {
   const bus = yield* FrameBus;
   const dom = yield* Dom;
+  const realm = yield* Realm;
   const rounds = yield* Ref.make<PageRounds>({ live: Option.none(), ended: [] });
+
+  /** The frames of the tree that a round has already waited for. */
+  const awaitedFramesRef = yield* Ref.make<ReadonlyArray<Window>>([]);
+
+  /**
+   * Wake every frame of the page, and give back the frames that joined.
+   *
+   * A child frame starts only when something wakes it, and it joins the bus a
+   * moment later, so the first round of a page would ask none of them. Every
+   * round passes through here, whichever frame started it, so a round wakes
+   * the whole frames tree. A wake is harmless to a frame that is joining or
+   * has joined. When the tree holds a frame that no round has waited for yet,
+   * this waits until every frame of the tree has joined, for `JOIN_GRACE_MS`
+   * at most. A frame that never joins, such as a sandboxed one, costs that
+   * wait once.
+   */
+  const wakePage = Effect.gen(function* () {
+    yield* realm.wakeDescendants;
+    const frames = yield* Effect.sync(() => descendantFrames(dom.window));
+    const awaited = yield* pipe(awaitedFramesRef, Ref.getAndSet(frames));
+    const isNew = (frame: Window): boolean => !awaited.includes(frame);
+    const allJoined = (peers: ReadonlyArray<FrameId>): boolean => peers.length > frames.length;
+    const peers = yield* bus.peers;
+    return yield* pipe(
+      pipe(frames, Array.some(isNew)) && !allJoined(peers),
+      Boolean.match({
+        onFalse: () => Effect.succeed(peers),
+        onTrue: () =>
+          pipe(
+            bus.peers,
+            Effect.repeat({ schedule: Schedule.spaced(JOIN_POLL_MS), until: allJoined }),
+            Effect.timeoutOrElse({ duration: JOIN_GRACE_MS, orElse: () => bus.peers }),
+          ),
+      }),
+    );
+  });
 
   /** Ask one frame for its descriptors. A frame that does not answer gives none. */
   const requestFrameHints =
@@ -1055,15 +1099,23 @@ const coordinate = Effect.gen(function* () {
    * The origin is asked as well, although it has already run its own
    * detection. Without its descriptors the other frames would work out
    * another assignment of the hint strings, and the whole scheme rests on
-   * every frame agreeing.
+   * every frame agreeing. An origin that is alone on the page is not asked:
+   * it keeps the round to itself, and gets no descriptors back.
    */
   const collectEveryFrame = Effect.fn("Hints.collectEveryFrame")(function* (
     origin: FrameId,
     roundId: string,
     mode: HintMode,
   ) {
-    const peers = yield* bus.peers;
-    return yield* collectFrameDescriptors(peers, requestFrameHints(origin, roundId, mode));
+    const peers = yield* wakePage;
+    return yield* pipe(
+      peers,
+      Array.filter((frameId) => frameId !== origin),
+      Array.match({
+        onEmpty: () => Effect.succeed({ descriptors: Array.empty<HintDescriptor>(), dropped: 0 }),
+        onNonEmpty: () => collectFrameDescriptors(peers, requestFrameHints(origin, roundId, mode)),
+      }),
+    );
   });
 
   /** Give the ordered descriptors to every frame except the origin. */
@@ -1215,7 +1267,6 @@ export const HintsLayer: Layer.Layer<
     const report = yield* Report;
     const capabilities = yield* Capabilities;
     const bus = yield* FrameBus;
-    const realm = yield* Realm;
     const tabs = yield* Tabs;
     const clipboard = yield* Clipboard;
 
@@ -2047,68 +2098,45 @@ export const HintsLayer: Layer.Layer<
       yield* pipe(abortAfterSafety(abort, giveUp), Effect.forkScoped);
     });
 
-    /** The frames of the tree that a round has already waited for. */
-    const awaitedFramesRef = yield* Ref.make<ReadonlyArray<Window>>([]);
-
-    /** The frames of the page, once every frame of the tree has joined. */
-    const awaitJoins = Effect.gen(function* () {
-      const frames = yield* Effect.sync(() => descendantFrames(dom.window));
-      const awaited = yield* pipe(awaitedFramesRef, Ref.getAndSet(frames));
-      const isNew = (frame: Window): boolean => !awaited.includes(frame);
-      const allJoined = (peers: ReadonlyArray<FrameId>): boolean => peers.length > frames.length;
-      const peers = yield* bus.peers;
-      return yield* pipe(
-        pipe(frames, Array.some(isNew)) && !allJoined(peers),
-        Boolean.match({
-          onFalse: () => Effect.succeed(peers),
-          onTrue: () =>
-            pipe(
-              bus.peers,
-              Effect.repeat({ schedule: Schedule.spaced(JOIN_POLL_MS), until: allJoined }),
-              Effect.timeoutOrElse({ duration: JOIN_GRACE_MS, orElse: () => bus.peers }),
-            ),
-        }),
-      );
-    });
+    /** Whether a round of this frame has already waited for its admission. */
+    const awaitedAdmissionRef = yield* Ref.make(false);
 
     /**
-     * The frames of the page, once the frames that this round woke have
-     * joined.
+     * Whether this frame can ask the top frame for a round.
      *
-     * A child frame starts only when a round wakes it, and it joins the bus a
-     * moment later, so the first round of a page would ask none of them. A
-     * round of the top frame wakes the whole frames tree, and the top frame
-     * sees that tree. When the tree holds a frame that no round of the top
-     * frame has waited for yet, it waits until every frame of the tree has
-     * joined, for `JOIN_GRACE_MS` at most. A frame that never joins, such as
-     * a sandboxed one, costs that wait once.
-     *
-     * A child frame knows the frames that joined by their ids only, so it
-     * cannot tell which of them it woke, and it does not wait.
+     * The top frame is the coordinator, so it always can. A child frame can
+     * once the top frame admitted it. A key can start a child frame, and its
+     * first round then begins before its welcome, so the first round of a
+     * frame waits for the welcome, for `JOIN_GRACE_MS` at most. Later rounds
+     * do not wait. A frame that never joins, such as one under a top frame
+     * that runs no script, costs that wait once.
      */
-    const joinedPeers = pipe(
-      bus.role,
-      FrameRole.$match({
-        Top: () => awaitJoins,
-        Child: () => bus.peers,
-      }),
-    );
+    const inSession = Effect.gen(function* () {
+      const awaited = yield* pipe(awaitedAdmissionRef, Ref.getAndSet(true));
+      const grace = pipe(awaited, Boolean.match({ onFalse: () => JOIN_GRACE_MS, onTrue: () => 0 }));
+      return yield* pipe(
+        bus.ready,
+        Effect.timeoutOrElse({ duration: grace, orElse: () => Effect.succeed(false) }),
+      );
+    });
 
     const collectRemote = Effect.fn("Hints.collectRemote")(function* (
       roundId: string,
       mode: HintMode,
     ) {
-      const peers = yield* joinedPeers;
+      const joined = yield* inSession;
       return yield* pipe(
-        peers.length <= 1,
+        joined,
         Boolean.match({
-          // One frame is this frame. There is nobody to ask.
-          onTrue: () =>
+          // A frame outside the session keeps the round to itself.
+          onFalse: () =>
             Effect.succeedSome<HintsResult>({
               descriptors: Array.empty<HintDescriptor>(),
               dropped: 0,
             }),
-          onFalse: () =>
+          // The top frame wakes the frames of the page, and it answers
+          // with no descriptors when no other frame takes part.
+          onTrue: () =>
             pipe(
               bus.request(
                 toTop,
@@ -2215,10 +2243,6 @@ export const HintsLayer: Layer.Layer<
     });
 
     const startRound = Effect.fn("Hints.startRound")(function* (mode: HintMode) {
-      // A child frame starts only when something wakes it, so a round must
-      // wake the frames below this one, whatever started the round: a key,
-      // the command list or another command.
-      yield* realm.wakeDescendants;
       yield* ensureStyles;
       yield* pipe(pendingActivationRef, Ref.set(Option.none()));
 
