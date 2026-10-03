@@ -37,6 +37,7 @@ import {
   Layer,
   Match,
   Option,
+  Order,
   Predicate,
   Ref,
   Struct,
@@ -186,6 +187,10 @@ const moveElement = (element: Element, axis: ScrollAxis, delta: number): Motion 
     }),
   );
 
+/** How far the content of an element reaches past its box along `axis`. */
+const overflowOf = (element: Element, axis: ScrollAxis): number =>
+  element[AXIS_PROPERTIES[axis].scrollSize] - element[AXIS_PROPERTIES[axis].clientSize];
+
 /**
  * Has the element room left to scroll in this direction?
  *
@@ -193,8 +198,7 @@ const moveElement = (element: Element, axis: ScrollAxis, delta: number): Motion 
  * element that has nothing to scroll, so a pixel of overflow is no room.
  */
 const hasRoom = (element: Element, axis: ScrollAxis, direction: Direction): boolean => {
-  const properties = AXIS_PROPERTIES[axis];
-  const room = element[properties.scrollSize] - element[properties.clientSize];
+  const room = overflowOf(element, axis);
   const offset = readOffset(element, axis);
   return (
     room > 1 &&
@@ -206,6 +210,19 @@ const hasRoom = (element: Element, axis: ScrollAxis, direction: Direction): bool
     )
   );
 };
+
+/**
+ * Is `element` a scroll container with something to scroll along `axis`?
+ *
+ * The size comes first, because it is the cheaper read and most elements fail
+ * it.
+ */
+const isScrollContainer = (view: Window, element: Element, axis: ScrollAxis): boolean =>
+  overflowOf(element, axis) > 1 &&
+  pipe(
+    SCROLLABLE_OVERFLOW,
+    Array.contains(view.getComputedStyle(element)[AXIS_PROPERTIES[axis].overflow]),
+  );
 
 /**
  * Can `element` absorb a scroll in this direction along `axis`?
@@ -229,11 +246,7 @@ const isScrollable = (
   element: Element,
   axis: ScrollAxis,
   direction: Direction,
-): boolean =>
-  pipe(
-    SCROLLABLE_OVERFLOW,
-    Array.contains(view.getComputedStyle(element)[AXIS_PROPERTIES[axis].overflow]),
-  ) && hasRoom(element, axis, direction);
+): boolean => isScrollContainer(view, element, axis) && hasRoom(element, axis, direction);
 
 const isShadowRoot = (node: Node): node is ShadowRoot => node instanceof ShadowRoot;
 
@@ -268,20 +281,108 @@ const ancestorsBelow =
       ),
     );
 
-/** The nearest ancestor that can absorb the scroll, or else the root. */
-const findScrollableAncestor = (
+/** The area of the part of `element` that is inside the viewport. */
+const visibleArea = (view: Window, element: Element): number => {
+  const rect = element.getBoundingClientRect();
+  const width = Math.min(rect.right, view.innerWidth) - Math.max(rect.left, 0);
+  const height = Math.min(rect.bottom, view.innerHeight) - Math.max(rect.top, 0);
+  return Math.max(0, width) * Math.max(0, height);
+};
+
+interface Candidate {
+  readonly element: Element;
+  readonly area: number;
+}
+
+const largestFirst: Order.Order<Candidate> = pipe(
+  Order.flip(Order.Number),
+  Order.mapInput((candidate: Candidate) => candidate.area),
+);
+
+/**
+ * The largest scroll container in view, found as upstream's
+ * `firstScrollableElement` finds it.
+ *
+ * An element that scrolls along the axis answers for itself. Otherwise its
+ * children are tried, the one with the largest visible area first, so the
+ * search goes down the main pane of an app shell and not down its toolbar. A
+ * child that is out of view is never tried.
+ */
+const largestScrollable =
+  (view: Window, axis: ScrollAxis) =>
+  (element: Element): Option.Option<Element> =>
+    pipe(
+      element,
+      Option.liftPredicate((element) => isScrollContainer(view, element, axis)),
+      Option.orElse(() =>
+        pipe(
+          Array.fromIterable(element.children),
+          Array.map((child) => ({ element: child, area: visibleArea(view, child) })),
+          Array.filter(({ area }) => area > 0),
+          Array.sort(largestFirst),
+          Array.findFirst(({ element: child }) => largestScrollable(view, axis)(child)),
+        ),
+      ),
+    );
+
+/**
+ * The element that must absorb a scroll along `axis` in `direction`.
+ *
+ * The nearest ancestor of `start` that can absorb it comes first. The document
+ * comes next, when it scrolls along the axis at all. An app shell hides the
+ * overflow of its `body` and scrolls a pane inside it, so a document that does
+ * not scroll gives the scroll to the largest scroll container in view. The
+ * document is the last resort.
+ */
+const scrollTarget = (
   view: Window,
   root: Element,
-  start: Element | null,
+  start: Option.Option<Element>,
   axis: ScrollAxis,
   direction: Direction,
 ): Element =>
   pipe(
     start,
-    Option.fromNullOr,
     ancestorsBelow(root),
     Iterable.findFirst((element) => isScrollable(view, element, axis, direction)),
+    Option.orElse(() =>
+      pipe(
+        root,
+        Option.liftPredicate((root) => overflowOf(root, axis) > 1),
+      ),
+    ),
+    Option.orElse(() => largestScrollable(view, axis)(view.document.body ?? root)),
     Option.getOrElse(() => root),
+  );
+
+/**
+ * Where the walk for the scroll target starts.
+ *
+ * The focus says where the user is, unless it rests on the page itself. A click
+ * on a pane that cannot take the focus leaves it on `body`. The element that
+ * the user pressed last stands in then, which is what makes `j` scroll the
+ * pane that the user clicked into. Upstream keeps the same element for the
+ * same reason.
+ */
+const walkStart = (document: Document, pressed: Option.Option<Element>): Option.Option<Element> =>
+  pipe(
+    deepActiveElement(document),
+    Option.fromNullOr,
+    Option.filter((focused) => focused !== document.body && focused !== document.documentElement),
+    Option.orElse(() =>
+      pipe(
+        pressed,
+        Option.filter((element) => element.isConnected),
+      ),
+    ),
+  );
+
+/** The element that a press truly started at, through an open shadow root. */
+const pressedElement = (event: Event): Option.Option<Element> =>
+  pipe(
+    event.composedPath(),
+    Array.head,
+    Option.filter((target) => target instanceof Element),
   );
 
 /**
@@ -583,6 +684,8 @@ export class Scroller extends Context.Service<
         /** Increased on every keydown that is not a repeat: "this press". */
         const generation = yield* Ref.make(0);
         const heldCodes = yield* Ref.make(HashSet.empty<string>());
+        /** The element that the user pressed last. */
+        const pressed = yield* Ref.make(Option.none<Element>());
         const animations: Record<ScrollAxis, Ref.Ref<Option.Option<Animation>>> = {
           x: yield* Ref.make(Option.none<Animation>()),
           y: yield* Ref.make(Option.none<Animation>()),
@@ -653,16 +756,21 @@ export class Scroller extends Context.Service<
 
         /** The element that must absorb the scroll. */
         const target = (axis: ScrollAxis, direction: Direction): Effect.Effect<Element> =>
-          dom.probeOrElse(
-            () =>
-              findScrollableAncestor(
-                dom.window,
-                rootElement(),
-                deepActiveElement(dom.document),
-                axis,
-                direction,
+          pipe(
+            Ref.get(pressed),
+            Effect.flatMap((last) =>
+              dom.probeOrElse(
+                () =>
+                  scrollTarget(
+                    dom.window,
+                    rootElement(),
+                    walkStart(dom.document, last),
+                    axis,
+                    direction,
+                  ),
+                rootElement,
               ),
-            rootElement,
+            ),
           );
 
         const cancel = (axis: ScrollAxis): Effect.Effect<void> =>
@@ -1033,6 +1141,20 @@ export class Scroller extends Context.Service<
         // the blur of the window can answer.
         yield* dom.listen("window", "blur", () =>
           pipe(heldCodes, Ref.set(HashSet.empty<string>())),
+        );
+
+        // Capture phase, so that a page that stops the press still tells us
+        // where it was. A press from a script counts too: a hint that clicks
+        // into a pane must aim the next scroll at that pane.
+        yield* dom.listen(
+          "window",
+          "pointerdown",
+          (event) =>
+            pipe(
+              dom.probeOrElse(() => pressedElement(event), Option.none),
+              Effect.flatMap((element) => pipe(pressed, Ref.set(element))),
+            ),
+          { capture: true, passive: true },
         );
 
         const service = Scroller.of({
