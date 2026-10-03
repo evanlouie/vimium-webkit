@@ -14,6 +14,7 @@
  */
 
 import {
+  Boolean,
   Context,
   Data,
   Effect,
@@ -386,15 +387,30 @@ const stopWatching = (
     }),
   );
 
-/** The values that another tab writes to one key, for the life of the stream. */
+/**
+ * The values that another tab writes to one key, for the life of the stream.
+ *
+ * The manager also calls the listener for a write of this tab, with `remote`
+ * false. That echo is dropped: the writer already holds the value, and an echo
+ * that arrives late could publish an older value over a newer one. A manager
+ * that leaves the flag out is read as reporting another tab.
+ */
 const watchValue =
   (watch: AddValueChangeListener, unwatch: Option.Option<RemoveValueChangeListener>) =>
   (key: string): Stream.Stream<Option.Option<string>> =>
     Stream.callback<Option.Option<string>>((queue) => {
       const listen = Effect.sync(() =>
-        watch(key, (_name, _old, next) => {
-          Queue.offerUnsafe(queue, asOption(next));
-        }),
+        watch(key, (_name, _old, next, remote) =>
+          pipe(
+            remote === false,
+            Boolean.match({
+              onFalse: () => {
+                Queue.offerUnsafe(queue, asOption(next));
+              },
+              onTrue: constVoid,
+            }),
+          ),
+        ),
       );
       return Effect.acquireRelease(listen, (id) => stopWatching(unwatch, id));
     });
