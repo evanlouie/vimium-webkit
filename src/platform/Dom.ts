@@ -7,8 +7,8 @@
  * `undefined`. A `typeof` guard does not survive that, and `?.` does not
  * either, because both still do the read. Only a `try` does.
  *
- * Therefore every read of a global that we do not own goes through `probe`
- * here, and every listener is a scoped resource. When the runtime scope closes,
+ * Therefore every read of a global that we do not own goes through
+ * `probeOrElse` or `attempt` here, and every listener is a scoped resource. When the runtime scope closes,
  * every listener goes with it. No module keeps a list of things to remove.
  */
 
@@ -23,7 +23,6 @@ import {
   Result,
   Schema,
   type Scope,
-  Stream,
   pipe,
 } from "effect";
 import { constVoid } from "effect/Function";
@@ -69,7 +68,6 @@ export interface ListenOptions {
   /** Capture phase. Necessary when the page also listens for the same event. */
   readonly capture?: boolean;
   readonly passive?: boolean;
-  readonly once?: boolean;
 }
 
 /**
@@ -88,7 +86,6 @@ export type Listener<Event, R> = (event: Event) => Effect.Effect<void, never, R>
 const toAddOptions = (options: ListenOptions = {}): AddEventListenerOptions => ({
   capture: options.capture ?? false,
   passive: options.passive,
-  once: options.once,
 });
 
 // ---------------------------------------------------------------------------
@@ -109,20 +106,17 @@ export class Dom extends Context.Service<
     readonly visibility: Effect.Effect<DocumentVisibilityState>;
 
     /**
-     * Read a global that this realm may have poisoned.
-     *
-     * The failure says which API, so a caller can name it to the user.
-     */
-    readonly probe: <A>(api: string, read: () => A) => Effect.Effect<A, DomError>;
-
-    /**
-     * The same read, with a fallback for "absent" and for "we could not tell".
+     * Read a global that this realm may have poisoned, with a fallback for
+     * "absent" and for "we could not tell".
      *
      * The fallback runs only when the read throws, so it can do work of its own.
      */
     readonly probeOrElse: <A>(read: () => A, orElse: () => A) => Effect.Effect<A>;
 
-    /** Run a synchronous DOM call, and name the failure if it throws. */
+    /**
+     * Run a synchronous DOM call, or read a global that this realm may have
+     * poisoned. The failure names the API, so a caller can name it to the user.
+     */
     readonly attempt: <A>(api: string, run: () => A) => Effect.Effect<A, DomError>;
 
     /**
@@ -166,13 +160,6 @@ export class Dom extends Context.Service<
       ): Effect.Effect<void, never, R | Scope.Scope>;
     };
 
-    /** The same events as a stream, for work that may suspend. */
-    readonly events: <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K]>(
-      target: K,
-      type: T,
-      options?: ListenOptions,
-    ) => Stream.Stream<TargetEventMap[K][T]>;
-
     /** Resolves on the next animation frame, with its timestamp. */
     readonly nextFrame: Effect.Effect<number>;
 
@@ -202,9 +189,9 @@ export class Dom extends Context.Service<
       const probeOrElse = <A>(read: () => A, orElse: () => A): Effect.Effect<A> =>
         Effect.sync(() => pipe(Result.try(read), Result.getOrElse(orElse)));
 
-      const probe = <A>(api: string, read: () => A): Effect.Effect<A, DomError> =>
+      const attempt = <A>(api: string, run: () => A): Effect.Effect<A, DomError> =>
         Effect.try({
-          try: read,
+          try: run,
           catch: (cause) =>
             new DomError({
               api,
@@ -268,25 +255,13 @@ export class Dom extends Context.Service<
         document: doc,
         href: Effect.sync(() => win.location.href),
         visibility: Effect.sync(() => doc.visibilityState),
-        probe,
         probeOrElse,
-        attempt: probe,
+        attempt,
 
         listen: (target, type, handler, options) =>
           attach(resolveTarget(target), String(type), handler, options),
 
         listenOn: attach,
-
-        events: <K extends keyof TargetEventMap, T extends keyof TargetEventMap[K]>(
-          target: K,
-          type: T,
-          options?: ListenOptions,
-        ) =>
-          Stream.fromEventListener<TargetEventMap[K][T]>(
-            resolveTarget(target),
-            String(type),
-            toAddOptions(options),
-          ),
 
         nextFrame: Effect.callback<number>((resume) => {
           const handle = win.requestAnimationFrame((time) => {
