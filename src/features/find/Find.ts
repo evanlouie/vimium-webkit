@@ -18,8 +18,8 @@
  * 1. **A search does not suspend.** History cycling with the arrow keys runs a
  *    search from inside the `keydown` of the prompt, and the HUD runs that body
  *    inside the dispatch of the browser. Both hot loops therefore stop against
- *    a time budget in place, and neither yields. Read `ARCHITECTURE.md` section
- *    3.
+ *    a time budget in place, and neither yields. Read the section "The
+ *    keyboard path is synchronous" of `ARCHITECTURE.md`.
  * 2. **A session is a fiber.** `enter` interrupts the session before it starts
  *    a new one, and the finalizer of the interrupted session puts the scroll
  *    position back. There is no "cancel" flag to keep in step.
@@ -64,6 +64,7 @@ import {
   wordQuery,
 } from "~/domain/FindQuery.ts";
 import { FIND_HISTORY_LIMIT } from "~/domain/Persisted.ts";
+import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { elementAt } from "~/platform/Elements.ts";
@@ -92,7 +93,7 @@ import { FIND_CSS, FIND_STYLE_KEY, type Highlighter, makeHighlighter } from "./H
 /** What one search found, in the terms that the HUD reports. */
 export type SearchOutcome = Data.TaggedEnum<{
   /** The query is empty, so there is nothing to say. */
-  NoQuery: Record<never, never>;
+  NoQuery: NoFields;
   /** The pattern is not a regular expression that compiles. */
   BadPattern: { readonly message: string };
   NoMatches: {
@@ -153,7 +154,7 @@ export const pushHistory = (history: ReadonlyArray<string>, query: string): Read
 
 /** The matches of the last search, and the one that is current. */
 type Hits = Data.TaggedEnum<{
-  None: Record<never, never>;
+  None: NoFields;
   Found: {
     readonly matches: Array.NonEmptyReadonlyArray<FindMatch>;
     /** The index of the current match. It is always in range. */
@@ -425,8 +426,8 @@ export const FindLayer: Layer.Layer<
     const overlayServices = pipe(Context.make(Dom, dom), Context.add(Ui, ui));
 
     // The layer scope owns the session, the overlay, the mode that lives on
-    // and each fiber that find starts. Closing the runtime therefore takes
-    // every `Range` with it.
+    // and each fiber that find starts. Closing the application scope
+    // therefore takes every `Range` with it.
     const layerScope = yield* Scope.Scope;
     const fibers = yield* FiberSet.make();
 
@@ -451,27 +452,6 @@ export const FindLayer: Layer.Layer<
 
     // -- the browser ---------------------------------------------------
 
-    const selection: Effect.Effect<Option.Option<Selection>> = dom.probeOrElse(
-      () => Option.fromNullishOr(win.getSelection()),
-      Option.none,
-    );
-
-    /** Read the selection inside `dom.probeOrElse`. No selection gives `fallback`. */
-    const probeSelection = <A>(read: (selection: Selection) => A, fallback: A): Effect.Effect<A> =>
-      pipe(
-        selection,
-        Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.succeed(fallback),
-            onSome: (target) =>
-              dom.probeOrElse(
-                () => read(target),
-                () => fallback,
-              ),
-          }),
-        ),
-      );
-
     const readScroll: Effect.Effect<ScrollPosition> = dom.probeOrElse(
       () => ({ x: win.scrollX, y: win.scrollY }),
       () => ({ x: 0, y: 0 }),
@@ -493,23 +473,13 @@ export const FindLayer: Layer.Layer<
     const closeHighlight = pipe(
       highlight,
       Ref.getAndSet(Option.none<LiveHighlight>()),
-      Effect.flatMap(
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: (live) => Scope.close(live.scope, Exit.void),
-        }),
-      ),
+      Effect.flatMap(whenSome((live) => Scope.close(live.scope, Exit.void))),
     );
 
     /** Hide every rectangle, and keep the overlay for the next search. */
     const hideHighlight = pipe(
       Ref.get(highlight),
-      Effect.flatMap(
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: (live) => live.highlighter.clear,
-        }),
-      ),
+      Effect.flatMap(whenSome((live) => live.highlighter.clear)),
     );
 
     const buildHighlight = Effect.gen(function* () {
@@ -643,7 +613,7 @@ export const FindLayer: Layer.Layer<
     /** Anchor a step of `delta` at the caret, when there is a selection. */
     const atCaret = (found: Found, delta: number): Effect.Effect<Found> =>
       pipe(
-        selection,
+        dom.selection,
         Effect.map(
           Option.match({
             onNone: () => found,
@@ -691,22 +661,20 @@ export const FindLayer: Layer.Layer<
      */
     const selectCurrent = Effect.fn("Find.selectCurrent")(function* () {
       const match = yield* pipe(Ref.get(hits), Effect.map(currentMatchOf));
-      const target = yield* selection;
+      const target = yield* dom.selection;
       yield* pipe(
         Option.all({ match, target }),
-        Option.match({
-          onNone: () => Effect.void,
-          // Ignored: Safari refuses a range inside a shadow tree, and the
-          // overlay still shows the user where the match is.
-          onSome: ({ match, target }) =>
-            pipe(
-              dom.attempt("Selection.addRange", () => {
-                target.removeAllRanges();
-                target.addRange(match.range.cloneRange());
-              }),
-              Effect.ignore,
-            ),
-        }),
+        whenSome(({ match, target }) =>
+          pipe(
+            dom.attempt("Selection.addRange", () => {
+              target.removeAllRanges();
+              target.addRange(match.range.cloneRange());
+            }),
+            // Ignored: Safari refuses a range inside a shadow tree, and the
+            // overlay still shows the user where the match is.
+            Effect.ignore,
+          ),
+        ),
       );
     });
 
@@ -774,10 +742,7 @@ export const FindLayer: Layer.Layer<
       const match = yield* pipe(Ref.get(hits), Effect.map(currentMatchOf));
       yield* pipe(
         match,
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: ({ range }) => reveal(range),
-        }),
+        whenSome(({ range }) => reveal(range)),
       );
     });
 
@@ -801,12 +766,7 @@ export const FindLayer: Layer.Layer<
     const closePost = pipe(
       post,
       Ref.getAndSet(Option.none<ModeHandle>()),
-      Effect.flatMap(
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: (handle) => handle.exit(),
-        }),
-      ),
+      Effect.flatMap(whenSome((handle) => handle.exit())),
     );
 
     /**
@@ -917,19 +877,17 @@ export const FindLayer: Layer.Layer<
           browsing,
           Ref.modify(browse(entries, delta, value)),
           Effect.flatMap(
-            Option.match({
-              onNone: () => Effect.void,
-              onSome: (entry) =>
-                pipe(
-                  Effect.sync(() => {
-                    input.value = entry;
-                  }),
-                  // The `input` listener of the HUD does not fire for a
-                  // write from a script, so the incremental search is
-                  // started by hand.
-                  Effect.andThen(runIncremental(entry)),
-                ),
-            }),
+            whenSome((entry) =>
+              pipe(
+                Effect.sync(() => {
+                  input.value = entry;
+                }),
+                // The `input` listener of the HUD does not fire for a
+                // write from a script, so the incremental search is
+                // started by hand.
+                Effect.andThen(runIncremental(entry)),
+              ),
+            ),
           ),
         );
 
@@ -1140,13 +1098,7 @@ export const FindLayer: Layer.Layer<
 
     const runSession = Effect.fn("Find.runSession")(function* (prompt: Heading) {
       const answer = yield* pipe(promptSession(prompt), Effect.scoped);
-      yield* pipe(
-        answer,
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: commit,
-        }),
-      );
+      yield* pipe(answer, whenSome(commit));
     });
 
     /** Land on the match *after* the caret, and not on the one under it. */
@@ -1233,7 +1185,7 @@ export const FindLayer: Layer.Layer<
     const searchWordUnderCursor = Effect.fn("Find.searchWordUnderCursor")(function* (
       direction: 1 | -1,
     ) {
-      const word = yield* probeSelection(wordUnderCursor, "");
+      const word = yield* dom.probeSelection(wordUnderCursor, "");
       const noWord = () => hud.show("No word under the cursor", BRIEFLY);
       yield* pipe(
         wordQuery(word),
