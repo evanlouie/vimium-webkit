@@ -9,13 +9,11 @@
  * records, asks these functions, and carries out the answer.
  */
 
-import { Array, Data, flow, Match, Option, pipe, Record } from "effect";
+import { Array, Data, flow, Match, Option, pipe } from "effect";
 import type { FrameId } from "~/domain/FrameId.ts";
 import type { HintMode, MessageOf } from "~/domain/FrameMessage.ts";
 import { drivenBy, type SessionRole } from "~/domain/HintSession.ts";
-
-/** A variant with no data of its own. */
-type NoFields = Record.ReadonlyRecord<never, never>;
+import type { NoFields } from "~/domain/Prelude.ts";
 
 /**
  * How long a round keeps authorising a remote activation.

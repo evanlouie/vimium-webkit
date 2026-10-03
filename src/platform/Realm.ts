@@ -16,10 +16,8 @@ import { Array, Context, Data, Effect, Layer, Option, Predicate, Result, pipe } 
 import { Hex } from "effect/encoding";
 import { constFalse } from "effect/Function";
 import { FrameId } from "~/domain/FrameId.ts";
+import type { NoFields } from "~/domain/Prelude.ts";
 import { Dom } from "./Dom.ts";
-
-/** A variant with no fields. The type `{}` would mean any value that is not nullish. */
-type NoFields = Record<never, never>;
 
 /**
  * Where this frame sits in the frames tree.

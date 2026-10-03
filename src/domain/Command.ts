@@ -11,6 +11,7 @@
  */
 
 import { Data, Option, Record, Schema, Struct, pipe } from "effect";
+import type { NoFields } from "~/domain/Prelude.ts";
 
 /**
  * Whether this userscript can do a command.
@@ -19,7 +20,7 @@ import { Data, Option, Record, Schema, Struct, pipe } from "effect";
  * shortcut of the browser when there is one, for example "⌘⇧T".
  */
 export type CommandAvailability = Data.TaggedEnum<{
-  Available: Record<never, never>;
+  Available: NoFields;
   Unavailable: { readonly reason: string; readonly nativeAlternative: Option.Option<string> };
 }>;
 

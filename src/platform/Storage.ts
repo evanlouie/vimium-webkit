@@ -64,6 +64,7 @@ import {
   type Settings,
   settingsGroup,
 } from "~/domain/Persisted.ts";
+import type { NoFields } from "~/domain/Prelude.ts";
 import type { GmError } from "./Gm.ts";
 import { KeyValueStore, STORAGE_PREFIX } from "./KeyValueStore.ts";
 
@@ -200,7 +201,7 @@ type Command<A> = Data.TaggedEnum<{
   Reset: { readonly reply: Deferred.Deferred<A, StorageError> };
   Flush: { readonly reply: WriteReply };
   /** The debounce window closed. */
-  Elapsed: Record<never, never>;
+  Elapsed: NoFields;
   /** Another tab wrote the key. */
   Remote: { readonly raw: Option.Option<string> };
 }>;
@@ -219,7 +220,7 @@ const Command = Data.taggedEnum<CommandDefinition>();
  */
 type Held<A> = Data.TaggedEnum<{
   /** Nothing is held, and nobody waits. */
-  Empty: Record<never, never>;
+  Empty: NoFields;
   /** A value waits for the window to close. It is the last write of the window. */
   Holding: { readonly value: A; readonly waiters: Array.NonEmptyReadonlyArray<Waiter> };
   /**
@@ -267,7 +268,7 @@ const hold =
 /** How a group writes an accepted value. */
 type WritePolicy = Data.TaggedEnum<{
   /** Each accepted value goes to the backend before the next command. */
-  Immediate: Record<never, never>;
+  Immediate: NoFields;
   /** Values wait in a window, and the last one of the window goes. */
   Debounced: { readonly delay: Duration.Duration };
 }>;

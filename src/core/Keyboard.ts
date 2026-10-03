@@ -49,6 +49,7 @@ import {
   openBranch,
   type TrieNode,
 } from "~/domain/Mapping.ts";
+import type { NoFields } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { isUserEvent, mediaPlayerHasFocus } from "~/platform/Elements.ts";
@@ -74,9 +75,6 @@ export const MEDIA_KEYS: ReadonlySet<string> = new Set([
   "<right>",
   "<space>",
 ]);
-
-/** A variant that carries no data. */
-type NoFields = Record.ReadonlyRecord<never, never>;
 
 // ---------------------------------------------------------------------------
 // The key state

@@ -26,7 +26,6 @@ import {
   Effect,
   Option,
   Predicate,
-  type Record,
   Ref,
   Schema,
   type Scope,
@@ -35,6 +34,7 @@ import {
 } from "effect";
 import { constFalse } from "effect/Function";
 import { isComposing, isModifierKey } from "~/domain/Key.ts";
+import type { NoFields } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { composedTarget, isEditable, isUserEvent } from "~/platform/Elements.ts";
 import { FrameRole, Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
@@ -83,9 +83,6 @@ export interface BootSignal {
    */
   readonly drain: Effect.Effect<ReadonlyArray<KeyboardEvent>>;
 }
-
-/** A variant that carries no data. */
-type NoFields = Record.ReadonlyRecord<never, never>;
 
 /** What the guard does with a key that would start the application. */
 type Hold = Data.TaggedEnum<{

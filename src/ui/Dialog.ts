@@ -64,6 +64,7 @@ import {
   type SettingBounds,
   type Settings as SettingsData,
 } from "~/domain/Persisted.ts";
+import type { NoFields } from "~/domain/Prelude.ts";
 import { Capabilities, formatCapabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { deepActiveElement } from "~/platform/Elements.ts";
@@ -789,7 +790,7 @@ type SaveOutcome = Data.TaggedEnum<{
    */
   Kept: { readonly message: string };
   /** Everything was stored as the user offered it. */
-  Saved: Record<never, never>;
+  Saved: NoFields;
 }>;
 const SaveOutcome = Data.taggedEnum<SaveOutcome>();
 

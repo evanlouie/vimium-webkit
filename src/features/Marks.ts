@@ -31,6 +31,7 @@ import { Report } from "~/core/Report.ts";
 import { PLAIN_KEY_CONTEXT } from "~/domain/Key.ts";
 import type { GlobalMark, Marks as MarksData } from "~/domain/Persisted.ts";
 import { localMark, pruneMarks, withGlobalMark, withLocalMark } from "~/domain/Persisted.ts";
+import type { NoFields } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Storage } from "~/platform/Storage.ts";
 import { Tabs } from "~/platform/Tabs.ts";
@@ -95,9 +96,6 @@ const isSafeMarkUrl: (href: string) => boolean = flow(
   parseUrl,
   Option.exists((url) => pipe(SAFE_PROTOCOLS, Array.contains(url.protocol))),
 );
-
-/** A variant that carries no data. */
-type NoFields = Record.ReadonlyRecord<never, never>;
 
 /** What a jump to a global mark does. */
 type GlobalJump = Data.TaggedEnum<{

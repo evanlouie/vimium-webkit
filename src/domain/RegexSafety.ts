@@ -99,6 +99,7 @@ import {
   Struct,
 } from "effect";
 import { constTrue } from "effect/Function";
+import type { NoFields } from "~/domain/Prelude.ts";
 
 // ---------------------------------------------------------------------------
 // The reasons
@@ -135,9 +136,6 @@ const PROPERTY_ESCAPE =
 const LONG_ESCAPE =
   "`\\u{…}` needs the `u` flag, which this field does not allow; write " +
   "`\\uFFFF` with four digits instead";
-
-/** A variant that carries no data. */
-type Mark = Record<never, never>;
 
 // ---------------------------------------------------------------------------
 // Character sets
@@ -453,7 +451,7 @@ const intersectWith = (holds: Holds): Intersect => {
  * With the `u` flag it reads code points, and `\u{…}` and `\p{…}` are
  * escapes. Without the flag it reads code units, and they are literal text.
  */
-type Reading = Data.TaggedEnum<{ CodePoints: Mark; CodeUnits: Mark }>;
+type Reading = Data.TaggedEnum<{ CodePoints: NoFields; CodeUnits: NoFields }>;
 const Reading = Data.taggedEnum<Reading>();
 
 /** What the flags of a pattern change in this module. */
@@ -569,11 +567,11 @@ const readFlags = (flags: string): Flags => {
 
 type Shape = Data.TaggedEnum<{
   /** Nothing at all, as between the two bars of `a||b`. */
-  Empty: Mark;
+  Empty: NoFields;
   /** One character, from a literal, a class escape or a `[…]` class. */
-  Char: Mark;
+  Char: NoFields;
   /** `^`, `$`, `\b` and `\B`. They match a position and no character. */
-  Anchor: Mark;
+  Anchor: NoFields;
   Look: { readonly body: Node };
   Concat: { readonly parts: ReadonlyArray<Node> };
   Alt: { readonly branches: ReadonlyArray<Node> };
@@ -1154,7 +1152,7 @@ interface Read<A> {
 type Reader<A> = (text: Text, index: number) => Result.Result<Read<A>, string>;
 
 /** What a `(` opens. */
-type Opener = Data.TaggedEnum<{ Group: Mark; Look: Mark }>;
+type Opener = Data.TaggedEnum<{ Group: NoFields; Look: NoFields }>;
 const Opener = Data.taggedEnum<Opener>();
 
 /**
@@ -1167,7 +1165,7 @@ type Token = Data.TaggedEnum<{
   Atom: { readonly node: Node; readonly count: Option.Option<Count> };
   Open: { readonly opener: Opener };
   Close: { readonly count: Option.Option<Count> };
-  Bar: Mark;
+  Bar: NoFields;
 }>;
 const Token = Data.taggedEnum<Token>();
 
@@ -1176,7 +1174,7 @@ type ClassItem = Data.TaggedEnum<{
   Code: { readonly code: number };
   Range: Range;
   Class: { readonly escape: ClassEscape };
-  Open: Mark;
+  Open: NoFields;
 }>;
 const ClassItem = Data.taggedEnum<ClassItem>();
 

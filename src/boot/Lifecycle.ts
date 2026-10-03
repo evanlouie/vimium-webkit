@@ -61,17 +61,14 @@ import {
   Layer,
   Option,
   PubSub,
-  Record,
   Ref,
   Schedule,
   type Scope,
   Stream,
   pipe,
 } from "effect";
+import type { NoFields } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
-
-/** A variant that carries no data. */
-type NoFields = Record.ReadonlyRecord<never, never>;
 
 export type LifecycleEvent = Data.TaggedEnum<{
   /** The URL changed with no document load. */

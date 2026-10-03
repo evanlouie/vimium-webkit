@@ -37,6 +37,7 @@ import {
   flow,
   pipe,
 } from "effect";
+import type { NoFields } from "~/domain/Prelude.ts";
 import {
   CONTINUE_BUBBLING,
   type HandlerEventMap,
@@ -59,9 +60,6 @@ export type ExitReason =
   | "navigation"
   /** A body of the mode failed, so the stack dropped the mode. */
   | "defect";
-
-/** A variant that carries no data. */
-type NoFields = Record.ReadonlyRecord<never, never>;
 
 /** An event that ends a mode, besides an explicit exit, its singleton group and a navigation. */
 export type ExitTrigger = Data.TaggedEnum<{

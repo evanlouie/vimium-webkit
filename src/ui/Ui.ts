@@ -66,6 +66,7 @@ import {
 } from "effect";
 import { Settings } from "~/core/Settings.ts";
 import { describeCause } from "~/domain/Failure.ts";
+import type { NoFields } from "~/domain/Prelude.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { BASE_CSS, type ColorScheme, detectPageScheme, schemeOf } from "~/ui/Styles.ts";
@@ -374,7 +375,7 @@ type GuardState = Data.TaggedEnum<{
    * The guard spent its repair budget for this second, so the page holds the
    * host and the overlay is not visible.
    */
-  Yielded: Record.ReadonlyRecord<never, never>;
+  Yielded: NoFields;
 }>;
 const GuardState = Data.taggedEnum<GuardState>();
 

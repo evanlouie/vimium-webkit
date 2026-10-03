@@ -27,6 +27,7 @@ import { Commands } from "~/core/Commands.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { type SessionState, type Settings as SettingsData, withZoom } from "~/domain/Persisted.ts";
+import type { NoFields } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { isElement, MEDIA_SELECTOR } from "~/platform/Elements.ts";
 import { Storage } from "~/platform/Storage.ts";
@@ -39,9 +40,6 @@ const ZOOM_STEP = 1.1;
 
 const clamp = (value: number, min: number, max: number): number =>
   Math.min(max, Math.max(min, value));
-
-/** A variant that carries no data. */
-type NoFields = Record.ReadonlyRecord<never, never>;
 
 /** A change of the CSS zoom of this origin. */
 type ZoomChange = Data.TaggedEnum<{

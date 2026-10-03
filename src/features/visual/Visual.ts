@@ -45,6 +45,7 @@ import { type ExitReason, ExitTrigger, KeyPolicy, type ModeHandle, Modes } from 
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { appendCountDigit, isComposing, isCountDigit, keyNotation } from "~/domain/Key.ts";
+import type { NoFields } from "~/domain/Prelude.ts";
 import { Capabilities, type CapabilityReport } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -192,10 +193,10 @@ const NOTHING_TYPED: Typed = Typed.Plain({ count: 0 });
 /** What one key asks the mode to do. */
 type KeyCommand = Data.TaggedEnum<{
   Motion: { readonly spec: MovementSpec; readonly repeat: number };
-  Yank: Record.ReadonlyRecord<never, never>;
-  SwapEnds: Record.ReadonlyRecord<never, never>;
+  Yank: NoFields;
+  SwapEnds: NoFields;
   Enter: { readonly kind: VisualKind };
-  ExplainPaste: Record.ReadonlyRecord<never, never>;
+  ExplainPaste: NoFields;
 }>;
 
 const KeyCommand = Data.taggedEnum<KeyCommand>();

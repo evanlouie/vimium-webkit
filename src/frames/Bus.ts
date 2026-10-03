@@ -104,6 +104,7 @@ import {
   WIRE_TARGET_ALL,
   WIRE_TARGET_TOP,
 } from "~/domain/FrameMessage.ts";
+import type { NoFields } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import {
   ANNOUNCE_MESSAGE,
@@ -187,9 +188,6 @@ export class FrameError extends Schema.TaggedError<FrameError>()("FrameError", {
 // ---------------------------------------------------------------------------
 // Targets and inbound messages
 // ---------------------------------------------------------------------------
-
-/** A variant with no fields. The type `{}` would mean any value that is not nullish. */
-type NoFields = Record<never, never>;
 
 export type FrameTarget = Data.TaggedEnum<{
   Top: NoFields;

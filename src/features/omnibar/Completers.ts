@@ -24,6 +24,7 @@
 import { Array, Boolean, Data, Equal, Match, Number, Option, Order, pipe, String } from "effect";
 import { CommandAvailability, type CommandDef, type CommandName } from "~/domain/Command.ts";
 import type { SessionState, Visit } from "~/domain/Persisted.ts";
+import type { NoFields } from "~/domain/Prelude.ts";
 import {
   buildSearchUrl,
   Destination,
@@ -53,7 +54,7 @@ export type CompletionAction = Data.TaggedEnum<{
   /** Rewrite the input instead of acting. It adopts an engine keyword. */
   Fill: { readonly text: string };
   /** Nothing to do. To choose the row closes the omnibar. */
-  Dismiss: Record<never, never>;
+  Dismiss: NoFields;
 }>;
 
 export const CompletionAction = Data.taggedEnum<CompletionAction>();

@@ -21,7 +21,6 @@ import {
   Effect,
   Layer,
   Option,
-  type Record,
   Ref,
   type Scope,
   Stream,
@@ -38,12 +37,10 @@ import {
   MAX_REGEX_URL_LENGTH,
 } from "~/domain/Exclusion.ts";
 import type { ExclusionRule } from "~/domain/Persisted.ts";
+import type { NoFields } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { Settings } from "./Settings.ts";
-
-/** A variant that carries no data. */
-type NoFields = Record.ReadonlyRecord<never, never>;
 
 /** The verdict in force for this frame. */
 export type Verdict = Data.TaggedEnum<{

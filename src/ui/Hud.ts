@@ -51,6 +51,7 @@ import { Keyboard } from "~/core/Keyboard.ts";
 import { isEscape, Modes } from "~/core/Modes.ts";
 import { Report, type UserMessage } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
+import type { NoFields } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
 
@@ -65,7 +66,7 @@ export type HudDuration = Data.TaggedEnum<{
   /** The message goes after `duration`. */
   Transient: { readonly duration: Duration.Duration };
   /** The message stays until the next one replaces it. For a live status. */
-  Sticky: Record<never, never>;
+  Sticky: NoFields;
 }>;
 export const HudDuration = Data.taggedEnum<HudDuration>();
 
@@ -84,9 +85,9 @@ export type HudTone = "info" | "error";
 /** What the caller of a prompt says about one key press. */
 export type KeyClaim = Data.TaggedEnum<{
   /** The caller took the key. The prompt calls `preventDefault` and does nothing more with it. */
-  Taken: Record<never, never>;
+  Taken: NoFields;
   /** The prompt acts on the key: Enter submits, Escape cancels, and the field takes the rest. */
-  Pass: Record<never, never>;
+  Pass: NoFields;
 }>;
 export const KeyClaim = Data.taggedEnum<KeyClaim>();
 
@@ -251,7 +252,7 @@ type HudFrame = Data.TaggedEnum<{
   /** One line, and no prompt. */
   Showing: { readonly line: HudLine };
   /** Nothing to say. */
-  Hidden: Record<never, never>;
+  Hidden: NoFields;
 }>;
 const HudFrame = Data.taggedEnum<HudFrame>();
 
@@ -276,13 +277,13 @@ const hudFrame = (state: HudState): HudFrame =>
 /** What a key press does to an open prompt. */
 type PromptKey = Data.TaggedEnum<{
   /** The caller took the key, so the prompt only stops its default action. */
-  Taken: Record<never, never>;
+  Taken: NoFields;
   /** Enter ends the prompt with the text. */
-  Submit: Record<never, never>;
+  Submit: NoFields;
   /** Escape ends the prompt with "the user cancelled". */
-  Cancel: Record<never, never>;
+  Cancel: NoFields;
   /** Any other key belongs to the field. */
-  Pass: Record<never, never>;
+  Pass: NoFields;
 }>;
 const PromptKey = Data.taggedEnum<PromptKey>();
 

@@ -11,25 +11,12 @@
  * key selects without sending anything but the key.
  */
 
-import {
-  Array,
-  Boolean,
-  Data,
-  Duration,
-  Match,
-  Option,
-  pipe,
-  Record,
-  String,
-  Struct,
-} from "effect";
+import { Array, Boolean, Data, Duration, Match, Option, pipe, String, Struct } from "effect";
 import type { FrameId } from "~/domain/FrameId.ts";
 import { type FilterCandidate, filterHints, type FilterOutcome } from "~/domain/HintFilter.ts";
 import { hintStrings, matchByPrefix, normaliseHintCharacters } from "~/domain/HintString.ts";
 import type { Settings } from "~/domain/Persisted.ts";
-
-/** A variant with no data of its own. */
-type NoFields = Record.ReadonlyRecord<never, never>;
+import type { NoFields } from "~/domain/Prelude.ts";
 
 /** The alphabet that is used when the setting cannot give a usable one. */
 const DEFAULT_HINT_CHARACTERS = "sadfjklewcmpgh";

@@ -30,6 +30,7 @@ import {
 } from "effect";
 import { constVoid, flow } from "effect/Function";
 import { describeThrown } from "~/domain/Failure.ts";
+import type { NoFields } from "~/domain/Prelude.ts";
 import { Dom } from "./Dom.ts";
 import type {
   GmNamespace,
@@ -300,7 +301,7 @@ const readIdentity = (info: unknown): ManagerIdentity => {
  */
 export type StoreKind = Data.TaggedEnum<{
   /** The promise form of the manager's store. It cannot report another tab's write. */
-  GmAsync: Record<never, never>;
+  GmAsync: NoFields;
   /** The synchronous form of the manager's store. */
   GmSync: {
     /** True when another tab's write can be seen without a poll. */
@@ -315,7 +316,7 @@ export type StoreKind = Data.TaggedEnum<{
    * frame credential. `ARCHITECTURE.md` section 5.1 says why the top frame
    * does not give a credential of its own to a child instead.
    */
-  Memory: Record<never, never>;
+  Memory: NoFields;
 }>;
 
 export const StoreKind = Data.taggedEnum<StoreKind>();
@@ -473,7 +474,7 @@ export type OpenInTabResult = Data.TaggedEnum<{
   /** The manager opened it. Some managers give a handle that can close it. */
   Manager: { readonly handle: Option.Option<GmTabHandle> };
   /** The manager had no API, and `window.open` was used. */
-  Window: Record<never, never>;
+  Window: NoFields;
 }>;
 
 export const OpenInTabResult = Data.taggedEnum<OpenInTabResult>();
@@ -509,11 +510,11 @@ type XhrSend = (
 /** What an interrupt of a request can reach. */
 type XhrLink = Data.TaggedEnum<{
   /** The manager has given no handle yet. */
-  Waiting: Record<never, never>;
+  Waiting: NoFields;
   /** The manager gave a handle, and the request can be aborted through it. */
   Attached: { readonly handle: GmXhrHandle };
   /** The caller stopped waiting. A handle that arrives now is aborted at once. */
-  Cancelled: Record<never, never>;
+  Cancelled: NoFields;
 }>;
 
 const XhrLink = Data.taggedEnum<XhrLink>();

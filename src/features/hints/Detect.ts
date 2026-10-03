@@ -42,6 +42,7 @@ import {
   pipe,
 } from "effect";
 import { constTrue } from "effect/Function";
+import type { NoFields } from "~/domain/Prelude.ts";
 import type { CapabilityReport } from "~/platform/Capabilities.ts";
 import type { Dom } from "~/platform/Dom.ts";
 import { containsDeep, shadowHostChain } from "~/platform/Elements.ts";
@@ -75,9 +76,6 @@ export type HintKind =
   | "class"
   | "span"
   | "tabindex";
-
-/** A variant with no fields. The type `{}` would mean any value that is not nullish. */
-type NoFields = Record.ReadonlyRecord<never, never>;
 
 /**
  * How strong the signal was that earned a hint.
