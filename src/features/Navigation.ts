@@ -19,6 +19,7 @@ import {
   Match,
   Option,
   Order,
+  flow,
   pipe,
   String,
 } from "effect";
@@ -153,10 +154,10 @@ const wordCharacterAt =
 
 /** Every index at which a pattern that is not empty starts in `text`. */
 const occurrences = (text: string, pattern: string): ReadonlyArray<number> =>
-  Array.unfold(text.indexOf(pattern), (index) =>
-    pipe(
-      index,
-      Option.liftPredicate((found) => found !== -1),
+  Array.unfold(
+    text.indexOf(pattern),
+    flow(
+      Option.liftPredicate((found: number) => found !== -1),
       Option.map((found) => [found, text.indexOf(pattern, found + 1)] as const),
     ),
   );
