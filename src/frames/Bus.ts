@@ -70,6 +70,7 @@ import {
   Result,
   Schema,
   Scope,
+  Semaphore,
   Stream,
   pipe,
 } from "effect";
@@ -129,6 +130,19 @@ import { FrameAuth, type FrameCipher } from "./Auth.ts";
  * and "this frame is invisible for the life of the page".
  */
 const HANDSHAKE_RETRY_MS = [150, 600, 1800] as const;
+
+/**
+ * How long a handshake attempt of a child frame waits for its welcome before
+ * it counts as failed.
+ *
+ * The top frame answers a join in a few milliseconds. A new attempt closes the
+ * port of the attempt before it, and a request that the top frame sent on that
+ * port is lost, so an attempt that can still succeed must not be replaced. The
+ * deadline is shorter than the last retry of the handshake, so a join that the
+ * top frame dropped is tried again on the retry schedule, and later on the
+ * next wake.
+ */
+const ATTEMPT_DEADLINE_MS = 1000;
 
 /**
  * How long an admission token stays valid.
@@ -1188,15 +1202,45 @@ type AttemptLink = {
 /**
  * One handshake attempt of a child frame.
  *
- * `Joining` waits for its welcome, and `Joined` has had it. A repeat of the
- * welcome finds `Joined`, and it changes nothing.
+ * `Joining` waits for its welcome until its deadline, and `Joined` has had
+ * it. A repeat of the welcome finds `Joined`, and it changes nothing. `Stale`
+ * is the link of a frame that the back-forward cache restored: the frame still
+ * sends on it, and it asks to join again.
  */
 type Attempt = Data.TaggedEnum<{
-  Joining: AttemptLink;
+  Joining: AttemptLink & { readonly deadline: number };
   Joined: AttemptLink;
+  Stale: AttemptLink;
 }>;
 
 const Attempt = Data.taggedEnum<Attempt>();
+
+/**
+ * Whether this frame may start a new handshake at `now`.
+ *
+ * A new attempt closes the port of the attempt before it, and a request that
+ * the top frame sent on that port is lost. A wake that comes twice, or a
+ * second challenge, must therefore not start a second handshake while the
+ * first one can still succeed. A frame with no attempt, with an attempt past
+ * its deadline or with a stale link starts one. A frame that is joining or
+ * has joined does not.
+ */
+const opensAttempt = (now: number): ((current: Option.Option<Attempt>) => boolean) =>
+  Option.match({
+    onNone: () => true,
+    onSome: Attempt.$match({
+      Joining: ({ deadline }) => now >= deadline,
+      Joined: () => false,
+      Stale: () => true,
+    }),
+  });
+
+/** The attempt of a restored frame, which keeps its link and asks to join again. */
+const staleAttempt: (attempt: Attempt) => Attempt = Attempt.$match({
+  Joining: ({ helloId, link, release }) => Attempt.Stale({ helloId, link, release }),
+  Joined: ({ helloId, link, release }) => Attempt.Stale({ helloId, link, release }),
+  Stale: (stale) => stale,
+});
 
 /**
  * Accept a welcome for the attempt that is open, once.
@@ -1235,8 +1279,8 @@ const acceptWelcome =
  * coordinator therefore sweeps with the announce message, and only a hint round
  * uses the wake message.
  *
- * A frame that already belongs to the session answers neither of them. Read the
- * note at the call site.
+ * A frame that is joining, or that already belongs to the session, answers
+ * neither of them. Read `opensAttempt`.
  */
 const isAnnounceRequest = (data: unknown): boolean =>
   Predicate.isObject(data) &&
@@ -1328,7 +1372,25 @@ const makeMember = Effect.fnUntraced(function* (publishLocal: PublishLocal) {
       Effect.ignore,
     );
 
-  const announce: Effect.Effect<void> = pipe(topWindow, Effect.flatMap(whenSome(postHello)));
+  /** Whether this frame may start a handshake now. Read `opensAttempt`. */
+  const mayOpenAttempt: Effect.Effect<boolean> = Effect.gen(function* () {
+    const now = yield* dom.now;
+    const current = yield* Ref.get(attemptRef);
+    return pipe(current, opensAttempt(now));
+  });
+
+  /**
+   * Say that this frame exists, unless it is joining or has joined.
+   *
+   * The top frame answers each `HELLO` with a challenge, so a frame that
+   * announces itself again only asks for a challenge that it would refuse.
+   */
+  const announce: Effect.Effect<void> = pipe(
+    topWindow,
+    Effect.flatMap(whenSome(postHello)),
+    Effect.when(mayOpenAttempt),
+    Effect.asVoid,
+  );
 
   const joinSession = Effect.fnUntraced(function* (welcome: WelcomeMessage) {
     yield* pipe(rosterRef, Ref.set(welcome.frames));
@@ -1400,11 +1462,17 @@ const makeMember = Effect.fnUntraced(function* (publishLocal: PublishLocal) {
         Scope.provide(scope),
       );
 
+      const now = yield* dom.now;
       const previous = yield* pipe(
         attemptRef,
         Ref.getAndSet(
           Option.some<Attempt>(
-            Attempt.Joining({ helloId, link, release: Scope.close(scope, Exit.void) }),
+            Attempt.Joining({
+              helloId,
+              link,
+              release: Scope.close(scope, Exit.void),
+              deadline: now + ATTEMPT_DEADLINE_MS,
+            }),
           ),
         ),
       );
@@ -1439,26 +1507,17 @@ const makeMember = Effect.fnUntraced(function* (publishLocal: PublishLocal) {
    * Only an ancestor may wake a frame. A page could otherwise make every
    * frame that it can reach start a handshake at will.
    *
-   * A frame that already holds the session says nothing. A second
-   * handshake makes a second `MessageChannel`, and the port of the attempt
-   * before it is closed. A hint round runs on that port, and the round
-   * starts with the same wake message that would ask for the new
-   * handshake, so the answer of this frame and the `ACTIVATE` of the top
-   * frame would both be dropped. A frame that is not admitted still
-   * announces itself, which is the recovery that the sweep of the
-   * coordinator exists for.
+   * Every hint round wakes the frames of the page, so the order comes again
+   * and again. A frame that is joining or has joined says nothing: a second
+   * handshake would close the port that a round runs on. A frame whose
+   * attempt failed still announces itself, which is the recovery that the
+   * sweep of the coordinator and the wake of a round give.
    */
-  const onAnnounceRequest = Effect.fnUntraced(function* (source: unknown) {
-    const fromAncestor = yield* realm.isAncestor(source);
-    const inSession = yield* Deferred.isDone(admitted);
-    yield* pipe(
-      fromAncestor && !inSession,
-      Boolean.match({
-        onFalse: () => Effect.void,
-        onTrue: () => announce,
-      }),
-    );
-  });
+  const onAnnounceRequest = (source: unknown): Effect.Effect<void> =>
+    pipe(announce, Effect.when(realm.isAncestor(source)), Effect.asVoid);
+
+  /** One handshake attempt is prepared at a time. */
+  const opening = yield* Semaphore.make(1);
 
   /**
    * Answer a challenge with a new attempt.
@@ -1466,6 +1525,11 @@ const makeMember = Effect.fnUntraced(function* (publishLocal: PublishLocal) {
    * Only the top frame may challenge us. A sibling, or the script of the
    * page, could otherwise make this frame transfer a port to an origin of
    * its choice.
+   *
+   * A frame that is joining or has joined refuses the challenge, and so does
+   * a frame that is still preparing an attempt. The top frame answers every
+   * `HELLO`, so two announcements give two challenges, and the second one
+   * would otherwise close the port of the first attempt.
    */
   const acceptChallenge = Effect.fnUntraced(
     function* (event: MessageEvent, message: ChallengeMessage) {
@@ -1474,7 +1538,12 @@ const makeMember = Effect.fnUntraced(function* (publishLocal: PublishLocal) {
         Effect.flatMap(Effect.fromOption),
         Effect.filterOrFail((top) => event.source === top),
       );
-      yield* pipe(startAttempt(message.token, event.origin), Effect.forkIn(layerScope));
+      yield* pipe(
+        startAttempt(message.token, event.origin),
+        Effect.when(mayOpenAttempt),
+        Semaphore.withPermitsIfAvailable(opening, 1),
+        Effect.forkIn(layerScope),
+      );
     },
     Effect.catchNoSuchElement,
     Effect.asVoid,
@@ -1529,13 +1598,15 @@ const makeMember = Effect.fnUntraced(function* (publishLocal: PublishLocal) {
   );
 
   yield* dom.listen("window", "pageshow", (event) =>
-    // A restore brings back a document whose port the coordinator has
-    // already swept. To announce again is cheap, and the registry gives
-    // this frame the same identity, because the identity is ours.
+    // A restore brings back a document whose port the coordinator may have
+    // swept. To join again is cheap, and the registry gives this frame the
+    // same identity, because the identity is ours. The frame sends on its
+    // old link until the new one replaces it.
     pipe(
       event.persisted,
       Boolean.match({
-        onTrue: () => announce,
+        onTrue: () =>
+          pipe(attemptRef, Ref.update(Option.map(staleAttempt)), Effect.andThen(announce)),
         onFalse: () => Effect.void,
       }),
     ),
