@@ -46,12 +46,11 @@ import {
 } from "effect";
 import { constFalse } from "effect/Function";
 import { Commands } from "~/core/Commands.ts";
-import { isUserEvent } from "~/core/Keyboard.ts";
 import { recoverUnlessInterrupted } from "~/core/Recovery.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { deepActiveElement } from "~/platform/Elements.ts";
+import { deepActiveElement, isUserEvent } from "~/platform/Elements.ts";
 
 export type ScrollAxis = "x" | "y";
 

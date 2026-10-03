@@ -51,7 +51,7 @@ import {
 } from "~/domain/Mapping.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
-import { mediaPlayerHasFocus } from "~/platform/Elements.ts";
+import { isUserEvent, mediaPlayerHasFocus } from "~/platform/Elements.ts";
 import { Commands } from "./Commands.ts";
 import { Exclusions, knownRule, type Verdict } from "./Exclusions.ts";
 import { CONTINUE_BUBBLING, type HandlerResult, SUPPRESS_EVENT } from "./HandlerStack.ts";
@@ -74,21 +74,6 @@ export const MEDIA_KEYS: ReadonlySet<string> = new Set([
   "<right>",
   "<space>",
 ]);
-
-/**
- * Did the browser make this event, or did the page?
- *
- * A page can call `dispatchEvent` with a `KeyboardEvent` that names any key.
- * The browser marks such an event `isTrusted === false`, and only the browser
- * can set the flag to `true`. A synthetic key must therefore never reach a
- * command. A command can open a tab, navigate, close a tab or write the
- * clipboard, and the user pressed nothing.
- *
- * The test is strict on purpose. `dispatchEvent` refuses an object that is not
- * an `Event`, but other paths do not. A page can hand such an object to a
- * handler of ours directly, so every value except `true` is refused.
- */
-export const isUserEvent = (event: Pick<Event, "isTrusted">): boolean => event.isTrusted === true;
 
 /** A variant that carries no data. */
 type NoFields = Record.ReadonlyRecord<never, never>;

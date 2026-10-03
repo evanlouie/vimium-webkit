@@ -12,9 +12,10 @@
 
 import { Effect, Option, type Scope, flow, pipe } from "effect";
 import type { HandlerEventMap, HandlerEventName } from "~/core/HandlerStack.ts";
-import { isUserEvent, Keyboard } from "~/core/Keyboard.ts";
+import { Keyboard } from "~/core/Keyboard.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Dom, type ListenOptions } from "~/platform/Dom.ts";
+import { isUserEvent } from "~/platform/Elements.ts";
 
 /** Every listener of the bridge runs in the capture phase, before the page's own. */
 const CAPTURE: ListenOptions = { capture: true };

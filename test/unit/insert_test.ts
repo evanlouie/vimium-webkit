@@ -9,7 +9,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { composedTarget } from "~/features/Insert.ts";
+import { composedTarget } from "~/platform/Elements.ts";
 
 /** A focus event with the path that the browser would build. */
 const focusEvent = (

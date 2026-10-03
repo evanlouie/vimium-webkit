@@ -49,6 +49,41 @@ export const deepActiveElement: (root: Document) => Element | null = flow(
   Option.getOrNull,
 );
 
+/**
+ * The node that an event truly started at.
+ *
+ * An event inside an open shadow root is retargeted to the host before a
+ * window listener sees it. `event.target` then names the host, and not the
+ * field: a page that keeps its search box in a web component looked unfocused,
+ * and every key that the user typed into it ran a command.
+ *
+ * `composedPath()[0]` is the true node while the root is open. A closed root
+ * gives the host, which is the correct answer there and is what our own
+ * overlay needs. `composedPath` is a call on an object that the page can
+ * reach, so a caller runs this through `Dom.probeOrElse`.
+ */
+export const composedTarget = (event: Pick<Event, "composedPath" | "target">): EventTarget | null =>
+  pipe(
+    event.composedPath(),
+    Array.head,
+    Option.getOrElse(() => event.target),
+  );
+
+/**
+ * Did the browser make this event, or did the page?
+ *
+ * A page can call `dispatchEvent` with a `KeyboardEvent` that names any key.
+ * The browser marks such an event `isTrusted === false`, and only the browser
+ * can set the flag to `true`. A synthetic key must therefore never reach a
+ * command. A command can open a tab, navigate, close a tab or write the
+ * clipboard, and the user pressed nothing.
+ *
+ * The test is strict on purpose. `dispatchEvent` refuses an object that is not
+ * an `Event`, but other paths do not. A page can hand such an object to a
+ * handler of ours directly, so every value except `true` is refused.
+ */
+export const isUserEvent = (event: Pick<Event, "isTrusted">): boolean => event.isTrusted === true;
+
 export const MEDIA_SELECTOR = "video, audio";
 
 const hasMedia = (root: ParentNode): boolean => root.querySelector(MEDIA_SELECTOR) !== null;

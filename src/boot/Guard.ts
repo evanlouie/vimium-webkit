@@ -34,8 +34,9 @@ import {
   pipe,
 } from "effect";
 import { constFalse } from "effect/Function";
+import { isComposing, isModifierKey } from "~/domain/Key.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { isEditable } from "~/platform/Elements.ts";
+import { composedTarget, isEditable, isUserEvent } from "~/platform/Elements.ts";
 import { FrameRole, Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
 
 /**
@@ -111,9 +112,6 @@ const heldKeys: (hold: Hold) => ReadonlyArray<KeyboardEvent> = Hold.$match({
   Released: () => NO_KEYS,
 });
 
-/** The keys that only change what another key means. */
-const MODIFIER_KEYS: ReadonlyArray<string> = ["Shift", "Control", "Alt", "Meta"];
-
 /** Is the marker of an instance on this realm already? */
 const isClaimed: (window: Window) => boolean = flow(
   Option.liftPredicate(Predicate.hasProperty(GUARD)),
@@ -157,32 +155,6 @@ export const claimRealm: Effect.Effect<boolean, never, Dom> = Effect.gen(functio
 });
 
 /**
- * The node that the event truly started at.
- *
- * A key event inside an open shadow root is retargeted to the host before a
- * window listener sees it. `event.target` then names the host, and the
- * editable test answers "no" for a user who is typing into a search box.
- *
- * The first node of `composedPath()` is the true node while the root is open.
- * A closed root gives the host, which is the correct answer there.
- */
-const composedSource = (event: Event): EventTarget | null =>
-  pipe(
-    event.composedPath(),
-    Array.head,
-    Option.getOrElse(() => event.target),
-  );
-
-/**
- * Did the user make this key, and not the page?
- *
- * The check is inline, because the guard imports nothing above the platform. A
- * page can dispatch a `KeyboardEvent` that names any key, and only the browser
- * can set `isTrusted`.
- */
-const madeByUser = (event: KeyboardEvent): boolean => event.isTrusted === true;
-
-/**
  * Must this key start the application?
  *
  * A page that the user is only typing into must never pay the cost. The
@@ -190,10 +162,7 @@ const madeByUser = (event: KeyboardEvent): boolean => event.isTrusted === true;
  * runs for every keystroke in every frame.
  */
 const startsApplication = (event: KeyboardEvent, source: EventTarget | null): boolean =>
-  !event.isComposing &&
-  event.keyCode !== 229 &&
-  !pipe(MODIFIER_KEYS, Array.contains(event.key)) &&
-  !isEditable(source);
+  !isComposing(event) && !isModifierKey(event) && !isEditable(source);
 
 /**
  * The wake message, as `platform/Realm.ts` sends it.
@@ -261,7 +230,7 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
       // page, so it goes through the probe. A page that poisons `composedPath`
       // then costs us the shadow case only, and not the whole guard.
       const source = yield* dom.probeOrElse(
-        () => composedSource(event),
+        () => composedTarget(event),
         () => event.target,
       );
       yield* pipe(
@@ -290,7 +259,7 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
       "window",
       "keydown",
       flow(
-        Option.liftPredicate(madeByUser),
+        Option.liftPredicate(isUserEvent),
         Option.match({ onNone: () => Effect.void, onSome: onUserKey }),
       ),
       { capture: true },
