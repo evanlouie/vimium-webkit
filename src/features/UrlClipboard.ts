@@ -8,7 +8,7 @@
  * that only calls the manager completes inside that window.
  */
 
-import { Effect, Layer, Match, Option, pipe } from "effect";
+import { Effect, FiberSet, Layer, Match, Option, pipe } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Report } from "~/core/Report.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
@@ -42,6 +42,10 @@ export const UrlClipboardLayer: Layer.Layer<
     const navigation = yield* Navigation;
     const report = yield* Report;
 
+    // The fibers that outlive the command that starts them. They belong to
+    // the layer, and stop with it.
+    const fibers = yield* FiberSet.make<void, never>();
+
     const copy = Effect.fn("UrlClipboard.copy")(function* (text: string, label: string) {
       yield* pipe(
         clipboard.write(text),
@@ -74,7 +78,9 @@ export const UrlClipboardLayer: Layer.Layer<
      * starts first, so that it races the user and not the other way round.
      */
     const openPasted = Effect.fn("UrlClipboard.openPasted")(function* (destination: Destination) {
-      yield* pipe(previewClipboard, Effect.forkDetach);
+      // Scheduled, and not started at once, so the prompt is on screen before
+      // the read begins.
+      yield* pipe(previewClipboard, FiberSet.run(fibers, { startImmediately: false }));
 
       const answer = yield* hud.prompt<never>({
         label: promptLabel(destination),

@@ -581,19 +581,15 @@ export class Omnibar extends Context.Service<
       /**
        * Start the work of a row, and give the key task back at once.
        *
-       * Detached on purpose. To act closes the session, and a fiber of the
-       * session scope would be interrupted before it opened the tab.
-       * `startImmediately` keeps the call to the manager inside the activation
-       * window of the key press.
+       * On a fiber of the layer, and not of the session. To act closes the
+       * session, and a fiber of the session scope would be interrupted before
+       * it opened the tab. `FiberSet.run` starts the fiber at once, which keeps
+       * the call to the manager inside the activation window of the key press.
        */
       const startActivation = (index: number, newTab: boolean): Effect.Effect<void> =>
-        pipe(activate(index, newTab), Effect.forkDetach({ startImmediately: true }), Effect.asVoid);
+        pipe(activate(index, newTab), FiberSet.run(fibers), Effect.asVoid);
 
-      const startClose: Effect.Effect<void> = pipe(
-        close,
-        Effect.forkDetach({ startImmediately: true }),
-        Effect.asVoid,
-      );
+      const startClose: Effect.Effect<void> = pipe(close, FiberSet.run(fibers), Effect.asVoid);
 
       // ---------------------------------------------------------------
       // Keys

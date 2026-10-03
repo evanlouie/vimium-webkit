@@ -13,6 +13,7 @@ import {
   Data,
   Effect,
   FiberHandle,
+  FiberSet,
   Layer,
   Match,
   Option,
@@ -143,6 +144,10 @@ export const TabControlLayer: Layer.Layer<
 
     const muted = yield* Ref.make(false);
 
+    // The fibers that outlive the command that starts them. They belong to
+    // the layer, and stop with it.
+    const fibers = yield* FiberSet.make<void, never>();
+
     // A frame does not change its origin, so it is read once.
     const origin = yield* dom.probeOrElse(
       () => dom.window.location.origin,
@@ -222,7 +227,11 @@ export const TabControlLayer: Layer.Layer<
 
       yield* setZoom(next);
 
-      yield* pipe(storage.session.update(withZoom(origin, next)), Effect.ignore, Effect.forkDetach);
+      yield* pipe(
+        storage.session.update(withZoom(origin, next)),
+        Effect.ignore,
+        FiberSet.run(fibers),
+      );
 
       yield* hud.show(`Zoom ${Math.round(next * 100)}%`, BRIEFLY);
     });
