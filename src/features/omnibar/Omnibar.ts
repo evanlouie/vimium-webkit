@@ -79,8 +79,6 @@ import { makeHistoryIndex } from "./History.ts";
 import { makeOmnibarView, OMNIBAR_CSS, type OmnibarView } from "./OmnibarUi.ts";
 import { makeSuggester } from "./Suggest.ts";
 
-export type { OmnibarSource } from "./Completers.ts";
-
 // ---------------------------------------------------------------------------
 // Text
 // ---------------------------------------------------------------------------
@@ -295,17 +293,8 @@ const withSignal =
 export class Omnibar extends Context.Service<
   Omnibar,
   {
-    readonly open: (source: OmnibarSource, initialQuery?: string) => Effect.Effect<void>;
-    readonly close: Effect.Effect<void>;
     /** Record this page in the local index, when the user turned the index on. */
     readonly noteVisit: Effect.Effect<void>;
-    /**
-     * Erase the local index.
-     *
-     * This is a privacy control, and not plumbing. The README documents it as the
-     * only way to erase the index, so it must report a failure to erase.
-     */
-    readonly clearHistory: Effect.Effect<void>;
   }
 >()("vimium/features/omnibar/Omnibar") {
   static readonly layer: Layer.Layer<
@@ -673,7 +662,7 @@ export class Omnibar extends Context.Service<
         ),
       );
 
-      const open = Effect.fn("Omnibar.open")(function* (source: OmnibarSource, initialQuery = "") {
+      const open = Effect.fn("Omnibar.open")(function* (source: OmnibarSource) {
         yield* close;
         // The omnibar takes the keyboard, so a message that is still on
         // screen is no longer the thing that the user looks at.
@@ -742,9 +731,6 @@ export class Omnibar extends Context.Service<
         // that cannot be reached.
         yield* mode.onExit(() => pipe(close, Effect.when(isLive(current)), Effect.asVoid));
 
-        // The optional first query is what "open a link with the omnibar"
-        // gives us.
-        yield* view.setValue(initialQuery);
         yield* view.focus;
         yield* refresh(current);
       });
@@ -785,6 +771,12 @@ export class Omnibar extends Context.Service<
         );
       });
 
+      /**
+       * Erase the local index.
+       *
+       * This is a privacy control, and not plumbing. The README documents it as
+       * the only way to erase the index, so it must report a failure to erase.
+       */
       const clearHistory = Effect.fn("Omnibar.clearHistory")(function* () {
         yield* pipe(
           history.clear,
@@ -796,30 +788,25 @@ export class Omnibar extends Context.Service<
         );
       });
 
-      const service = Omnibar.of({
-        open,
-        close,
-        noteVisit: pipe(history.record, Effect.andThen(heartbeat())),
-        clearHistory: clearHistory(),
-      });
-
       // A command body runs on a forked fiber, so it may suspend.
       yield* commands.registerAll({
-        "Vomnibar.activate": () => service.open("url"),
-        "Vomnibar.activateInNewTab": () => service.open("url"),
-        "Vomnibar.activateCommands": () => service.open("command"),
-        "Vomnibar.activateSearch": () => service.open("search"),
+        "Vomnibar.activate": () => open("url"),
+        "Vomnibar.activateInNewTab": () => open("url"),
+        "Vomnibar.activateCommands": () => open("command"),
+        "Vomnibar.activateSearch": () => open("search"),
         // Tier C, and still a body. The row explains the refusal and shows the
         // shortcut of the browser, which a silent command cannot do.
-        "Vomnibar.activateBookmarks": () => service.open("bookmark"),
-        "clear-history": () => service.clearHistory,
+        "Vomnibar.activateBookmarks": () => open("bookmark"),
+        "clear-history": () => clearHistory(),
       });
 
       // The session belongs to the layer scope as well, so that the runtime
       // takes the overlay with it when it stops.
       yield* Effect.addFinalizer(() => close);
 
-      return service;
+      return Omnibar.of({
+        noteVisit: pipe(history.record, Effect.andThen(heartbeat())),
+      });
     }),
   );
 }
