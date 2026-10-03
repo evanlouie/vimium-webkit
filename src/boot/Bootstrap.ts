@@ -8,6 +8,7 @@
  */
 
 import {
+  Array,
   Boolean,
   type Cause,
   Context,
@@ -18,6 +19,7 @@ import {
   Option,
   Scope,
   Stream,
+  Struct,
   pipe,
 } from "effect";
 import { Commands } from "~/core/Commands.ts";
@@ -221,6 +223,33 @@ export const BootstrapLayer: Layer.Layer<
         }),
       );
 
+    /**
+     * Tell the user once about each loss that this manager or browser causes.
+     *
+     * The session group remembers each warning that the user saw. With no value
+     * store it lasts as long as the page, so the warning comes once for each
+     * page. The top frame alone speaks, so a page with frames speaks once. A
+     * failed write is a storage issue of its own, and the user hears about it.
+     */
+    const warnOnce = Effect.gen(function* () {
+      const { acknowledged } = yield* storage.session.current;
+      const fresh = pipe(degradationWarnings(capabilities), Array.difference(acknowledged));
+      yield* pipe(fresh, Effect.forEach(report.error, { discard: true }));
+      yield* pipe(
+        fresh,
+        Array.match({
+          onEmpty: () => Effect.void,
+          onNonEmpty: (shown) =>
+            pipe(
+              storage.session.update(
+                Struct.evolve({ acknowledged: (known) => pipe(known, Array.appendAll(shown)) }),
+              ),
+              Effect.ignore,
+            ),
+        }),
+      );
+    });
+
     /** Read the settings and the verdict again, after the page changed under us. */
     const refresh = Effect.gen(function* () {
       yield* settings.reload;
@@ -294,7 +323,7 @@ export const BootstrapLayer: Layer.Layer<
     // value with the defaults plus one change.
     yield* storage.hydrateAll;
 
-    yield* pipe(degradationWarnings(capabilities), Effect.forEach(report.error, { discard: true }));
+    yield* inTopFrame(warnOnce);
 
     // The top frame matches the rules that it has just read. A child frame asked
     // the top frame when it started.
