@@ -108,6 +108,7 @@ import { Capabilities } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import type { FrameId } from "~/domain/FrameId.ts";
+import { containsDeep, shadowHostChain } from "~/platform/Elements.ts";
 import { FrameRole } from "~/platform/Realm.ts";
 import { OpenInTabResult, Tabs } from "~/platform/Tabs.ts";
 import { BRIEFLY, Hud, HudDuration } from "~/ui/Hud.ts";
@@ -563,42 +564,6 @@ const targetOf = (hint: LocalHint): Element =>
 /** Are the element of a hint and its hit target still in the document? */
 const isAttached = (hint: LocalHint): boolean =>
   hint.element.isConnected && targetOf(hint).isConnected;
-
-const isShadowRoot = (node: Node): node is ShadowRoot => node instanceof ShadowRoot;
-
-/** The host of the shadow root that holds `node`, when a shadow root holds it. */
-const shadowHostOf = (node: Node): Option.Option<Element> =>
-  pipe(
-    node.getRootNode(),
-    Option.liftPredicate(isShadowRoot),
-    Option.map((root) => root.host),
-  );
-
-/**
- * Does `ancestor` hold `node`, across an open shadow boundary?
- *
- * `Node.contains` stops at a shadow root, so a hit inside the own open shadow
- * root of the element would look like an unrelated element that is painted on
- * top. `Detect.ts` holds the same walk for the detection pass, and the two stay
- * apart on purpose: one decides what takes a hint, and this one decides what a
- * key press may click.
- */
-const containsDeep = (ancestor: Element, node: Node): boolean =>
-  ancestor.contains(node) ||
-  pipe(
-    shadowHostOf(node),
-    Option.exists((host) => containsDeep(ancestor, host)),
-  );
-
-/** Every shadow host above `node`, nearest first. */
-const shadowHostChain = (node: Node): readonly Element[] =>
-  pipe(
-    shadowHostOf(node),
-    Option.match({
-      onNone: () => Array.empty<Element>(),
-      onSome: (host) => pipe(shadowHostChain(host), Array.prepend(host)),
-    }),
-  );
 
 /** Is this a hit on the target, on something inside it, or on a host of it? */
 const isOurTarget =

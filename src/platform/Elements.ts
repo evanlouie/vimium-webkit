@@ -80,6 +80,40 @@ export const mediaPlayerHasFocus = (root: Document): boolean =>
 /** The form fields, which read the keys that the user types. */
 const FIELD_TAGS: ReadonlyArray<string> = ["INPUT", "TEXTAREA", "SELECT"];
 
+const isShadowRoot = (node: Node): node is ShadowRoot => node instanceof ShadowRoot;
+
+/** The host of the shadow root that holds `node`, when a shadow root holds it. */
+export const shadowHostOf = (node: Node): Option.Option<Element> =>
+  pipe(
+    node.getRootNode(),
+    Option.liftPredicate(isShadowRoot),
+    Option.map((root) => root.host),
+  );
+
+/**
+ * Does `ancestor` hold `node`, across an open shadow boundary?
+ *
+ * `Node.contains` stops at a shadow root, so a node inside the own open shadow
+ * root of an element would look like an unrelated element that is painted on
+ * top of it.
+ */
+export const containsDeep = (ancestor: Element, node: Node): boolean =>
+  ancestor.contains(node) ||
+  pipe(
+    shadowHostOf(node),
+    Option.exists((host) => containsDeep(ancestor, host)),
+  );
+
+/** Every shadow host above `node`, nearest first. */
+export const shadowHostChain = (node: Node): ReadonlyArray<Element> =>
+  pipe(
+    shadowHostOf(node),
+    Option.match({
+      onNone: () => Array.empty<Element>(),
+      onSome: (host) => pipe(shadowHostChain(host), Array.prepend(host)),
+    }),
+  );
+
 /** Can the user type into this element? */
 export const isEditable = (target: EventTarget | null): boolean =>
   target instanceof Element &&

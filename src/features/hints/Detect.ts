@@ -44,6 +44,7 @@ import {
 import { constTrue } from "effect/Function";
 import type { CapabilityReport } from "~/platform/Capabilities.ts";
 import type { Dom } from "~/platform/Dom.ts";
+import { containsDeep, shadowHostChain } from "~/platform/Elements.ts";
 import {
   CHUNK_BUDGET_MS,
   type ChunkedOptions,
@@ -270,8 +271,6 @@ const isLabel = (element: Element): element is HTMLLabelElement =>
 
 const isLink = (element: Element): element is HTMLAnchorElement | HTMLAreaElement =>
   element instanceof HTMLAnchorElement || element instanceof HTMLAreaElement;
-
-const isShadowRoot = (node: Node): node is ShadowRoot => node instanceof ShadowRoot;
 
 // ---------------------------------------------------------------------------
 // Attribute probes
@@ -1223,38 +1222,6 @@ export const collectElements = Effect.fnUntraced(function* <E extends WalkElemen
 // ---------------------------------------------------------------------------
 // Occlusion
 // ---------------------------------------------------------------------------
-
-/** The host of the shadow tree that holds `node`, when that tree is one. */
-const hostOf = (node: Node): Option.Option<Element> =>
-  pipe(
-    node.getRootNode(),
-    Option.liftPredicate(isShadowRoot),
-    Option.map((root) => root.host),
-  );
-
-/** The chain of shadow hosts between `element` and the document. */
-const shadowHostChain = (element: Element): ReadonlyArray<Element> =>
-  pipe(
-    hostOf(element),
-    Option.match({
-      onNone: () => Array.empty<Element>(),
-      onSome: (host) => pipe(shadowHostChain(host), Array.prepend(host)),
-    }),
-  );
-
-/**
- * Does `ancestor` contain `node`, across an open shadow boundary?
- *
- * `Node.contains` stops at a shadow root. A hit on a *descendant inside the own
- * open shadow root of the element* therefore looked like an unrelated element
- * that was painted on top, and every clickable custom element lost its hint.
- */
-const containsDeep = (ancestor: Element, node: Element): boolean =>
-  ancestor.contains(node) ||
-  pipe(
-    hostOf(node),
-    Option.exists((host) => containsDeep(ancestor, host)),
-  );
 
 interface Point {
   readonly x: number;
