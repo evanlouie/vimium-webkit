@@ -180,7 +180,16 @@ describe("the find budget", () => {
       // `/.+/` over a long paragraph. `collectSpans` gave 4096 to 4500 here,
       // and one search over the whole text gives 0 to 4500.
       const haystack = "the quick brown fox jumps over the lazy dog. ".repeat(200).slice(0, 4500);
-      const passed = collectSpans(haystack, /.+/g);
+      // The slice grows only while its window stays inside the window budget.
+      // On a loaded machine the window can overrun it, and the search then
+      // stops, which is the budget at work. This search has no time budget.
+      const passed = collectSpans(
+        haystack,
+        /.+/g,
+        DEFAULT_MATCH_LIMIT,
+        Number.POSITIVE_INFINITY,
+        Number.POSITIVE_INFINITY,
+      );
       assert.isFalse(passed.stopped);
       assert.deepEqual(passed.spans, [{ start: 0, end: 4500 }]);
     }),

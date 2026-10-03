@@ -168,8 +168,9 @@ const NOTHING_FOUND: SpanSearch = { spans: [], stopped: false };
  *
  * - the clock is read between two windows, and the search stops at `deadline`;
  * - each window is measured, and the next window is smaller when a window cost
- *   more than `WINDOW_BUDGET_MS`. The first window is `FIRST_WINDOW`
- *   characters, because nothing has measured the pattern yet.
+ *   more than `windowBudget`, `WINDOW_BUDGET_MS` by default. The first window
+ *   is `FIRST_WINDOW` characters, because nothing has measured the pattern
+ *   yet.
  *
  * A match that reaches the end of its slice grows the slice, up to
  * `MAX_MATCH_LENGTH`. The search then finds the whole match, or reports a stop.
@@ -179,6 +180,7 @@ export const collectSpans = (
   pattern: RegExp,
   limit: number = DEFAULT_MATCH_LIMIT,
   deadline: number = readClock() + MATCH_BUDGET_MS,
+  windowBudget: number = WINDOW_BUDGET_MS,
 ): SpanSearch =>
   pipe(
     limit > 0 && haystack.length > 0,
@@ -190,6 +192,7 @@ export const collectSpans = (
           new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`),
           limit,
           deadline,
+          windowBudget,
         ),
     }),
   );
@@ -211,6 +214,7 @@ const scanWindows = (
   regex: RegExp,
   limit: number,
   deadline: number,
+  windowBudget: number,
 ): SpanSearch => {
   const spans: MatchSpan[] = [];
   // Where the next match may begin. A match can end after the window that
@@ -258,7 +262,7 @@ const scanWindows = (
         // Nothing is recorded until the whole match is inside the slice.
         if (
           sliceEnd - sliceStart >= MAX_MATCH_LENGTH ||
-          readClock() - started > WINDOW_BUDGET_MS ||
+          readClock() - started > windowBudget ||
           readClock() > deadline
         ) {
           return { spans, stopped: true };
@@ -278,7 +282,7 @@ const scanWindows = (
     }
 
     cursor = Math.max(cursor, windowEnd);
-    window = nextWindow(window, readClock() - started);
+    window = nextWindow(window, readClock() - started, windowBudget);
   }
 
   return { spans, stopped: false };
@@ -294,11 +298,11 @@ const scanWindows = (
  * It runs once for each window of `scanWindows`, so it keeps the plain
  * conditionals that the measurement there asks for.
  */
-const nextWindow = (size: number, elapsed: number): number => {
-  if (elapsed > WINDOW_BUDGET_MS) {
+const nextWindow = (size: number, elapsed: number, budget: number): number => {
+  if (elapsed > budget) {
     return Math.max(FIRST_WINDOW, Math.floor(size / 2));
   }
-  return elapsed * 4 <= WINDOW_BUDGET_MS ? Math.min(SEARCH_WINDOW, size * 2) : size;
+  return elapsed * 4 <= budget ? Math.min(SEARCH_WINDOW, size * 2) : size;
 };
 
 // ---------------------------------------------------------------------------
