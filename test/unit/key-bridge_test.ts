@@ -12,10 +12,9 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Array, type Context, Effect, Layer, Option, Ref, Stream, Struct, pipe } from "effect";
+import { Array, type Context, Effect, Layer, Option, Ref, Struct, pipe } from "effect";
 import { attachKeyBridge } from "~/boot/KeyBridge.ts";
 import { CONTINUE_BUBBLING } from "~/core/HandlerStack.ts";
-import { Keyboard } from "~/core/Keyboard.ts";
 import { KeyPolicy, Modes } from "~/core/Modes.ts";
 import { Dom, type Listener, type TargetEventMap } from "~/platform/Dom.ts";
 
@@ -85,18 +84,20 @@ const recordingDom = (attached: Ref.Ref<ReadonlyArray<Attached>>): Layer.Layer<D
     Layer.provide(Dom.layer),
   );
 
-/** `Keyboard`, reduced to the one method that the bridge calls. */
-const stubKeyboard = (forgotten: Ref.Ref<number>): Layer.Layer<Keyboard> =>
-  Layer.succeed(
-    Keyboard,
-    Keyboard.of({
-      pending: { get: Effect.succeedNone, changes: Stream.empty },
-      passNextKey: () => Effect.void,
-      forgetSuppressed: pipe(
-        forgotten,
-        Ref.update((count) => count + 1),
-      ),
-    }),
+/** The real `Modes`, which counts each request to forget the taken presses. */
+const countingModes = (forgotten: Ref.Ref<number>): Layer.Layer<Modes> =>
+  pipe(
+    Modes,
+    Effect.map(
+      Struct.assign({
+        forgetSuppressed: pipe(
+          forgotten,
+          Ref.update((count) => count + 1),
+        ),
+      }),
+    ),
+    Layer.effect(Modes),
+    Layer.provide(Modes.layer),
   );
 
 /**
@@ -214,7 +215,7 @@ const withBridge = (
   Effect.gen(function* () {
     const attached = yield* Ref.make<ReadonlyArray<Attached>>([]);
     const forgotten = yield* Ref.make(0);
-    const layer = Layer.mergeAll(recordingDom(attached), Modes.layer, stubKeyboard(forgotten));
+    const layer = Layer.mergeAll(recordingDom(attached), countingModes(forgotten));
 
     const run = Effect.gen(function* () {
       const modes = yield* Modes;

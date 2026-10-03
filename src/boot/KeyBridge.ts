@@ -13,7 +13,6 @@
 
 import { Effect, Option, type Scope, flow, pipe } from "effect";
 import type { HandlerEventMap, HandlerEventName } from "~/core/HandlerStack.ts";
-import { Keyboard } from "~/core/Keyboard.ts";
 import { Modes } from "~/core/Modes.ts";
 import { whenSome } from "~/domain/Prelude.ts";
 import { Dom, type ListenOptions } from "~/platform/Dom.ts";
@@ -58,11 +57,10 @@ const fromUser = <E extends Event, R>(
  * needs the true node therefore reads `event.composedPath()`.
  * `features/Insert.ts` does that.
  */
-export const attachKeyBridge: Effect.Effect<void, never, Dom | Keyboard | Modes | Scope.Scope> =
-  Effect.gen(function* () {
+export const attachKeyBridge: Effect.Effect<void, never, Dom | Modes | Scope.Scope> = Effect.gen(
+  function* () {
     const dom = yield* Dom;
     const modes = yield* Modes;
-    const keyboard = yield* Keyboard;
 
     /**
      * Give the event to the mode stack.
@@ -82,7 +80,7 @@ export const attachKeyBridge: Effect.Effect<void, never, Dom | Keyboard | Modes 
     yield* dom.listen("window", "focus", fromUser(bubble("focus")), CAPTURE);
     yield* dom.listen("window", "blur", fromUser(bubble("blur")), CAPTURE);
 
-    // A press whose release we will never see leaves normal mode waiting for a
+    // A press whose release we will never see leaves the stack waiting for a
     // `keyup` that never comes. The everyday case is a window switch in the
     // middle of a keystroke. The next release of that physical key would then be
     // taken from a page that was entitled to it.
@@ -92,9 +90,10 @@ export const attachKeyBridge: Effect.Effect<void, never, Dom | Keyboard | Modes 
     yield* dom.listen(
       "window",
       "blur",
-      fromUser(() => keyboard.forgetSuppressed),
+      fromUser(() => modes.forgetSuppressed),
     );
-  });
+  },
+);
 
 /** Replay the keys that the guard held while the application started. */
 export const replayBufferedKeys = Effect.fnUntraced(function* (

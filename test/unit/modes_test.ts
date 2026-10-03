@@ -610,3 +610,48 @@ describe("the walk of the stack", () => {
     ),
   );
 });
+
+describe("the release of a key", () => {
+  it.effect("goes to the page exactly when its press did", () =>
+    pipe(
+      Effect.gen(function* () {
+        const modes = yield* Modes;
+        const takes = yield* Ref.make(true);
+        yield* modes.enter(onTier("normal", ModeTier.Base()), {
+          keydown: () =>
+            pipe(
+              Ref.get(takes),
+              Effect.map((taken) => (taken ? SUPPRESS_EVENT : PASS_EVENT_TO_PAGE)),
+            ),
+        });
+
+        // A press that a mode takes keeps its release from the page, whatever
+        // a mode above answers for the release. `/` opens find this way.
+        assert.isFalse(yield* modes.bubble("keydown", keyEvent()));
+        const find = yield* modes.enter(plain("find"), {
+          keyup: () => Effect.succeed(PASS_EVENT_TO_PAGE),
+        });
+        const release = keyEvent();
+        assert.isFalse(yield* modes.bubble("keyup", release));
+        assert.isTrue(release.defaultPrevented);
+        yield* find.exit();
+
+        // macOS sends no release for a key pressed with ⌘. The next press that
+        // reaches the page, in a text field say, gives the page its release.
+        assert.isFalse(yield* modes.bubble("keydown", keyEvent()));
+        yield* pipe(takes, Ref.set(false));
+        assert.isTrue(yield* modes.bubble("keydown", keyEvent()));
+        const typed = keyEvent();
+        assert.isTrue(yield* modes.bubble("keyup", typed));
+        assert.isFalse(typed.defaultPrevented);
+
+        // A blur of the window forgets the presses whose release may not come.
+        yield* pipe(takes, Ref.set(true));
+        assert.isFalse(yield* modes.bubble("keydown", keyEvent()));
+        yield* modes.forgetSuppressed;
+        assert.isTrue(yield* modes.bubble("keyup", keyEvent()));
+      }),
+      Effect.provide(layer),
+    ),
+  );
+});

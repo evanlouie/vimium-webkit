@@ -28,6 +28,7 @@ import {
   Exit,
   Layer,
   Match,
+  HashSet,
   Option,
   Record,
   Ref,
@@ -39,6 +40,7 @@ import {
   pipe,
 } from "effect";
 import { type NoFields, whenSome } from "~/domain/Prelude.ts";
+import { isUserEvent } from "~/platform/Elements.ts";
 import {
   CONTINUE_BUBBLING,
   type HandlerEventMap,
@@ -286,6 +288,17 @@ const suppressEvent = (event: Event): void => {
   event.stopImmediatePropagation();
 };
 
+/** A key that the record of taken presses follows: a true key with a physical code. */
+const tracked = (event: KeyboardEvent): boolean => isUserEvent(event) && event.code.length > 0;
+
+/** Take `code` out of the record, and say whether it was there. */
+const releaseOf =
+  (code: string) =>
+  (taken: HashSet.HashSet<string>): readonly [boolean, HashSet.HashSet<string>] => [
+    HashSet.has(taken, code),
+    HashSet.remove(taken, code),
+  ];
+
 export class Modes extends Context.Service<
   Modes,
   {
@@ -314,6 +327,17 @@ export class Modes extends Context.Service<
      * Give each mode, from the top, a chance at the event.
      *
      * Answers `true` when the event may continue to the page.
+     *
+     * A `keyup` goes where its `keydown` went. The page gets the release of
+     * a key exactly when it got the press, whatever the modes answer for the
+     * release. The record of the presses that the page did not get is kept
+     * here, where every key passes, and not in one mode. A mode above normal
+     * mode takes the release of the key that opened it, `/` for find, and
+     * macOS sends no release for a key pressed with ⌘. A record inside normal
+     * mode went stale in both cases, and then took the next release of that
+     * key from a text field of the page. An entry ends with the release of its
+     * key, with a later press of that key that reaches the page, or with
+     * `forgetSuppressed`.
      */
     readonly bubble: <K extends HandlerEventName>(
       name: K,
@@ -329,6 +353,16 @@ export class Modes extends Context.Service<
 
     /** The live mode names, innermost last. For diagnostics and for tests. */
     readonly activeNames: Effect.Effect<ReadonlyArray<string>>;
+
+    /**
+     * Forget which presses the page did not get.
+     *
+     * The window lost the focus, so a release may never come: the everyday
+     * case is a window switch in the middle of a keystroke. The next release
+     * of that physical key would otherwise be taken from a page that was
+     * entitled to it.
+     */
+    readonly forgetSuppressed: Effect.Effect<void>;
   }
 >()("vimium/core/Modes") {
   static readonly layer: Layer.Layer<Modes> = Layer.effect(
@@ -336,6 +370,60 @@ export class Modes extends Context.Service<
     Effect.gen(function* () {
       const state = yield* Ref.make<ModeState>({ active: [], singletons: Record.empty() });
       const indicator = yield* SubscriptionRef.make<ModeIndicator>(Option.none());
+      // The `event.code` of each key whose last press the page did not get.
+      // It is keyed on `code` and not on `key`, because the modifier state can
+      // change between the press and the release. Read `bubble`.
+      const taken = yield* Ref.make(HashSet.empty<string>());
+
+      /** A press that the page got gives it the release too, and one that it did not, not. */
+      const notePress = (event: KeyboardEvent, toPage: boolean): Effect.Effect<boolean> =>
+        pipe(
+          tracked(event),
+          Boolean.match({
+            onFalse: () => Effect.void,
+            onTrue: () =>
+              pipe(
+                taken,
+                Ref.update(toPage ? HashSet.remove(event.code) : HashSet.add(event.code)),
+              ),
+          }),
+          Effect.as(toPage),
+        );
+
+      /** The release of a press that the page did not get stays from the page as well. */
+      const settleRelease = (event: KeyboardEvent, toPage: boolean): Effect.Effect<boolean> =>
+        pipe(
+          tracked(event),
+          Boolean.match({
+            onFalse: () => Effect.succeed(false),
+            onTrue: () => pipe(taken, Ref.modify(releaseOf(event.code))),
+          }),
+          Effect.flatMap(
+            Boolean.match({
+              onFalse: () => Effect.succeed(toPage),
+              onTrue: () =>
+                pipe(
+                  Effect.sync(() => suppressEvent(event)),
+                  Effect.as(false),
+                ),
+            }),
+          ),
+        );
+
+      /** What the record of taken presses makes of the answer of the modes. */
+      const settle: {
+        readonly [K in HandlerEventName]: (
+          event: HandlerEventMap[K],
+          toPage: boolean,
+        ) => Effect.Effect<boolean>;
+      } = {
+        keydown: notePress,
+        keypress: (_, toPage) => Effect.succeed(toPage),
+        keyup: settleRelease,
+        click: (_, toPage) => Effect.succeed(toPage),
+        focus: (_, toPage) => Effect.succeed(toPage),
+        blur: (_, toPage) => Effect.succeed(toPage),
+      };
 
       /** Show the innermost indicator that a live mode gives. */
       const refreshIndicator = pipe(
@@ -588,6 +676,7 @@ export class Modes extends Context.Service<
         return pipe(
           Ref.get(state),
           Effect.flatMap(({ active }) => walk(active)),
+          Effect.flatMap((toPage) => settle[name](event, toPage)),
         );
       };
 
@@ -608,6 +697,7 @@ export class Modes extends Context.Service<
             ),
           ),
         ),
+        forgetSuppressed: pipe(taken, Ref.set(HashSet.empty<string>())),
       });
     }),
   );

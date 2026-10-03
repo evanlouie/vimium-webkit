@@ -22,7 +22,6 @@ import {
   Data,
   Effect,
   FiberSet,
-  HashSet,
   Layer,
   Match,
   Option,
@@ -414,22 +413,6 @@ const walk = (trie: TrieNode, state: KeyState, notation: string): Step => {
   );
 };
 
-/**
- * The release of a press that we took is ours as well. Any other release
- * belongs to the page.
- */
-const release =
-  (code: string) =>
-  (taken: HashSet.HashSet<string>): readonly [HandlerResult, HashSet.HashSet<string>] =>
-    pipe(
-      taken,
-      HashSet.has(code),
-      Boolean.match({
-        onFalse: () => [CONTINUE_BUBBLING, taken] as const,
-        onTrue: () => [SUPPRESS_EVENT, pipe(taken, HashSet.remove(code))] as const,
-      }),
-    );
-
 export class Keyboard extends Context.Service<
   Keyboard,
   {
@@ -442,16 +425,6 @@ export class Keyboard extends Context.Service<
 
     /** Give the next `count` keystrokes to the page, without reading them. */
     readonly passNextKey: (count: number) => Effect.Effect<void>;
-
-    /**
-     * Forget which presses we took.
-     *
-     * A press whose release we will never see leaves normal mode waiting for a
-     * `keyup` that never comes. The everyday case is a window switch in the
-     * middle of a keystroke. The next release of that physical key would then be
-     * taken from a page that was entitled to it.
-     */
-    readonly forgetSuppressed: Effect.Effect<void>;
   }
 >()("vimium/core/Keyboard") {
   static readonly layer: Layer.Layer<
@@ -473,11 +446,6 @@ export class Keyboard extends Context.Service<
       const pending = yield* SubscriptionRef.make(Option.none<string>());
       const state = yield* Ref.make<KeyState>(Option.none());
       const passNext = yield* Ref.make(0);
-      // The `event.code` values whose `keydown` we took. A page that listens
-      // for `keyup` must not see a release for a press that it never saw. It is
-      // keyed on `code` and not on `key`, because the modifier state can change
-      // between the press and the release.
-      const suppressedCodes = yield* Ref.make(HashSet.empty<string>());
       // The command bodies that still run. They start at once, on the key task.
       const running = yield* FiberSet.make();
 
@@ -501,13 +469,9 @@ export class Keyboard extends Context.Service<
         Effect.forkScoped,
       );
 
-      const suppress = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-        pipe(
-          event.code,
-          Option.liftPredicate((code) => code.length > 0),
-          whenSome((code) => pipe(suppressedCodes, Ref.update(HashSet.add(code)))),
-          Effect.as(SUPPRESS_EVENT),
-        );
+      // The release of a key that this takes stays from the page as well.
+      // `Modes.bubble` keeps that record, for every mode.
+      const suppressed: Effect.Effect<HandlerResult> = Effect.succeed(SUPPRESS_EVENT);
 
       /**
        * Run a command from inside the key task.
@@ -557,7 +521,7 @@ export class Keyboard extends Context.Service<
           ),
           Option.match({
             onNone: () => Effect.succeed(CONTINUE_BUBBLING),
-            onSome: () => pipe(runCommand(OUR_FIND, 1, event), Effect.andThen(suppress(event))),
+            onSome: () => pipe(runCommand(OUR_FIND, 1, event), Effect.andThen(suppressed)),
           }),
         );
 
@@ -592,7 +556,7 @@ export class Keyboard extends Context.Service<
                 state,
                 Ref.set(Option.some(next)),
                 Effect.andThen(showPending(next.pending)),
-                Effect.andThen(suppress(event)),
+                Effect.andThen(suppressed),
               ),
             // Reset first, so that a command which enters another mode finds a
             // clean normal mode underneath it.
@@ -600,7 +564,7 @@ export class Keyboard extends Context.Service<
               pipe(
                 reset,
                 Effect.andThen(runCommand(binding, count, event)),
-                Effect.andThen(suppress(event)),
+                Effect.andThen(suppressed),
               ),
             // Back to the top of the rules, and not to the branch walk. A key
             // that the exclusion or a media player owns must go to the page,
@@ -611,7 +575,7 @@ export class Keyboard extends Context.Service<
                 Effect.andThen(runCommand(binding, count, event)),
                 Effect.andThen(onKeydown(event)),
               ),
-            Drop: () => pipe(reset, Effect.andThen(suppress(event))),
+            Drop: () => pipe(reset, Effect.andThen(suppressed)),
             Miss: () => pipe(reset, Effect.andThen(miss(notation, event))),
           }),
         );
@@ -647,7 +611,7 @@ export class Keyboard extends Context.Service<
                 Effect.andThen(reset),
                 Effect.as(CONTINUE_BUBBLING),
               ),
-            Cancelled: () => pipe(reset, Effect.andThen(suppress(event))),
+            Cancelled: () => pipe(reset, Effect.andThen(suppressed)),
             Media: ({ raw }) =>
               pipe(
                 Effect.sync(() => mediaPlayerHasFocus(dom.document)),
@@ -666,14 +630,6 @@ export class Keyboard extends Context.Service<
           }),
         );
       });
-
-      const onKeyup = flow(
-        Option.liftPredicate((event: KeyboardEvent) => isUserEvent(event) && event.code.length > 0),
-        Option.match({
-          onNone: () => Effect.succeed(CONTINUE_BUBBLING),
-          onSome: ({ code }) => pipe(suppressedCodes, Ref.modify(release(code))),
-        }),
-      );
 
       /**
        * The focus moved, so a half-typed sequence is no longer live.
@@ -706,7 +662,6 @@ export class Keyboard extends Context.Service<
         },
         {
           keydown: onKeydown,
-          keyup: onKeyup,
           focus: onFocus,
         },
       );
@@ -717,7 +672,6 @@ export class Keyboard extends Context.Service<
           changes: SubscriptionRef.changes(pending),
         },
         passNextKey: (count) => pipe(passNext, Ref.set(Math.max(1, count))),
-        forgetSuppressed: pipe(suppressedCodes, Ref.set(HashSet.empty<string>())),
       });
     }),
   );

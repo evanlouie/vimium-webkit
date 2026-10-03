@@ -23,7 +23,6 @@ import {
 } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Exclusions, Verdict } from "~/core/Exclusions.ts";
-import { Keyboard } from "~/core/Keyboard.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
@@ -187,7 +186,6 @@ export const BootstrapLayer: Layer.Layer<
   | Exclusions
   | FrameBus
   | Insert
-  | Keyboard
   | Lifecycle
   | Modes
   | Omnibar
@@ -209,7 +207,6 @@ export const BootstrapLayer: Layer.Layer<
     const owner = yield* RuntimeOwner;
     const report = yield* Report;
     const settings = yield* Settings;
-    const keyboard = yield* Keyboard;
     const storage = yield* Storage;
 
     /** Work that only the top frame does. Its page is the page that the user visits. */
@@ -351,7 +348,7 @@ export const BootstrapLayer: Layer.Layer<
     yield* lifecycle.onExit(
       onPageExit({
         flushAllUnsafe: storage.flushAllUnsafe,
-        forgetSuppressed: keyboard.forgetSuppressed,
+        forgetSuppressed: modes.forgetSuppressed,
         flushAll: storage.flushAll,
         release: owner.release,
       }),
