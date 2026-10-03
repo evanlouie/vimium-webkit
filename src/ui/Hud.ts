@@ -46,6 +46,7 @@ import {
   pipe,
   Struct,
 } from "effect";
+import { constVoid } from "effect/Function";
 import { Keyboard } from "~/core/Keyboard.ts";
 import { isEscape, Modes } from "~/core/Modes.ts";
 import { Report, type UserMessage } from "~/core/Report.ts";
@@ -299,6 +300,37 @@ const promptKey = (event: KeyboardEvent): PromptKey =>
     Match.orElse(() => PromptKey.Pass()),
   );
 
+/**
+ * Does the focus of `selection` rest on `host`: beside it, or inside it?
+ *
+ * A point in a shadow tree reads as a point at its host, so a caret in our own
+ * input reads as a caret beside our host.
+ */
+const restsOn =
+  (host: Element) =>
+  (selection: Selection): boolean =>
+    pipe(
+      selection.focusNode,
+      Option.fromNullishOr,
+      Option.exists((node) => {
+        const around = host.ownerDocument.createRange();
+        around.selectNode(host);
+        return around.isPointInRange(node, selection.focusOffset);
+      }),
+    );
+
+/** Make `saved` the whole selection. `None` leaves no selection at all. */
+const selectOnly = (target: Selection, saved: Option.Option<Range>): void => {
+  target.removeAllRanges();
+  pipe(
+    saved,
+    Option.match({
+      onNone: constVoid,
+      onSome: (range) => target.addRange(range),
+    }),
+  );
+};
+
 export class Hud extends Context.Service<
   Hud,
   {
@@ -324,6 +356,7 @@ export class Hud extends Context.Service<
         const report = yield* Report;
 
         const doc = dom.document;
+        const win = dom.window;
         const hudLayer = yield* ui.layer("hud");
 
         // The HUD layer stays in the accessibility tree for the whole session.
@@ -519,6 +552,39 @@ export class Hud extends Context.Service<
         // The prompt
         // ---------------------------------------------------------------
 
+        /**
+         * The range of the selection, or `None` when there is none.
+         *
+         * A copy, because the range of the selection itself can follow the
+         * selection when the focus moves.
+         */
+        const readSelectedRange: Effect.Effect<Option.Option<Range>> = dom.probeOrElse(
+          () =>
+            pipe(
+              win.getSelection(),
+              Option.fromNullishOr,
+              Option.filter((selection) => selection.rangeCount > 0),
+              Option.map((selection) => selection.getRangeAt(0).cloneRange()),
+            ),
+          Option.none,
+        );
+
+        /** Give back `saved`, while the selection still rests on our host. */
+        const restoreSelection = (saved: Option.Option<Range>): Effect.Effect<void> =>
+          dom.probeOrElse(
+            () =>
+              pipe(
+                win.getSelection(),
+                Option.fromNullishOr,
+                Option.filter(restsOn(ui.shadow.host)),
+                Option.match({
+                  onNone: constVoid,
+                  onSome: (selection) => selectOnly(selection, saved),
+                }),
+              ),
+            constVoid,
+          );
+
         const promptIn = <R>(
           options: HudPromptOptions<R>,
         ): Effect.Effect<Option.Option<string>, never, R | Scope.Scope> =>
@@ -544,6 +610,14 @@ export class Hud extends Context.Service<
               nextPromptId,
               Ref.modify((n: number) => [n, n + 1]),
             );
+
+            // The focus of the input moves the selection of the document to
+            // our host, and the removal of the input leaves a caret there,
+            // which visual mode would adopt. The prompt therefore gives back
+            // the selection that it found, as upstream does. This release runs
+            // after the release of the input below. A selection anywhere else
+            // was placed by the page or by the user meanwhile, and it stays.
+            yield* Effect.acquireRelease(readSelectedRange, restoreSelection);
 
             const parts = yield* Effect.acquireRelease(
               Effect.sync(() => {
