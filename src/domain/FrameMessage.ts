@@ -63,7 +63,9 @@
  * of the credential opens one. Such a holder could also derive the key of any
  * link from the three values of its handshake, which the page can read, and
  * open the `WELCOME` that carried the nonce. The nonce therefore proved
- * nothing that the seal had not already proved.
+ * nothing that the seal had not already proved. Version 4 also sends the
+ * exclusion verdict as the tagged union of `domain/Exclusion.ts`, and not as
+ * `{ enabled, passKeys }`.
  *
  * ## What the hints service must do
  *
@@ -85,7 +87,6 @@
 
 import {
   Array,
-  Boolean,
   flow,
   Iterable,
   Match,
@@ -93,11 +94,9 @@ import {
   Order,
   Predicate,
   Schema,
-  SchemaTransformation,
   pipe,
   Struct,
 } from "effect";
-import { EffectiveRule, FULLY_ENABLED } from "~/domain/Exclusion.ts";
 import { FrameId } from "~/domain/FrameId.ts";
 
 /** The first, cheap test against the other `postMessage` traffic of a page. */
@@ -468,14 +467,6 @@ export const limitDescriptors = (
 // Exclusions
 // ---------------------------------------------------------------------------
 
-/** The verdict as it travels: two fields. */
-const wireExclusionSchema = Schema.Struct({
-  enabled: Schema.Boolean,
-  passKeys: Schema.String.check(Schema.isMaxLength(MAX_PASS_KEYS)),
-});
-
-type WireExclusion = typeof wireExclusionSchema.Type;
-
 /**
  * The *resolved* exclusion for a page.
  *
@@ -483,42 +474,13 @@ type WireExclusion = typeof wireExclusionSchema.Type;
  * Upstream resolves an exclusion against the URL of the top frame
  * (`sender.tab.url`), so this is always the answer of the top frame.
  *
- * The two fields of the wire decode into the verdict of `domain/Exclusion.ts`.
- * A disabled verdict gives the page no key, so it drops the pass keys that the
- * wire carries, and it travels with none.
+ * It is the verdict of `domain/Exclusion.ts` as it is, with a bound on the
+ * pass keys that a frame accepts from the wire.
  */
-export const effectiveExclusionSchema = pipe(
-  wireExclusionSchema,
-  Schema.decodeTo(
-    EffectiveRule,
-    SchemaTransformation.transform({
-      decode: ({ enabled, passKeys }) =>
-        pipe(
-          enabled,
-          Boolean.match({
-            onFalse: () => EffectiveRule.cases.Disabled.make({}),
-            onTrue: () => EffectiveRule.cases.Enabled.make({ passKeys }),
-          }),
-        ),
-      encode: EffectiveRule.match({
-        Disabled: (): WireExclusion => ({ enabled: false, passKeys: "" }),
-        Enabled: ({ passKeys }) => ({ enabled: true, passKeys }),
-      }),
-    }),
-  ),
-);
-
-export type EffectiveExclusion = typeof effectiveExclusionSchema.Type;
-
-/**
- * What a frame uses when the top frame never answers.
- *
- * "Enabled, and no key passed through" is the correct failure mode. A frame
- * that cannot reach the coordinator, because an ancestor is cross-origin with
- * no injection or because a parent is sandboxed, would otherwise disable
- * Vimium-WebKit on a page that the user never excluded.
- */
-export const DEFAULT_EXCLUSION: EffectiveExclusion = FULLY_ENABLED;
+export const effectiveExclusionSchema = Schema.TaggedUnion({
+  Disabled: {},
+  Enabled: { passKeys: Schema.String.check(Schema.isMaxLength(MAX_PASS_KEYS)) },
+});
 
 // ---------------------------------------------------------------------------
 // The handshake

@@ -11,8 +11,6 @@ import { assert, describe, it } from "@effect/vitest";
 import { Array, Boolean, Effect, flow, Option, Order, Record, Schema, pipe, Struct } from "effect";
 import {
   compareDescriptors,
-  DEFAULT_EXCLUSION,
-  effectiveExclusionSchema,
   encodeLinkMessage,
   encodeMessage,
   ENVELOPE,
@@ -75,8 +73,7 @@ const descriptor = (frameId: string, localIndex: number, secondary = false): Hin
 describe("FrameMessage", () => {
   it.effect("accepts a message of a kind that carries a payload", () =>
     Effect.sync(() => {
-      // The verdict has a wire shape of its own, so the message goes through
-      // the encoder of the bus.
+      // The message goes through the encoder of the bus, as a frame sends it.
       const parsed = pipe(
         encodeMessage(envelope, {
           kind: "EXCLUSION_RESULT",
@@ -365,13 +362,6 @@ describe("FrameMessage", () => {
       // A frame id is 16 hexadecimal characters, so it is neither word.
       assert.isBelow(WIRE_TARGET_TOP.length, 16);
       assert.isBelow(WIRE_TARGET_ALL.length, 16);
-    }),
-  );
-
-  it.effect("stays enabled when the top frame never answers", () =>
-    Effect.sync(() => {
-      const onTheWire = pipe(DEFAULT_EXCLUSION, Schema.encodeSync(effectiveExclusionSchema));
-      assert.deepEqual(onTheWire, { enabled: true, passKeys: "" });
     }),
   );
 });
