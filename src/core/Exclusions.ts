@@ -142,8 +142,8 @@ export class Exclusions extends Context.Service<
     /** The verdict now, and then every verdict that this frame takes. */
     readonly changes: Stream.Stream<Verdict>;
 
-    /** Wait until the verdict is known. */
-    readonly known: Effect.Effect<void>;
+    /** Wait until the verdict is no longer pending, and give it. */
+    readonly settled: Effect.Effect<Verdict>;
 
     /**
      * Work the verdict out again, after the URL of this frame changed.
@@ -152,13 +152,6 @@ export class Exclusions extends Context.Service<
      * top frame, which pushes a new one when its own URL changes.
      */
     readonly refresh: Effect.Effect<void>;
-
-    /**
-     * Work the verdict out from this frame's own URL and settings.
-     *
-     * Correct in the top frame, which answers a child frame with it.
-     */
-    readonly resolveLocal: Effect.Effect<EffectiveRule>;
 
     /** Match a URL against the current rules. */
     readonly match: (url: string) => Effect.Effect<EffectiveRule>;
@@ -221,9 +214,17 @@ export class Exclusions extends Context.Service<
         /**
          * The top frame works the verdict out from its own URL, and again
          * whenever the rules change.
+         *
+         * The settings at the build are the defaults, because the stored ones
+         * are read later, and the defaults exclude nothing. A verdict from
+         * them would enable us on a page that the user excluded, and a child
+         * frame would hear it. The top frame therefore stays pending until
+         * Bootstrap has read storage and asks for a `refresh`, or until the
+         * rules change.
          */
         const followRules = pipe(
           settings.changes,
+          Stream.drop(1),
           Stream.runForEach(() => resolveHere),
           Effect.forkScoped,
         );
@@ -270,14 +271,14 @@ export class Exclusions extends Context.Service<
           current: SubscriptionRef.get(verdict),
           currentUnsafe: () => SubscriptionRef.getUnsafe(verdict),
           changes: SubscriptionRef.changes(verdict),
-          known: pipe(
+          settled: pipe(
             SubscriptionRef.changes(verdict),
             Stream.filter(Verdict.$is("Known")),
             Stream.runHead,
-            Effect.asVoid,
+            // The changes of a live reference never end, so the head is there.
+            Effect.flatMap(Option.match({ onNone: () => Effect.never, onSome: Effect.succeed })),
           ),
           refresh,
-          resolveLocal,
           match,
         });
       }),

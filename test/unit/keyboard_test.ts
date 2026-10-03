@@ -178,9 +178,8 @@ const exclusionsOf = (verdict: Verdict): Layer.Layer<Exclusions> =>
       current: Effect.succeed(verdict),
       currentUnsafe: () => verdict,
       changes: Stream.make(verdict),
-      known: Effect.void,
+      settled: Effect.succeed(verdict),
       refresh: Effect.void,
-      resolveLocal: Effect.succeed(FULLY_ENABLED),
       match: () => Effect.succeed(FULLY_ENABLED),
     }),
   );

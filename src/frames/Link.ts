@@ -28,7 +28,19 @@
  * `FrameBus.serve`. This file must not import anything from `src/features/`.
  */
 
-import { Array, Boolean, Context, Effect, Filter, Layer, Option, Ref, Stream, pipe } from "effect";
+import {
+  Array,
+  Boolean,
+  Context,
+  Effect,
+  Filter,
+  Layer,
+  Option,
+  Ref,
+  Stream,
+  flow,
+  pipe,
+} from "effect";
 import type { EffectiveRule } from "~/domain/Exclusion.ts";
 import { isKind } from "~/domain/FrameMessage.ts";
 import { Exclusions, knownRule, TopFrameVerdict } from "~/core/Exclusions.ts";
@@ -189,12 +201,17 @@ export class FrameLink extends Context.Service<
       /** The messages that the coordinator answers, and the verdict that it pushes. */
       const serveAsCoordinator = Effect.gen(function* () {
         // The URL of the top frame is the URL that decides the verdict, and a
-        // child frame cannot read it across origins.
+        // child frame cannot read it across origins. The answer waits until
+        // the top frame has read its settings: an answer from the defaults
+        // would enable the child on a page that the user excluded.
         yield* bus.serve("EXCLUSION_REQUEST", () =>
           pipe(
-            exclusions.resolveLocal,
-            Effect.map((rule) =>
-              Option.some({ kind: "EXCLUSION_RESULT" as const, exclusion: rule }),
+            exclusions.settled,
+            Effect.map(
+              flow(
+                knownRule,
+                Option.map((rule) => ({ kind: "EXCLUSION_RESULT" as const, exclusion: rule })),
+              ),
             ),
           ),
         );

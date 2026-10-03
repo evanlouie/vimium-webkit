@@ -148,11 +148,13 @@ describe("Exclusions", () => {
           const exclusions = yield* Exclusions;
 
           // The frame starts with the defaults, so the stored rules must be read
-          // before the verdict means anything.
-          yield* settings.reload;
+          // before the verdict means anything. Until then the verdict is
+          // pending, and not the verdict of the defaults, which exclude
+          // nothing.
+          yield* pipe(Effect.yieldNow, Effect.replicateEffect(10, { discard: true }));
+          assert.deepEqual(yield* exclusions.current, Verdict.Pending());
 
-          const local = yield* exclusions.resolveLocal;
-          assert.deepEqual(local, DISABLED);
+          yield* settings.reload;
 
           // The top frame keeps its own verdict up to date from the settings.
           yield* verdictOf(known(DISABLED));
@@ -200,7 +202,7 @@ describe("Exclusions", () => {
           assert.deepEqual(yield* exclusions.current, Verdict.Pending());
 
           yield* pipe(top.answer, Deferred.succeed(Option.some<EffectiveRule>(DISABLED)));
-          yield* exclusions.known;
+          yield* exclusions.settled;
           assert.deepEqual(yield* exclusions.current, known(DISABLED));
 
           yield* pipe(top.pushes, Queue.offer(passing("jk")));
@@ -231,7 +233,7 @@ describe("Exclusions", () => {
           // no value store. Disabling us there would disable us on a page that
           // the user never excluded.
           yield* pipe(top.answer, Deferred.succeed(Option.none<EffectiveRule>()));
-          yield* exclusions.known;
+          yield* exclusions.settled;
           assert.deepEqual(yield* exclusions.current, known(FULLY_ENABLED));
         }),
         Effect.provide(

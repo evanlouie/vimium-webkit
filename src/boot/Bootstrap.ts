@@ -270,7 +270,7 @@ export const BootstrapLayer: Layer.Layer<
      */
     const replayHeldKeys = Effect.gen(function* () {
       const known = yield* pipe(
-        exclusions.known,
+        exclusions.settled,
         Effect.timeoutOption(REQUEST_DEADLINE),
         Effect.map(Option.isSome),
       );
