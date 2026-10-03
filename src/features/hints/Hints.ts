@@ -15,9 +15,9 @@
  *   reads the `href` and goes through `Tabs.open`.
  * - **A clipboard write must be reached synchronously from the key task.**
  *   Nothing on the path to `Clipboard.write` may suspend, or the transient
- *   activation of Safari is already spent. Activation runs in a fiber that
- *   `Effect.forkDetach` starts at once, so it runs on the key stack until it
- *   suspends, and the manager write happens before that point.
+ *   activation of Safari is already spent. Activation runs in a fiber of the
+ *   layer that `FiberSet.run` starts at once, so it runs on the key stack
+ *   until it suspends, and the manager write happens before that point.
  *
  * ## The round
  *
@@ -61,6 +61,7 @@ import {
   type Duration,
   Effect,
   FiberHandle,
+  FiberSet,
   flow,
   identity,
   Layer,
@@ -1245,6 +1246,11 @@ export const Hints = {
         );
       /** One session at a time. A new one interrupts the one before it. */
       const sessionFiber = yield* FiberHandle.make<void, never>();
+      /**
+       * The activations of this frame. They belong to the layer and not to the
+       * session, because the session ends before its activation does.
+       */
+      const activations = yield* FiberSet.make();
 
       /** Warn about unreachable hosts once for each frame. */
       const firstWarning = (unreachableHosts: number): Effect.Effect<boolean> =>
@@ -1754,14 +1760,14 @@ export const Hints = {
         });
 
         /**
-         * Detached and started at once, so that the clipboard write of a copy
-         * mode still happens inside the activation window, and so that a mode
-         * which must wait does not suspend the key path.
+         * Started at once in a fiber of the layer, so that the clipboard write
+         * of a copy mode still happens inside the activation window, and so
+         * that a mode which must wait does not suspend the key path.
          */
         const activateHere = (entry: HintEntry, hint: LocalHint): Effect.Effect<void> =>
           pipe(
             activateLocal(entry.localIndex, hint, config.mode, "local"),
-            Effect.forkDetach({ startImmediately: true }),
+            FiberSet.run(activations),
             Effect.asVoid,
           );
 
