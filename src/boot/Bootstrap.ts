@@ -256,24 +256,30 @@ export const BootstrapLayer: Layer.Layer<
     });
 
     /**
-     * Play the keys that the guard held, once the verdict is known.
+     * Take the keyboard from the guard, and play the keys that it held once
+     * the verdict is known.
      *
-     * A child frame learns the verdict from the top frame, and the handshake
-     * takes time. A key that is played before then runs a command on a page
-     * that the user may have excluded. A child frame that hears nothing before
-     * the deadline only assumes a verdict, and it drops the keys instead: the
-     * guard has already taken them from the page, and a guess at the verdict
-     * is worse.
+     * The guard lets go at once. A later key reaches normal mode, which gives
+     * it to the page while the verdict is pending. Holding it instead would
+     * take the keyboard from the page for as long as a child frame waits.
      *
-     * The guard holds every key until the drain, so a key that the user types
-     * during the wait is held as well, and the order stays the order of typing.
+     * The held keys are already taken from the page, so they wait. A child
+     * frame learns the verdict from the top frame, and the handshake takes
+     * time. A key that is played before then runs a command on a page that
+     * the user may have excluded. A child frame that hears nothing before the
+     * deadline only assumes a verdict, and it drops the keys instead: a guess
+     * at the verdict is worse, and so is a key that acts seconds after the
+     * user pressed it.
      */
     const replayHeldKeys = Effect.gen(function* () {
-      const answered = yield* pipe(exclusions.settled, Effect.map(Verdict.$is("Known")));
       const held = yield* boot.drain;
       yield* pipe(
-        answered,
-        Boolean.match({ onFalse: () => Effect.void, onTrue: () => replayBufferedKeys(held) }),
+        exclusions.settled,
+        Effect.map(Verdict.$is("Known")),
+        Effect.flatMap(
+          Boolean.match({ onFalse: () => Effect.void, onTrue: () => replayBufferedKeys(held) }),
+        ),
+        Effect.forkScoped({ startImmediately: true }),
       );
     });
 
@@ -333,9 +339,9 @@ export const BootstrapLayer: Layer.Layer<
     yield* inTopFrame(grabBackFocus);
     yield* inTopFrame(omnibar.noteVisit);
 
-    // The key bridge comes before the replay, and the replay comes before the
-    // guard scope closes. A key that arrives during the start is therefore held,
-    // and then played, exactly once.
+    // The key bridge comes before the drain, and the drain comes before the
+    // guard scope closes. A key that arrives during the start is therefore
+    // held by the guard or read by the bridge, and played at most once.
     yield* attachKeyBridge;
     yield* replayHeldKeys;
 

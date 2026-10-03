@@ -54,7 +54,8 @@ export type Verdict = Data.TaggedEnum<{
   /**
    * The frame does not know the verdict yet. A child frame waits for the top
    * frame. Every key goes to the page meanwhile, because a key that we took on
-   * a page that the user excluded cannot be given back.
+   * a page that the user excluded cannot be given back. The keys that the
+   * guard took during the start wait for the verdict instead.
    */
   Pending: NoFields;
   /**
