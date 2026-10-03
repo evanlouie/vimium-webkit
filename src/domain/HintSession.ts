@@ -70,7 +70,7 @@ export type SessionKey = Data.TaggedEnum<{
   Ignore: NoFields;
 }>;
 
-export const SessionKey = Data.taggedEnum<SessionKey>();
+const SessionKey = Data.taggedEnum<SessionKey>();
 
 /** `"a"` types `"a"`, `"<space>"` types `" "`, and `"<c-a>"` does nothing. */
 export const readKey = (notation: string): SessionKey =>

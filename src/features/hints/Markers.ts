@@ -70,7 +70,7 @@ import type { HintRect } from "./Detect.ts";
  * itself against an inherited page style. Only the properties that we want are
  * set.
  */
-export const HINT_CSS = `
+const HINT_CSS = `
 .vw-hints {
   position: absolute;
   inset: 0;

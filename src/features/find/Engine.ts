@@ -148,7 +148,7 @@ const LEADING_CONTEXT = 256;
  * costs about two and a half times as much, so it reaches the deadline
  * sooner, and the search reports the stop.
  */
-export const LONGEST_SURE_MATCH = 1024;
+const LONGEST_SURE_MATCH = 1024;
 
 /**
  * How much longer a slice becomes when a match reaches its end.

@@ -13,7 +13,6 @@ import { compilePattern, MAX_REGEX_URL_LENGTH } from "~/domain/Exclusion.ts";
 import {
   collectSpans,
   DEFAULT_MATCH_LIMIT,
-  LONGEST_SURE_MATCH,
   MAX_MATCH_LENGTH,
   SEARCH_WINDOW,
 } from "~/features/find/Engine.ts";
@@ -163,6 +162,9 @@ describe("the find budget", () => {
     // went with the load of the machine. A window budget of -1 keeps every
     // window at its smallest, and no budget lets each window double up to
     // `SEARCH_WINDOW`. Either way the guarantee must hold, up to its bound.
+    // The bound is the promise of `Engine.ts`, written out here so that a
+    // smaller one fails.
+    const LONGEST_SURE_MATCH = 1024;
     const WINDOWS = [
       { windows: "the smallest windows", windowBudget: -1 },
       { windows: "the largest windows", windowBudget: Number.POSITIVE_INFINITY },

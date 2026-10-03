@@ -56,7 +56,7 @@ export interface GroupSpec<A> {
 // Exclusion rules
 // ---------------------------------------------------------------------------
 
-export const exclusionRuleSchema = Schema.Struct({
+const exclusionRuleSchema = Schema.Struct({
   /** A URL glob, e.g. `https://mail.google.com/*`. */
   pattern: Schema.String,
   /**
