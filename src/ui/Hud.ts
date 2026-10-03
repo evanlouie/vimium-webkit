@@ -45,6 +45,7 @@ import {
   Stream,
   pipe,
   Struct,
+  flow,
 } from "effect";
 import { constVoid } from "effect/Function";
 import { Keyboard } from "~/core/Keyboard.ts";
@@ -357,7 +358,6 @@ export class Hud extends Context.Service<
         const report = yield* Report;
 
         const doc = dom.document;
-        const win = dom.window;
         const hudLayer = yield* ui.layer("hud");
 
         // The HUD layer stays in the accessibility tree for the whole session.
@@ -559,31 +559,25 @@ export class Hud extends Context.Service<
          * A copy, because the range of the selection itself can follow the
          * selection when the focus moves.
          */
-        const readSelectedRange: Effect.Effect<Option.Option<Range>> = dom.probeOrElse(
-          () =>
-            pipe(
-              win.getSelection(),
-              Option.fromNullishOr,
-              Option.filter((selection) => selection.rangeCount > 0),
-              Option.map((selection) => selection.getRangeAt(0).cloneRange()),
-            ),
-          Option.none,
+        const readSelectedRange: Effect.Effect<Option.Option<Range>> = dom.probeSelection(
+          flow(
+            Option.liftPredicate((selection: Selection) => selection.rangeCount > 0),
+            Option.map((selection) => selection.getRangeAt(0).cloneRange()),
+          ),
+          Option.none(),
         );
 
         /** Give back `saved`, while the selection still rests on our host. */
         const restoreSelection = (saved: Option.Option<Range>): Effect.Effect<void> =>
-          dom.probeOrElse(
-            () =>
-              pipe(
-                win.getSelection(),
-                Option.fromNullishOr,
-                Option.filter(restsOn(ui.shadow.host)),
-                Option.match({
-                  onNone: constVoid,
-                  onSome: (selection) => selectOnly(selection, saved),
-                }),
-              ),
-            constVoid,
+          dom.probeSelection(
+            flow(
+              Option.liftPredicate(restsOn(ui.shadow.host)),
+              Option.match({
+                onNone: constVoid,
+                onSome: (selection) => selectOnly(selection, saved),
+              }),
+            ),
+            undefined,
           );
 
         const promptIn = <R>(
