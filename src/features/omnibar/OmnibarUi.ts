@@ -477,23 +477,7 @@ export const makeOmnibarView: (
     Effect.asVoid,
   );
 
-  yield* dom.listen("window", "resize", () => reposition, { passive: true });
-
-  const visualViewport = yield* dom.probeOrElse(
-    () => Option.fromNullishOr(dom.window.visualViewport),
-    Option.none,
-  );
-  yield* pipe(
-    visualViewport,
-    whenSome((visual) =>
-      pipe(
-        ["resize", "scroll"],
-        Effect.forEach((type) => dom.listenOn(visual, type, () => reposition, { passive: true }), {
-          discard: true,
-        }),
-      ),
-    ),
-  );
+  yield* ui.onViewportChange(reposition);
 
   yield* applyViewport;
 

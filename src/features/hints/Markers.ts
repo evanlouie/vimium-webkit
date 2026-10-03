@@ -43,7 +43,6 @@ import {
   type Scope,
   String,
 } from "effect";
-import { whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Ui } from "~/ui/Ui.ts";
 import type { HintRect } from "./Detect.ts";
@@ -483,26 +482,7 @@ export const makeMarkerLayer: Effect.Effect<MarkerLayer, never, Dom | Ui | Scope
       capture: true,
       passive: true,
     });
-    yield* dom.listen("window", "resize", () => reposition, { passive: true });
-
-    const visualViewport = yield* dom.probeOrElse(
-      () => Option.fromNullishOr(dom.window.visualViewport),
-      Option.none,
-    );
-    yield* pipe(
-      visualViewport,
-      whenSome((visual) =>
-        pipe(
-          ["resize", "scroll"],
-          Effect.forEach(
-            (type) => dom.listenOn(visual, type, () => reposition, { passive: true }),
-            {
-              discard: true,
-            },
-          ),
-        ),
-      ),
-    );
+    yield* ui.onViewportChange(reposition);
 
     yield* applyOffset;
 

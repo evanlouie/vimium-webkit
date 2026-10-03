@@ -582,6 +582,17 @@ export class Ui extends Context.Service<
     readonly setStyle: (key: string, css: string) => Effect.Effect<void>;
     readonly owns: (target: EventTarget | null) => boolean;
     readonly viewport: Effect.Effect<ViewportRect>;
+    /**
+     * Run `changed` on each change of `viewport`, while the scope is open: a
+     * resize of the window, and a resize or a scroll of the visual viewport
+     * where the engine has one.
+     *
+     * `changed` runs inside the dispatch of the browser, so it must not
+     * suspend. A caller that draws again starts a fiber for the next frame.
+     */
+    readonly onViewportChange: (
+      changed: Effect.Effect<void>,
+    ) => Effect.Effect<void, never, Scope.Scope>;
   }
 >()("vimium/ui/Ui") {
   static readonly layer: Layer.Layer<Ui, never, Dom | Capabilities | Settings> = Layer.effect(
@@ -1309,6 +1320,22 @@ export class Ui extends Context.Service<
         }),
       );
 
+      const onViewportChange = Effect.fnUntraced(function* (changed: Effect.Effect<void>) {
+        yield* dom.listen("window", "resize", () => changed, { passive: true });
+        yield* pipe(
+          visualViewport,
+          whenSome((visual) =>
+            pipe(
+              ["resize", "scroll"],
+              Effect.forEach(
+                (type) => dom.listenOn(visual, type, () => changed, { passive: true }),
+                { discard: true },
+              ),
+            ),
+          ),
+        );
+      });
+
       /** Where the host lies now, or `None` when the read is refused. */
       const measureHost: Effect.Effect<Option.Option<HostBox>> = dom.probeOrElse(() => {
         const rect = host.getBoundingClientRect();
@@ -1418,23 +1445,12 @@ export class Ui extends Context.Service<
         Effect.asVoid,
       );
 
-      /** Follow the visual viewport, where the engine has one. */
-      const followVisualViewport = (visual: VisualViewport) =>
-        Effect.gen(function* () {
-          yield* dom.listenOn(visual, "resize", () => scheduleSync);
-          yield* dom.listenOn(visual, "scroll", () => scheduleSync);
-          yield* applyOwned;
-        });
-
-      yield* pipe(visualViewport, whenSome(followVisualViewport));
-
+      yield* onViewportChange(scheduleSync);
       // The page scroll, because a host under a containing block of class 1
       // moves with the document. A page that does not have such an ancestor
       // pays one box read for each frame that it scrolls, and no write.
-      yield* dom.listenOn(win, "scroll", () => scheduleSync, {
-        passive: true,
-      });
-      yield* alignHost;
+      yield* dom.listen("window", "scroll", () => scheduleSync, { passive: true });
+      yield* syncPass;
 
       // ---------------------------------------------------------------
       // Ownership
@@ -1463,6 +1479,7 @@ export class Ui extends Context.Service<
         setStyle,
         owns,
         viewport,
+        onViewportChange,
       });
     }),
   );
