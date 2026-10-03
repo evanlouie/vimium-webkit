@@ -52,7 +52,6 @@
 import {
   Array,
   Boolean,
-  Context,
   Data,
   Deferred,
   type Duration,
@@ -974,34 +973,18 @@ const omittedNotice = (dropped: number): Option.Option<string> =>
 const noReply = Effect.as(Option.none<FrameMessage>());
 
 // ---------------------------------------------------------------------------
-// The service
+// The layer
 // ---------------------------------------------------------------------------
 
-export class Hints extends Context.Service<
-  Hints,
-  {
-    /** Start a hint round in this frame. A second call replaces the first. */
-    readonly activate: (mode: HintMode) => Effect.Effect<void>;
-    readonly isActive: Effect.Effect<boolean>;
-    readonly deactivate: Effect.Effect<void>;
-  }
->()("vimium/features/hints/Hints") {
-  static readonly layer: Layer.Layer<
-    Hints,
-    never,
-    | Dom
-    | Ui
-    | Hud
-    | Settings
-    | Modes
-    | Commands
-    | Report
-    | Capabilities
-    | FrameBus
-    | Tabs
-    | Clipboard
-  > = Layer.effect(
-    Hints,
+/**
+ * Link hints in this frame.
+ *
+ * Nothing asks for a hints service, so the layer provides none. It registers
+ * the hint commands and answers the hint messages of the frame bus for as long
+ * as its scope is open.
+ */
+export const Hints = {
+  layer: Layer.effectDiscard(
     Effect.gen(function* () {
       const dom = yield* Dom;
       const ui = yield* Ui;
@@ -1018,8 +1001,8 @@ export class Hints extends Context.Service<
       /**
        * The services that the detection and the markers need.
        *
-       * A session runs in a fiber of its own, and the public methods promise
-       * `Effect<void>` with nothing left to supply. The context is therefore
+       * A session runs in a fiber of its own, and the functions of this layer
+       * give effects with nothing left to supply. The context is therefore
        * captured once here and given to those effects.
        */
       const browser = yield* Effect.context<Dom | Ui>();
@@ -1074,8 +1057,6 @@ export class Hints extends Context.Service<
           Effect.filterOrFail((rounds) => !pipe(rounds, Array.contains(roundId))),
           Effect.asVoid,
         );
-      /** True while a round is collected, before its session exists. */
-      const startingRef = yield* Ref.make(false);
       /** One session at a time. A new one interrupts the one before it. */
       const sessionFiber = yield* FiberHandle.make<void, never>();
 
@@ -1909,8 +1890,6 @@ export class Hints extends Context.Service<
         buffered: Ref.Ref<readonly string[]>,
         abort: Deferred.Deferred<void>,
       ) {
-        const claim = pipe(startingRef, Ref.set(true));
-        yield* Effect.acquireRelease(claim, () => pipe(startingRef, Ref.set(false)));
         yield* bufferKeys(buffered, abort);
         const local = yield* detectLocal(mode);
         const remote = yield* collectRemote(roundId, mode);
@@ -2346,45 +2325,23 @@ export class Hints extends Context.Service<
       yield* bus.serve("KEYSTROKE", onKeystroke);
 
       // ---------------------------------------------------------------------
-      // The interface
+      // The commands
       // ---------------------------------------------------------------------
 
-      const isActive: Effect.Effect<boolean> = Effect.gen(function* () {
-        const starting = yield* Ref.get(startingRef);
-        const live = yield* Ref.get(sessionRef);
-        return starting || Option.isSome(live);
-      });
-
-      const deactivate: Effect.Effect<void> = Effect.gen(function* () {
-        const live = yield* Ref.get(sessionRef);
-        const starting = yield* Ref.get(startingRef);
-        yield* FiberHandle.clear(sessionFiber);
-        yield* pipe(
-          Option.isSome(live) || starting,
-          Boolean.match({ onFalse: () => Effect.void, onTrue: () => releaseHover }),
-        );
-      });
-
-      const service = Hints.of({
-        activate: (mode) => pipe(startRound(mode), FiberHandle.run(sessionFiber), Effect.asVoid),
-        isActive,
-        deactivate,
-      });
+      /** Start a hint round in this frame. A second call replaces the first. */
+      const activate = (mode: HintMode): Effect.Effect<void> =>
+        pipe(startRound(mode), FiberHandle.run(sessionFiber), Effect.asVoid);
 
       yield* commands.registerAll({
-        "LinkHints.activateMode": () => service.activate("activate"),
-        "LinkHints.activateModeToOpenInNewTab": () =>
-          service.activate("activate-new-tab-background"),
-        "LinkHints.activateModeToOpenInNewForegroundTab": () =>
-          service.activate("activate-new-tab"),
-        "LinkHints.activateModeToHover": () => service.activate("hover"),
-        "LinkHints.activateModeToFocus": () => service.activate("focus"),
-        "LinkHints.activateModeToCopyLinkUrl": () => service.activate("copy-link-url"),
-        "LinkHints.activateModeToCopyLinkText": () => service.activate("copy-link-text"),
-        "LinkHints.activateModeWithOmnibar": () => service.activate("open-with-omnibar"),
+        "LinkHints.activateMode": () => activate("activate"),
+        "LinkHints.activateModeToOpenInNewTab": () => activate("activate-new-tab-background"),
+        "LinkHints.activateModeToOpenInNewForegroundTab": () => activate("activate-new-tab"),
+        "LinkHints.activateModeToHover": () => activate("hover"),
+        "LinkHints.activateModeToFocus": () => activate("focus"),
+        "LinkHints.activateModeToCopyLinkUrl": () => activate("copy-link-url"),
+        "LinkHints.activateModeToCopyLinkText": () => activate("copy-link-text"),
+        "LinkHints.activateModeWithOmnibar": () => activate("open-with-omnibar"),
       });
-
-      return service;
     }),
-  );
-}
+  ),
+};
