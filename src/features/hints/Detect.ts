@@ -1083,7 +1083,10 @@ export interface ElementWalk<E> {
   readonly pending: Array<WalkFrame<E>>;
   /** The elements produced so far, in document order. */
   readonly elements: Array<E>;
-  /** Elements already produced. A moved element cannot be produced again. */
+  /**
+   * Elements already produced. A moved element cannot be produced again, and
+   * an element that the walk starts with here is never produced at all.
+   */
   readonly produced: Set<E>;
   /** Work includes duplicate elements that mutations put in the walk again. */
   examined: number;
@@ -1110,14 +1113,19 @@ const childFrame = <E>(parent: WalkParent<E>): Option.Option<WalkFrame<E>> =>
     ),
   );
 
-/** A walk of `root` that has visited nothing yet. */
+/**
+ * A walk of `root` that has visited nothing yet.
+ *
+ * The walk passes over each element of `skipped`, and over everything below it.
+ */
 export const startWalk = <E extends WalkElement<E>>(
   root: WalkParent<E>,
   limit = WALK_ELEMENT_LIMIT,
+  skipped: Iterable<E> = [],
 ): ElementWalk<E> => ({
   pending: pipe(childFrame(root), Option.toArray),
   elements: [],
-  produced: new Set(),
+  produced: new Set(skipped),
   examined: 0,
   unreachableHosts: 0,
   truncated: false,
@@ -1188,12 +1196,17 @@ export const stepWalk = <E extends WalkElement<E>>(
  */
 const WALK_CHECK_EVERY = 64;
 
-/** Walk `root` in time-boxed slices. Interruption stops it at a slice edge. */
+/**
+ * Walk `root` in time-boxed slices. Interruption stops it at a slice edge.
+ *
+ * The walk passes over each element of `skipped`, and over everything below it.
+ */
 export const collectElements = Effect.fnUntraced(function* <E extends WalkElement<E>>(
   root: WalkParent<E>,
   options: ChunkedOptions,
+  skipped: Iterable<E> = [],
 ): Effect.fn.Return<Collected<E>, never, Dom> {
-  const walk = startWalk(root);
+  const walk = startWalk(root, WALK_ELEMENT_LIMIT, skipped);
   const checkEvery = options.checkEvery ?? WALK_CHECK_EVERY;
   yield* repeatInSlices(
     Effect.sync(() => stepWalk(walk, checkEvery)),
@@ -1423,7 +1436,13 @@ const SLICES: ChunkedOptions = { budgetMs: CHUNK_BUDGET_MS };
 export const detectHints = Effect.fnUntraced(function* (
   options: DetectOptions,
 ): Effect.fn.Return<DetectionResult, never, Dom> {
-  const collected = yield* collectElements(options.document, SLICES);
+  // Our own overlay is a custom element with a closed shadow root and no
+  // light child. The walk would count it as a host that it cannot reach.
+  const collected = yield* collectElements(
+    options.document,
+    SLICES,
+    Option.toArray(options.overlayHost),
+  );
   const groups = yield* pipe(collected.elements, mapChunked(buildHints(options)));
   // Descendants before ancestors, so that a later element paints above an
   // earlier one, and the false-positive window looks the correct way.

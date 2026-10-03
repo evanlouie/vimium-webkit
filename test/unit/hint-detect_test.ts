@@ -40,6 +40,7 @@ import {
   mapNameOf,
   startWalk,
   stepWalk,
+  WALK_ELEMENT_LIMIT,
 } from "~/features/hints/Detect.ts";
 
 // ---------------------------------------------------------------------------
@@ -519,6 +520,24 @@ describe("the walk of the tree", () => {
       assert.isFalse(stepWalk(walk, 1));
       assert.isFalse(stepWalk(walk, 1));
       assert.strictEqual(walk.elements.length, 2);
+    }),
+  );
+
+  it.effect("passes over a skipped element", () =>
+    Effect.sync(() => {
+      const tree = root();
+      const overlay = node("x-overlay");
+      const page = node();
+      append(tree, overlay);
+      append(tree, page);
+
+      const walk = startWalk(tree, WALK_ELEMENT_LIMIT, [overlay]);
+      assert.isFalse(stepWalk(walk, 10));
+
+      // Our overlay looks like the host of a closed shadow root that the page
+      // hides, and the walk must not count it as one.
+      assert.deepStrictEqual(walk.elements, [page]);
+      assert.strictEqual(walk.unreachableHosts, 0);
     }),
   );
 
