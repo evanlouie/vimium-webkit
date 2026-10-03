@@ -14,33 +14,37 @@ obligations.
 Vimium-WebKit ports algorithms and behaviour from Vimium. No Vimium source is
 copied verbatim — the implementation is original TypeScript — but the designs
 below are derived closely enough that attribution is required, not merely
-courteous. Each source file names the upstream file it derives from in a comment
-at the top.
+courteous. Each file below names the upstream file that it derives from in its
+header comment, except `src/domain/HintRound.ts`, which holds the hint-round
+rules that moved out of `src/features/hints/Hints.ts`.
 
 Ported designs:
 
-| Vimium source                         | Vimium-WebKit                                   |
-| ------------------------------------- | ----------------------------------------------- |
-| `lib/handler_stack.js`                | `src/core/handler-stack.ts`                     |
-| `lib/keyboard_utils.js`               | `src/core/key-notation.ts`                      |
-| `content_scripts/mode.js`             | `src/core/mode.ts`                              |
-| `content_scripts/mode_key_handler.js` | `src/core/key-handler.ts`                       |
-| `background_scripts/exclusions.js`    | `src/core/exclusions.ts`                        |
-| `content_scripts/link_hints.js`       | `src/features/hints/`                           |
-| `content_scripts/scroller.js`         | `src/features/scroller.ts`                      |
-| `content_scripts/mode_find.js`        | `src/features/find/`                            |
-| `content_scripts/mode_visual.js`      | `src/features/visual/`                          |
-| `content_scripts/marks.js`            | `src/features/marks.ts`                         |
-| `content_scripts/mode_insert.js`      | `src/features/insert.ts`                        |
-| `content_scripts/vimium_frontend.js`  | `src/frames/index.ts`, `protocol.ts`            |
-| `background_scripts/main.js`          | `src/frames/coordinator.ts`, `registry.ts`      |
-| `background_scripts/completion.js`    | `src/features/omnibar/scoring.ts`, `engines.ts` |
+| Vimium source                                           | Vimium-WebKit                                                                                                                                                                                               |
+| ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lib/handler_stack.js`                                  | `src/core/HandlerStack.ts`, `src/core/Modes.ts`                                                                                                                                                             |
+| `lib/keyboard_utils.js`                                 | `src/domain/Key.ts`                                                                                                                                                                                         |
+| `lib/dom_utils.js`                                      | `src/features/hints/Detect.ts`                                                                                                                                                                              |
+| `lib/utils.js`                                          | `src/domain/FindQuery.ts`                                                                                                                                                                                   |
+| `content_scripts/mode.js`                               | `src/core/Modes.ts`                                                                                                                                                                                         |
+| `content_scripts/mode_key_handler.js`, `mode_normal.js` | `src/core/Keyboard.ts`                                                                                                                                                                                      |
+| `content_scripts/link_hints.js`                         | `src/features/hints/Hints.ts`, `src/features/hints/Detect.ts`, `src/domain/HintSession.ts`, `src/domain/HintRound.ts`, `src/domain/HintString.ts`, `src/domain/HintFilter.ts`, `src/domain/FrameMessage.ts` |
+| `content_scripts/scroller.js`                           | `src/features/Scroller.ts`                                                                                                                                                                                  |
+| `content_scripts/mode_find.js`                          | `src/features/find/Find.ts`, `src/domain/FindQuery.ts`                                                                                                                                                      |
+| `content_scripts/mode_post_find.js`                     | `src/features/find/Find.ts`                                                                                                                                                                                 |
+| `content_scripts/mode_visual.js`                        | `src/features/visual/Visual.ts`, `src/features/visual/Movement.ts`                                                                                                                                          |
+| `content_scripts/marks.js`                              | `src/features/Marks.ts`                                                                                                                                                                                     |
+| `content_scripts/mode_insert.js`                        | `src/features/Insert.ts`                                                                                                                                                                                    |
+| `content_scripts/vimium_frontend.js`                    | `src/domain/FrameMessage.ts`                                                                                                                                                                                |
+| `background_scripts/main.js`                            | `src/domain/FrameMessage.ts`                                                                                                                                                                                |
+| `background_scripts/exclusions.js`                      | `src/domain/Exclusion.ts`                                                                                                                                                                                   |
+| `background_scripts/completion.js`                      | `src/domain/Score.ts`                                                                                                                                                                                       |
 
 > [!NOTE]
 > Vimium's `lib/keyboard_utils.js` credits the
 > [`vim-like-key-notation`](https://github.com/lydell/vim-like-key-notation)
-> project for its key-notation scheme. `src/core/key-notation.ts` implements the
-> same notation. Vimium's `tests/vendor/` directory (which vendors `shoulda.js`)
+> project for its key-notation scheme. `src/domain/Key.ts` implements the same
+> notation. Vimium's `tests/vendor/` directory (which vendors `shoulda.js`)
 > is **not** used here; no test code was ported.
 
 ```
@@ -79,7 +83,7 @@ Bundled into the shipping userscript.
 
 The application framework. `Effect` carries every fallible operation, `Schema`
 validates the settings and the cross-frame message protocol, and `Layer` and
-`ManagedRuntime` own the lifetime of everything the extension acquires.
+`Scope` own the lifetime of everything the extension acquires.
 
 ---
 
