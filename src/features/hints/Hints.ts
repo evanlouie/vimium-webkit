@@ -2107,8 +2107,9 @@ export const HintsLayer: Layer.Layer<
     /**
      * Whether this frame can ask the top frame for a round.
      *
-     * The top frame is the coordinator, so it always can. A child frame can
-     * once the top frame admitted it. A key can start a child frame, and its
+     * The top frame is the coordinator, so it can whenever it can hold a
+     * session: a page with no Web Crypto has none, and its frames stay apart.
+     * A child frame can once the top frame admitted it. A key can start a child frame, and its
      * first round then begins before its welcome, so the first round of a
      * frame waits for the welcome, for `JOIN_GRACE_MS` at most. Later rounds
      * do not wait. A frame that never joins, such as one under a top frame

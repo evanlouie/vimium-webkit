@@ -1186,7 +1186,9 @@ const makeCoordinator = Effect.fnUntraced(function* (publishLocal: PublishLocal)
     route,
     peers: pipe(sweep, Effect.map(rosterOf)),
     joinedFrames: pipe(sweep, Effect.map(Array.map((record) => record.source))),
-    ready: Effect.succeed(true),
+    // A top frame that cannot hold the credential can admit no frame, so it
+    // has no session to wake the page for.
+    ready: Effect.succeed(auth.available),
   } satisfies Role;
 });
 
