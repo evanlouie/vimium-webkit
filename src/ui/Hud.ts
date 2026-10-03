@@ -321,14 +321,67 @@ const restsOn =
       }),
     );
 
-/** Make `saved` the whole selection. `None` leaves no selection at all. */
-const selectOnly = (target: Selection, saved: Option.Option<Range>): void => {
+/** A selection that a prompt gives back. */
+interface SavedSelection {
+  /**
+   * A copy of its range. The range of the selection itself can follow the
+   * selection when the focus moves, and a copy still follows the page.
+   */
+  readonly range: Range;
+  /** The focus is at the start, as after a drag from right to left. */
+  readonly backward: boolean;
+}
+
+/** The selection as it is now. `None` when it has no range. */
+const savedFrom = (selection: Selection): Option.Option<SavedSelection> =>
+  pipe(
+    selection,
+    Option.liftPredicate((current) => current.rangeCount > 0),
+    Option.map((current) => {
+      const range = current.getRangeAt(0).cloneRange();
+      return {
+        range,
+        backward:
+          !range.collapsed &&
+          current.anchorNode === range.endContainer &&
+          current.anchorOffset === range.endOffset,
+      };
+    }),
+  );
+
+/**
+ * Make `saved` the whole selection, in its own direction. Visual mode moves
+ * the focus, so a direction that was lost would move the other end.
+ * `None` leaves no selection at all.
+ */
+const selectOnly = (target: Selection, saved: Option.Option<SavedSelection>): void => {
+  // First, so that a range that the selection refuses leaves no caret at our
+  // host either.
   target.removeAllRanges();
   pipe(
     saved,
     Option.match({
       onNone: constVoid,
-      onSome: (range) => target.addRange(range),
+      onSome: ({ range, backward }) =>
+        pipe(
+          backward,
+          Boolean.match({
+            onFalse: () =>
+              target.setBaseAndExtent(
+                range.startContainer,
+                range.startOffset,
+                range.endContainer,
+                range.endOffset,
+              ),
+            onTrue: () =>
+              target.setBaseAndExtent(
+                range.endContainer,
+                range.endOffset,
+                range.startContainer,
+                range.startOffset,
+              ),
+          }),
+        ),
     }),
   );
 };
@@ -553,22 +606,14 @@ export class Hud extends Context.Service<
         // The prompt
         // ---------------------------------------------------------------
 
-        /**
-         * The range of the selection, or `None` when there is none.
-         *
-         * A copy, because the range of the selection itself can follow the
-         * selection when the focus moves.
-         */
-        const readSelectedRange: Effect.Effect<Option.Option<Range>> = dom.probeSelection(
-          flow(
-            Option.liftPredicate((selection: Selection) => selection.rangeCount > 0),
-            Option.map((selection) => selection.getRangeAt(0).cloneRange()),
-          ),
+        /** The selection, to give back when the prompt closes. */
+        const readSelection: Effect.Effect<Option.Option<SavedSelection>> = dom.probeSelection(
+          savedFrom,
           Option.none(),
         );
 
         /** Give back `saved`, while the selection still rests on our host. */
-        const restoreSelection = (saved: Option.Option<Range>): Effect.Effect<void> =>
+        const restoreSelection = (saved: Option.Option<SavedSelection>): Effect.Effect<void> =>
           dom.probeSelection(
             flow(
               Option.liftPredicate(restsOn(ui.shadow.host)),
@@ -609,7 +654,7 @@ export class Hud extends Context.Service<
             // the selection that it found, as upstream does. This release runs
             // after the release of the input below. A selection anywhere else
             // was placed by the page or by the user meanwhile, and it stays.
-            yield* Effect.acquireRelease(readSelectedRange, restoreSelection);
+            yield* Effect.acquireRelease(readSelection, restoreSelection);
 
             const parts = yield* Effect.acquireRelease(
               Effect.sync(() => {
