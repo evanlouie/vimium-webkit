@@ -5,8 +5,10 @@
  * so the input below is a *true in-page element* that takes part in the focus
  * of the page. Two results of that are designed for here:
  *
- * - `ownsFocus` exists so that insert mode can tell our input from an input of
- *   the page, and does not treat a focus of ours as an entry into insert mode.
+ * - An open prompt enters a mode that owns the keyboard. The mode gives the
+ *   keys that are aimed at the input to the input, takes every other key, and
+ *   keeps insert mode from treating a focus of ours as an entry into insert
+ *   mode.
  * - A key event that is aimed at this input would bubble out to the page,
  *   retargeted to the shadow host, so the input stops each one. A listener of
  *   the page in the capture phase on `window` or `document` runs before the
@@ -51,7 +53,14 @@ import {
 } from "effect";
 import { constVoid } from "effect/Function";
 import { Keyboard } from "~/core/Keyboard.ts";
-import { isEscape, Modes } from "~/core/Modes.ts";
+import {
+  CONTINUE_BUBBLING,
+  type HandlerResult,
+  PASS_EVENT_TO_PAGE,
+  SUPPRESS_EVENT,
+  SUPPRESS_PROPAGATION,
+} from "~/core/HandlerStack.ts";
+import { isEscape, KeyPolicy, type ModeOptions, Modes } from "~/core/Modes.ts";
 import { Report, type UserMessage } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { type NoFields, whenSome } from "~/domain/Prelude.ts";
@@ -398,7 +407,6 @@ export class Hud extends Context.Service<
     readonly prompt: <R>(
       options: HudPromptOptions<R>,
     ) => Effect.Effect<Option.Option<string>, never, R>;
-    readonly ownsFocus: (target: EventTarget | null) => boolean;
   }
 >()("vimium/ui/Hud") {
   static readonly layer: Layer.Layer<Hud, never, Ui | Dom | Settings | Modes | Keyboard | Report> =
@@ -627,6 +635,54 @@ export class Hud extends Context.Service<
             undefined,
           );
 
+        /**
+         * Give a key to our own input, and take every other key.
+         *
+         * `PASS_EVENT_TO_PAGE` stops the walk of the stack without touching
+         * the event, which is exactly "our input types this, and nothing else
+         * acts". The input then stops the key, so that it does not bubble out
+         * to the page.
+         *
+         * The prompt must claim these keys. The key bridge listens on `window`
+         * in the capture phase, so it sees every key before the input does.
+         * Without this claim, `hemisphere` typed into find would run `h`,
+         * `m`, `i` and `s` as commands, and an `x` typed into the prompt
+         * for a URL would close the tab.
+         */
+        const passIfOurs = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
+          pipe(
+            ui.owns(event.target),
+            Boolean.match({
+              onTrue: () => PASS_EVENT_TO_PAGE,
+              onFalse: () => SUPPRESS_EVENT,
+            }),
+            Effect.succeed,
+          );
+
+        /**
+         * Stop insert mode, which sits below, from reading a focus on our own
+         * input as the page asking for insert mode.
+         */
+        const claimOurFocus = (event: FocusEvent): Effect.Effect<HandlerResult> =>
+          pipe(
+            ui.owns(event.target),
+            Boolean.match({
+              onTrue: () => SUPPRESS_PROPAGATION,
+              onFalse: () => CONTINUE_BUBBLING,
+            }),
+            Effect.succeed,
+          );
+
+        const promptMode: ModeOptions = {
+          name: "prompt",
+          indicator: Option.none(),
+          // The input owns Escape: it has to settle the prompt, and an exit at
+          // the level of the mode would leave the prompt open.
+          exitOn: [],
+          keyboard: KeyPolicy.Owned(),
+          singleton: Option.none(),
+        };
+
         const promptIn = <R>(
           options: HudPromptOptions<R>,
         ): Effect.Effect<Option.Option<string>, never, R | Scope.Scope> =>
@@ -634,6 +690,18 @@ export class Hud extends Context.Service<
             const done = yield* Deferred.make<Option.Option<string>>();
             const settle = (value: Option.Option<string>): Effect.Effect<void> =>
               pipe(done, Deferred.succeed(value), Effect.asVoid);
+
+            // The prompt owns the keyboard from here until it closes. A mode can
+            // also end without the prompt, as `exitAll` does on a navigation.
+            // The prompt then closes too, and does not leave a field open that
+            // no mode gives the keys to.
+            const mode = yield* modes.enter(promptMode, {
+              keydown: passIfOurs,
+              keypress: passIfOurs,
+              keyup: passIfOurs,
+              focus: claimOurFocus,
+            });
+            yield* mode.onExit(() => settle(Option.none()));
 
             // A second prompt replaces the first one. Each prompt owns its own
             // container, so the removal of the old one cannot take the new one
@@ -862,16 +930,6 @@ export class Hud extends Context.Service<
           show,
           hide,
           prompt,
-          /**
-           * Does this target belong to the overlay?
-           *
-           * Given to the UI root, which knows about the retargeting of a closed
-           * shadow root. It is wider than "the prompt has focus" on purpose:
-           * every caller asks the same question. Insert mode must not claim a
-           * field of ours, and every modal mode must know whether a key press
-           * was aimed at its own input or at the page.
-           */
-          ownsFocus: (target) => ui.owns(target),
         });
       }),
     );

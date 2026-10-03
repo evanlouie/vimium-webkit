@@ -46,13 +46,7 @@ import {
 } from "effect";
 import { constVoid } from "effect/Function";
 import { Commands } from "~/core/Commands.ts";
-import {
-  CONTINUE_BUBBLING,
-  type HandlerResult,
-  PASS_EVENT_TO_PAGE,
-  SUPPRESS_EVENT,
-  SUPPRESS_PROPAGATION,
-} from "~/core/HandlerStack.ts";
+import { CONTINUE_BUBBLING, type HandlerResult } from "~/core/HandlerStack.ts";
 import { ExitTrigger, KeyPolicy, type ModeHandle, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
@@ -930,46 +924,6 @@ export const FindLayer: Layer.Layer<
       } satisfies HudPromptOptions;
     });
 
-    /**
-     * Give the key to our own HUD input, and swallow everything else.
-     *
-     * `PASS_EVENT_TO_PAGE` stops the walk of the stack without touching the
-     * event, which is exactly "our input types this, and nothing else acts".
-     * The HUD input then stops the key, so that it does not bubble out to the
-     * page. Only a listener of the page in the capture phase on `window` or
-     * `document` still sees it, retargeted to our shadow host. Without an
-     * iframe of our own origin there is no way to prevent that.
-     *
-     * The mode must claim these keys. The key bridge listens on `window` in
-     * the capture phase, so it sees every keystroke before the capture
-     * listener of the HUD input can stop it. Without a handler here, typing
-     * `hemisphere` into the find field would run `h`, `m`, `i` and `s` as
-     * commands.
-     */
-    const passIfOurs = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-      pipe(
-        hud.ownsFocus(event.target),
-        Boolean.match({
-          onTrue: () => PASS_EVENT_TO_PAGE,
-          onFalse: () => SUPPRESS_EVENT,
-        }),
-        Effect.succeed,
-      );
-
-    /**
-     * Stop insert mode, which sits below us, from reading focus on our own
-     * input as the page asking for insert mode.
-     */
-    const claimOurFocus = (event: FocusEvent): Effect.Effect<HandlerResult> =>
-      pipe(
-        hud.ownsFocus(event.target),
-        Boolean.match({
-          onTrue: () => SUPPRESS_PROPAGATION,
-          onFalse: () => CONTINUE_BUBBLING,
-        }),
-        Effect.succeed,
-      );
-
     const promptSession = Effect.fn("Find.promptSession")(function* (prompt: Heading) {
       const committed = yield* Ref.make(false);
       const snapshot = yield* readScroll;
@@ -1002,23 +956,17 @@ export const FindLayer: Layer.Layer<
       yield* closePost;
       yield* clearState;
 
-      const handle = yield* modes.enter(
-        {
-          name: "find",
-          indicator: Option.some(prompt.indicator),
-          // The HUD input owns Escape: it has to settle the prompt, and an
-          // exit at the level of the mode would leave the prompt open.
-          exitOn: [],
-          keyboard: KeyPolicy.Shared(),
-          singleton: Option.some("find"),
-        },
-        {
-          keydown: passIfOurs,
-          keypress: passIfOurs,
-          keyup: passIfOurs,
-          focus: claimOurFocus,
-        },
-      );
+      const handle = yield* modes.enter<never>({
+        name: "find",
+        indicator: Option.some(prompt.indicator),
+        // The HUD input owns Escape: it has to settle the prompt, and an
+        // exit at the level of the mode would leave the prompt open.
+        exitOn: [],
+        // No key reaches a binding until the prompt opens. The prompt then
+        // claims the keyboard itself, and gives its own input the keys.
+        keyboard: KeyPolicy.Owned(),
+        singleton: Option.some("find"),
+      });
 
       yield* refreshRuns();
 
