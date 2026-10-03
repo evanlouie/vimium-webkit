@@ -18,6 +18,7 @@
 
 import {
   Array,
+  Boolean,
   Iterable,
   Match,
   Number,
@@ -166,13 +167,29 @@ const vimWord = (direction: Direction): ReadonlyArray<NativeMovement> =>
     Match.exhaustive,
   );
 
+/**
+ * Get the selection ready for a movement.
+ *
+ * `gg` and `G` must move the focus and keep the anchor, as in Vim. On macOS,
+ * Blink and WebKit instead extend a selection to a boundary as NSTextView
+ * does: they grow it. `gg` moves the start and `G` the end, whichever end the
+ * anchor is. A caret has no end to grow, and the boundary of the document is
+ * the same from anywhere, so the extend starts from a caret at the anchor.
+ */
+const prepare = (selection: Selection, alter: AlterMethod, { granularity }: MovementSpec): void =>
+  pipe(
+    alter === "extend" && granularity === "documentboundary",
+    Boolean.match({ onFalse: constVoid, onTrue: () => collapseToAnchor(selection) }),
+  );
+
 /** Run one movement, `count` times, and once at least. */
 export const runMovement = (
   selection: Selection,
   alter: AlterMethod,
   spec: MovementSpec,
   count = 1,
-): void =>
+): void => {
+  prepare(selection, alter, spec);
   pipe(
     spec,
     nativeMovements,
@@ -180,6 +197,7 @@ export const runMovement = (
     Array.flatten,
     Array.forEach((movement) => modify(selection, alter, movement)),
   );
+};
 
 // ---------------------------------------------------------------------------
 // Direction
