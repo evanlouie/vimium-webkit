@@ -22,9 +22,10 @@
  * ## The round
  *
  * `src/frames/Link.ts` deliberately does not answer the hint messages. This
- * service answers them, with `FrameBus.serve`, and that is the seam that keeps
- * the layer graph a tree. The four rules that `src/domain/FrameMessage.ts`
- * states are kept here:
+ * layer answers them, with `FrameBus.serve`, and that is the seam that keeps
+ * the layer graph a tree. In the top frame, the coordinator below also answers
+ * the requests for a round. The four rules that `src/domain/FrameMessage.ts`
+ * states are kept here, and `src/domain/HintRound.ts` holds their decisions:
  *
  * 1. **One live round for the page, with an age limit.** The top frame holds
  *    the record. A second frame cannot start a round while one is live, and a
@@ -887,7 +888,7 @@ const markerSpecs = (
     }),
   );
 
-/** The live session, as the message handlers of this service see it. */
+/** The live session, as the message handlers of this frame see it. */
 interface LiveSession extends RoundSession {
   readonly id: number;
   readonly mode: HintMode;
@@ -897,11 +898,6 @@ interface LiveSession extends RoundSession {
 // ---------------------------------------------------------------------------
 // The rounds
 // ---------------------------------------------------------------------------
-
-/** The one live round of the page, with the signal that stops its collection. */
-interface LiveTopRound extends TopRound {
-  readonly cancelled: Deferred.Deferred<void>;
-}
 
 interface PendingActivation {
   readonly roundId: string;
@@ -976,6 +972,205 @@ const omittedNotice = (dropped: number): Option.Option<string> =>
 const noReply = Effect.as(Option.none<FrameMessage>());
 
 // ---------------------------------------------------------------------------
+// The coordinator
+// ---------------------------------------------------------------------------
+
+/** The one live round of the page, with the signal that stops its collection. */
+interface LiveTopRound extends TopRound {
+  readonly cancelled: Deferred.Deferred<void>;
+}
+
+/** What the top frame knows about the rounds of the page. */
+interface PageRounds {
+  readonly live: Option.Option<LiveTopRound>;
+  /** The rounds that ended, oldest first. A late request for one gets no answer. */
+  readonly ended: readonly string[];
+}
+
+/**
+ * End a round when a frame says that it is over.
+ *
+ * The round counts as ended whoever says so. It stops being the live round of
+ * the page only when its origin says so, and that round comes back, so that
+ * the other frames can hear of it.
+ */
+const endPageRound =
+  (roundId: string, from: FrameId) =>
+  (rounds: PageRounds): readonly [Option.Option<LiveTopRound>, PageRounds] => {
+    const isEnded = isTopRoundOf(roundId, from);
+    return [
+      pipe(rounds.live, Option.filter(isEnded)),
+      {
+        live: pipe(rounds.live, Option.filter(Predicate.not(isEnded))),
+        ended: pipe(rounds.ended, withRound(roundId)),
+      },
+    ];
+  };
+
+/**
+ * The broker of the hint rounds of the page. Only the top frame runs it.
+ *
+ * A frame asks it for a round with `REQUEST_HINTS`. The coordinator asks every
+ * frame for its descriptors, gives the ordered list to every frame except the
+ * origin, and answers the origin with the same list. The round is then the one
+ * live round of the page until its origin ends it with `CANCEL_HINTS`, and the
+ * coordinator sends that end on to every frame.
+ */
+const coordinate = Effect.gen(function* () {
+  const bus = yield* FrameBus;
+  const dom = yield* Dom;
+  const rounds = yield* Ref.make<PageRounds>({ live: Option.none(), ended: [] });
+
+  /** Ask one frame for its descriptors. A frame that does not answer gives none. */
+  const requestFrameHints =
+    (origin: FrameId, roundId: string, mode: HintMode) =>
+    (frameId: FrameId): Effect.Effect<readonly HintDescriptor[]> =>
+      pipe(
+        bus.request(
+          toFrame(frameId),
+          {
+            kind: "COLLECT_HINTS",
+            roundId,
+            originFrameId: origin,
+            mode,
+          },
+          readHints(roundId, frameId),
+          REQUEST_DEADLINE,
+        ),
+        Effect.orElseSucceed(() => Array.empty<HintDescriptor>()),
+      );
+
+  /**
+   * Ask every frame for its descriptors, and give them back in the one
+   * order that every frame must agree on.
+   *
+   * The origin is asked as well, although it has already run its own
+   * detection. Without its descriptors the other frames would work out
+   * another assignment of the hint strings, and the whole scheme rests on
+   * every frame agreeing.
+   */
+  const collectEveryFrame = Effect.fn("Hints.collectEveryFrame")(function* (
+    origin: FrameId,
+    roundId: string,
+    mode: HintMode,
+  ) {
+    const peers = yield* bus.peers;
+    return yield* collectFrameDescriptors(peers, requestFrameHints(origin, roundId, mode));
+  });
+
+  /** Give the ordered descriptors to every frame except the origin. */
+  const activateEveryFrame = Effect.fnUntraced(function* (
+    origin: FrameId,
+    roundId: string,
+    mode: HintMode,
+    descriptors: readonly HintDescriptor[],
+  ) {
+    const peers = yield* bus.peers;
+    yield* pipe(
+      peers,
+      Array.filter((frameId) => frameId !== origin),
+      Effect.forEach(
+        (frameId) =>
+          pipe(
+            bus.send(toFrame(frameId), {
+              kind: "ACTIVATE",
+              roundId,
+              originFrameId: origin,
+              mode,
+              descriptors,
+            }),
+            Effect.ignore,
+          ),
+        { discard: true },
+      ),
+    );
+  });
+
+  const runHintRound = Effect.fn("Hints.runHintRound")(function* (
+    origin: FrameId,
+    roundId: string,
+    mode: HintMode,
+    cancelled: Deferred.Deferred<void>,
+  ) {
+    const collect = pipe(collectEveryFrame(origin, roundId, mode), Effect.asSome);
+    const collected = yield* raceUntilAbort(collect, cancelled);
+    const { live } = yield* Ref.get(rounds);
+    // The answers count only while the round that asked for them is live.
+    const round = pipe(
+      collected,
+      Option.flatMap((result) =>
+        pipe(
+          live,
+          Option.filter((live) => live.roundId === roundId),
+          Option.as(result),
+        ),
+      ),
+    );
+    yield* pipe(
+      round,
+      whenSome(({ descriptors }) => activateEveryFrame(origin, roundId, mode, descriptors)),
+    );
+    return round;
+  });
+
+  const answerRequestHints = Effect.fnUntraced(function* ({
+    message: { roundId, mode },
+    from,
+  }: InboundOf<"REQUEST_HINTS">) {
+    const now = yield* dom.now;
+    // A round that already ended gets no answer, and neither does a round
+    // while another frame owns the live round.
+    const { live } = yield* pipe(
+      rounds,
+      Ref.get,
+      Effect.filterOrFail(
+        ({ live, ended }) =>
+          !pipe(ended, Array.contains(roundId)) &&
+          !pipe(live, Option.exists(blocksRound(from, now))),
+      ),
+    );
+    yield* pipe(
+      live,
+      whenSome((replaced) => signal(replaced.cancelled)),
+    );
+    const cancelled = yield* Deferred.make<void>();
+    const round: LiveTopRound = { roundId, origin: from, mode, startedAt: now, cancelled };
+    yield* pipe(rounds, Ref.update(Struct.assign({ live: Option.some(round) })));
+    const { descriptors, dropped } = yield* pipe(
+      runHintRound(from, roundId, mode, cancelled),
+      Effect.flatMap((round) => Effect.fromOption(round)),
+    );
+    return {
+      kind: "HINTS_RESULT" as const,
+      roundId,
+      droppedDescriptors: dropped,
+      descriptors,
+    };
+  }, Effect.option);
+
+  /** The origin ends its round, and every other frame hears of it from here. */
+  const onCancelHints = Effect.fnUntraced(function* ({
+    message: { roundId },
+    from,
+  }: InboundOf<"CANCEL_HINTS">) {
+    const ended = yield* pipe(rounds, Ref.modify(endPageRound(roundId, from)));
+    yield* pipe(
+      ended,
+      whenSome((live) =>
+        pipe(
+          signal(live.cancelled),
+          Effect.andThen(bus.broadcast({ kind: "CANCEL_HINTS", roundId })),
+          Effect.ignore,
+        ),
+      ),
+    );
+  }, noReply);
+
+  yield* bus.serve("REQUEST_HINTS", answerRequestHints);
+  yield* bus.serve("CANCEL_HINTS", onCancelHints);
+});
+
+// ---------------------------------------------------------------------------
 // The layer
 // ---------------------------------------------------------------------------
 
@@ -1038,13 +1233,6 @@ export const Hints = {
        */
       const hoverRef = yield* Ref.make(Option.none<WeakRef<Element>>());
       const roundRef = yield* Ref.make(Option.none<LocalRound>());
-      /**
-       * The one live round of the page.
-       *
-       * Only the top frame serves `REQUEST_HINTS`, so only the top frame ever
-       * holds a record here.
-       */
-      const topRoundRef = yield* Ref.make(Option.none<LiveTopRound>());
       const sessionRef = yield* Ref.make(Option.none<LiveSession>());
       const sessionSeq = yield* Ref.make(0);
       const roundSeq = yield* Ref.make(0);
@@ -1072,13 +1260,6 @@ export const Hints = {
             (warned) => [unreachableHosts > 0 && !warned, warned || unreachableHosts > 0] as const,
           ),
         );
-
-      /** Forget the one live round of the page, and wake the collection that waits on it. */
-      const endTopRound = (live: LiveTopRound): Effect.Effect<void> =>
-        pipe(topRoundRef, Ref.set(Option.none()), Effect.andThen(signal(live.cancelled)));
-
-      const broadcastCancel = (roundId: string): Effect.Effect<void> =>
-        pipe(bus.broadcast({ kind: "CANCEL_HINTS", roundId }), Effect.ignore);
 
       // ---------------------------------------------------------------------
       // Activation
@@ -1978,140 +2159,12 @@ export const Hints = {
       });
 
       // ---------------------------------------------------------------------
-      // The round, as the top frame runs it
-      // ---------------------------------------------------------------------
-
-      /** Ask one frame for its descriptors. A frame that does not answer gives none. */
-      const requestFrameHints =
-        (origin: FrameId, roundId: string, mode: HintMode) =>
-        (frameId: FrameId): Effect.Effect<readonly HintDescriptor[]> =>
-          pipe(
-            bus.request(
-              toFrame(frameId),
-              {
-                kind: "COLLECT_HINTS",
-                roundId,
-                originFrameId: origin,
-                mode,
-              },
-              readHints(roundId, frameId),
-              REQUEST_DEADLINE,
-            ),
-            Effect.orElseSucceed(() => Array.empty<HintDescriptor>()),
-          );
-
-      /**
-       * Ask every frame for its descriptors, and give them back in the one
-       * order that every frame must agree on.
-       *
-       * The origin is asked as well, although it has already run its own
-       * detection. Without its descriptors the other frames would work out
-       * another assignment of the hint strings, and the whole scheme rests on
-       * every frame agreeing.
-       */
-      const collectEveryFrame = Effect.fn("Hints.collectEveryFrame")(function* (
-        origin: FrameId,
-        roundId: string,
-        mode: HintMode,
-      ) {
-        const peers = yield* bus.peers;
-        return yield* collectFrameDescriptors(peers, requestFrameHints(origin, roundId, mode));
-      });
-
-      /** Give the ordered descriptors to every frame except the origin. */
-      const activateEveryFrame = Effect.fnUntraced(function* (
-        origin: FrameId,
-        roundId: string,
-        mode: HintMode,
-        descriptors: readonly HintDescriptor[],
-      ) {
-        const peers = yield* bus.peers;
-        yield* pipe(
-          peers,
-          Array.filter((frameId) => frameId !== origin),
-          Effect.forEach(
-            (frameId) =>
-              pipe(
-                bus.send(toFrame(frameId), {
-                  kind: "ACTIVATE",
-                  roundId,
-                  originFrameId: origin,
-                  mode,
-                  descriptors,
-                }),
-                Effect.ignore,
-              ),
-            { discard: true },
-          ),
-        );
-      });
-
-      const runHintRound = Effect.fn("Hints.runHintRound")(function* (
-        origin: FrameId,
-        roundId: string,
-        mode: HintMode,
-        cancelled: Deferred.Deferred<void>,
-      ) {
-        const collect = pipe(collectEveryFrame(origin, roundId, mode), Effect.asSome);
-        const collected = yield* raceUntilAbort(collect, cancelled);
-        const live = yield* Ref.get(topRoundRef);
-        // The answers count only while the round that asked for them is live.
-        const round = pipe(
-          collected,
-          Option.flatMap((result) =>
-            pipe(
-              live,
-              Option.filter((live) => live.roundId === roundId),
-              Option.as(result),
-            ),
-          ),
-        );
-        yield* pipe(
-          round,
-          whenSome(({ descriptors }) => activateEveryFrame(origin, roundId, mode, descriptors)),
-        );
-        return round;
-      });
-
-      // ---------------------------------------------------------------------
-      // The messages that this service answers
+      // The messages that every frame answers
       // ---------------------------------------------------------------------
 
       // `FrameBus.serve` gives each handler the messages of its kind only. A
       // handler that drops a message fails with `NoSuchElementError`, and
       // `Effect.option` turns that into no reply.
-
-      const answerRequestHints = Effect.fnUntraced(function* ({
-        message: { roundId, mode },
-        from,
-      }: InboundOf<"REQUEST_HINTS">) {
-        yield* unlessCancelled(roundId);
-        const now = yield* dom.now;
-        const live = yield* pipe(
-          topRoundRef,
-          Ref.get,
-          Effect.filterOrFail(Predicate.not(Option.exists(blocksRound(from, now)))),
-        );
-        yield* pipe(
-          live,
-          whenSome((replaced) => signal(replaced.cancelled)),
-        );
-        const cancelled = yield* Deferred.make<void>();
-        yield* pipe(
-          topRoundRef,
-          Ref.set(Option.some({ roundId, origin: from, mode, startedAt: now, cancelled })),
-        );
-        const { descriptors, dropped } = yield* pipe(
-          runHintRound(from, roundId, mode, cancelled),
-          Effect.flatMap((round) => Effect.fromOption(round)),
-        );
-        return {
-          kind: "HINTS_RESULT" as const,
-          roundId,
-          droppedDescriptors: dropped,
-          descriptors,
-        };
-      }, Effect.option);
 
       const answerCollectHints = Effect.fnUntraced(function* ({
         message: { roundId, mode, originFrameId },
@@ -2224,8 +2277,7 @@ export const Hints = {
        * End a round in this frame.
        *
        * The origin sends this to the top frame when its round ends, for any
-       * reason. The top frame forgets the live round of the page, and sends
-       * it on to every frame.
+       * reason, and the coordinator sends it on to every frame.
        */
       const onCancelHints = Effect.fnUntraced(function* ({
         message: { roundId },
@@ -2238,13 +2290,6 @@ export const Hints = {
           localRound,
           Option.filter(cancelsLocalRound(roundId, from)),
           whenSome(() => pipe(roundRef, Ref.set(Option.none()))),
-        );
-
-        const topRound = yield* Ref.get(topRoundRef);
-        yield* pipe(
-          topRound,
-          Option.filter(isTopRoundOf(roundId, from)),
-          whenSome((live) => pipe(endTopRound(live), Effect.andThen(broadcastCancel(roundId)))),
         );
 
         const session = yield* Ref.get(sessionRef);
@@ -2296,12 +2341,12 @@ export const Hints = {
         );
       }, noReply);
 
-      // The top frame is the broker of the round. A child frame asks it, and
-      // it fans the request out to every frame.
+      // The top frame is the broker of the rounds of the page. A frame asks
+      // it for a round, and it fans the request out to every frame.
       yield* pipe(
         bus.role,
         FrameRole.$match({
-          Top: () => bus.serve("REQUEST_HINTS", answerRequestHints),
+          Top: () => coordinate,
           Child: () => Effect.void,
         }),
       );
