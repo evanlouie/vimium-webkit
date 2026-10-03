@@ -203,11 +203,6 @@ export class Insert extends Context.Service<
     /** `i` — global insert mode, whatever has focus. */
     readonly enter: Effect.Effect<void>;
 
-    readonly exit: Effect.Effect<void>;
-
-    /** Is the user typing into something? */
-    readonly isActive: Effect.Effect<boolean>;
-
     /** `gi` — focus a text input. */
     readonly focusInput: (count: number) => Effect.Effect<void>;
 
@@ -550,8 +545,6 @@ export class Insert extends Context.Service<
 
         const service = Insert.of({
           enter: enterGlobal(),
-          exit: exitInsert(),
-          isActive: isInserting,
           focusInput,
           seedFromFocus: seedFromFocus(),
           grabBackFocus,
