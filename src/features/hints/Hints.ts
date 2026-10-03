@@ -58,6 +58,7 @@
 import {
   Array,
   Boolean,
+  Context,
   Data,
   Deferred,
   type Duration,
@@ -1208,13 +1209,16 @@ export const HintsLayer: Layer.Layer<
     const clipboard = yield* Clipboard;
 
     /**
-     * The services that the detection and the markers need.
+     * The services that the detection and the markers need, and only those.
      *
      * A session runs in a fiber of its own, and the functions of this layer
-     * give effects with nothing left to supply. The context is therefore
-     * captured once here and given to those effects.
+     * give effects with nothing left to supply, so these services travel with
+     * those effects. The whole context of the layer holds the layer scope
+     * too, and that scope would take the markers of each session from the
+     * scope of the session: every round would leave its container, its
+     * listeners and its fiber behind.
      */
-    const browser = yield* Effect.context<Dom | Ui>();
+    const browser = pipe(Context.make(Dom, dom), Context.add(Ui, ui));
 
     // ---------------------------------------------------------------------
     // State
