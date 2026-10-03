@@ -30,6 +30,13 @@ export class Mappings extends Context.Service<
     readonly compiledUnsafe: () => CompiledMappings;
 
     /**
+     * The text that the trie of `compiledUnsafe` comes from, read
+     * synchronously. Two tries of one text are the same mappings, whether or
+     * not they are the same object.
+     */
+    readonly sourceUnsafe: () => string;
+
+    /**
      * The current trie, and then each one for a new text. A change to
      * another setting gives no new trie.
      */
@@ -72,6 +79,7 @@ export class Mappings extends Context.Service<
 
       return Mappings.of({
         compiledUnsafe: () => compiledOf(sourceOf(settings.currentUnsafe())),
+        sourceUnsafe: () => sourceOf(settings.currentUnsafe()),
         changes: pipe(
           settings.changes,
           Stream.map(sourceOf),

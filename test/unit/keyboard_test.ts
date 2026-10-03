@@ -151,6 +151,7 @@ const mappingsOf = (source: string): Layer.Layer<Mappings> =>
     });
     return Mappings.of({
       compiledUnsafe: () => compiled,
+      sourceUnsafe: () => source,
       changes: Stream.make(compiled),
       check: () => Effect.succeed(compiled),
     });
@@ -842,27 +843,27 @@ describe("Keyboard", () => {
    * asks whether the user is at the root therefore reads the count as well.
    */
   describe("a count in front of a key", () => {
-    it.effect("stays when the news of its own trie comes late, and goes for another", () =>
+    it.effect("stays on the mappings in force, whatever news comes late", () =>
       Effect.gen(function* () {
-        const before = compileMappings("", { rejectReservedShortcuts: false });
-        const compiled = compileMappings("map j scrollDown", { rejectReservedShortcuts: false });
-        const other = compileMappings("map j scrollUp", { rejectReservedShortcuts: false });
-        // The trie of the settings at the start, and then the trie of the
-        // settings that the start read.
-        const current = MutableRef.make(before);
+        const compile = (source: string): CompiledMappings =>
+          compileMappings(source, { rejectReservedShortcuts: false });
+        // The text at the start, and then the text that the start read. Each
+        // read compiles again, so only the text says which mappings these are.
+        const current = MutableRef.make("");
         const news = yield* Queue.unbounded<CompiledMappings>();
-        yield* Queue.offer(news, before);
+        yield* Queue.offer(news, compile(""));
         const mappingsLayer = Layer.succeed(
           Mappings,
           Mappings.of({
-            compiledUnsafe: () => MutableRef.get(current),
+            compiledUnsafe: () => compile(MutableRef.get(current)),
+            sourceUnsafe: () => MutableRef.get(current),
             changes: Stream.fromQueue(news),
-            check: () => Effect.succeed(compiled),
+            check: (source) => Effect.succeed(compile(source)),
           }),
         );
-        const tell = (trie: CompiledMappings) =>
+        const tell = (source: string) =>
           pipe(
-            Queue.offer(news, trie),
+            Queue.offer(news, compile(source)),
             Effect.andThen(Effect.yieldNow),
             Effect.andThen(Effect.yieldNow),
           );
@@ -873,19 +874,25 @@ describe("Keyboard", () => {
             const calls = yield* recorder(["scrollDown", "scrollUp"]);
 
             // The guard plays `3` as soon as the settings load. The news of
-            // the trie that the settings made reaches normal mode after it.
-            MutableRef.set(current, compiled);
+            // the mappings that the settings made reaches normal mode after it.
+            MutableRef.set(current, "map j scrollDown");
             yield* modes.bubble("keydown", new Press("3", { code: "Digit3" }));
-            yield* tell(compiled);
+            yield* tell("map j scrollDown");
             yield* modes.bubble("keydown", new Press("j"));
             assert.deepEqual(yield* Ref.get(calls), ["scrollDown:3"]);
 
+            // News of older mappings that comes later still changes nothing.
+            yield* modes.bubble("keydown", new Press("2", { code: "Digit2" }));
+            yield* tell("");
+            yield* modes.bubble("keydown", new Press("j"));
+            assert.deepEqual(yield* Ref.get(calls), ["scrollDown:3", "scrollDown:2"]);
+
             // A change of the mappings in the middle of a count ends the count.
             yield* modes.bubble("keydown", new Press("4", { code: "Digit4" }));
-            MutableRef.set(current, other);
-            yield* tell(other);
+            MutableRef.set(current, "map j scrollUp");
+            yield* tell("map j scrollUp");
             yield* modes.bubble("keydown", new Press("j"));
-            assert.deepEqual(yield* Ref.get(calls), ["scrollDown:3", "scrollUp:1"]);
+            assert.deepEqual(yield* Ref.get(calls), ["scrollDown:3", "scrollDown:2", "scrollUp:1"]);
           }),
           Effect.provide(layerFor({ mappings: "", mappingsLayer })),
         );
