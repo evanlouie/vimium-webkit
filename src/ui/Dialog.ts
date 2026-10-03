@@ -1016,6 +1016,14 @@ interface DialogParts {
   readonly dialog: HTMLElement;
 }
 
+/**
+ * Draw one dialog in the scope of its session.
+ *
+ * `end` closes this dialog, and no other one. A control that closes the
+ * dialog, and a save that finishes, use it.
+ */
+type DialogBuild = (end: Effect.Effect<void>) => Effect.Effect<DialogParts, never, Scope.Scope>;
+
 /** The parts of the settings dialog that the save step writes back to. */
 interface SettingsForm {
   readonly dialog: HTMLElement;
@@ -1127,14 +1135,17 @@ export const DialogLayer: Layer.Layer<
     const sessions = yield* FiberHandle.make<void, never>();
 
     // One save at a time. A save reaches storage, so it cannot run on the
-    // key path; it runs in this fiber instead.
+    // key path; it runs in this fiber instead. The fiber belongs to the
+    // layer and not to the dialog, so a save still reports its result after
+    // the user closed the dialog. It ends only its own dialog, with `end`.
     const saves = yield* FiberHandle.make<void, never>();
 
     /**
-     * Close the open dialog, if there is one.
+     * Close the open dialog, whichever it is. `present` does this before it
+     * opens the next one.
      *
-     * The fiber of the dialog waits for its mode to exit, so the interruption
-     * and every release step run at once, and nothing here suspends.
+     * The fiber of the dialog waits for its end, so the interruption and
+     * every release step run at once, and nothing here suspends.
      */
     const close: Effect.Effect<void> = FiberHandle.clear(sessions);
 
@@ -1222,9 +1233,15 @@ export const DialogLayer: Layer.Layer<
      * that scope too, so a listener that it registers goes away with the
      * dialog.
      */
-    const session = Effect.fnUntraced(function* (
-      build: Effect.Effect<DialogParts, never, Scope.Scope>,
-    ) {
+    const session = Effect.fnUntraced(function* (build: DialogBuild) {
+      // The end of this session, and of no other one. A save that finishes
+      // after this dialog closed, or after another dialog took its place,
+      // ends nothing. The exit of the mode signals it too: an exit body also
+      // runs while this scope closes, on this fiber, so it must not call
+      // `close`, which would wait for this fiber.
+      const ended = yield* Deferred.make<void>();
+      const end = pipe(ended, Deferred.succeed<void>(undefined), Effect.asVoid);
+
       // The layer is opened before the dialog is built, so that the
       // release steps run in the other order: the dialog leaves the tree
       // first, and `aria-hidden` arrives on an empty layer. A layer that
@@ -1236,7 +1253,7 @@ export const DialogLayer: Layer.Layer<
       // it. The release step hides the layer again.
       yield* ui.expose(dialogLayer);
 
-      const parts = yield* build;
+      const parts = yield* build(end);
 
       const backdrop = yield* Effect.acquireRelease(
         Effect.sync(() => {
@@ -1256,7 +1273,7 @@ export const DialogLayer: Layer.Layer<
           event.target === backdrop,
           Boolean.match({
             onFalse: () => Effect.void,
-            onTrue: () => close,
+            onTrue: () => end,
           }),
         ),
       );
@@ -1272,11 +1289,7 @@ export const DialogLayer: Layer.Layer<
         },
         { keydown: (event) => trapKey(parts.dialog, event) },
       );
-      // The exit of the mode ends the session. An exit body also runs while
-      // this scope closes, on this fiber, so it signals the end instead of
-      // calling `close`, which would wait for this fiber.
-      const exited = yield* Deferred.make<void>();
-      yield* mode.onExit(() => pipe(exited, Deferred.succeed<void>(undefined), Effect.asVoid));
+      yield* mode.onExit(() => end);
 
       // Acquired last, so that its release step runs first: the focus
       // leaves the dialog before the dialog leaves the tree. A modal that
@@ -1291,7 +1304,7 @@ export const DialogLayer: Layer.Layer<
         parts.dialog.focus({ preventScroll: true });
       });
 
-      yield* Deferred.await(exited);
+      yield* Deferred.await(ended);
     });
 
     /**
@@ -1303,9 +1316,7 @@ export const DialogLayer: Layer.Layer<
      * so the dialog holds the keyboard before the key that asked for it is
      * done.
      */
-    const present = Effect.fn("Dialog.present")(function* (
-      build: Effect.Effect<DialogParts, never, Scope.Scope>,
-    ) {
+    const present = Effect.fn("Dialog.present")(function* (build: DialogBuild) {
       yield* close;
       yield* pipe(
         session(build),
@@ -1401,7 +1412,7 @@ export const DialogLayer: Layer.Layer<
         ],
       });
 
-    const buildHelp = Effect.fn("Dialog.buildHelp")(function* () {
+    const buildHelp = Effect.fn("Dialog.buildHelp")(function* (end: Effect.Effect<void>) {
       // `compiledUnsafe`, because a command body reaches this from the key
       // path, which must not suspend.
       const compiled = mappings.compiledUnsafe();
@@ -1449,11 +1460,11 @@ export const DialogLayer: Layer.Layer<
       );
 
       yield* dom.listenOn(parts.settingsButton, "click", () => showSettings);
-      yield* dom.listenOn(parts.closeButton, "click", () => close);
+      yield* dom.listenOn(parts.closeButton, "click", () => end);
       return parts;
     });
 
-    const showHelp: Effect.Effect<void> = present(buildHelp());
+    const showHelp: Effect.Effect<void> = present(buildHelp);
 
     // ---------------------------------------------------------------
     // Settings
@@ -1483,9 +1494,17 @@ export const DialogLayer: Layer.Layer<
      * into range, when a control dropped the decimals of a number, and when
      * storage repaired a field. In each case the dialog is the only place
      * where the user can see what happened.
+     *
+     * `end` closes the dialog that started the save. The save can outlive
+     * it, and must not close a dialog that the user opened in the meantime.
      */
     const store = Effect.fn("Dialog.store")(
-      function* (form: SettingsForm, next: SettingsData, notes: FormNotes) {
+      function* (
+        form: SettingsForm,
+        end: Effect.Effect<void>,
+        next: SettingsData,
+        notes: FormNotes,
+      ) {
         const stored = yield* settings.save(next);
         yield* fill(form, stored);
         const compiled = yield* mappings.check(stored.keyMappings);
@@ -1496,7 +1515,7 @@ export const DialogLayer: Layer.Layer<
             Saved: () =>
               pipe(
                 showProblems(form, ""),
-                Effect.andThen(close),
+                Effect.andThen(end),
                 Effect.andThen(report.info("Settings saved")),
               ),
           }),
@@ -1641,7 +1660,7 @@ export const DialogLayer: Layer.Layer<
       };
     };
 
-    const buildSettings = Effect.fn("Dialog.buildSettings")(function* () {
+    const buildSettings = Effect.fn("Dialog.buildSettings")(function* (end: Effect.Effect<void>) {
       // `currentUnsafe`, because a command body reaches this from the key
       // path, which must not suspend.
       const current = settings.currentUnsafe();
@@ -1656,7 +1675,7 @@ export const DialogLayer: Layer.Layer<
       // The store call reaches the backend, so it cannot run inside the
       // click dispatch. One fiber holds it, and a second click replaces it.
       const submit = (next: SettingsData, notes: FormNotes): Effect.Effect<void> =>
-        pipe(store(form, next, notes), FiberHandle.run(saves), Effect.asVoid);
+        pipe(store(form, end, next, notes), FiberHandle.run(saves), Effect.asVoid);
 
       yield* dom.listenOn(
         form.save,
@@ -1673,11 +1692,11 @@ export const DialogLayer: Layer.Layer<
         // refused here.
         () => submit(defaultSettings(), NO_FORM_NOTES),
       );
-      yield* dom.listenOn(form.cancel, "click", () => close);
+      yield* dom.listenOn(form.cancel, "click", () => end);
       return form;
     });
 
-    const showSettings: Effect.Effect<void> = present(buildSettings());
+    const showSettings: Effect.Effect<void> = present(buildSettings);
 
     // The commands that this layer owns. A feature registers its own bodies
     // in the same way, so no feature imports another feature.
