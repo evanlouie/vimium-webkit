@@ -65,7 +65,9 @@
  * open the `WELCOME` that carried the nonce. The nonce therefore proved
  * nothing that the seal had not already proved. Version 4 also sends the
  * exclusion verdict as the tagged union of `domain/Exclusion.ts`, and not as
- * `{ enabled, passKeys }`.
+ * `{ enabled, passKeys }`. It also splits the verdict from the prompt to read
+ * settings again: `VERDICT` carries the verdict, and `SETTINGS` carries
+ * nothing and goes out only once a save has reached storage.
  *
  * ## What the hints service must do
  *
@@ -687,19 +689,16 @@ const define = <F extends Schema.Struct.Fields>(fields: F) => ({
 });
 
 /**
- * Top to every frame, after a change of the settings in the top frame.
+ * Top to every frame, once settings that the top frame saved reach storage.
  *
- * It carries the exclusion verdict, and nothing else. Settings used to travel
- * here. That made the protocol a route to push a CSS string, a search template
- * and a key-mapping source into every frame of a page. It also made the
- * handshake a route to take the exclusion patterns, the mappings and the engine
- * list of the user out of the top frame. Every frame reads its own storage.
- * This message is a prompt to do that, and it is not a source of truth.
+ * It carries nothing. Settings used to travel here. That made the protocol a
+ * route to push a CSS string, a search template and a key-mapping source into
+ * every frame of a page. It also made the handshake a route to take the
+ * exclusion patterns, the mappings and the engine list of the user out of the
+ * top frame. Every frame reads its own storage. This message is a prompt to do
+ * that, and it is not a source of truth.
  */
-const settingsPush = define({
-  kind: Schema.Literal("SETTINGS"),
-  exclusion: effectiveExclusionSchema,
-});
+const settingsPush = define({ kind: Schema.Literal("SETTINGS") });
 
 /** Top to every frame, whenever the registry changes. It keeps `peers` honest. */
 const roster = define({
@@ -829,6 +828,12 @@ const exclusionResult = define({
   exclusion: effectiveExclusionSchema,
 });
 
+/** Top to every frame, each time the top frame takes a verdict. */
+const verdictPush = define({
+  kind: Schema.Literal("VERDICT"),
+  exclusion: effectiveExclusionSchema,
+});
+
 /**
  * Child to top, on `pagehide`.
  *
@@ -870,6 +875,7 @@ export const frameMessageSchema = Schema.Union([
   focused.payload,
   exclusionRequest.payload,
   exclusionResult.payload,
+  verdictPush.payload,
   goodbye.payload,
 ]);
 
@@ -891,6 +897,7 @@ export const frameWireSchema = Schema.Union([
   focused.wire,
   exclusionRequest.wire,
   exclusionResult.wire,
+  verdictPush.wire,
   goodbye.wire,
 ]);
 

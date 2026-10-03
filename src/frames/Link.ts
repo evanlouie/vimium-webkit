@@ -2,18 +2,20 @@
  * The application protocol on top of the frame bus.
  *
  * `FrameBus` moves a message. This service gives the meaning of the messages
- * that every frame needs: which frame has the focus, and what the exclusion
- * verdict of the page is. It is the only user of the bus that every build has.
+ * that every frame needs: which frame has the focus, what the exclusion verdict
+ * of the page is, and when the settings of the top frame reach storage. It is
+ * the only user of the bus that every build has.
  *
  * Two rules from the earlier code, which cost real reviews to find:
  *
- * - **Settings never come over the wire.** A `SETTINGS` message carries the
- *   exclusion verdict and nothing else. Settings used to travel with it, which
- *   made the protocol a route to push a CSS string, a search template and a
- *   key-mapping source into every frame of a page, and made the handshake a
- *   route to take the exclusion patterns, the mappings and the engine list of
- *   the user out of the top frame. A push is a prompt to read our own storage
- *   again, and it is not a source of truth.
+ * - **Settings never come over the wire.** A `SETTINGS` message carries
+ *   nothing. Settings used to travel with it, which made the protocol a route
+ *   to push a CSS string, a search template and a key-mapping source into every
+ *   frame of a page, and made the handshake a route to take the exclusion
+ *   patterns, the mappings and the engine list of the user out of the top
+ *   frame. A push is a prompt to read our own storage again, and it is not a
+ *   source of truth. The top frame sends it only once its settings reach
+ *   storage, because a frame that reads earlier finds the old settings.
  * - **A child frame does not decide its own verdict.** Upstream Vimium resolves
  *   an exclusion against `sender.tab.url`, which is the URL of the top frame.
  *   Without that, a rule that the user wrote for a page would stop applying
@@ -115,7 +117,7 @@ export const topFrameVerdictLayer: Layer.Layer<TopFrameVerdict, never, FrameBus>
     return TopFrameVerdict.of({
       ask,
       onPush: (adopt) =>
-        bus.serve("SETTINGS", ({ message }) =>
+        bus.serve("VERDICT", ({ message }) =>
           pipe(adopt(message.exclusion), Effect.as(Option.none())),
         ),
     });
@@ -145,14 +147,12 @@ export class FrameLink extends Context.Service<
       /** The frame that the focus cursor points at. The top frame keeps it. */
       const focusedRef = yield* Ref.make(Option.none<FrameId>());
 
-      /**
-       * Tell every frame that the settings changed.
-       *
-       * The message carries the verdict of the top frame, and each frame reads
-       * its own storage again.
-       */
-      const pushSettings = (rule: EffectiveRule): Effect.Effect<void> =>
-        pipe(bus.broadcast({ kind: "SETTINGS", exclusion: rule }), Effect.ignore);
+      /** Tell every frame the verdict that the top frame took. */
+      const pushVerdict = (rule: EffectiveRule): Effect.Effect<void> =>
+        pipe(bus.broadcast({ kind: "VERDICT", exclusion: rule }), Effect.ignore);
+
+      /** Tell every frame to read its own storage again. */
+      const pushSettings = pipe(bus.broadcast({ kind: "SETTINGS" }), Effect.ignore);
 
       /** Point the cursor at one frame, and give that frame the focus. */
       const focus = Effect.fnUntraced(function* (frameId: FrameId) {
@@ -213,25 +213,32 @@ export class FrameLink extends Context.Service<
         );
 
         // The top frame owns the verdict, and `Exclusions` works it out again
-        // whenever the settings change. Each verdict that it takes therefore
-        // goes out to the frames.
+        // whenever the settings or the URL change. Each verdict that it takes
+        // therefore goes out to the frames at once.
         yield* pipe(
           exclusions.changes,
           Stream.filterMap(Filter.fromPredicateOption(knownRule)),
-          Stream.runForEach(pushSettings),
+          Stream.runForEach(pushVerdict),
+          Effect.forkScoped,
+        );
+
+        // Saved settings wait in a debounce window before they reach storage.
+        // A frame that read storage on the change would keep the old settings.
+        yield* pipe(
+          settings.committed,
+          Stream.runForEach(() => pushSettings),
           Effect.forkScoped,
         );
       });
 
       /**
-       * What a member does with a push: it reads its own storage again.
+       * What a member does with a push of the settings: it reads its own
+       * storage again.
        *
-       * The verdict of the push goes to `Exclusions`, through
-       * `TopFrameVerdict`. It is never a value that this frame takes from the
-       * wire.
+       * A pushed verdict goes to `Exclusions`, through `TopFrameVerdict`.
        */
       const serveAsMember = bus.serve("SETTINGS", () =>
-        pipe(settings.reload, Effect.ignore, Effect.as(Option.none())),
+        pipe(settings.reload, Effect.as(Option.none())),
       );
 
       // ---------------------------------------------------------------------

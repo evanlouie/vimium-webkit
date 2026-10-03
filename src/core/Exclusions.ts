@@ -215,7 +215,7 @@ export class Exclusions extends Context.Service<
           return set.match(url);
         });
 
-        /** Take a verdict. Every one is published, because the top frame pushes each one. */
+        /** Take a verdict. */
         const adopt = (rule: EffectiveRule): Effect.Effect<void> =>
           pipe(verdict, SubscriptionRef.set<Verdict>(Verdict.Known({ rule })));
 
