@@ -291,17 +291,20 @@ export class Dom extends Context.Service<
   );
 }
 
+const clockFor: (missing: boolean) => number = Boolean.match({
+  onFalse: () => performance.now(),
+  onTrue: () => Date.now(),
+});
+
 /**
  * A monotonic clock where the realm has one, and the wall clock otherwise.
  *
  * The question is asked at each read, because the page can replace
- * `performance` at any time.
+ * `performance` at any time. The matcher is built once: find reads this clock
+ * in its search loop, and a matcher built at each read made one read ten times
+ * slower.
  */
-const readClock = (): number =>
-  pipe(
-    typeof performance === "undefined",
-    Boolean.match({ onFalse: () => performance.now(), onTrue: () => Date.now() }),
-  );
+export const readClock = (): number => clockFor(typeof performance === "undefined");
 
 /**
  * A listener body must not fail. If it does, the fault is ours.

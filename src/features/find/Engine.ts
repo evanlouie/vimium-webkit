@@ -20,6 +20,7 @@
 import { Array, Boolean, Data, HashSet, Match, Number, Option, Result, flow, pipe } from "effect";
 import { constFalse } from "effect/Function";
 import type { CapabilityReport } from "~/platform/Capabilities.ts";
+import { readClock } from "~/platform/Dom.ts";
 import { isElement, isText } from "~/platform/Elements.ts";
 
 // ---------------------------------------------------------------------------
@@ -142,15 +143,6 @@ const SLICE_GROWTH = 4;
  */
 export const MAX_MATCH_LENGTH = 65_536;
 
-/**
- * The clock for the budget.
- *
- * `performance` is absent in some hosts. The check stays a plain conditional,
- * because the search loop below reads the clock two or three times in each
- * window: see the measurement on `scanWindows`.
- */
-const now = (): number => (typeof performance !== "undefined" ? performance.now() : Date.now());
-
 /** What one search of a haystack gave, and whether it read all of it. */
 export interface SpanSearch {
   readonly spans: ReadonlyArray<MatchSpan>;
@@ -186,7 +178,7 @@ export const collectSpans = (
   haystack: string,
   pattern: RegExp,
   limit: number = DEFAULT_MATCH_LIMIT,
-  deadline: number = now() + MATCH_BUDGET_MS,
+  deadline: number = readClock() + MATCH_BUDGET_MS,
 ): SpanSearch =>
   pipe(
     limit > 0 && haystack.length > 0,
@@ -210,8 +202,9 @@ export const collectSpans = (
  * `Array.unfold` over an immutable state machine found the same spans three to
  * six times slower in JavaScriptCore: 0.97 ms against 0.33 ms over 2 MB of text
  * with no match, and 0.16 ms against 0.03 ms for 500 matches. A `Boolean.match`
- * in `now` and in `nextWindow`, which run for each window, made the whole
- * search 1.4 to 1.9 times slower, so those two stay plain conditionals too.
+ * built in the clock and in `nextWindow` at each call, which happens for each
+ * window, made the whole search 1.4 to 1.9 times slower. `nextWindow` stays a
+ * plain conditional, and `readClock` builds its matcher once.
  */
 const scanWindows = (
   haystack: string,
@@ -228,9 +221,9 @@ const scanWindows = (
   while (cursor < haystack.length) {
     // The clock is read between two windows. One `exec` cannot be stopped, so
     // the window is the work that one look at the clock cannot prevent.
-    if (now() > deadline) return { spans, stopped: true };
+    if (readClock() > deadline) return { spans, stopped: true };
 
-    const started = now();
+    const started = readClock();
     const windowEnd = Math.min(cursor + window, haystack.length);
     const sliceStart = Math.max(0, cursor - WINDOW_CONTEXT);
     let sliceEnd = Math.min(haystack.length, windowEnd + WINDOW_CONTEXT);
@@ -265,8 +258,8 @@ const scanWindows = (
         // Nothing is recorded until the whole match is inside the slice.
         if (
           sliceEnd - sliceStart >= MAX_MATCH_LENGTH ||
-          now() - started > WINDOW_BUDGET_MS ||
-          now() > deadline
+          readClock() - started > WINDOW_BUDGET_MS ||
+          readClock() > deadline
         ) {
           return { spans, stopped: true };
         }
@@ -285,7 +278,7 @@ const scanWindows = (
     }
 
     cursor = Math.max(cursor, windowEnd);
-    window = nextWindow(window, now() - started);
+    window = nextWindow(window, readClock() - started);
   }
 
   return { spans, stopped: false };
@@ -876,7 +869,7 @@ export const matchesInRuns = (
   runs: ReadonlyArray<TextRun>,
   pattern: RegExp,
   limit: number = DEFAULT_MATCH_LIMIT,
-  deadline: number = now() + MATCH_BUDGET_MS,
+  deadline: number = readClock() + MATCH_BUDGET_MS,
 ): RunSearch =>
   pipe(
     runs,
@@ -896,7 +889,7 @@ const searchRun =
   (document: Document, run: TextRun, pattern: RegExp, limit: number, deadline: number) =>
   (search: RunSearch): RunSearch =>
     pipe(
-      now() > deadline,
+      readClock() > deadline,
       Boolean.match({
         onTrue: () => ({ matches: search.matches, stopped: true }),
         onFalse: () => addRun(document, run, pattern, limit, deadline)(search),
