@@ -323,21 +323,20 @@ const largestScrollable =
     );
 
 /**
- * The element that must absorb a scroll along `axis` in `direction`.
+ * The element that must absorb a scroll along `axis` in `direction`, when the
+ * walk finds one.
  *
  * The nearest ancestor of `start` that can absorb it comes first. The document
- * comes next, when it scrolls along the axis at all. An app shell hides the
- * overflow of its `body` and scrolls a pane inside it, so a document that does
- * not scroll gives the scroll to the largest scroll container in view. The
- * document is the last resort.
+ * comes next, when it scrolls along the axis at all. `None` sends the scroll
+ * to the fallback pane.
  */
-const scrollTarget = (
+const nearestTarget = (
   view: Window,
   root: Element,
   start: Option.Option<Element>,
   axis: ScrollAxis,
   direction: Direction,
-): Element =>
+): Option.Option<Element> =>
   pipe(
     start,
     ancestorsBelow(root),
@@ -348,8 +347,37 @@ const scrollTarget = (
         Option.liftPredicate((root) => overflowOf(root, axis) > 1),
       ),
     ),
+  );
+
+/**
+ * Can the pane that the fallback chose before still take the scroll?
+ *
+ * It must still be in the document, a scroll container along the axis, and in
+ * view. Those are reads of one element, where a new search reads the whole
+ * visible page.
+ */
+const isStillPane =
+  (view: Window, axis: ScrollAxis) =>
+  (element: Element): boolean =>
+    element.isConnected && isScrollContainer(view, element, axis) && visibleArea(view, element) > 0;
+
+/**
+ * The pane for a document that does not scroll along the axis.
+ *
+ * An app shell hides the overflow of its `body` and scrolls a pane inside it,
+ * so the scroll goes to the largest scroll container in view. The pane that was
+ * chosen before is kept while it is still valid, as upstream keeps its own.
+ */
+const fallbackPane = (
+  view: Window,
+  root: Element,
+  axis: ScrollAxis,
+  remembered: Option.Option<Element>,
+): Option.Option<Element> =>
+  pipe(
+    remembered,
+    Option.filter(isStillPane(view, axis)),
     Option.orElse(() => largestScrollable(view, axis)(view.document.body ?? root)),
-    Option.getOrElse(() => root),
   );
 
 /** A reference that does not keep `element` alive. */
@@ -695,6 +723,17 @@ export class Scroller extends Context.Service<
          * that scrolls without end.
          */
         const pressed = yield* Ref.make(Option.none<WeakRef<Element>>());
+        /**
+         * The pane that the fallback chose last, for each axis.
+         *
+         * The search reads the whole visible page, and without this it ran on
+         * every press of a scroll key on an app shell. A `WeakRef` for the
+         * same reason as `pressed`.
+         */
+        const panes: Record<ScrollAxis, Ref.Ref<Option.Option<WeakRef<Element>>>> = {
+          x: yield* Ref.make(Option.none<WeakRef<Element>>()),
+          y: yield* Ref.make(Option.none<WeakRef<Element>>()),
+        };
         const animations: Record<ScrollAxis, Ref.Ref<Option.Option<Animation>>> = {
           x: yield* Ref.make(Option.none<Animation>()),
           y: yield* Ref.make(Option.none<Animation>()),
@@ -763,6 +802,18 @@ export class Scroller extends Context.Service<
           );
         });
 
+        /** The fallback pane for `axis`, remembered for the next press, or else the document. */
+        const paneTarget = Effect.fnUntraced(function* (axis: ScrollAxis) {
+          const remembered = yield* pipe(Ref.get(panes[axis]), Effect.map(Option.flatMap(held)));
+          const pane = yield* dom.probeOrElse(
+            () => fallbackPane(dom.window, rootElement(), axis, remembered),
+            Option.none,
+          );
+          const reference = pipe(pane, Option.map(weakly));
+          yield* pipe(panes[axis], Ref.set(reference));
+          return pipe(pane, Option.getOrElse(rootElement));
+        });
+
         /** The element that must absorb the scroll. */
         const target = (axis: ScrollAxis, direction: Direction): Effect.Effect<Element> =>
           pipe(
@@ -771,15 +822,18 @@ export class Scroller extends Context.Service<
             Effect.flatMap((last) =>
               dom.probeOrElse(
                 () =>
-                  scrollTarget(
+                  nearestTarget(
                     dom.window,
                     rootElement(),
                     walkStart(dom.document, last),
                     axis,
                     direction,
                   ),
-                rootElement,
+                () => Option.some(rootElement()),
               ),
+            ),
+            Effect.flatMap(
+              Option.match({ onNone: () => paneTarget(axis), onSome: Effect.succeed }),
             ),
           );
 
