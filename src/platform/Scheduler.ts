@@ -4,29 +4,16 @@
  * Safari still does not have `requestIdleCallback` (true at 26.5), so idle
  * work — hint detection above all — is cut into slices by hand against a time
  * budget. Do not call `requestIdleCallback`.
- *
- * Most of the old module is gone, because Effect already has it:
- *
- * - `yieldToEventLoop` is `Dom.yieldToBrowser`.
- * - `nextFrame` is `Dom.nextFrame`.
- * - `timeout` and `withDeadline` are `Effect.timeout` and `Effect.timeoutTo`,
- *   at the call site. A deadline belongs to the caller, not to a helper.
- * - `AbortedError` and the `signal` option are fiber interruption. The caller
- *   interrupts the fiber, and the slice loop stops at its next yield.
- * - `rafCoalesce` is a stream. Read the events with `Dom.events`, keep one
- *   value per window with `Stream.throttle`, and run the stream in a fiber
- *   that `Effect.forkScoped` owns. The scope removes the listener and stops
- *   the fiber, so there is no `cancel` method for a caller to remember.
  */
 
-import { Array, Boolean, Effect, Option, Ref, flow, pipe } from "effect";
+import { Array, Boolean, Effect, Iterable, type Option, Ref, pipe } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 
 /** The length of one slice. Chosen to stay inside one 60 Hz frame. */
 export const CHUNK_BUDGET_MS = 8;
 
-/** How many items are mapped before the clock is read again. */
-const DEFAULT_CHECK_EVERY = 32;
+/** How many items `mapChunked` maps before it reads the clock again. */
+const CHECK_EVERY = 32;
 
 export interface ChunkedOptions {
   /** The time budget for one slice, in milliseconds. */
@@ -92,16 +79,6 @@ export const repeatInSlices = Effect.fnUntraced(function* (
   yield* run;
 });
 
-/** `items` cut into consecutive batches of `size`, without a copy of the rest at each cut. */
-const batchesOf = <A>(items: ReadonlyArray<A>, size: number): ReadonlyArray<ReadonlyArray<A>> =>
-  Array.unfold(
-    0,
-    flow(
-      Option.liftPredicate((offset: number) => offset < items.length),
-      Option.map((offset) => [items.slice(offset, offset + size), offset + size] as const),
-    ),
-  );
-
 /**
  * Map over `items` in time-boxed slices.
  *
@@ -109,18 +86,19 @@ const batchesOf = <A>(items: ReadonlyArray<A>, size: number): ReadonlyArray<Read
  * the order of `items`. A `None` drops the item.
  *
  * Control goes back to the browser between two slices, and that point is also
- * where interruption takes effect. Interrupt the fiber to stop the work; the
- * old `AbortSignal` is gone.
+ * where interruption takes effect. Interrupt the fiber to stop the work.
  *
- * `checkEvery` exists because `performance.now()` is itself measurable when it
- * is read once for each of many thousands of elements.
+ * The items are mapped in batches, because `performance.now()` is itself
+ * measurable when it is read once for each of many thousands of elements. The
+ * batches are cut lazily, as the work reaches them. `Array.chunksOf` copies
+ * the rest of the array at each cut, and on a large page that copy alone takes
+ * longer than many slices.
  */
 export const mapChunked = <A, B>(
   transform: (item: A) => Option.Option<B>,
-  options: ChunkedOptions = {},
 ): ((items: ReadonlyArray<A>) => Effect.Effect<ReadonlyArray<B>, never, Dom>) =>
   Effect.fnUntraced(function* (items: ReadonlyArray<A>) {
-    const slices = yield* startSlices(options.budgetMs ?? CHUNK_BUDGET_MS);
+    const slices = yield* startSlices(CHUNK_BUDGET_MS);
     const mapBatch = (batch: ReadonlyArray<A>, index: number): Effect.Effect<ReadonlyArray<B>> =>
       pipe(
         // The slice check runs between two batches, and never after the last.
@@ -128,9 +106,6 @@ export const mapChunked = <A, B>(
         Boolean.match({ onFalse: () => Effect.void, onTrue: () => slices.check }),
         Effect.andThen(Effect.sync(() => pipe(batch, Array.map(transform), Array.getSomes))),
       );
-    const mapped = yield* pipe(
-      batchesOf(items, options.checkEvery ?? DEFAULT_CHECK_EVERY),
-      Effect.forEach(mapBatch),
-    );
+    const mapped = yield* pipe(items, Iterable.chunksOf(CHECK_EVERY), Effect.forEach(mapBatch));
     return Array.flatten(mapped);
   });

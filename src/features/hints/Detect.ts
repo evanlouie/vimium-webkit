@@ -1428,14 +1428,11 @@ export const detectHints = Effect.fnUntraced(function* (
   options: DetectOptions,
 ): Effect.fn.Return<DetectionResult, never, Dom> {
   const collected = yield* collectElements(options.document, SLICES);
-  const groups = yield* pipe(collected.elements, mapChunked(buildHints(options), SLICES));
+  const groups = yield* pipe(collected.elements, mapChunked(buildHints(options)));
   // Descendants before ancestors, so that a later element paints above an
   // earlier one, and the false-positive window looks the correct way.
   const candidates = pipe(groups, Array.flatten, Array.reverse, dropFalsePositives);
-  const visible = yield* pipe(
-    candidates,
-    mapChunked(Option.liftPredicate(isHintVisible(options)), SLICES),
-  );
+  const visible = yield* pipe(candidates, mapChunked(Option.liftPredicate(isHintVisible(options))));
   return {
     hints: pipe(visible, Array.reverse, secondaryLast),
     unreachableHosts: collected.unreachableHosts,
