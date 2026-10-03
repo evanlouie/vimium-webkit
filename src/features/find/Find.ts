@@ -6,10 +6,13 @@
  *
  * - our own engine lists the matches, so the HUD can say `3/17` where upstream
  *   can only say what it managed to find;
- * - the selection of the document is **not touched** while the user types.
- *   Upstream must move it, because `window.find()` moves it as a side effect.
- *   Only a commit with Enter selects anything here, and that is what makes
- *   Escape a true no-op;
+ * - a search does **not move** the selection of the document while the user
+ *   types. Upstream must move it, because `window.find()` moves it as a side
+ *   effect. Only a commit with Enter selects anything here, and that is what
+ *   makes Escape a true no-op;
+ * - the focus of the prompt input still moves the selection to our host, so
+ *   a prompt that closes puts back the selection that it found, as upstream
+ *   does;
  * - Escape puts back the scroll position that was read when find opened.
  *
  * Two rules hold the design together:
@@ -41,6 +44,7 @@ import {
   Ref,
   Scope,
   Struct,
+  flow,
   pipe,
 } from "effect";
 import { constVoid } from "effect/Function";
@@ -396,6 +400,37 @@ const isInView = (
 ): boolean =>
   rect.bottom >= 0 && rect.top <= viewport.height && rect.right >= 0 && rect.left <= viewport.width;
 
+/**
+ * Does the focus of `selection` rest on `host`: beside it, or inside it?
+ *
+ * A point in a shadow tree reads as a point at its host, so a caret in our own
+ * input reads as a caret beside our host.
+ */
+const restsOn =
+  (host: Element) =>
+  (selection: Selection): boolean =>
+    pipe(
+      selection.focusNode,
+      Option.fromNullishOr,
+      Option.exists((node) => {
+        const around = host.ownerDocument.createRange();
+        around.selectNode(host);
+        return around.isPointInRange(node, selection.focusOffset);
+      }),
+    );
+
+/** Make `saved` the whole selection. `None` leaves no selection at all. */
+const selectOnly = (target: Selection, saved: Option.Option<Range>): void => {
+  target.removeAllRanges();
+  pipe(
+    saved,
+    Option.match({
+      onNone: constVoid,
+      onSome: (range) => target.addRange(range),
+    }),
+  );
+};
+
 /** Find, as the bodies of the commands that `/`, `n`, `N`, `*` and `#` run. */
 export const FindLayer: Layer.Layer<
   never,
@@ -469,6 +504,41 @@ export const FindLayer: Layer.Layer<
               ),
           }),
         ),
+      );
+
+    /**
+     * The range of the selection, or `None` when there is none.
+     *
+     * A copy, because the range of the selection itself can follow the
+     * selection when the focus moves.
+     */
+    const readSelectedRange: Effect.Effect<Option.Option<Range>> = probeSelection(
+      flow(
+        Option.liftPredicate((target: Selection) => target.rangeCount > 0),
+        Option.map((target) => target.getRangeAt(0).cloneRange()),
+      ),
+      Option.none(),
+    );
+
+    /**
+     * Give back the selection that a prompt found, while the selection still
+     * rests on our host.
+     *
+     * The focus of the prompt input moves the selection of the document to
+     * our host, and the removal of the input leaves a caret there. `v` would
+     * adopt that caret. A selection anywhere else was placed by the page or by
+     * the user, and it stays.
+     */
+    const restoreSelection = (saved: Option.Option<Range>): Effect.Effect<void> =>
+      probeSelection(
+        flow(
+          Option.liftPredicate(restsOn(ui.shadow.host)),
+          Option.match({
+            onNone: constVoid,
+            onSome: (target) => selectOnly(target, saved),
+          }),
+        ),
+        undefined,
       );
 
     const readScroll: Effect.Effect<ScrollPosition> = dom.probeOrElse(
@@ -1013,6 +1083,7 @@ export const FindLayer: Layer.Layer<
     const promptSession = Effect.fn("Find.promptSession")(function* (prompt: Heading) {
       const committed = yield* Ref.make(false);
       const snapshot = yield* readScroll;
+      const selected = yield* readSelectedRange;
 
       // The one place that undoes what a cancelled search disturbed. It
       // runs for Escape, for a blur, and for an interruption from `clear`
@@ -1022,9 +1093,12 @@ export const FindLayer: Layer.Layer<
         Effect.andThen(restoreScroll(snapshot)),
         Effect.andThen(hud.hide),
       );
+      // The selection comes back on every exit, because the prompt moved it
+      // and not the search. A commit selects its match after this.
       yield* Effect.addFinalizer(() =>
         pipe(
-          Ref.get(committed),
+          restoreSelection(selected),
+          Effect.andThen(Ref.get(committed)),
           Effect.flatMap(
             Boolean.match({
               onTrue: () => Effect.void,
