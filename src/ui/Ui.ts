@@ -59,7 +59,6 @@ import {
   Predicate,
   Record,
   Ref,
-  Schema,
   Scope,
   Stream,
   pipe,
@@ -70,15 +69,6 @@ import { describeCause } from "~/domain/Failure.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { BASE_CSS, type ColorScheme, detectPageScheme, schemeOf } from "~/ui/Styles.ts";
-
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
-
-export class UiError extends Schema.TaggedError<UiError>()("UiError", {
-  reason: Schema.Literals(["unavailable"]),
-  detail: Schema.String,
-}) {}
 
 // ---------------------------------------------------------------------------
 // Layers of the overlay
@@ -688,7 +678,6 @@ export class Ui extends Context.Service<
       // failure that a caller could handle.
       const shadow = yield* pipe(
         dom.attempt("Element.attachShadow", () => host.attachShadow({ mode: "closed" })),
-        Effect.mapError((error) => new UiError({ reason: "unavailable", detail: error.detail })),
         Effect.orDie,
       );
 
