@@ -43,7 +43,6 @@ import {
 } from "~/domain/Key.ts";
 import {
   canExtend,
-  deepestBranch,
   extendBranches,
   type KeyBinding,
   type KeyBranch,
@@ -320,7 +319,7 @@ const restartStep = (progress: Progress, extended: ReadonlyArray<KeyBranch>): Op
     Array.match({
       onEmpty: () =>
         pipe(
-          deepestBranch(progress.branches),
+          Array.last(progress.branches),
           Option.flatMap((branch) => branch.accepted),
         ),
       onNonEmpty: () => Option.none<KeyBinding>(),
@@ -364,7 +363,7 @@ const branchStep = (
         ),
       onNonEmpty: (live) =>
         pipe(
-          deepestBranch(live),
+          Array.last(live),
           Option.filter((deepest) => !canExtend(deepest)),
           Option.flatMap((deepest) => deepest.accepted),
           Option.match({

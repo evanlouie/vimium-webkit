@@ -831,14 +831,6 @@ export const shiftedNonLetter = (notation: string): boolean =>
     Option.exists((char) => char.toUpperCase() === char.toLowerCase()),
   );
 
-/**
- * Combinations that Safari *does* send on macOS, but which
- * [WebKit bug 191768](https://bugs.webkit.org/show_bug.cgi?id=191768) shows
- * can be unpreventable on iOS. They are permitted, and marked in the help
- * dialog.
- */
-export const IOS_UNCERTAIN: ReadonlySet<string> = new Set(["<m-s>", "<m-p>", "<m-f>", "<m-d>"]);
-
 // ---------------------------------------------------------------------------
 // The count prefix
 // ---------------------------------------------------------------------------

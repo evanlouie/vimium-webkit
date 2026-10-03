@@ -14,11 +14,9 @@ import {
   canExtend,
   type CompiledMappings,
   compileMappings,
-  deepestBranch,
   type DiagnosticSeverity,
   extendBranches,
   formatDiagnostics,
-  hasErrors,
   type KeyBinding,
   type KeyBranch,
   keysByCommand,
@@ -73,6 +71,10 @@ const withSeverity = (
     result.diagnostics,
     Array.filter((entry) => entry.severity === severity),
   );
+
+/** Does the result hold an error? */
+const hasErrors = (result: CompiledMappings): boolean =>
+  Array.isReadonlyArrayNonEmpty(withSeverity(result, "error"));
 
 /** The severity of the first diagnostic, or `null` when there is none. */
 const firstSeverity = (result: CompiledMappings): string | null =>
@@ -318,7 +320,7 @@ describe("the trie walk", () => {
   /** The accepted binding of the deepest branch, by name. */
   const decision = (cursor: BranchCursor): string =>
     pipe(
-      deepestBranch(cursor),
+      Array.last(cursor),
       Option.flatMap((deepest) => deepest.accepted),
       nameOf,
     );
@@ -359,12 +361,6 @@ describe("the trie walk", () => {
       );
       assert.isTrue(Option.isSome(deep));
       assert.isTrue(finished);
-    }),
-  );
-
-  it.effect("gives no deepest branch when nothing is live", () =>
-    Effect.sync(() => {
-      assert.isTrue(Option.isNone(deepestBranch([])));
     }),
   );
 

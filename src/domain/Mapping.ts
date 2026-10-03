@@ -695,14 +695,6 @@ export const extendBranches = (cursor: BranchCursor, key: string): readonly KeyB
   pipe(cursor, Array.map(extendBranch(key)), Array.getSomes);
 
 /**
- * The deepest branch, which is the branch that lived longest.
- *
- * The cursor is shallowest first, so the last branch is the deepest one. That
- * branch decides, and the longest attempt therefore wins.
- */
-export const deepestBranch = (cursor: BranchCursor): Option.Option<KeyBranch> => Array.last(cursor);
-
-/**
  * Can this branch take another key?
  *
  * While it can, the attempt is not finished, and a binding on the node waits.
@@ -723,12 +715,6 @@ export const keysByCommand = (
     mappings.bindings,
     Array.groupBy((binding): string => binding.command),
     Record.map(Array.map((binding) => written(binding.keys))),
-  );
-
-export const hasErrors = (mappings: CompiledMappings): boolean =>
-  pipe(
-    mappings.diagnostics,
-    Array.some((entry) => entry.severity === "error"),
   );
 
 export const formatDiagnostics = (mappings: CompiledMappings): readonly string[] =>
