@@ -1,5 +1,5 @@
 /**
- * The one Vite configuration, shared by the CLI and by `build/build.ts`.
+ * The Vite configuration of `build/build.ts`, and the facts of each build mode.
  *
  * Vite is here for a single measured reason. esbuild tree-shakes Effect's
  * barrel export badly: `import { Effect } from "effect"` costs 1212 KB under

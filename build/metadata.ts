@@ -69,18 +69,19 @@ export const buildMetadata = (input: MetadataInput): string => {
     ["run-at", "document-start"],
     // Violentmonkey and quoid honour this; Tampermonkey infers the world from
     // the `@grant` list. Content world is required because quoid only exposes
-    // the GM API there (§5.3).
+    // the GM API there.
     ["inject-into", "content"],
     ...pipe(
       GRANTS,
       Array.map((grant): Line => ["grant", grant]),
     ),
-    // Exactly the suggestion endpoints, derived from the table in `suggest.ts`
-    // so the grant cannot outlive the code. `@connect *` granted network access
-    // to every host on the web for a feature that talks to five, and a
-    // userscript's grants are the only thing standing between it and the user's
-    // cookies on arbitrary origins. quoid does not implement `@connect` at all,
-    // which degrades to "no suggestions" rather than an error.
+    // Exactly the suggestion endpoints, derived from the table in
+    // `domain/SearchSuggest.ts` so the grant cannot outlive the code.
+    // `@connect *` granted network access to every host on the web for a
+    // feature that talks to five, and a userscript's grants are the only thing
+    // standing between it and the user's cookies on arbitrary origins. quoid
+    // does not implement `@connect` at all, which degrades to "no suggestions"
+    // rather than an error.
     ...pipe(
       SUGGEST_HOSTS,
       Array.map((host): Line => ["connect", host]),
@@ -91,7 +92,7 @@ export const buildMetadata = (input: MetadataInput): string => {
 
   // `@noframes` is deliberately absent. It is a presence-only flag in
   // Tampermonkey — writing `@noframes false` *enables* it in some managers —
-  // and running in every frame is required for cross-frame link hints (§6.5).
+  // and running in every frame is required for cross-frame link hints.
 
   const width = pipe(
     lines,
