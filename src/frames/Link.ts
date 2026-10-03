@@ -45,7 +45,8 @@ import { Exclusions } from "~/core/Exclusions.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { type FrameId, FrameRole } from "~/platform/Realm.ts";
+import type { FrameId } from "~/domain/FrameId.ts";
+import { FrameRole } from "~/platform/Realm.ts";
 import {
   FrameBus,
   type FrameError,

@@ -18,9 +18,9 @@
  *
  * This module knows about `postMessage`, about who a peer is, and about
  * authentication. It knows nothing about hints, exclusions or history. A
- * service that wants a message subscribes to `incoming`, or answers one kind of
- * request with `serve`. Two services that need each other therefore do not
- * import each other, and the layer graph stays a tree.
+ * service answers one kind of message with `serve`, and asks with `request`.
+ * Two services that need each other therefore do not import each other, and
+ * the layer graph stays a tree.
  *
  * ## The port is not the capability
  *
@@ -74,6 +74,7 @@ import {
   pipe,
 } from "effect";
 import { describeThrown } from "~/domain/Failure.ts";
+import type { FrameId } from "~/domain/FrameId.ts";
 import {
   type ChallengeMessage,
   challengeMessage,
@@ -104,13 +105,7 @@ import {
   WIRE_TARGET_TOP,
 } from "~/domain/FrameMessage.ts";
 import { Dom } from "~/platform/Dom.ts";
-import {
-  ANNOUNCE_MESSAGE,
-  type FrameId,
-  FrameRole,
-  Realm,
-  WAKE_MESSAGE,
-} from "~/platform/Realm.ts";
+import { ANNOUNCE_MESSAGE, FrameRole, Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
 import { FrameAuth, type FrameCipher } from "./Auth.ts";
 
 // ---------------------------------------------------------------------------
@@ -179,8 +174,6 @@ export const FrameFailureReason = Schema.Literals([
   "timeout",
   /** This frame is not admitted to the session. */
   "unauthenticated",
-  /** The message did not match the wire schema. */
-  "malformed",
   /** There is no frame with that identity, or there is no link to the top. */
   "no-peer",
   /** The browser refused the post. */
@@ -771,9 +764,6 @@ export class FrameBus extends Context.Service<
      * be cross-origin with no injection, or a parent can be sandboxed.
      */
     readonly ready: Effect.Effect<boolean>;
-
-    /** Every message that reached this frame and passed every check. */
-    readonly incoming: Stream.Stream<InboundMessage>;
 
     /** Send to one peer. */
     readonly send: (target: FrameTarget, message: FrameMessage) => Effect.Effect<void, FrameError>;
@@ -1768,8 +1758,6 @@ export class FrameBus extends Context.Service<
       // The interface
       // ---------------------------------------------------------------------
 
-      const incoming = Stream.fromPubSub(inbox);
-
       /** A member that has no roster yet knows itself. */
       const memberRoster: Effect.Effect<ReadonlyArray<FrameId>> = pipe(
         Ref.get(rosterRef),
@@ -1858,7 +1846,7 @@ export class FrameBus extends Context.Service<
             pipe(post(toFrame(inbound.from), reply, inbound.requestId), Effect.ignore);
 
         yield* pipe(
-          incoming,
+          Stream.fromPubSub(inbox),
           Stream.filter(isInboundOf(kind)),
           Stream.runForEach((inbound) =>
             pipe(
@@ -1887,7 +1875,6 @@ export class FrameBus extends Context.Service<
         frameId: realm.frameId,
         role,
         ready,
-        incoming,
         send,
         broadcast: (message) => post(toAll, message, Option.none()),
         request,

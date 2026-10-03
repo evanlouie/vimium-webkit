@@ -107,7 +107,8 @@ import {
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { type FrameId, FrameRole } from "~/platform/Realm.ts";
+import type { FrameId } from "~/domain/FrameId.ts";
+import { FrameRole } from "~/platform/Realm.ts";
 import { OpenInTabResult, Tabs } from "~/platform/Tabs.ts";
 import { BRIEFLY, Hud, HudDuration } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";

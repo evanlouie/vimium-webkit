@@ -17,7 +17,7 @@ import {
   collectFrameDescriptors,
   raceUntilAbort,
 } from "~/features/hints/Hints.ts";
-import { FrameId } from "~/platform/Realm.ts";
+import { FrameId } from "~/domain/FrameId.ts";
 
 const SAFETY_MS = 1000;
 

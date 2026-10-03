@@ -22,21 +22,12 @@ import {
   Option,
   Predicate,
   Result,
-  Schema,
   flow,
   pipe,
 } from "effect";
 import { constFalse } from "effect/Function";
 import { FrameId } from "~/domain/FrameId.ts";
 import { Dom } from "./Dom.ts";
-
-/**
- * The frame identity, given again here.
- *
- * `domain/FrameId.ts` owns the brand, because the wire schemas decode into it.
- * A caller that asks the realm for its identity then needs only one import.
- */
-export { FrameId };
 
 /** A variant with no fields. The type `{}` would mean any value that is not nullish. */
 type NoFields = Record<never, never>;
@@ -55,10 +46,6 @@ export type FrameRole = Data.TaggedEnum<{
 }>;
 
 export const FrameRole = Data.taggedEnum<FrameRole>();
-
-export class RealmError extends Schema.TaggedError<RealmError>()("RealmError", {
-  detail: Schema.String,
-}) {}
 
 /** How deep the wake walk goes. Ad-heavy pages nest without limit. */
 const MAX_WAKE_DEPTH = 16;

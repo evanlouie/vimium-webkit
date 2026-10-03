@@ -40,10 +40,11 @@ import {
   pipe,
   Struct,
 } from "effect";
+import { FrameId } from "~/domain/FrameId.ts";
 import { frameCredentialGroup, sessionGroup } from "~/domain/Persisted.ts";
 import { FrameAuth, type FrameHandshake } from "~/frames/Auth.ts";
 import { KeyValueStore, STORAGE_PREFIX, StoreKind } from "~/platform/KeyValueStore.ts";
-import { FrameId, FrameRole, Realm } from "~/platform/Realm.ts";
+import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
 
 /** The key of the group that only `frames/Auth.ts` builds. */
