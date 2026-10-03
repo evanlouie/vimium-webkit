@@ -129,7 +129,7 @@ import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import type { FrameId } from "~/domain/FrameId.ts";
 import { containsDeep, shadowHostChain } from "~/platform/Elements.ts";
-import { FrameRole } from "~/platform/Realm.ts";
+import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { OpenInTabResult, Tabs } from "~/platform/Tabs.ts";
 import { BRIEFLY, Hud, HudDuration } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
@@ -998,6 +998,7 @@ export const Hints = {
       const report = yield* Report;
       const capabilities = yield* Capabilities;
       const bus = yield* FrameBus;
+      const realm = yield* Realm;
       const tabs = yield* Tabs;
       const clipboard = yield* Clipboard;
 
@@ -1959,6 +1960,10 @@ export const Hints = {
       });
 
       const startRound = Effect.fn("Hints.startRound")(function* (mode: HintMode) {
+        // A child frame starts only when something wakes it, so a round must
+        // wake the frames below this one, whatever started the round: a key,
+        // the command list or another command.
+        yield* realm.wakeDescendants;
         yield* ensureStyles;
         yield* pipe(pendingActivationRef, Ref.set(Option.none()));
 
