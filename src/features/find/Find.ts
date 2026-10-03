@@ -74,7 +74,8 @@ import {
   DEFAULT_MAX_CHARACTERS,
   type FindMatch,
   firstMatchInView,
-  indexAtSelection,
+  CaretPlace,
+  caretPlace,
   matchesInRuns,
   type RunSearch,
   type TextRun,
@@ -221,26 +222,42 @@ const outcomeOf = (query: ParsedFindQuery, search: RunSearch, hits: Hits): Searc
     }),
   );
 
-/** `n` and `N`: the current match moves by `delta`, and wraps, as it does in Vim. */
+/** The match that `index` names when the matches wrap, as they do in Vim. */
+const wrapped = (found: Found, index: number): Found => {
+  const count = found.matches.length;
+  return pipe(found, Struct.assign({ current: ((index % count) + count) % count }));
+};
+
+/** `n` and `N`: the current match moves by `delta`. */
 const stepped =
   (delta: number) =>
-  (found: Found): Found => {
-    const count = found.matches.length;
-    return pipe(
-      found,
-      Struct.assign({ current: (((found.current + delta) % count) + count) % count }),
-    );
-  };
+  (found: Found): Found =>
+    wrapped(found, found.current + delta);
 
-/** The current match becomes the one that holds the caret, or the one just after it. */
+/**
+ * The match that a step of `delta` from the caret starts from.
+ *
+ * A caret inside a match starts from that match, so the step moves past it. A
+ * caret between two matches starts between them: a step forward lands on the
+ * match after the caret, and a step back on the match before it.
+ */
+const stepStart = (delta: number): ((place: CaretPlace) => number) =>
+  CaretPlace.$match({
+    Inside: ({ index }) => index,
+    Before: ({ index }) =>
+      pipe(delta > 0, Boolean.match({ onFalse: () => index, onTrue: () => index - 1 })),
+  });
+
+/** The current match becomes the one that a step of `delta` from the caret starts from. */
 const anchoredAt =
-  (selection: Selection) =>
+  (selection: Selection, delta: number) =>
   (found: Found): Found =>
     pipe(
-      indexAtSelection(selection, found.matches),
+      caretPlace(selection, found.matches),
+      Option.map(stepStart(delta)),
       Option.match({
         onNone: () => found,
-        onSome: (current) => pipe(found, Struct.assign({ current })),
+        onSome: (start) => wrapped(found, start),
       }),
     );
 
@@ -642,12 +659,28 @@ export class Find extends Context.Service<
         return yield* searchQuery(parsed, anchor);
       });
 
+      /** Anchor a step of `delta` at the caret, when there is a selection. */
+      const atCaret = (found: Found, delta: number): Effect.Effect<Found> =>
+        pipe(
+          selection,
+          Effect.map(
+            Option.match({
+              onNone: () => found,
+              onSome: (target) => anchoredAt(target, delta)(found),
+            }),
+          ),
+        );
+
       /**
        * The matches of the last search. With none, the document is walked
        * again and the same query runs again first, because the document may
        * have changed since.
+       *
+       * The new search is anchored at the caret, for a step of `delta`.
+       * Escape and a click drop the matches, and the selection still shows
+       * where the user stopped or clicked, so `n` continues from there.
        */
-      const liveHits = (last: ParsedFindQuery): Effect.Effect<Hits> =>
+      const liveHits = (last: ParsedFindQuery, delta: number): Effect.Effect<Hits> =>
         pipe(
           Ref.get(hits),
           Effect.flatMap(
@@ -658,6 +691,12 @@ export class Find extends Context.Service<
                   refreshRuns(),
                   Effect.andThen(searchQuery(last, Option.none())),
                   Effect.andThen(Ref.get(hits)),
+                  Effect.flatMap(
+                    Hits.$match({
+                      None: () => Effect.succeed(NO_HITS),
+                      Found: (found) => atCaret(found, delta),
+                    }),
+                  ),
                 ),
             }),
           ),
@@ -1140,12 +1179,7 @@ export class Find extends Context.Service<
         word: string,
         direction: 1 | -1,
       ) {
-        const target = yield* selection;
-        const anchored = pipe(
-          target,
-          Option.map((target) => anchoredAt(target)(found)),
-          Option.getOrElse(() => found),
-        );
+        const anchored = yield* atCaret(found, direction);
         const moved = yield* stepBy(anchored, direction);
         yield* showMatch(moved, `${word}  `);
         yield* enterPost();
@@ -1186,14 +1220,15 @@ export class Find extends Context.Service<
         // release clears the matches.
         yield* ensurePost();
         const { step: sign } = yield* Ref.get(heading);
-        const latest = yield* liveHits(last);
+        const delta = count * sign;
+        const latest = yield* liveHits(last, delta);
         yield* pipe(
           latest,
           Hits.$match({
             None: () => hud.show(`No matches for "${last.raw}"`, BRIEFLY),
             Found: (found) =>
               pipe(
-                stepBy(found, count * sign),
+                stepBy(found, delta),
                 Effect.flatMap((moved) => showMatch(moved, "")),
               ),
           }),

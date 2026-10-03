@@ -17,7 +17,7 @@
  * word.
  */
 
-import { Array, Boolean, HashSet, Match, Number, Option, Result, flow, pipe } from "effect";
+import { Array, Boolean, Data, HashSet, Match, Number, Option, Result, flow, pipe } from "effect";
 import { constFalse } from "effect/Function";
 import type { CapabilityReport } from "~/platform/Capabilities.ts";
 import { isElement, isText } from "~/platform/Elements.ts";
@@ -968,39 +968,59 @@ export const firstMatchInView = (matches: ReadonlyArray<{ readonly rect: RectLik
     Option.getOrElse(() => 0),
   );
 
+/** Where the caret is among the matches. */
+export type CaretPlace = Data.TaggedEnum<{
+  /**
+   * Inside the match, or at one of its ends. A caret just after a match is
+   * still inside it, which is where a click after a word leaves it.
+   */
+  Inside: { readonly index: number };
+  /** Before the match, and after the one before it. */
+  Before: { readonly index: number };
+}>;
+
+export const CaretPlace = Data.taggedEnum<CaretPlace>();
+
 /**
- * The index of the match that holds the caret, or of the one just after it.
- *
- * That is the first match whose range holds the caret or starts after it. A
- * caret just after a match is still inside it, which is where a click after a
- * word leaves it. A caret after the last match gives `None`.
+ * Where the focus of the selection is among the matches.
  *
  * `comparePoint` throws when the point is in another tree, which is usual once
- * a shadow root is involved. A failure therefore means "no opinion".
+ * a shadow root is involved. A failure therefore means "no opinion", and no
+ * opinion about any match gives `None`.
+ *
+ * A caret after the last match gives `None` too. The host of our own overlay
+ * is at the end of the document, so a focus in the HUD reads as such a caret,
+ * and it must not send `n` to the first match of the page.
  */
-export const indexAtSelection = (
+export const caretPlace = (
   selection: Selection,
   matches: ReadonlyArray<FindMatch>,
-): Option.Option<number> =>
+): Option.Option<CaretPlace> =>
   pipe(
     selection.focusNode,
     Option.fromNullishOr,
-    Option.flatMap((node) =>
-      pipe(matches, Array.findFirstIndex(holdsOrFollows(node, selection.focusOffset))),
-    ),
+    Option.flatMap((node) => pipe(matches, Array.findFirst(placeOf(node, selection.focusOffset)))),
   );
 
 /**
- * Does `match` hold the point, or lie after it? That is what `comparePoint`
- * answers with `0` and `-1`: the point is inside the range, or before it. A
- * throw is no opinion.
+ * Where a point is against match `index`. `comparePoint` answers `0` for a
+ * point inside the range and `-1` for a point before it. A point after the
+ * match, and a throw, say nothing.
  */
-const holdsOrFollows =
+const placeOf =
   (node: Node, offset: number) =>
-  (match: FindMatch): boolean =>
+  (match: FindMatch, index: number): Option.Option<CaretPlace> =>
     pipe(
-      Result.try(() => match.range.comparePoint(node, offset) <= 0),
-      Result.getOrElse(() => false),
+      Result.try(() => match.range.comparePoint(node, offset)),
+      Result.getSuccess,
+      Option.flatMap((side) =>
+        pipe(
+          Match.value(side),
+          Match.when(0, () => CaretPlace.Inside({ index })),
+          Match.when(-1, () => CaretPlace.Before({ index })),
+          Match.option,
+        ),
+      ),
     );
 
 /** The word under the caret, or the selected text. This backs `*` and `#`. */
