@@ -92,17 +92,25 @@ const placeholderFor = (source: OmnibarSource): string =>
     Match.exhaustive,
   );
 
-const KEY_LEGEND = "↑↓ move · ⏎ open · ⇧⏎ new tab · esc close";
+/** The keys, as a session that opens in this tab or in a new one reads them. */
+const keyLegend = (newTab: boolean): string =>
+  pipe(
+    newTab,
+    Boolean.match({
+      onFalse: () => "↑↓ move · ⏎ open · ⇧⏎ new tab · esc close",
+      onTrue: () => "↑↓ move · ⏎ open in a new tab · esc close",
+    }),
+  );
 
 /** The badge of a suggestion when no engine keyword names the engine. */
 const DEFAULT_SUGGESTION_BADGE = "Suggested";
 
-const footerText = (badLines: number): string =>
+const footerText = (legend: string, badLines: number): string =>
   pipe(
     Match.value(badLines),
-    Match.when(0, () => KEY_LEGEND),
-    Match.when(1, () => `${KEY_LEGEND} · 1 malformed searchEngines line`),
-    Match.orElse((count) => `${KEY_LEGEND} · ${count} malformed searchEngines lines`),
+    Match.when(0, () => legend),
+    Match.when(1, () => `${legend} · 1 malformed searchEngines line`),
+    Match.orElse((count) => `${legend} · ${count} malformed searchEngines lines`),
   );
 
 /** The sign in front of the field. */
@@ -240,6 +248,8 @@ const suggestionTarget = (
 
 interface Session {
   readonly source: OmnibarSource;
+  /** Enter opens a new tab, as Shift and Enter always do. `O` asks for this. */
+  readonly newTab: boolean;
   /** Closing this removes the overlay and exits the mode. */
   readonly scope: Scope.Closeable;
   readonly view: OmnibarView;
@@ -408,7 +418,7 @@ export class Omnibar extends Context.Service<
         const selected = yield* Ref.updateAndGet(current.selected, clamp(state.rows.length));
 
         yield* current.view.setPrefix(promptOf(state));
-        yield* current.view.setFooter(footerText(parsed.badLines));
+        yield* current.view.setFooter(footerText(keyLegend(current.newTab), parsed.badLines));
         yield* current.view.render(state.rows, selected);
         return state;
       });
@@ -551,7 +561,7 @@ export class Omnibar extends Context.Service<
             Effect.map(Array.get(index)),
             Effect.flatMap(Effect.fromOption),
           );
-          yield* pipe(row.action, perform(current, newTab));
+          yield* pipe(row.action, perform(current, newTab || current.newTab));
         },
         // No session, or no row at the index: the list changed under the key
         // or the click. Nothing happens.
@@ -662,7 +672,7 @@ export class Omnibar extends Context.Service<
         ),
       );
 
-      const open = Effect.fn("Omnibar.open")(function* (source: OmnibarSource) {
+      const open = Effect.fn("Omnibar.open")(function* (source: OmnibarSource, newTab: boolean) {
         yield* close;
         // The omnibar takes the keyboard, so a message that is still on
         // screen is no longer the thing that the user looks at.
@@ -718,6 +728,7 @@ export class Omnibar extends Context.Service<
 
         const current: Session = {
           source,
+          newTab,
           scope,
           view,
           rows,
@@ -790,13 +801,13 @@ export class Omnibar extends Context.Service<
 
       // A command body runs on a forked fiber, so it may suspend.
       yield* commands.registerAll({
-        "Vomnibar.activate": () => open("url"),
-        "Vomnibar.activateInNewTab": () => open("url"),
-        "Vomnibar.activateCommands": () => open("command"),
-        "Vomnibar.activateSearch": () => open("search"),
+        "Vomnibar.activate": () => open("url", false),
+        "Vomnibar.activateInNewTab": () => open("url", true),
+        "Vomnibar.activateCommands": () => open("command", false),
+        "Vomnibar.activateSearch": () => open("search", false),
         // Tier C, and still a body. The row explains the refusal and shows the
         // shortcut of the browser, which a silent command cannot do.
-        "Vomnibar.activateBookmarks": () => open("bookmark"),
+        "Vomnibar.activateBookmarks": () => open("bookmark", false),
         "clear-history": () => clearHistory(),
       });
 
