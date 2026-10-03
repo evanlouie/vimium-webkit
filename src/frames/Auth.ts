@@ -75,6 +75,7 @@
  */
 
 import {
+  Boolean,
   Context,
   Effect,
   flow,
@@ -261,6 +262,14 @@ export class FrameAuth extends Context.Service<
 
     /** The cipher of one port. Both ends derive the same one. */
     readonly cipher: (handshake: FrameHandshake) => Effect.Effect<FrameCipher, FrameAuthError>;
+
+    /**
+     * Whether this realm can hold a credential at all.
+     *
+     * `false` on a manager with no private value store. No frame of the page
+     * can then join a session, so nothing need wait for one.
+     */
+    readonly available: boolean;
   }
 >()("vimium/frames/FrameAuth") {
   static readonly layer: Layer.Layer<FrameAuth, never, Realm | KeyValueStore> = Layer.effect(
@@ -311,12 +320,20 @@ export class FrameAuth extends Context.Service<
        * hostile page could otherwise read the credential out of
        * `localStorage` and calculate a valid proof.
        */
-      const privateStore: Effect.Effect<void, FrameAuthError> = pipe(
+      const available = pipe(
         kv.kind,
         StoreKind.$match({
-          GmAsync: () => Effect.void,
-          GmSync: () => Effect.void,
-          Memory: () =>
+          GmAsync: () => true,
+          GmSync: () => true,
+          Memory: () => false,
+        }),
+      );
+
+      const privateStore: Effect.Effect<void, FrameAuthError> = pipe(
+        available,
+        Boolean.match({
+          onTrue: () => Effect.void,
+          onFalse: () =>
             Effect.fail(
               new FrameAuthError({
                 reason: "unavailable",
@@ -652,6 +669,7 @@ export class FrameAuth extends Context.Service<
         joinProof,
         verifyJoin,
         cipher,
+        available,
       });
     }),
   );
