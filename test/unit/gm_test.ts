@@ -52,8 +52,6 @@ describe("Gm value API selection", () => {
         xhrSync: Option.none(),
         addValueChangeListener: Option.none(),
         removeValueChangeListener: Option.none(),
-        registerMenuCommand: Option.none(),
-        addStyle: Option.none(),
         hasUnsafeWindow: false,
         windowClose: Option.none(),
       };

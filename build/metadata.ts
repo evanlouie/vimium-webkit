@@ -48,7 +48,6 @@ const GRANTS: readonly string[] = [
   // feature-probed, so requesting them costs nothing where they do not exist.
   "GM_addValueChangeListener",
   "GM_removeValueChangeListener",
-  "GM_registerMenuCommand",
   "window.close",
 ];
 

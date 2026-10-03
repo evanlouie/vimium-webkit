@@ -41,8 +41,6 @@ import type {
   GmXhrResponse,
 } from "./GmApi.ts";
 
-export type { GmOpenInTabOptions, GmXhrResponse };
-
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -123,11 +121,6 @@ type AddValueChangeListener = (
   ) => void,
 ) => string | number;
 type RemoveValueChangeListener = (listenerId: string | number) => void;
-type RegisterMenuCommand = (
-  caption: string,
-  onClick: () => void,
-  accessKey?: string,
-) => string | number;
 
 /** Every binding of the manager that this module can use. `None` is an absent binding. */
 interface GmSurface {
@@ -141,8 +134,6 @@ interface GmSurface {
   readonly xhrSync: Option.Option<XhrSync>;
   readonly addValueChangeListener: Option.Option<AddValueChangeListener>;
   readonly removeValueChangeListener: Option.Option<RemoveValueChangeListener>;
-  readonly registerMenuCommand: Option.Option<RegisterMenuCommand>;
-  readonly addStyle: Option.Option<(css: string) => unknown>;
   readonly hasUnsafeWindow: boolean;
   readonly windowClose: Option.Option<() => void>;
 }
@@ -239,14 +230,6 @@ const detectSurface = (): GmSurface => {
       () => typeof GM_removeValueChangeListener,
       () => GM_removeValueChangeListener,
     ),
-    registerMenuCommand: callable(
-      () => typeof GM_registerMenuCommand,
-      () => GM_registerMenuCommand,
-    ),
-    addStyle: callable(
-      () => typeof GM_addStyle,
-      () => GM_addStyle,
-    ),
     hasUnsafeWindow: probeOr(
       () => typeof unsafeWindow !== "undefined" && unsafeWindow !== undefined,
       false,
@@ -272,7 +255,6 @@ export interface ManagerIdentity {
   readonly handlerVersion: Option.Option<string>;
   readonly scriptVersion: Option.Option<string>;
   readonly injectInto: Option.Option<string>;
-  readonly sandboxMode: Option.Option<string>;
 }
 
 /** A property of a value that the manager gave, when that value is an object. */
@@ -302,7 +284,6 @@ const readIdentity = (info: unknown): ManagerIdentity => {
       stringOf("injectInto"),
       Option.orElse(() => ofScript("injectInto")),
     ),
-    sandboxMode: pipe(info, stringOf("sandboxMode")),
   };
 };
 
@@ -473,18 +454,12 @@ export interface XhrRequest {
  * from an empty body, so the text is `""` then.
  */
 export interface XhrResponse {
-  readonly readyState: number;
   readonly status: number;
-  readonly statusText: string;
-  readonly responseHeaders: string;
   readonly responseText: string;
 }
 
 const toXhrResponse = (response: GmXhrResponse): XhrResponse => ({
-  readyState: response.readyState,
   status: response.status,
-  statusText: response.statusText,
-  responseHeaders: response.responseHeaders,
   responseText: response.responseText ?? "",
 });
 
@@ -685,20 +660,6 @@ const namespaceRequest = (ns: GmNamespace): Option.Option<XhrSend> =>
     ),
   );
 
-type MenuRegister = (caption: string, onClick: () => void) => unknown;
-
-/** `GM.registerMenuCommand`, called on its namespace. */
-const namespaceMenu = (ns: GmNamespace): Option.Option<MenuRegister> =>
-  pipe(
-    ns.registerMenuCommand,
-    Option.fromNullishOr,
-    Option.map(
-      (add): MenuRegister =>
-        (caption, onClick) =>
-          add.call(ns, caption, onClick),
-    ),
-  );
-
 // ---------------------------------------------------------------------------
 // The service
 // ---------------------------------------------------------------------------
@@ -708,8 +669,6 @@ export class Gm extends Context.Service<
   {
     /** Diagnostics only. */
     readonly identity: ManagerIdentity;
-    /** The raw `GM_info`, for a bug report. */
-    readonly info: unknown;
 
     /** The best value API that this manager has, if it has one. */
     readonly values: Option.Option<GmValueApi>;
@@ -720,9 +679,7 @@ export class Gm extends Context.Service<
     readonly canOpenInTab: boolean;
     readonly canSetClipboard: boolean;
     readonly canRequest: boolean;
-    readonly canRegisterMenuCommand: boolean;
     readonly canCloseWindow: boolean;
-    readonly canAddStyle: boolean;
 
     /**
      * Open a URL in a new tab.
@@ -752,12 +709,6 @@ export class Gm extends Context.Service<
      * "this function is off", and do not report it more than once.
      */
     readonly request: (request: XhrRequest) => Effect.Effect<XhrResponse, GmError>;
-
-    /** Add a menu entry for the life of the enclosing scope. */
-    readonly registerMenuCommand: (
-      caption: string,
-      onClick: Effect.Effect<void>,
-    ) => Effect.Effect<void, GmError>;
 
     /** Close this tab. Only Violentmonkey and Tampermonkey grant this. */
     readonly closeWindow: Effect.Effect<void, GmError>;
@@ -839,28 +790,6 @@ const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
     return toXhrResponse(response);
   });
 
-  const register: Option.Option<MenuRegister> = pipe(
-    surface.registerMenuCommand,
-    Option.orElse(() => pipe(surface.namespace, Option.flatMap(namespaceMenu))),
-  );
-
-  const registerMenuCommand = (
-    caption: string,
-    onClick: Effect.Effect<void>,
-  ): Effect.Effect<void, GmError> =>
-    pipe(
-      register,
-      Option.match({
-        onNone: () => Effect.fail(gmUnavailable("GM_registerMenuCommand")),
-        onSome: (add) =>
-          gmAttempt("GM_registerMenuCommand", () => {
-            add(caption, () => {
-              Effect.runFork(onClick);
-            });
-          }),
-      }),
-    );
-
   const closeWindow = pipe(
     surface.windowClose,
     Effect.fromOption(() => gmUnavailable("window.close")),
@@ -869,7 +798,6 @@ const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
 
   return Gm.of({
     identity: readIdentity(surface.info),
-    info: surface.info,
     values: pipe(
       surface,
       syncValueApi,
@@ -883,13 +811,10 @@ const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
     canOpenInTab: Option.isSome(managerOpen),
     canSetClipboard: Option.isSome(clipboardWrite),
     canRequest: Option.isSome(send),
-    canRegisterMenuCommand: Option.isSome(register),
     canCloseWindow: Option.isSome(surface.windowClose),
-    canAddStyle: Option.isSome(surface.addStyle),
     openInTab,
     setClipboard,
     request,
-    registerMenuCommand,
     closeWindow,
   });
 };

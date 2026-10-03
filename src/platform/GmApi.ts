@@ -77,13 +77,6 @@ export interface GmNamespace {
   readonly xmlHttpRequest?: (
     details: GmXhrDetails,
   ) => GmXhrHandle | undefined | Promise<GmXhrHandle | undefined>;
-  readonly registerMenuCommand?: (
-    caption: string,
-    onClick: () => void,
-    accessKey?: string,
-  ) => unknown;
-  readonly addStyle?: (css: string) => unknown;
-  readonly addElement?: (tagName: string, attributes: Readonly<Record<string, string>>) => Element;
 }
 
 declare global {
@@ -116,14 +109,6 @@ declare global {
   function GM_setClipboard(data: string, type?: string): void;
 
   function GM_xmlhttpRequest(details: GmXhrDetails): GmXhrHandle | undefined;
-
-  function GM_registerMenuCommand(
-    caption: string,
-    onClick: () => void,
-    accessKey?: string,
-  ): string | number;
-
-  function GM_addStyle(css: string): HTMLStyleElement | undefined;
 
   /** Present only in page-world-capable managers. Never in quoid. */
   const unsafeWindow: (Window & typeof globalThis) | undefined;

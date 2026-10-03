@@ -25,7 +25,6 @@ const healthy: CapabilityReport = {
   openInTabBackground: true,
   setClipboard: true,
   xhr: true,
-  menuCommand: true,
   windowClose: true,
 
   adoptedStyleSheets: true,

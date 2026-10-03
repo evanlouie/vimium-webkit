@@ -207,7 +207,6 @@ const capabilitiesOf = (applePlatform: boolean): Layer.Layer<Capabilities> =>
       openInTabBackground: false,
       setClipboard: false,
       xhr: false,
-      menuCommand: false,
       windowClose: false,
       adoptedStyleSheets: false,
       constructableStyleSheets: false,

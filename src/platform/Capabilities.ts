@@ -60,7 +60,6 @@ export interface CapabilityReport {
   readonly openInTabBackground: boolean;
   readonly setClipboard: boolean;
   readonly xhr: boolean;
-  readonly menuCommand: boolean;
   readonly windowClose: boolean;
 
   // --- The browser surface ---
@@ -287,7 +286,6 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
       openInTabBackground: gm.canOpenInTab,
       setClipboard: gm.canSetClipboard,
       xhr: gm.canRequest,
-      menuCommand: gm.canRegisterMenuCommand,
       windowClose: gm.canCloseWindow,
 
       adoptedStyleSheets,
