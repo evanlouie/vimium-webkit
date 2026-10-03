@@ -38,7 +38,7 @@
  *    never runs its scripts again. The hook therefore gets `Resumable`, and
  *    nothing that must be built again may be released. Only `pagehide` with
  *    `persisted === false` gives `Final`.
- * 3. **`visibilitychange` to `hidden` runs the same hooks.** It is the last
+ * 3. **`visibilitychange` to `hidden` runs the same hook.** It is the last
  *    moment that mobile WebKit reliably gives us. A tab that goes to the
  *    background may never see `pagehide`. It is never final: the tab can come
  *    forward again. `unload` is not used at all. WebKit refuses to cache a page
@@ -52,7 +52,6 @@
  */
 
 import {
-  Array,
   Boolean,
   Context,
   Data,
@@ -110,19 +109,6 @@ export const PageExit = Data.taggedEnum<PageExit>();
  */
 export type ExitHook = (exit: PageExit) => Effect.Effect<void>;
 
-/**
- * One registration of a hook.
- *
- * The token is the key, and not the function. Two scopes may register the same
- * function reference, and a filter on the reference would remove both. The
- * token is a plain object, so it is equal to itself only.
- */
-interface Registration {
-  readonly hook: ExitHook;
-}
-
-type Registrations = ReadonlyArray<Registration>;
-
 /** The fiber of the last-resource poll, while it runs. */
 type Poller = Fiber.Fiber<unknown, never>;
 
@@ -157,8 +143,8 @@ export class Lifecycle extends Context.Service<
     /**
      * Run this work when the page goes away or goes to the background.
      *
-     * The hook belongs to the enclosing scope, and it goes when that scope
-     * closes.
+     * A frame has one hook, and `src/boot/Bootstrap.ts` gives it. The hook
+     * belongs to the enclosing scope, and it goes when that scope closes.
      */
     readonly onExit: (hook: ExitHook) => Effect.Effect<void, never, Scope.Scope>;
   }
@@ -170,7 +156,7 @@ export class Lifecycle extends Context.Service<
       const bus = yield* PubSub.unbounded<LifecycleEvent>();
       const url = yield* pipe(dom.href, Effect.flatMap(Ref.make));
       const poller = yield* Ref.make(Option.none<Poller>());
-      const exitHooks = yield* Ref.make<Registrations>([]);
+      const exitHook = yield* Ref.make(Option.none<ExitHook>());
 
       const emit = (event: LifecycleEvent): Effect.Effect<void> =>
         pipe(bus, PubSub.publish(event), Effect.asVoid);
@@ -216,39 +202,36 @@ export class Lifecycle extends Context.Service<
 
       const pollWhileVisible = pipe(startPolling, Effect.when(isVisible), Effect.asVoid);
 
-      const register = (entry: Registration): Effect.Effect<void, never, Scope.Scope> => {
-        const add = pipe(exitHooks, Ref.update<Registrations>(Array.append(entry)));
-        const remove = pipe(
-          exitHooks,
-          Ref.update<Registrations>(Array.filter((other) => other !== entry)),
-        );
-        return Effect.acquireRelease(add, () => remove);
-      };
-
-      /** A fresh token for each registration. Read `Registration`. */
       const onExit = (hook: ExitHook): Effect.Effect<void, never, Scope.Scope> =>
-        Effect.suspend(() => register({ hook }));
+        Effect.acquireRelease(pipe(exitHook, Ref.set(Option.some(hook))), () =>
+          pipe(exitHook, Ref.set(Option.none<ExitHook>())),
+        );
 
       /**
-       * Start every hook now, on this stack.
+       * Start the hook now, on this stack.
        *
        * `platform/Dom.ts` runs the listener with `runSyncExitWith`. That call
-       * drains its own scheduler, so the part of a hook before the first
+       * drains its own scheduler, so the part of the hook before the first
        * suspension happens inside the dispatch. `startImmediately` says the
        * same thing at the fork, and it does not depend on the drain. A plain
        * `yield*` would be wrong: a hook that suspends would become a defect
        * instead of work.
+       *
+       * The fork is detached, and it must stay so. A final exit releases the
+       * scope of this layer, and a fiber of that scope would be interrupted by
+       * its own hook.
        */
-      const startExitHooks = Effect.fnUntraced(function* (exit: PageExit) {
-        const entries = yield* Ref.get(exitHooks);
-        yield* pipe(
-          entries,
-          Effect.forEach(
-            ({ hook }) => pipe(hook(exit), Effect.forkDetach({ startImmediately: true })),
-            { discard: true },
+      const startExitHook = (exit: PageExit): Effect.Effect<void> =>
+        pipe(
+          Ref.get(exitHook),
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.void,
+              onSome: (hook) =>
+                pipe(hook(exit), Effect.forkDetach({ startImmediately: true }), Effect.asVoid),
+            }),
           ),
         );
-      });
 
       /** The tab came forward: poll again, read the URL, and say so. */
       const comeForward = Effect.gen(function* () {
@@ -264,10 +247,7 @@ export class Lifecycle extends Context.Service<
        * the background may never see `pagehide`. The tab can come forward
        * again, so this exit is never final.
        */
-      const goToBackground = pipe(
-        stopPolling,
-        Effect.andThen(startExitHooks(PageExit.Resumable())),
-      );
+      const goToBackground = pipe(stopPolling, Effect.andThen(startExitHook(PageExit.Resumable())));
 
       yield* dom.listen("window", "popstate", () => check);
       yield* dom.listen("window", "hashchange", () => check);
@@ -305,12 +285,12 @@ export class Lifecycle extends Context.Service<
       });
 
       const onPageHide = Effect.fnUntraced(function* (event: PageTransitionEvent) {
-        // The hooks come first, and everything else comes second. They are the
+        // The hook comes first, and everything else comes second. It is the
         // work that the page may have no time for. The bus is last: a
         // subscriber reads it on another fiber, which can run after the page
         // is gone.
         const exit = exitOf(event);
-        yield* startExitHooks(exit);
+        yield* startExitHook(exit);
         yield* stopPolling;
         yield* pipe(
           exit,
