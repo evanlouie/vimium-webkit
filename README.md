@@ -9,8 +9,8 @@ Tampermonkey, Violentmonkey, and the Safari-native userscript managers. It
 exists because Vimium is a browser extension and Safari's extension model — plus
 a handful of WebKit-specific behaviours — makes a straight port impossible.
 
-The full engineering rationale, including every WebKit limitation and how it is
-worked around, is in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+The design of the code, and the WebKit limits that shape it, are in
+[`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ---
 
@@ -58,15 +58,13 @@ A userscript is **content-script-only**: there is no service worker, no
 Roughly a fifth of Vimium's command set depends on exactly those APIs.
 
 Commands are classified into three tiers, and **all three are bound**. Pressing
-`J` does not silently do nothing — it tells you why tab switching is impossible
-and shows you the native Safari shortcut instead.
-
-| Tier | Count | Behaviour |
+`J` does not silently do nothing. It tells you why tab switching is impossible,
+and `?` shows the native Safari shortcut beside the command.
 
 | Tier  | Count | Meaning                                                               |
 | ----- | ----- | --------------------------------------------------------------------- |
 | **A** | 37    | Full parity. No `GM_*` capability needed; identical on every manager. |
-| **B** | 22    | Works, with a documented caveat, or depends on a `GM_*` capability.   |
+| **B** | 23    | Works, with a documented caveat, or depends on a `GM_*` capability.   |
 | **C** | 18    | Not implementable. Greyed out in `?`; pressing the key explains why.  |
 
 > [!NOTE]
@@ -91,7 +89,6 @@ and shows you the native Safari shortcut instead.
 | `zH` `0`            | `scrollToLeft`                  | Scroll all the way left                        |
 | `zL` `$`            | `scrollToRight`                 | Scroll all the way right                       |
 | `r`                 | `reload`                        | Reload the page                                |
-| `R`                 | `reloadHard`                    | Reload, bypassing the cache¹                   |
 | `H`                 | `goBack`                        | Go back in history                             |
 | `L`                 | `goForward`                     | Go forward in history                          |
 | `gu`                | `goUp`                          | Go up the URL hierarchy                        |
@@ -117,31 +114,29 @@ and shows you the native Safari shortcut instead.
 | —                   | `showSettings`                  | Open settings                                  |
 | —                   | `passNextKey`                   | Pass the next key to the page                  |
 
-¹ A userscript cannot request a cache-bypassing reload. `R` approximates it with
-a cache-busting query parameter and says so in the HUD.
-
 ### Tier B — works, with a caveat
 
-| Keys           | Command                                          | Caveat                                                                                         |
-| -------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| `F`            | `LinkHints.activateModeToOpenInNewTab`           | Routed through `GM_openInTab`; synthetic ⌘-clicks do not open tabs in WebKit                   |
-| `<a-f>`        | `LinkHints.activateModeToOpenInNewForegroundTab` | Same                                                                                           |
-| `yf`           | `LinkHints.activateModeToCopyLinkUrl`            | Needs a clipboard API; denied on `http://` without `GM_setClipboard`                           |
-| `yt`           | `LinkHints.activateModeToCopyLinkText`           | Same                                                                                           |
-| `<a-o>`        | `LinkHints.activateModeWithOmnibar`              | Omnibar-lite has no browser history behind it                                                  |
-| `yy`           | `copyCurrentUrl`                                 | Same clipboard caveat                                                                          |
-| `yT`           | `copyCurrentTitle`                               | Same                                                                                           |
-| `p`            | `openCopiedUrlInCurrentTab`                      | WebKit will not hand a script the clipboard, so this opens a pre-focused input — paste with ⌘V |
-| `P`            | `openCopiedUrlInNewTab`                          | Same                                                                                           |
-| `t`            | `createTab`                                      | Needs `GM_openInTab`                                                                           |
-| `x`            | `removeTab`                                      | Needs `@grant window.close` — **unavailable on quoid and Stay**                                |
-| `<a-m>`        | `toggleMuteTab`                                  | Mutes `<audio>`/`<video>` elements only; WebAudio keeps playing                                |
-| `zi` `zo` `z0` | `zoomIn` `zoomOut` `zoomReset`                   | CSS zoom, not browser zoom. Off by default; breaks `position: fixed` on some sites             |
-| `gs`           | `toggleViewSource`                               | Some managers refuse to open `view-source:`                                                    |
-| `o` `O`        | `Vomnibar.activate`, `…InNewTab`                 | Both open the omnibar in this tab: a userscript cannot pre-focus a new tab's address bar       |
-| `:`            | `Vomnibar.activateCommands`                      | Full parity — the command palette needs no browser API                                         |
-| `s`            | `Vomnibar.activateSearch`                        | Suggestions are opt-in and need `@connect`, which quoid does not implement                     |
-| `gf` `gF`      | `nextFrame`, `mainFrame`                         | Cannot see frames the script failed to inject into (CSP-sandboxed, older `about:blank`)        |
+| Keys           | Command                                          | Caveat                                                                                                         |
+| -------------- | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| `F`            | `LinkHints.activateModeToOpenInNewTab`           | Routed through `GM_openInTab`; synthetic ⌘-clicks do not open tabs in WebKit                                   |
+| `<a-f>`        | `LinkHints.activateModeToOpenInNewForegroundTab` | Same                                                                                                           |
+| `yf`           | `LinkHints.activateModeToCopyLinkUrl`            | Needs a clipboard API; denied on `http://` without `GM_setClipboard`                                           |
+| `yt`           | `LinkHints.activateModeToCopyLinkText`           | Same                                                                                                           |
+| `<a-o>`        | `LinkHints.activateModeWithOmnibar`              | Omnibar-lite has no browser history behind it                                                                  |
+| `yy`           | `copyCurrentUrl`                                 | Same clipboard caveat                                                                                          |
+| `yT`           | `copyCurrentTitle`                               | Same                                                                                                           |
+| `p`            | `openCopiedUrlInCurrentTab`                      | WebKit will not hand a script the clipboard, so this opens a pre-focused input — paste with ⌘V                 |
+| `P`            | `openCopiedUrlInNewTab`                          | Same                                                                                                           |
+| `t`            | `createTab`                                      | Uses `GM_openInTab`; without it, `window.open`, which the browser can block                                    |
+| `x`            | `removeTab`                                      | Needs `@grant window.close` — **unavailable on quoid and Stay**                                                |
+| `<a-m>`        | `toggleMuteTab`                                  | Mutes `<audio>`/`<video>` elements only; WebAudio keeps playing                                                |
+| `zi` `zo` `z0` | `zoomIn` `zoomOut` `zoomReset`                   | CSS zoom, not browser zoom. Off by default; breaks `position: fixed` on some sites. Each origin keeps its zoom |
+| `gs`           | `toggleViewSource`                               | Some managers refuse to open `view-source:`                                                                    |
+| `o` `O`        | `Vomnibar.activate`, `…InNewTab`                 | The omnibar opens in this page. `O` opens the chosen row in a new tab, as ⇧⏎ does after `o`                    |
+| `:`            | `Vomnibar.activateCommands`                      | Full parity — the command palette needs no browser API                                                         |
+| `s`            | `Vomnibar.activateSearch`                        | Suggestions are opt-in and need `@connect`, which quoid does not implement                                     |
+| `gf` `gF`      | `nextFrame`, `mainFrame`                         | Cannot see frames the script failed to inject into (CSP-sandboxed, older `about:blank`)                        |
+| —              | `clear-history`                                  | Erases the local history index of the omnibar, and not the browser's history. Run it from `:`                  |
 
 ### Tier C — not implementable
 
@@ -149,6 +144,7 @@ Bound, so pressing the key explains itself rather than doing nothing.
 
 | Keys        | Command                                   | Why, and what to use instead                                                  |
 | ----------- | ----------------------------------------- | ----------------------------------------------------------------------------- |
+| `R`         | `reloadHard`                              | A userscript cannot ask the browser to bypass its cache → ⇧⌘R                 |
 | `gd`        | `LinkHints.activateModeToDownloadLink`    | WebKit ignores synthetic modifier-clicks → right-click → Download Linked File |
 | `gI`        | `LinkHints.activateModeToOpenIncognito`   | No window-creation API                                                        |
 | `X`         | `restoreTab`                              | No session API → ⌘⇧T                                                          |
@@ -167,11 +163,29 @@ Bound, so pressing the key explains itself rather than doing nothing.
 
 Safari never dispatches a `keydown` for `⌘N`, `⌘W`, `⌘Q`, `⌘T`, `⌘R`, `⌘L`,
 `⌃Tab`, or `⌃⇧Tab` — `preventDefault()` is irrelevant because the event does not
-arrive at all. Binding one of these is **rejected at parse time** with an
-explanation, rather than silently accepted and dead. `⌘S`, `⌘P`, `⌘F` and `⌘D`
-are preventable on macOS but
-[possibly not on iOS](https://bugs.webkit.org/show_bug.cgi?id=191768); they are
-allowed and flagged.
+arrive at all. On WebKit, binding one of these is **rejected at parse time**
+with an explanation, rather than silently accepted and dead. On another engine
+the binding stays, with a warning. `⌘S`, `⌘P`, `⌘F` and `⌘D` are preventable on
+macOS but [possibly not on iOS](https://bugs.webkit.org/show_bug.cgi?id=191768).
+The parser accepts them without a warning.
+
+### Scrolling follows the pane that you are in
+
+`j`, `k`, `d`, `gg`, `G` and the other scroll commands scroll the nearest
+scrollable element around the focus. When the focus rests on the page itself,
+the element that you last clicked stands in for it, so a click into a pane aims
+the next scroll at that pane. A document that cannot scroll, such as an app
+shell that scrolls a pane inside it, gives the scroll to the largest scrollable
+pane in view.
+
+### Find gives the page back
+
+`/` opens a prompt in the HUD. While you type, find highlights the matches and
+brings the current one into view, but it does not move the selection of the
+page. Escape puts back the scroll position. When the prompt closes, it gives
+back the selection that the page had before the prompt opened, unless the page
+or you placed another one in the meantime. Enter then selects the match, if
+there is one.
 
 ### A focused video player keeps its own keys
 
@@ -201,14 +215,20 @@ unchanged:
 unmap j
 map <c-j> scrollDown
 map gh LinkHints.activateModeToHover
-mapkey a b          " remap a physical key
-unmapAll            " start from nothing
+" Make the key a do what b does.
+mapkey a b
 ```
+
+A comment needs a line of its own, because `#` and `"` are keys that you can
+bind. A word after the command, such as an upstream option like `key=value`, is
+ignored. `unmapAll` removes every binding above it, the defaults included, so
+put it first to start from nothing.
 
 Settings are stored with your userscript manager wherever it offers a value
 store, which is durable. A manager that offers none leaves your settings, your
 marks and your history in memory for the life of the page, and the script tells
-you so, in the settings dialog and in a one-time warning. The frames of a page
+you so, in the settings dialog and in a warning that the top frame shows once on
+each page. The frames of a page
 also stay apart on such a manager: link hints across frames and frame focus are
 off, and a frame does not learn that you excluded the page. The script never
 writes your settings, marks or history to `localStorage`: the page owns that
@@ -220,34 +240,34 @@ read the credential that admits a frame to the cross-frame session.
 All of these are editable in the settings overlay. There is no hidden
 configuration and no config file.
 
-| Setting                        | Default                | What it does                                                                                                                                     |
-| ------------------------------ | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `scrollStepSize`               | `60`                   | Pixels one `j`/`k` moves. 1–10000.                                                                                                               |
-| `smoothScroll`                 | `true`                 | Animate scrolling. Ignored when `prefers-reduced-motion` is set.                                                                                 |
-| `linkHintCharacters`           | `sadfjklewcmpgh`       | Alphabet for hint labels. Characters must be distinct and visible.                                                                               |
-| `linkHintNumbers`              | `0123456789`           | Digits used to select among filtered hints.                                                                                                      |
-| `filterLinkHints`              | `false`                | Match hints by link text instead of by hint string.                                                                                              |
-| `waitForEnterForFilteredHints` | `true`                 | In filter mode, require Enter rather than activating on a pause.                                                                                 |
-| `userDefinedLinkHintCss`       | empty                  | Extra CSS for hint markers, inside our shadow root. No `@import` or `url()`.                                                                     |
-| `regexFindMode`                | `false`                | Treat a bare find query as a regular expression. See the note below.                                                                             |
-| `ignoreKeyboardLayout`         | `false`                | Bind physical key positions, so Dvorak and Cyrillic drive QWERTY bindings.                                                                       |
-| `shadowNativeFind`             | `false`                | Shadow the browser's own ⌘F. Off because it may be unpreventable on iOS.                                                                         |
-| `previousPatterns`             | `prev,previous,back,…` | Link text `[` looks for.                                                                                                                         |
-| `nextPatterns`                 | `next,more,newer,…`    | Link text `]` looks for.                                                                                                                         |
-| `searchUrl`                    | Google                 | Default search template. Must contain `%s`.                                                                                                      |
-| `searchEngines`                | 5 engines              | One `keyword: url-with-%s Description` per line. Templates must be `http(s)`.                                                                    |
-| `newTabUrl`                    | `about:blank`          | What `t` opens.                                                                                                                                  |
-| `enableSearchSuggestions`      | **`false`**            | Send omnibar searches to your engine as you type. See [Privacy](./PRIVACY.md).                                                                   |
-| `hideHud`                      | `false`                | Suppress the corner HUD entirely.                                                                                                                |
-| `followPageColorScheme`        | `true`                 | Match the overlay to the page's theme rather than your system appearance.                                                                        |
-| `grabBackFocus`                | `false`                | Blur a field the page autofocused on load — unless you have already typed.                                                                       |
-| `passMediaKeys`                | `true`                 | Leave the arrow keys and space to a focused `<video>`/`<audio>` player.                                                                          |
-| `enableCssZoom`                | `false`                | Enable `zi`/`zo`. CSS zoom, not browser zoom; breaks `position: fixed` sites.                                                                    |
-| `enableHistoryIndex`           | **`false`**            | Build a local frecency index for the omnibar. See [Privacy](./PRIVACY.md).                                                                       |
-| `historyIndexDenylist`         | empty                  | URL globs never recorded in that index.                                                                                                          |
-| `historyIndexLimit`            | `5000`                 | Entries kept before LRU eviction. `0` disables recording.                                                                                        |
-| `exclusionRules`               | empty                  | URL glob → pass-key set. An empty pass-key set disables us on matching pages. A pattern between two `/` is a raw expression. See the note below. |
-| `keyMappings`                  | empty                  | Your `map`/`unmap`/`unmapAll`/`mapkey` lines, applied over the defaults.                                                                         |
+| Setting                        | Default                | What it does                                                                                                                                                               |
+| ------------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scrollStepSize`               | `60`                   | Pixels one `j`/`k` moves. 1–10000.                                                                                                                                         |
+| `smoothScroll`                 | `true`                 | Animate scrolling. Ignored when `prefers-reduced-motion` is set.                                                                                                           |
+| `linkHintCharacters`           | `sadfjklewcmpgh`       | Alphabet for hint labels. Characters must be distinct and visible.                                                                                                         |
+| `linkHintNumbers`              | `0123456789`           | Digits used to select among filtered hints.                                                                                                                                |
+| `filterLinkHints`              | `false`                | Match hints by link text instead of by hint string.                                                                                                                        |
+| `waitForEnterForFilteredHints` | `true`                 | In filter mode, wait for Enter or a pause in typing before the only match activates, instead of activating it at once.                                                     |
+| `userDefinedLinkHintCss`       | empty                  | Extra CSS for hint markers, inside our shadow root. Refused when it holds `@import`, `@charset`, `url()`, `src()`, `image()` or `image-set()`, escaped or not.             |
+| `regexFindMode`                | `false`                | Treat a bare find query as a regular expression. See the note below.                                                                                                       |
+| `ignoreKeyboardLayout`         | `false`                | Bind physical key positions, so Dvorak and Cyrillic drive QWERTY bindings.                                                                                                 |
+| `shadowNativeFind`             | `false`                | Meant to shadow the browser's own ⌘F. No code reads it in this build, so it has no effect.                                                                                 |
+| `previousPatterns`             | `prev,previous,back,…` | Link text `[` looks for.                                                                                                                                                   |
+| `nextPatterns`                 | `next,more,newer,…`    | Link text `]` looks for.                                                                                                                                                   |
+| `searchUrl`                    | Google                 | Default search template. Must contain `%s`.                                                                                                                                |
+| `searchEngines`                | 5 engines              | One `keyword: url-with-%s Description` per line. Templates must be `http(s)`.                                                                                              |
+| `newTabUrl`                    | `about:blank`          | What `t` opens.                                                                                                                                                            |
+| `enableSearchSuggestions`      | **`false`**            | Send omnibar searches to your engine as you type. See [Privacy](./PRIVACY.md).                                                                                             |
+| `hideHud`                      | `false`                | Hide the informational messages of the HUD. Errors, prompts, the mode indicator and half-typed keys still show.                                                            |
+| `followPageColorScheme`        | `true`                 | Match the overlay to the page's theme rather than your system appearance.                                                                                                  |
+| `grabBackFocus`                | `false`                | Blur a field the page autofocused on load — unless you have already typed.                                                                                                 |
+| `passMediaKeys`                | `true`                 | Leave the arrow keys and space to a focused `<video>`/`<audio>` player.                                                                                                    |
+| `enableCssZoom`                | `false`                | Enable `zi`/`zo`. CSS zoom, not browser zoom; breaks `position: fixed` sites. While on, each origin's zoom comes back on load. Off puts pages back at 100%.                |
+| `enableHistoryIndex`           | **`false`**            | Build a local frecency index for the omnibar. See [Privacy](./PRIVACY.md).                                                                                                 |
+| `historyIndexDenylist`         | empty                  | URL patterns never recorded in that index, written as the patterns of `exclusionRules` are. See the note below.                                                            |
+| `historyIndexLimit`            | `5000`                 | Entries kept before LRU eviction. `0` disables recording.                                                                                                                  |
+| `exclusionRules`               | empty                  | URL glob → pass-key set. `*` is the only wildcard. An empty pass-key set disables us on matching pages. A pattern between two `/` is a raw expression. See the note below. |
+| `keyMappings`                  | empty                  | Your `map`/`unmap`/`unmapAll`/`mapkey` lines, applied over the defaults.                                                                                                   |
 
 A value the script cannot make sense of falls back to its own default — that one
 setting, not the whole configuration.
@@ -317,10 +337,10 @@ the same labels on every machine.
 
 #### An expression that a user writes
 
-A find query in regex mode, and an exclusion pattern between two `/` characters,
-are read by a safety check first. The check refuses an expression when it can
-prove that the expression is ambiguous, because such an expression can make the
-tab stop answering. `\s+\s+\s+` and `(a+)+$` are refused. `(cat|car)+` and
+A find query in regex mode, and a pattern between two `/` characters in
+`exclusionRules` or `historyIndexDenylist`, are read by a safety check first.
+The check refuses an expression when it can prove that the expression is
+ambiguous, because such an expression can make the tab stop answering. `\s+\s+\s+` and `(a+)+$` are refused. `(cat|car)+` and
 `^https?://([a-z0-9-]+\.)*example\.com/.*$` are accepted.
 
 The check reads inside a lookahead and a lookbehind as well.
@@ -329,12 +349,21 @@ vary. `.*(?=.*x)` is refused, because the body of the assertion runs again for
 each way that the `.*` before it can match. An expression may hold at most eight
 assertions.
 
+The check also refuses an expression longer than 512 characters. A pattern of
+`exclusionRules` or `historyIndexDenylist` must match the whole URL, so the
+script puts the expression between anchors, and the anchors count toward that
+length. Each alternative is anchored, so `/.*\.pdf|.*\.zip/` matches only a URL
+that ends in `.pdf` or `.zip`.
+
 The check does not promise a linear match, so a budget holds the limit as well:
 
 - An exclusion rule with a raw expression reads at most 512 characters of the
   URL. It does not match a URL that is longer than that. A page can make its own
   URL longer than 512 characters, and it then escapes the rule. Write the rule
   as a glob for such a page: a glob reads 4096 characters.
+- The history index records no URL longer than 512 characters while
+  `historyIndexDenylist` holds a pattern that compiles. It cannot tell whether
+  such a URL is denied, so it records nothing.
 - Find reads the page text in windows, measures each window, and makes the next
   window smaller when a window costs too much. It stops at a time limit, and at
   a match that is longer than 65 536 characters. The HUD then says
@@ -344,7 +373,8 @@ The check does not promise a linear match, so a budget holds the limit as well:
 The script drops a rule that the check refuses. It writes a warning to the
 console, it says so in the HUD when you save, and it marks the line in the
 settings dialog. A glob is never refused, and it stays the format that we ask
-for.
+for. A `historyIndexDenylist` pattern that the check refuses matches nothing,
+and nothing says so, so write a denylist pattern as a glob where you can.
 
 ### Omnibar-lite
 
@@ -370,13 +400,13 @@ the two APIs that would make it one do not exist for a userscript:
 > request the engine's own search box makes, but you did not open the engine's
 > search box — so it is a decision, not a default. Only queries classified as
 > searches are sent; a URL you type is navigated to, never searched for. The
-> script can reach exactly five hosts (`@connect` names them individually), and
+> script can reach exactly four hosts (`@connect` names them individually), and
 > nothing is sent at all unless **Ask the search engine for omnibar
 > completions** is enabled in Settings.
 >
 > **The local history index** records the pages you visit into
 > userscript-manager storage, which the manager's own UI can read. It honours a
-> per-origin denylist, skips private browsing where detectable, is capped with
+> URL-pattern denylist, skips private browsing where detectable, is capped with
 > LRU eviction, can be wiped with `:clear-history`, and never leaves your
 > device.
 
@@ -423,38 +453,38 @@ reports no newer version, so every existing install silently stays where it is.
 ### Architecture
 
 The whole extension is one [Effect](https://effect.website) application: every
-capability is a service, every service is provided by a layer, every failure is
-a typed value, and there is no `Promise` and no `any` in `src/`.
+capability is a layer, every failure is a typed value, a promise of the browser
+or the manager is wrapped where it is called, and there is no `any` in `src/`.
 [`ARCHITECTURE.md`](./ARCHITECTURE.md) is the reference; it is short, and you
 should read it before you add a file.
 
 ```
 src/
   main.ts     Claim the realm, wait to be wanted, build the application
-  App.ts      The one layer graph, and the runtime for one frame
+  App.ts      The layer graph of one frame
   domain/     Pure data and schemas. No services, no DOM
   platform/   The browser and the userscript manager
   core/       Settings, keys, modes, commands, exclusions
   ui/         One closed shadow root, styled through CSSOM
-  frames/     The cross-frame bus and its protocol
+  frames/     The cross-frame bus, its credential and the frame link
   features/   Hints, find, visual/caret, scroller, marks, insert, omnibar,
               navigation, tab control, URL clipboard
-  boot/       The injection guard, the lifecycle and the key bridge
+  boot/       The injection guard, the start, the lifecycle and the key bridge
 ```
 
-Five decisions carry most of the weight:
+Seven decisions carry most of the weight:
 
-- **The runtime owns a scope.** Every listener, observer, port, stylesheet and
-  fiber is acquired inside it, so teardown is the close of that scope. Nothing
-  keeps a list of things to undo.
+- **The application owns a scope.** `launch` builds the layer graph in a scope
+  of its own. Every listener, observer, port, stylesheet and fiber is acquired
+  inside it, so teardown is the close of that scope. Nothing keeps a list of
+  things to undo.
 - **The frame bus breaks every cycle.** Hints needs remote frames and a remote
   frame needs hints; exclusions needs the top frame and the top frame needs
-  exclusions. Neither depends on the other: each publishes on the bus and
-  subscribes to what it can answer, so the layer graph stays a tree.
-- **Features register commands; nothing imports a feature.** The catalogue is
-  pure data, the bodies live in a registry, and the key handler reads the
-  registry.
-
+  exclusions. Neither imports the other: each asks on the bus and answers what
+  it can, so the import graph has no cycle.
+- **Features register commands.** The catalogue is pure data, the bodies live
+  in `Commands`, and the key handler reads `Commands`, so the key path imports
+  no feature. A feature imports another feature only for its service.
 - **Content world, not page world.** quoid's GM API only exists there, and the
   choice does not affect keyboard interception at all.
 - **One closed shadow root, styled with `adoptedStyleSheets`.** This solves page
@@ -465,8 +495,8 @@ Five decisions carry most of the weight:
   Page code sees that transfer, so every message on the port is sealed with a
   key that both frames derive from a manager-private credential.
 - **The keyboard path is synchronous.** `preventDefault()` works nowhere else. A
-  key decision runs through `runSyncExit`, and a command that must wait
-  continues on its own fiber afterwards.
+  listener runs its handler with `Effect.runSyncExitWith`, and a command that
+  must wait goes on in a fiber that its layer owns.
 
 ---
 
@@ -475,5 +505,5 @@ Five decisions carry most of the weight:
 MIT. See [`LICENSE`](./LICENSE).
 
 Behaviour is ported from [Vimium](https://github.com/philc/vimium) (MIT, © 2010
-Phil Crosby, Ilya Sukhar). Each source file names the upstream file it derives
-from; see [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md).
+Phil Crosby, Ilya Sukhar). A ported source file names the upstream file that it
+derives from; see [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md).
