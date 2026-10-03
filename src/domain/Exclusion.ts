@@ -218,14 +218,20 @@ type SafePattern = Data.TaggedEnum<{
 
 const SafePattern = Data.taggedEnum<SafePattern>();
 
+const compileExpression = (source: string): Result.Result<RegExp, string> =>
+  Result.try({
+    try: () => new RegExp(source),
+    catch: (cause) => `the expression does not compile: ${describeThrown(cause)}`,
+  });
+
 /** Compile a raw expression and check it, or say why we drop it. */
 const readExpression = (body: string): Result.Result<SafePattern, string> =>
   Result.gen(function* () {
-    const source = `^${body}$`;
-    const regexp = yield* Result.try({
-      try: () => new RegExp(source),
-      catch: (cause) => `the expression does not compile: ${describeThrown(cause)}`,
-    });
+    // The group puts every alternative between the anchors. The body must
+    // compile alone first, so that a `)` in it cannot close the group.
+    yield* compileExpression(body);
+    const source = `^(?:${body})$`;
+    const regexp = yield* compileExpression(source);
     // The page chooses the URL, and the rules run on every navigation. An
     // expression that backtracks turns one crafted URL into a tab that does
     // not answer: `(a+)+$` against forty characters already takes minutes.

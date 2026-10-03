@@ -105,6 +105,9 @@ describe("Exclusion", () => {
       const pattern = "/https://(mail|inbox)\\.google\\.com/.*/";
       assert.strictEqual(matches(pattern, "https://mail.google.com/u/0"), true);
       assert.strictEqual(matches(pattern, "https://drive.google.com/u/0"), false);
+      // The anchors hold every alternative, and not only the first and the last.
+      assert.strictEqual(matches("/.*\\.pdf|.*\\.zip/", "https://x/a.pdf.html"), false);
+      assert.strictEqual(matches("/.*\\.pdf|.*\\.zip/", "https://x/a.zip"), true);
     }),
   );
 
