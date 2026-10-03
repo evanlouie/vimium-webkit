@@ -16,7 +16,6 @@
  */
 
 import {
-  Array,
   Context,
   Effect,
   HashMap,
@@ -37,13 +36,6 @@ import {
   COMMANDS,
 } from "~/domain/Command.ts";
 import { recoverEvenIfInterrupted } from "./Recovery.ts";
-
-export type {
-  CommandAvailability,
-  CommandDef,
-  CommandGroup,
-  CommandName,
-} from "~/domain/Command.ts";
 
 export const CommandFailureReason = Schema.Literals([
   /** The command is in the catalogue, and nothing can run it here. */
@@ -94,12 +86,7 @@ export class Commands extends Context.Service<
       invocation: CommandInvocation,
     ) => Effect.Effect<void, CommandError>;
 
-    /** True when a body is present for this command in this frame. */
-    readonly isRunnable: (name: CommandName) => Effect.Effect<boolean>;
-
-    readonly definition: (name: string) => Option.Option<CommandDef>;
     readonly all: ReadonlyArray<CommandDef>;
-    readonly names: ReadonlyArray<CommandName>;
   }
 >()("vimium/core/Commands") {
   static readonly layer: Layer.Layer<Commands> = Layer.effect(
@@ -184,10 +171,7 @@ export class Commands extends Context.Service<
             ),
           ),
         run,
-        isRunnable: (name) => pipe(Ref.get(bodies), Effect.map(HashMap.has(name))),
-        definition: definitionOf,
         all: COMMAND_LIST,
-        names: COMMAND_NAMES,
       });
     }),
   );
@@ -196,10 +180,3 @@ export class Commands extends Context.Service<
 const COMMAND_LIST: ReadonlyArray<CommandDef> = Record.values(COMMANDS);
 
 const COMMAND_NAMES: ReadonlyArray<CommandName> = Record.keys(COMMANDS);
-
-/** The command of a name that may not be one. */
-const definitionOf = (name: string): Option.Option<CommandDef> =>
-  pipe(
-    COMMAND_LIST,
-    Array.findFirst((definition) => definition.name === name),
-  );

@@ -151,7 +151,6 @@ const mappingsOf = (source: string): Layer.Layer<Mappings> =>
       rejectReservedShortcuts: false,
     });
     return Mappings.of({
-      compiled: Effect.succeed(compiled),
       compiledUnsafe: () => compiled,
       changes: Stream.make(compiled),
       check: () => Effect.succeed(compiled),

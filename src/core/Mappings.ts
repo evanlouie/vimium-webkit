@@ -23,8 +23,6 @@ const DEFAULT_MAPPING_LINES = `${DEFAULT_MAPPINGS}\n`.split("\n").length - 1;
 export class Mappings extends Context.Service<
   Mappings,
   {
-    readonly compiled: Effect.Effect<CompiledMappings>;
-
     /** The trie, read synchronously. For the key path only. */
     readonly compiledUnsafe: () => CompiledMappings;
 
@@ -64,7 +62,6 @@ export class Mappings extends Context.Service<
       );
 
       return Mappings.of({
-        compiled: SubscriptionRef.get(trie),
         compiledUnsafe: () => SubscriptionRef.getUnsafe(trie),
         changes: SubscriptionRef.changes(trie),
         check: (source) => Effect.sync(() => compileFor(source)),
