@@ -87,7 +87,6 @@ import {
   Result,
   Schema,
   String as Str,
-  Struct,
   pipe,
 } from "effect";
 import { Base64Url } from "effect/encoding";
@@ -100,7 +99,7 @@ import {
   sealedMessage,
   type SealedMessage,
 } from "~/domain/FrameMessage.ts";
-import { type FrameCredential, frameCredentialGroup } from "~/domain/Persisted.ts";
+import { frameCredentialGroup } from "~/domain/Persisted.ts";
 import { StoreKind } from "~/platform/Gm.ts";
 import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 import { FrameRole, Realm } from "~/platform/Realm.ts";
@@ -217,25 +216,6 @@ const ivFor = (direction: SealDirection, seq: number): Uint8Array<ArrayBuffer> =
 const presentSecret: (secret: string) => Option.Option<string> = Option.liftPredicate(
   Str.isNonEmpty,
 );
-
-/**
- * Put a credential into a group that holds none.
- *
- * The caller has already looked, and this is the same test again, against the
- * value that the group holds. Another tab can reach the group through the
- * change stream of the manager between the read and the write.
- */
-const withSecret =
-  (created: string) =>
-  (current: FrameCredential): FrameCredential =>
-    pipe(
-      current.secret,
-      presentSecret,
-      Option.match({
-        onSome: () => current,
-        onNone: () => pipe(current, Struct.assign({ secret: created })),
-      }),
-    );
 
 interface CachedKey {
   readonly secret: string;
@@ -373,10 +353,16 @@ export class FrameAuth extends Context.Service<
       /**
        * Write a credential that this frame made, and give back the one that
        * storage then holds.
+       *
+       * A whole value, and not an update. The group refuses an update while
+       * the stored value cannot be read, and a credential that cannot be read
+       * is exactly the one that must be replaced: every frame would otherwise
+       * stay outside the session for good. The credential is ours alone, so
+       * nothing else in the value is lost.
        */
       const storeSecret = Effect.fnUntraced(function* (created: string) {
         yield* pipe(
-          store.update(withSecret(created)),
+          store.write({ secret: created }),
           Effect.mapError(
             (cause) =>
               new FrameAuthError({
