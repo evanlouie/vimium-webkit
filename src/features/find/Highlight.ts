@@ -14,6 +14,10 @@
  * visual viewport is subtracted as well, because the host of the overlay is
  * moved by it to imitate `position: device-fixed`.
  *
+ * The scroll of an inner container is the exception. It moves the matches
+ * inside it and no others, by an amount that the scroll of the window does not
+ * give, so the rectangles are measured again, once for each animation frame.
+ *
  * Every element and every listener here is a scoped resource. Close the scope
  * that built the highlighter, and the overlay goes with it. There is no
  * `dispose` method.
@@ -123,6 +127,14 @@ interface Origin {
   readonly x: number;
   readonly y: number;
 }
+
+/** What the overlay shows: the matches, and the index of the current one. */
+interface Shown {
+  readonly matches: ReadonlyArray<FindMatch>;
+  readonly currentIndex: number;
+}
+
+const NOTHING_SHOWN: Shown = { matches: [], currentIndex: -1 };
 
 /** The band of the page, in viewport coordinates, whose rectangles are drawn. */
 interface Band {
@@ -272,6 +284,9 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
 
     const rects = yield* Ref.make<ReadonlyArray<HTMLElement>>([]);
     const origin = yield* Ref.make<Origin>({ x: 0, y: 0 });
+    const shown = yield* Ref.make(NOTHING_SHOWN);
+    /** Did an inner container scroll since the last measurement? */
+    const innerScrolled = yield* Ref.make(false);
 
     const readScroll: Effect.Effect<Origin> = dom.probeOrElse(
       () => ({ x: win.scrollX, y: win.scrollY }),
@@ -359,10 +374,9 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
       );
     });
 
-    const render = Effect.fn("Highlighter.render")(function* (
-      matches: ReadonlyArray<FindMatch>,
-      currentIndex: number,
-    ) {
+    /** Measure and draw what the overlay shows. */
+    const draw = Effect.fn("Highlighter.draw")(function* () {
+      const { matches, currentIndex } = yield* Ref.get(shown);
       // A new measurement sets the scroll baseline again. Everything after this
       // call is a difference from here.
       const scroll = yield* readScroll;
@@ -372,8 +386,18 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
       yield* applyOffset();
     });
 
+    const render = Effect.fn("Highlighter.render")(function* (
+      matches: ReadonlyArray<FindMatch>,
+      currentIndex: number,
+    ) {
+      yield* pipe(shown, Ref.set<Shown>({ matches, currentIndex }));
+      yield* draw();
+    });
+
     const clear = pipe(
-      Ref.get(rects),
+      shown,
+      Ref.set(NOTHING_SHOWN),
+      Effect.andThen(Ref.get(rects)),
       Effect.flatMap((pool) => Effect.sync(() => pipe(pool, Array.forEach(hide)))),
     );
 
@@ -382,6 +406,13 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
     // ---------------------------------------------------------------------
 
     const repositionFiber = yield* FiberHandle.make<void, never>();
+
+    /** The correction of a frame: a new measurement after an inner scroll, and a move otherwise. */
+    const correct = pipe(
+      innerScrolled,
+      Ref.getAndSet(false),
+      Effect.flatMap(Boolean.match({ onFalse: () => applyOffset(), onTrue: () => draw() })),
+    );
 
     /**
      * One correction for each animation frame.
@@ -392,17 +423,26 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
      */
     const reposition = pipe(
       dom.nextFrame,
-      Effect.andThen(applyOffset()),
+      Effect.andThen(correct),
       FiberHandle.run(repositionFiber, { onlyIfMissing: true }),
       Effect.asVoid,
     );
 
+    const remeasure = pipe(innerScrolled, Ref.set(true), Effect.andThen(reposition));
+
     // The capture phase: `scroll` does not bubble out of an element that
-    // scrolls, and a match inside an inner scroll container must follow it too.
-    yield* dom.listen("document", "scroll", () => reposition, {
-      capture: true,
-      passive: true,
-    });
+    // scrolls, so only a capturing listener on the document hears an inner
+    // scroll container.
+    yield* dom.listen(
+      "document",
+      "scroll",
+      (event) =>
+        pipe(
+          event.target === doc,
+          Boolean.match({ onFalse: () => remeasure, onTrue: () => reposition }),
+        ),
+      { capture: true, passive: true },
+    );
     yield* dom.listen("window", "resize", () => reposition, { passive: true });
 
     const visualViewport = yield* dom.probeOrElse(
