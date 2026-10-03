@@ -73,6 +73,7 @@ import {
   type KnownTab,
   liveTabs,
   type OmnibarSource,
+  type Suggestions,
 } from "./Completers.ts";
 import { makeHistoryIndex } from "./History.ts";
 import { makeOmnibarView, OMNIBAR_CSS, type OmnibarView } from "./OmnibarUi.ts";
@@ -184,23 +185,20 @@ const clamp =
 // The session
 // ---------------------------------------------------------------------------
 
-/** The suggestions on screen, and the query that they belong to. */
-interface SuggestionState {
+/** The last answer of an engine, and the query that it belongs to. */
+interface SuggestionState extends Suggestions {
   /** The whole input that these suggestions answer. */
   readonly query: string;
-  readonly badge: string;
-  readonly items: readonly string[];
 }
 
 /**
  * Only the suggestions that belong to the query on screen. A late answer for
  * a query that the user has left behind is worse than no answer.
  */
-const suggestionsFor = (query: string, suggestion: SuggestionState): readonly string[] =>
-  pipe(
-    suggestion.query === query.trim(),
-    Boolean.match({ onTrue: () => suggestion.items, onFalse: () => Array.empty<string>() }),
-  );
+const suggestionsFor = (
+  query: string,
+): ((answer: Option.Option<SuggestionState>) => Option.Option<Suggestions>) =>
+  Option.filter((answer) => answer.query === query.trim());
 
 /** Where suggestions for a query go, and the badge of their rows. */
 interface SuggestionTarget {
@@ -249,7 +247,7 @@ interface Session {
   readonly view: OmnibarView;
   readonly rows: Ref.Ref<readonly Completion[]>;
   readonly selected: Ref.Ref<number>;
-  readonly suggestions: Ref.Ref<SuggestionState>;
+  readonly suggestions: Ref.Ref<Option.Option<SuggestionState>>;
 }
 
 /** The parsed engines, kept against the raw configuration that made them. */
@@ -403,7 +401,7 @@ export class Omnibar extends Context.Service<
         const visits = yield* history.visits;
         const stored = yield* storage.session.current;
         const now = yield* Clock.currentTimeMillis;
-        const suggestion = yield* Ref.get(current.suggestions);
+        const answer = yield* Ref.get(current.suggestions);
 
         const state = completionsFor({
           source: current.source,
@@ -413,8 +411,7 @@ export class Omnibar extends Context.Service<
           searchUrl: config.searchUrl,
           visits,
           knownTabs: liveTabs(stored.knownTabs, now),
-          suggestions: suggestionsFor(query, suggestion),
-          suggestionEngine: suggestion.badge,
+          suggestions: pipe(answer, suggestionsFor(query)),
           now,
         });
 
@@ -459,7 +456,10 @@ export class Omnibar extends Context.Service<
             onSome: ({ template, text, badge }) =>
               suggester.request(template, text, (_answered, items) =>
                 pipe(
-                  Ref.set(current.suggestions, { query: forQuery, badge, items }),
+                  Ref.set(
+                    current.suggestions,
+                    Option.some({ query: forQuery, template, badge, items }),
+                  ),
                   // Draw again only. To ask again here would loop.
                   Effect.andThen(render(current)),
                   Effect.when(isLive(current)),
@@ -682,11 +682,7 @@ export class Omnibar extends Context.Service<
         const scope = yield* Scope.make();
         const rows = yield* Ref.make<readonly Completion[]>([]);
         const selected = yield* Ref.make(0);
-        const suggestions = yield* Ref.make<SuggestionState>({
-          query: "",
-          badge: DEFAULT_SUGGESTION_BADGE,
-          items: [],
-        });
+        const suggestions = yield* Ref.make(Option.none<SuggestionState>());
 
         const view = yield* pipe(
           makeOmnibarView({

@@ -425,19 +425,28 @@ export const completeRecent = (
 const SUGGESTION_BASE_SCORE = 3;
 const SUGGESTION_STEP = 0.1;
 
-export const completeSuggestions = (
-  suggestions: readonly string[],
-  searchTemplate: string,
-  engineName: string,
-): readonly Completion[] =>
+/** What an engine answered, and the engine that answered it. */
+export interface Suggestions {
+  /** The search template of that engine. A chosen suggestion opens a search there. */
+  readonly template: string;
+  /** The name of that engine, which each row shows. */
+  readonly badge: string;
+  readonly items: readonly string[];
+}
+
+export const completeSuggestions = ({
+  template,
+  badge,
+  items,
+}: Suggestions): readonly Completion[] =>
   pipe(
-    suggestions,
+    items,
     Array.map((suggestion, index): Completion => ({
       kind: "suggestion",
-      badge: engineName,
+      badge,
       title: suggestion,
       detail: "",
-      action: CompletionAction.Navigate({ url: buildSearchUrl(searchTemplate, suggestion) }),
+      action: CompletionAction.Navigate({ url: buildSearchUrl(template, suggestion) }),
       // Descending, and below the sources that we can vouch for. A
       // suggestion is the guess of the engine about the query, and not a
       // page that the user has been to.
@@ -527,8 +536,8 @@ export interface CompletionInput {
   readonly searchUrl: string;
   readonly visits: readonly Visit[];
   readonly knownTabs: readonly KnownTab[];
-  readonly suggestions: readonly string[];
-  readonly suggestionEngine: string;
+  /** The answer of an engine for this query, if one came. */
+  readonly suggestions: Option.Option<Suggestions>;
   readonly now: number;
 }
 
@@ -580,6 +589,14 @@ const knownPages = (input: CompletionInput): ReadonlyArray<Completion> =>
     Match.exhaustive,
   );
 
+/** The rows of the suggestions, below every source that we can vouch for. */
+const suggestionRows = (input: CompletionInput): ReadonlyArray<Completion> =>
+  pipe(
+    input.suggestions,
+    Option.map(completeSuggestions),
+    Option.getOrElse(() => Array.empty<Completion>()),
+  );
+
 /**
  * The engines are limited once the user types. To find a keyword matters, but
  * not enough to push the sources below it off the screen.
@@ -626,9 +643,7 @@ const destinationCompletions = (input: CompletionInput): CompletionState =>
       Array.appendAll(completeNavigate(input.query, input.engines, input.searchUrl)),
       Array.appendAll(knownPages(input)),
       Array.appendAll(completeEngines(input.engines, input.query, engineLimit(input.query))),
-      Array.appendAll(
-        completeSuggestions(input.suggestions, input.searchUrl, input.suggestionEngine),
-      ),
+      Array.appendAll(suggestionRows(input)),
       Array.dedupeWith(sameAction),
       Array.take(MAX_RESULTS),
     ),
