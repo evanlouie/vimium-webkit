@@ -52,7 +52,11 @@ records the pages you visit so the omnibar can rank them. It:
 
 - honours a denylist of URL patterns you control, and records no URL longer
   than 512 characters while that list holds a valid pattern;
-- skips private browsing where that is detectable;
+- skips private browsing where that is detectable. To tell, the top frame
+  checks once per page, and only while the index is on, whether it may read the
+  site's `localStorage` and how large a storage quota the browser grants
+  (`navigator.storage.estimate()`). Both checks only read: nothing is written
+  to the site's storage, and no other tab of the site is told;
 - skips pages carrying `<meta name="robots" content="noindex">`;
 - keeps only `http:`/`https:` pages;
 - **strips the query string** except for a short allowlist of keys that identify
@@ -77,10 +81,10 @@ frames of a page cannot form a session. Link hints across frames and frame focus
 stop working, and a frame inside the page does not learn that you excluded the
 page.
 
-The script does **not** fall back to `localStorage`. The page owns that store,
-so your settings, your marks, your history — and the credential that admits a
-frame to the cross-frame session — would be readable and writable by every
-script on the site.
+The script does **not** fall back to `localStorage`, and it writes nothing
+there. The page owns that store, so your settings, your marks, your history —
+and the credential that admits a frame to the cross-frame session — would be
+readable and writable by every script on the site.
 
 ## What crosses a frame boundary
 

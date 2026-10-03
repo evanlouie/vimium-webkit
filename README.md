@@ -231,9 +231,10 @@ you so, in the settings dialog and in a warning that the top frame shows once on
 each page. The frames of a page
 also stay apart on such a manager: link hints across frames and frame focus are
 off, and a frame does not learn that you excluded the page. The script never
-writes your settings, marks or history to `localStorage`: the page owns that
-store, so every script on the site could read and change them, and it could also
-read the credential that admits a frame to the cross-frame session.
+writes to `localStorage`, and keeps none of your settings, marks or history
+there: the page owns that store, so every script on the site could read and
+change them, and it could also read the credential that admits a frame to the
+cross-frame session.
 
 ### Every setting
 
@@ -409,7 +410,9 @@ the two APIs that would make it one do not exist for a userscript:
 > userscript-manager storage, which the manager's own UI can read. It honours a
 > URL-pattern denylist, skips private browsing where detectable, is capped with
 > LRU eviction, can be wiped with `:clear-history`, and never leaves your
-> device.
+> device. To detect private browsing, the top frame checks once per page whether
+> it may read the site's `localStorage`, and asks the browser for its storage
+> quota. Both checks only read: nothing is written to the site's storage.
 
 ---
 
