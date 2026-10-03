@@ -51,7 +51,6 @@ import { Dom } from "~/platform/Dom.ts";
 import { BRIEFLY, Hud, HudDuration } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
 import {
-  canModify,
   collapseToAnchor,
   collapseToFocus,
   extendByOneCharacter,
@@ -468,9 +467,13 @@ export const VisualLayer: Layer.Layer<
 
     // -- the first selection -------------------------------------------
 
-    /** The selection of this frame, when `Selection.modify` works on it. */
+    /**
+     * The selection of this frame.
+     *
+     * `enterKind` already checked that `Selection.modify` works on it.
+     */
     const modifiableSelection: Effect.Effect<Selection, VisualStartError> = pipe(
-      probeSelection(Option.liftPredicate(canModify), Option.none<Selection>()),
+      selection,
       Effect.flatMap(Effect.fromOption(() => new VisualStartError({ reason: "unavailable" }))),
     );
 

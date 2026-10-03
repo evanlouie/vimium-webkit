@@ -560,8 +560,8 @@ const VISIBILITY_OPTIONS: CheckVisibilityOptions = {
  * `checkVisibility` is used where it exists, which is Safari 17.4 and later. It
  * is the only check that accounts for `content-visibility: auto`, which Safari
  * 18 has, and which makes an answer from `getComputedStyle` wrong. The
- * capability report decides, and the method is still looked for, because an
- * older Safari has no such method at all.
+ * capability report decides. A method that the page takes away later throws,
+ * and the element then counts as searchable.
  */
 const isVisible =
   (view: Window, capabilities: CapabilityReport) =>
@@ -569,7 +569,7 @@ const isVisible =
     pipe(
       Result.try(() =>
         pipe(
-          capabilities.checkVisibility && typeof element.checkVisibility === "function",
+          capabilities.checkVisibility,
           Boolean.match({
             onTrue: () => element.checkVisibility(VISIBILITY_OPTIONS),
             onFalse: () => {

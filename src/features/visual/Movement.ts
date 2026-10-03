@@ -121,29 +121,15 @@ const WORD_FORWARD: NativeMovement = { direction: "forward", granularity: "word"
 const WORD_BACKWARD: NativeMovement = { direction: "backward", granularity: "word" };
 
 /**
- * The selection, when this realm gives it a working `modify`.
+ * Run one native movement.
  *
- * The DOM library that we compile against declares the method, so this check
- * is for the run time only. A realm, or a script of the page, can still take
- * the method away.
+ * Visual mode starts only when the capability report found `Selection.modify`.
+ * A script of the page can still take the method away later. The call then
+ * throws, and `dom.probeOrElse` in `Visual.ts` makes the key do nothing.
  */
-const modifiable = (selection: Selection): Option.Option<Selection> =>
-  pipe(
-    selection,
-    Option.liftPredicate((selection) => typeof selection.modify === "function"),
-  );
-
-export const canModify = (selection: Selection): boolean => Option.isSome(modifiable(selection));
-
-const modify = (selection: Selection, alter: AlterMethod, movement: NativeMovement): void =>
-  pipe(
-    selection,
-    modifiable,
-    Option.match({
-      onNone: constVoid,
-      onSome: (target) => target.modify(alter, movement.direction, movement.granularity),
-    }),
-  );
+const modify = (selection: Selection, alter: AlterMethod, movement: NativeMovement): void => {
+  selection.modify(alter, movement.direction, movement.granularity);
+};
 
 /**
  * The native movements that one movement is made of.
@@ -193,7 +179,16 @@ export const runMovement = (
 // Direction
 // ---------------------------------------------------------------------------
 
-const probeDirection = (selection: Selection): Direction => {
+/**
+ * Which end of the selection holds the focus, found by a probe.
+ *
+ * Extend one character forward, see whether the selection grew or became
+ * smaller, then undo it. Upstream does this instead of comparing the positions
+ * of the anchor and the focus, because those are *retargeted* across a shadow
+ * boundary, and because `anchorNode` and `focusNode` say nothing useful when
+ * the selection covers a table or a run of text in the other direction.
+ */
+export const getDirection = (selection: Selection): Direction => {
   const before = selection.toString().length;
   selection.modify("extend", "forward", "character");
   return pipe(
@@ -218,23 +213,6 @@ const undoProbe = (selection: Selection, direction: Direction): Direction => {
   selection.modify("extend", "backward", "character");
   return direction;
 };
-
-/**
- * Which end of the selection holds the focus, found by a probe.
- *
- * Extend one character forward, see whether the selection grew or became
- * smaller, then undo it. Upstream does this instead of comparing the positions
- * of the anchor and the focus, because those are *retargeted* across a shadow
- * boundary, and because `anchorNode` and `focusNode` say nothing useful when
- * the selection covers a table or a run of text in the other direction.
- */
-export const getDirection: (selection: Selection) => Direction = flow(
-  modifiable,
-  Option.match({
-    onNone: (): Direction => "forward",
-    onSome: probeDirection,
-  }),
-);
 
 /** The anchor and the focus of the selection, when it has both. */
 const selectionEnds = (
@@ -385,8 +363,7 @@ export const readBoundaries = (
 const composedBoundaries = (selection: Selection): Option.Option<SelectionBoundaries> =>
   pipe(
     selection,
-    Option.liftPredicate((selection) => typeof selection.getComposedRanges === "function"),
-    Option.flatMap(firstComposedRange),
+    firstComposedRange,
     Option.map((range) => ({
       start: { node: range.startContainer, offset: range.startOffset },
       end: { node: range.endContainer, offset: range.endOffset },
