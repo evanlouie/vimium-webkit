@@ -207,7 +207,7 @@ A caller waits on a `Deferred` that the fiber completes.
 This removes the epoch, the committed counter, the outstanding counter and the
 lock.
 
-A read that fails gives the defaults and one message on the issue stream.
+A read that fails gives the defaults and one `StorageError` on the issue stream.
 `update` then fails until a read, a write or a reset succeeds, so the defaults
 never replace a stored value that this build could not read. There are no
 migrations. Each stored value carries the schema version of its group, and a
@@ -228,7 +228,10 @@ the application on the in-memory backend. The kind of `KeyValueStore` is then
 joins the session. Link hints across frames, frame focus and the exclusion
 verdict of a child frame all stop. `platform/Capabilities.ts` names those
 losses in a warning that the top frame shows, because a loss of function with
-no message is worse than the loss itself.
+no message is worse than the loss itself. `BootstrapLayer` shows that warning
+and the errors of the first read, which it takes with `Storage.pendingIssues`,
+as one message. The HUD shows one message at a time, and each one replaces the
+one before it.
 
 The top frame does **not** give a credential of its own to a child during the
 handshake. That would restore the session, and it would also give the session to
@@ -300,8 +303,8 @@ one rule, so no service decides for itself how to speak to the user.
 4. It closes that scope when this frame's page goes away for good.
 
 Step 2 keeps a page with twenty frames cheap. A frame that never receives a key
-builds the guard only. The guard layer holds `Dom`, `Realm` and the logger, and
-nothing else.
+builds the guard only, until a hint round wakes it. The guard layer holds
+`Dom`, `Realm` and the logger, and nothing else.
 
 The guard holds each key that starts the application, up to 16 of them, from
 the first key until the application takes the keyboard. It suppresses each one,
@@ -309,7 +312,8 @@ so the page does not act on it, and it takes the release of each one as well.
 A release that comes after the guard lets go goes to `Modes`, which takes it
 too. A chord with Control or ⌘ starts the
 application but goes on to the page, because a held key cannot get its default
-action back, and ⌘C must still copy. The guard holds for three seconds at most:
+action back, and ⌘C must still copy. A binding on such a chord misses that
+press. The guard holds for three seconds at most:
 a start that takes longer gives the page its keyboard back, and the held keys
 are lost. A held key that the application gives to the page is lost as well.
 This includes each key that starts a page that the settings exclude, because
@@ -335,7 +339,10 @@ matters:
 - **wake** starts a frame that has not started. Only an ancestor may send it.
   The top frame sends it to every frame of the page at the start of each hint
   round, whichever frame starts the round. A frame that is joining or has
-  joined ignores it.
+  joined ignores it. When the page holds a frame that no round has waited for,
+  the top frame waits for every frame to join before it collects the hints,
+  for 400 ms at most. On its first round, a child frame waits as long for its
+  own admission. `JOIN_GRACE_MS` in `features/hints/Hints.ts` sets that bound.
 - **announce** asks a frame that is _already_ running to say so again. The
   coordinator sweeps with this when it starts, because a frame that started
   before its listener existed hears nothing. The guard ignores it.
