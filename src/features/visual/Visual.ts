@@ -23,7 +23,6 @@
 
 import {
   Boolean,
-  Context,
   Data,
   Duration,
   Effect,
@@ -296,353 +295,330 @@ class VisualStartError extends Schema.TaggedError<VisualStartError>()("VisualSta
 }) {}
 
 // ---------------------------------------------------------------------------
-// The service
+// The layer
 // ---------------------------------------------------------------------------
 
-export class Visual extends Context.Service<
-  Visual,
-  {
-    readonly enterVisual: Effect.Effect<void>;
-    readonly enterVisualLine: Effect.Effect<void>;
-    readonly enterCaret: Effect.Effect<void>;
-  }
->()("vimium/features/visual/Visual") {
-  static readonly layer: Layer.Layer<
-    Visual,
-    never,
-    Dom | Ui | Hud | Settings | Modes | Commands | Report | Capabilities | Clipboard
-  > = Layer.effect(
-    Visual,
-    Effect.gen(function* () {
-      const dom = yield* Dom;
-      const ui = yield* Ui;
-      const hud = yield* Hud;
-      const settings = yield* Settings;
-      const modes = yield* Modes;
-      const commands = yield* Commands;
-      const report = yield* Report;
-      const capabilities = yield* Capabilities;
-      const clipboard = yield* Clipboard;
+/** The three modes, as the bodies of the commands that enter them. */
+export const VisualLayer: Layer.Layer<
+  never,
+  never,
+  Dom | Ui | Hud | Settings | Modes | Commands | Report | Capabilities | Clipboard
+> = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const dom = yield* Dom;
+    const ui = yield* Ui;
+    const hud = yield* Hud;
+    const settings = yield* Settings;
+    const modes = yield* Modes;
+    const commands = yield* Commands;
+    const report = yield* Report;
+    const capabilities = yield* Capabilities;
+    const clipboard = yield* Clipboard;
 
-      const doc = dom.document;
-      const win = dom.window;
+    const doc = dom.document;
+    const win = dom.window;
 
-      const live = yield* Ref.make<Option.Option<LiveVisual>>(Option.none());
-      /** The count prefix, and whether a `g` is pending. */
-      const typed = yield* Ref.make(NOTHING_TYPED);
+    const live = yield* Ref.make<Option.Option<LiveVisual>>(Option.none());
+    /** The count prefix, and whether a `g` is pending. */
+    const typed = yield* Ref.make<Typed>(NOTHING_TYPED);
 
-      const selection: Effect.Effect<Option.Option<Selection>> = dom.probeOrElse(
-        () => Option.fromNullishOr(win.getSelection()),
-        Option.none,
-      );
+    const selection: Effect.Effect<Option.Option<Selection>> = dom.probeOrElse(
+      () => Option.fromNullishOr(win.getSelection()),
+      Option.none,
+    );
 
-      /** Read or change the selection inside `dom.probeOrElse`. No selection gives `fallback`. */
-      const probeSelection = <A>(
-        read: (selection: Selection) => A,
-        fallback: A,
-      ): Effect.Effect<A> =>
-        pipe(
-          selection,
-          Effect.flatMap(
-            Option.match({
-              onNone: () => Effect.succeed(fallback),
-              onSome: (target) =>
-                dom.probeOrElse(
-                  () => read(target),
-                  () => fallback,
-                ),
-            }),
-          ),
-        );
-
-      /** Run one synchronous piece of selection work, and ignore a refusal. */
-      const withSelection = (body: (selection: Selection) => void): Effect.Effect<void> =>
-        probeSelection(body, undefined);
-
-      const clearSelection: Effect.Effect<void> = withSelection((target) => {
-        // Nothing to do on a refusal. The page owns the selection again in
-        // either case.
-        target.removeAllRanges();
-      });
-
-      // -- the lifecycle of a mode ---------------------------------------
-
-      /**
-       * End the live mode, and close its scope.
-       *
-       * `reason` decides what happens to the selection. `"singleton"` is the
-       * hand-over from `v` to `V` or to `c`, and the selection survives it.
-       */
-      const release = Effect.fn("Visual.release")(function* (reason: ExitReason) {
-        const entry = yield* pipe(live, Ref.getAndSet(Option.none<LiveVisual>()));
-        yield* pipe(
-          entry,
+    /** Read or change the selection inside `dom.probeOrElse`. No selection gives `fallback`. */
+    const probeSelection = <A>(read: (selection: Selection) => A, fallback: A): Effect.Effect<A> =>
+      pipe(
+        selection,
+        Effect.flatMap(
           Option.match({
-            onNone: () => Effect.void,
-            // The exit comes first, and with the true reason. Closing the
-            // scope alone would exit the mode with `"navigation"`, and the
-            // hand-over would then throw the selection away.
-            onSome: ({ handle, scope }) =>
-              pipe(handle.exit(reason), Effect.andThen(Scope.close(scope, Exit.void))),
-          }),
-        );
-      });
-
-      /** End the live mode from inside one of its own key handlers. */
-      const exitCurrent = Effect.fn("Visual.exitCurrent")(function* () {
-        const entry = yield* Ref.get(live);
-        yield* pipe(
-          entry,
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: ({ handle }) => handle.exit("explicit"),
-          }),
-        );
-      });
-
-      // -- motions -------------------------------------------------------
-
-      const runMotion = Effect.fn("Visual.runMotion")(function* (
-        kind: VisualKind,
-        spec: MovementSpec,
-        repeat: number,
-      ) {
-        const viewport = yield* ui.viewport;
-        yield* withSelection((target) => {
-          profileOf(kind).move(target, spec, repeat);
-          scrollSelectionIntoView(doc, target, viewport);
-        });
-      });
-
-      const swapEnds = Effect.fn("Visual.swapEnds")(function* () {
-        const viewport = yield* ui.viewport;
-        yield* withSelection((target) => {
-          reverseSelection(target);
-          scrollSelectionIntoView(doc, target, viewport);
-        });
-      });
-
-      // -- yank ----------------------------------------------------------
-
-      /**
-       * Start the write of `text`, and say so.
-       *
-       * The write is started **inside** the keydown task. Nothing may suspend
-       * in front of it: the window of transient activation in WebKit is short,
-       * and the first suspension spends it, after which
-       * `navigator.clipboard.writeText` refuses.
-       *
-       * `Effect.forkDetach` with `startImmediately` is what keeps that true.
-       * The child fiber runs on this stack until it suspends, so the manager
-       * write and the start of the promise both happen inside the dispatch of
-       * the browser. Only the wait for the answer runs later.
-       */
-      const copy = (text: string): Effect.Effect<void> =>
-        pipe(
-          clipboard.write(text),
-          Effect.catch((error) => report.error(`Copy failed: ${error.detail}`)),
-          Effect.forkDetach({ startImmediately: true }),
-          Effect.andThen(hud.show(`Yanked ${characters(text.length)}`, BRIEFLY)),
-        );
-
-      /** `y`: copy the selection and leave. */
-      const yank = Effect.fn("Visual.yank")(function* () {
-        const text = yield* probeSelection(selectionText, "");
-        yield* pipe(
-          text,
-          Option.liftPredicate((text) => text.length > 0),
-          Option.match({
-            onNone: () => hud.show("Nothing to copy", BRIEFLY),
-            onSome: copy,
-          }),
-        );
-        yield* exitCurrent();
-      });
-
-      // -- keys ----------------------------------------------------------
-
-      const runCommand = (kind: VisualKind): ((command: KeyCommand) => Effect.Effect<void>) =>
-        KeyCommand.$match({
-          Motion: ({ spec, repeat }) => runMotion(kind, spec, repeat),
-          Yank: () => yank(),
-          SwapEnds: () => swapEnds(),
-          Enter: (command) => enterKind(command.kind),
-          ExplainPaste: () => hud.show(PASTE_EXPLANATION, PASTE_EXPLANATION_DURATION),
-        });
-
-      const handleKey = Effect.fn("Visual.handleKey")(function* (
-        kind: VisualKind,
-        notation: string,
-      ) {
-        const commands = yield* pipe(
-          typed,
-          Ref.modify(flow(pressKey(notation), ({ next, commands }) => [commands, next] as const)),
-        );
-        yield* pipe(commands, Effect.forEach(runCommand(kind), { discard: true }));
-      });
-
-      const onKeydown =
-        (kind: VisualKind) =>
-        (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-          pipe(
-            event,
-            // A keystroke in the middle of a composition belongs to the input
-            // method, and not to us.
-            Option.liftPredicate(Predicate.not(isComposing)),
-            Option.flatMap((event) =>
-              keyNotation(event, {
-                ignoreKeyboardLayout: settings.currentUnsafe().ignoreKeyboardLayout,
-                applePlatform: capabilities.applePlatform,
-              }),
-            ),
-            Option.match({
-              onNone: () => Effect.void,
-              onSome: (notation) => handleKey(kind, notation),
-            }),
-            Effect.as(SUPPRESS_EVENT),
-          );
-
-      // -- the first selection -------------------------------------------
-
-      /** The selection of this frame, when `Selection.modify` works on it. */
-      const modifiableSelection: Effect.Effect<Selection, VisualStartError> = pipe(
-        probeSelection(Option.liftPredicate(canModify), Option.none<Selection>()),
-        Effect.flatMap(Effect.fromOption(() => new VisualStartError({ reason: "unavailable" }))),
-      );
-
-      /** Put a caret at the start of the first large text of the page. */
-      const placeCaret = (current: Selection): Effect.Effect<void, VisualStartError> =>
-        pipe(
-          dom.probeOrElse(() => findCaretAnchor(doc), Option.none),
-          Effect.flatMap(Effect.fromOption(() => new VisualStartError({ reason: "no-text" }))),
-          Effect.flatMap((anchor) =>
-            pipe(
-              dom.attempt("Selection.setBaseAndExtent", () =>
-                current.setBaseAndExtent(anchor, 0, anchor, 0),
+            onNone: () => Effect.succeed(fallback),
+            onSome: (target) =>
+              dom.probeOrElse(
+                () => read(target),
+                () => fallback,
               ),
-              Effect.mapError(() => new VisualStartError({ reason: "unplaceable" })),
-            ),
-          ),
-        );
-
-      /**
-       * A selection that is already there is adopted, and not replaced. That
-       * is what makes `v` after a find, or after a drag with the mouse, do the
-       * obvious thing. An empty one gets a caret.
-       */
-      const adoptOrPlace = (current: Selection): Effect.Effect<Selection, VisualStartError> =>
-        pipe(
-          dom.probeOrElse(() => current.rangeCount === 0 || current.anchorNode === null, constTrue),
-          Effect.flatMap(
-            Boolean.match({
-              onFalse: () => Effect.void,
-              onTrue: () => placeCaret(current),
-            }),
-          ),
-          Effect.as(current),
-        );
-
-      const explainRefusal = ({ reason }: VisualStartError): Effect.Effect<void> =>
-        pipe(
-          Match.value(reason),
-          Match.when("unavailable", () =>
-            report.error("Text selection is not available in this frame."),
-          ),
-          Match.when("no-text", () => hud.show("No text on this page to select.", BRIEFLY)),
-          Match.when("unplaceable", () => report.error("Could not place the caret on this page.")),
-          Match.exhaustive,
-        );
-
-      /** Establish the selection that the mode starts from. */
-      const start = Effect.fn("Visual.start")(
-        function* (kind: VisualKind) {
-          const current = yield* pipe(modifiableSelection, Effect.flatMap(adoptOrPlace));
-          const viewport = yield* ui.viewport;
-          yield* dom.probeOrElse(() => {
-            profileOf(kind).shape(current, capabilities);
-            scrollSelectionIntoView(doc, current, viewport);
-          }, constVoid);
-        },
-        Effect.catchTag("VisualStartError", (error) =>
-          pipe(explainRefusal(error), Effect.andThen(exitCurrent())),
+          }),
         ),
       );
 
-      // -- entering ------------------------------------------------------
+    /** Run one synchronous piece of selection work, and ignore a refusal. */
+    const withSelection = (body: (selection: Selection) => void): Effect.Effect<void> =>
+      probeSelection(body, undefined);
 
-      /**
-       * A `singleton` exit means that `v`, `V` or `c` is handing over to a
-       * sibling. The selection is the state that is handed over, and it must
-       * survive.
-       */
-      const afterExit = (reason: ExitReason): Effect.Effect<void> =>
+    const clearSelection: Effect.Effect<void> = withSelection((target) => {
+      // Nothing to do on a refusal. The page owns the selection again in
+      // either case.
+      target.removeAllRanges();
+    });
+
+    // -- the lifecycle of a mode ---------------------------------------
+
+    /**
+     * End the live mode, and close its scope.
+     *
+     * `reason` decides what happens to the selection. `"singleton"` is the
+     * hand-over from `v` to `V` or to `c`, and the selection survives it.
+     */
+    const release = Effect.fn("Visual.release")(function* (reason: ExitReason) {
+      const entry = yield* pipe(live, Ref.getAndSet(Option.none<LiveVisual>()));
+      yield* pipe(
+        entry,
+        Option.match({
+          onNone: () => Effect.void,
+          // The exit comes first, and with the true reason. Closing the
+          // scope alone would exit the mode with `"navigation"`, and the
+          // hand-over would then throw the selection away.
+          onSome: ({ handle, scope }) =>
+            pipe(handle.exit(reason), Effect.andThen(Scope.close(scope, Exit.void))),
+        }),
+      );
+    });
+
+    /** End the live mode from inside one of its own key handlers. */
+    const exitCurrent = Effect.fn("Visual.exitCurrent")(function* () {
+      const entry = yield* Ref.get(live);
+      yield* pipe(
+        entry,
+        Option.match({
+          onNone: () => Effect.void,
+          onSome: ({ handle }) => handle.exit("explicit"),
+        }),
+      );
+    });
+
+    // -- motions -------------------------------------------------------
+
+    const runMotion = Effect.fn("Visual.runMotion")(function* (
+      kind: VisualKind,
+      spec: MovementSpec,
+      repeat: number,
+    ) {
+      const viewport = yield* ui.viewport;
+      yield* withSelection((target) => {
+        profileOf(kind).move(target, spec, repeat);
+        scrollSelectionIntoView(doc, target, viewport);
+      });
+    });
+
+    const swapEnds = Effect.fn("Visual.swapEnds")(function* () {
+      const viewport = yield* ui.viewport;
+      yield* withSelection((target) => {
+        reverseSelection(target);
+        scrollSelectionIntoView(doc, target, viewport);
+      });
+    });
+
+    // -- yank ----------------------------------------------------------
+
+    /**
+     * Start the write of `text`, and say so.
+     *
+     * The write is started **inside** the keydown task. Nothing may suspend
+     * in front of it: the window of transient activation in WebKit is short,
+     * and the first suspension spends it, after which
+     * `navigator.clipboard.writeText` refuses.
+     *
+     * `Effect.forkDetach` with `startImmediately` is what keeps that true.
+     * The child fiber runs on this stack until it suspends, so the manager
+     * write and the start of the promise both happen inside the dispatch of
+     * the browser. Only the wait for the answer runs later.
+     */
+    const copy = (text: string): Effect.Effect<void> =>
+      pipe(
+        clipboard.write(text),
+        Effect.catch((error) => report.error(`Copy failed: ${error.detail}`)),
+        Effect.forkDetach({ startImmediately: true }),
+        Effect.andThen(hud.show(`Yanked ${characters(text.length)}`, BRIEFLY)),
+      );
+
+    /** `y`: copy the selection and leave. */
+    const yank = Effect.fn("Visual.yank")(function* () {
+      const text = yield* probeSelection(selectionText, "");
+      yield* pipe(
+        text,
+        Option.liftPredicate((text) => text.length > 0),
+        Option.match({
+          onNone: () => hud.show("Nothing to copy", BRIEFLY),
+          onSome: copy,
+        }),
+      );
+      yield* exitCurrent();
+    });
+
+    // -- keys ----------------------------------------------------------
+
+    const runCommand = (kind: VisualKind): ((command: KeyCommand) => Effect.Effect<void>) =>
+      KeyCommand.$match({
+        Motion: ({ spec, repeat }) => runMotion(kind, spec, repeat),
+        Yank: () => yank(),
+        SwapEnds: () => swapEnds(),
+        Enter: (command) => enterKind(command.kind),
+        ExplainPaste: () => hud.show(PASTE_EXPLANATION, PASTE_EXPLANATION_DURATION),
+      });
+
+    const handleKey = Effect.fn("Visual.handleKey")(function* (kind: VisualKind, notation: string) {
+      const commands = yield* pipe(
+        typed,
+        Ref.modify(flow(pressKey(notation), ({ next, commands }) => [commands, next] as const)),
+      );
+      yield* pipe(commands, Effect.forEach(runCommand(kind), { discard: true }));
+    });
+
+    const onKeydown =
+      (kind: VisualKind) =>
+      (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
         pipe(
-          Match.value(reason),
-          Match.when("singleton", () => Effect.void),
-          Match.orElse(() => clearSelection),
-        );
-
-      const openMode = Effect.fn("Visual.openMode")(function* (kind: VisualKind) {
-        // The hand-over. The mode before this one keeps the selection.
-        yield* release("singleton");
-        yield* pipe(typed, Ref.set(NOTHING_TYPED));
-
-        const scope = yield* Scope.make();
-        const handle = yield* pipe(
-          modes.enter(
-            {
-              name: kind,
-              indicator: Option.some(profileOf(kind).indicator),
-              exitOn: [ExitTrigger.Escape()],
-              // These modes own the keyboard outright: a key that they do not
-              // use must not reach the page, or `j` scrolls out from under the
-              // selection.
-              keyboard: KeyPolicy.Owned(),
-              singleton: Option.some("visual"),
-            },
-            {
-              keydown: onKeydown(kind),
-            },
+          event,
+          // A keystroke in the middle of a composition belongs to the input
+          // method, and not to us.
+          Option.liftPredicate(Predicate.not(isComposing)),
+          Option.flatMap((event) =>
+            keyNotation(event, {
+              ignoreKeyboardLayout: settings.currentUnsafe().ignoreKeyboardLayout,
+              applePlatform: capabilities.applePlatform,
+            }),
           ),
-          Scope.provide(scope),
-        );
-
-        yield* handle.onExit(afterExit);
-        yield* pipe(live, Ref.set(Option.some({ kind, scope, handle })));
-        yield* start(kind);
-      });
-
-      const enterKind = Effect.fn("Visual.enterKind")(function* (kind: VisualKind) {
-        yield* pipe(
-          capabilities.selectionModify,
-          Boolean.match({
-            // Every capability that is `false` gets an explanation that the
-            // user can see. This one should be unreachable on any WebKit build
-            // that this application targets.
-            onFalse: () =>
-              report.error("Selection.modify() is unavailable, so visual mode cannot run here."),
-            onTrue: () => openMode(kind),
+          Option.match({
+            onNone: () => Effect.void,
+            onSome: (notation) => handleKey(kind, notation),
           }),
+          Effect.as(SUPPRESS_EVENT),
         );
-      });
 
-      // The layer scope owns the live mode. Closing the runtime therefore ends
-      // the mode and gives the selection back to the page.
-      yield* Effect.addFinalizer(() => release("navigation"));
+    // -- the first selection -------------------------------------------
 
-      const service = Visual.of({
-        enterVisual: enterKind("visual"),
-        enterVisualLine: enterKind("visual-line"),
-        enterCaret: enterKind("caret"),
-      });
+    /** The selection of this frame, when `Selection.modify` works on it. */
+    const modifiableSelection: Effect.Effect<Selection, VisualStartError> = pipe(
+      probeSelection(Option.liftPredicate(canModify), Option.none<Selection>()),
+      Effect.flatMap(Effect.fromOption(() => new VisualStartError({ reason: "unavailable" }))),
+    );
 
-      yield* commands.registerAll({
-        enterVisualMode: () => service.enterVisual,
-        enterVisualLineMode: () => service.enterVisualLine,
-        enterCaretMode: () => service.enterCaret,
-      });
+    /** Put a caret at the start of the first large text of the page. */
+    const placeCaret = (current: Selection): Effect.Effect<void, VisualStartError> =>
+      pipe(
+        dom.probeOrElse(() => findCaretAnchor(doc), Option.none),
+        Effect.flatMap(Effect.fromOption(() => new VisualStartError({ reason: "no-text" }))),
+        Effect.flatMap((anchor) =>
+          pipe(
+            dom.attempt("Selection.setBaseAndExtent", () =>
+              current.setBaseAndExtent(anchor, 0, anchor, 0),
+            ),
+            Effect.mapError(() => new VisualStartError({ reason: "unplaceable" })),
+          ),
+        ),
+      );
 
-      return service;
-    }),
-  );
-}
+    /**
+     * A selection that is already there is adopted, and not replaced. That
+     * is what makes `v` after a find, or after a drag with the mouse, do the
+     * obvious thing. An empty one gets a caret.
+     */
+    const adoptOrPlace = (current: Selection): Effect.Effect<Selection, VisualStartError> =>
+      pipe(
+        dom.probeOrElse(() => current.rangeCount === 0 || current.anchorNode === null, constTrue),
+        Effect.flatMap(
+          Boolean.match({
+            onFalse: () => Effect.void,
+            onTrue: () => placeCaret(current),
+          }),
+        ),
+        Effect.as(current),
+      );
+
+    const explainRefusal = ({ reason }: VisualStartError): Effect.Effect<void> =>
+      pipe(
+        Match.value(reason),
+        Match.when("unavailable", () =>
+          report.error("Text selection is not available in this frame."),
+        ),
+        Match.when("no-text", () => hud.show("No text on this page to select.", BRIEFLY)),
+        Match.when("unplaceable", () => report.error("Could not place the caret on this page.")),
+        Match.exhaustive,
+      );
+
+    /** Establish the selection that the mode starts from. */
+    const start = Effect.fn("Visual.start")(
+      function* (kind: VisualKind) {
+        const current = yield* pipe(modifiableSelection, Effect.flatMap(adoptOrPlace));
+        const viewport = yield* ui.viewport;
+        yield* dom.probeOrElse(() => {
+          profileOf(kind).shape(current, capabilities);
+          scrollSelectionIntoView(doc, current, viewport);
+        }, constVoid);
+      },
+      Effect.catchTag("VisualStartError", (error) =>
+        pipe(explainRefusal(error), Effect.andThen(exitCurrent())),
+      ),
+    );
+
+    // -- entering ------------------------------------------------------
+
+    /**
+     * A `singleton` exit means that `v`, `V` or `c` is handing over to a
+     * sibling. The selection is the state that is handed over, and it must
+     * survive.
+     */
+    const afterExit = (reason: ExitReason): Effect.Effect<void> =>
+      pipe(
+        Match.value(reason),
+        Match.when("singleton", () => Effect.void),
+        Match.orElse(() => clearSelection),
+      );
+
+    const openMode = Effect.fn("Visual.openMode")(function* (kind: VisualKind) {
+      // The hand-over. The mode before this one keeps the selection.
+      yield* release("singleton");
+      yield* pipe(typed, Ref.set<Typed>(NOTHING_TYPED));
+
+      const scope = yield* Scope.make();
+      const handle = yield* pipe(
+        modes.enter(
+          {
+            name: kind,
+            indicator: Option.some(profileOf(kind).indicator),
+            exitOn: [ExitTrigger.Escape()],
+            // These modes own the keyboard outright: a key that they do not
+            // use must not reach the page, or `j` scrolls out from under the
+            // selection.
+            keyboard: KeyPolicy.Owned(),
+            singleton: Option.some("visual"),
+          },
+          {
+            keydown: onKeydown(kind),
+          },
+        ),
+        Scope.provide(scope),
+      );
+
+      yield* handle.onExit(afterExit);
+      yield* pipe(live, Ref.set(Option.some({ kind, scope, handle })));
+      yield* start(kind);
+    });
+
+    const enterKind = Effect.fn("Visual.enterKind")(function* (kind: VisualKind) {
+      yield* pipe(
+        capabilities.selectionModify,
+        Boolean.match({
+          // Every capability that is `false` gets an explanation that the
+          // user can see. This one should be unreachable on any WebKit build
+          // that this application targets.
+          onFalse: () =>
+            report.error("Selection.modify() is unavailable, so visual mode cannot run here."),
+          onTrue: () => openMode(kind),
+        }),
+      );
+    });
+
+    // The layer scope owns the live mode. Closing the runtime therefore ends
+    // the mode and gives the selection back to the page.
+    yield* Effect.addFinalizer(() => release("navigation"));
+
+    yield* commands.registerAll({
+      enterVisualMode: () => enterKind("visual"),
+      enterVisualLineMode: () => enterKind("visual-line"),
+      enterCaretMode: () => enterKind("caret"),
+    });
+  }),
+);

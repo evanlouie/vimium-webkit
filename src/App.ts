@@ -27,16 +27,16 @@ import { Settings } from "~/core/Settings.ts";
 import { FrameAuth } from "~/frames/Auth.ts";
 import { FrameBus } from "~/frames/Bus.ts";
 import { FrameLink } from "~/frames/Link.ts";
-import { Find } from "~/features/find/Find.ts";
+import { FindLayer } from "~/features/find/Find.ts";
 import { Hints } from "~/features/hints/Hints.ts";
 import { Insert } from "~/features/Insert.ts";
-import { Marks } from "~/features/Marks.ts";
+import { MarksLayer } from "~/features/Marks.ts";
 import { Navigation } from "~/features/Navigation.ts";
 import { Omnibar } from "~/features/omnibar/Omnibar.ts";
 import { Scroller } from "~/features/Scroller.ts";
 import { TabControlLayer } from "~/features/TabControl.ts";
 import { UrlClipboardLayer } from "~/features/UrlClipboard.ts";
-import { Visual } from "~/features/visual/Visual.ts";
+import { VisualLayer } from "~/features/visual/Visual.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -119,7 +119,7 @@ const FramesLayer = pipe(
   Layer.provideMerge(UiLayer),
 );
 
-const MarksLayer = pipe(Marks.layer, Layer.provide(Scroller.layer));
+const MarksWithScroller = pipe(MarksLayer, Layer.provide(Scroller.layer));
 
 // `UrlClipboard` opens a URL that the user pasted, which is the same step that
 // `Navigation` takes for a typed URL. It asks for that service rather than
@@ -138,10 +138,10 @@ const FeatureLayer = pipe(
   Layer.mergeAll(
     Scroller.layer,
     Insert.layer,
-    MarksLayer,
+    MarksWithScroller,
     Hints.layer,
-    Find.layer,
-    Visual.layer,
+    FindLayer,
+    VisualLayer,
     Omnibar.layer,
     TabControlLayer,
     UrlClipboardWithNavigation,

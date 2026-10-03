@@ -16,7 +16,6 @@ import {
   Array,
   Boolean,
   Clock,
-  Context,
   Data,
   Effect,
   Layer,
@@ -137,171 +136,145 @@ const globalJump = (marks: MarksData, letter: string, href: string): GlobalJump 
     }),
   );
 
-export class Marks extends Context.Service<
-  Marks,
-  {
+/** Marks, as the bodies of the commands that `m` and `` ` `` run. */
+export const MarksLayer: Layer.Layer<
+  never,
+  never,
+  Commands | Dom | Hud | Modes | Report | Scroller | Storage | Tabs
+> = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const commands = yield* Commands;
+    const dom = yield* Dom;
+    const hud = yield* Hud;
+    const report = yield* Report;
+    const scroller = yield* Scroller;
+    const storage = yield* Storage;
+    const tabs = yield* Tabs;
+
+    /**
+     * `now` comes from the `Clock`, and not from `Date.now()`.
+     *
+     * Every timestamp here is stored and later compared with another one, so
+     * the clock is an input of this feature and not an ambient fact. A test
+     * can age a mark without waiting for real time, and the mark that is
+     * written and the prune that goes with it share one reading. Two
+     * `Date.now()` calls did not share one.
+     */
+    const update = Effect.fn("Marks.update")(function* (
+      change: (now: number) => (marks: MarksData) => MarksData,
+    ) {
+      const now = yield* Clock.currentTimeMillis;
+      // Pruned on every write, and not on a timer: a local mark is keyed by
+      // URL, nothing else ever removes one, so the table only grew — and
+      // the whole of it is rewritten on every mark.
+      yield* pipe(
+        storage.marks.update(flow(change(now), (marks) => pruneMarks(marks, now))),
+        Effect.catch((error) => report.error(`Could not save mark: ${error.detail}`)),
+      );
+    });
+
+    const setGlobal = Effect.fn("Marks.setGlobal")(function* (letter: string) {
+      const { x, y } = yield* scroller.position;
+      const href = yield* dom.href;
+      yield* update((now) =>
+        withGlobalMark(letter, { url: href, scrollX: x, scrollY: y, savedAt: now }),
+      );
+      yield* hud.show(`Global mark "${letter}" set`, BRIEFLY);
+    });
+
+    const setOnPage = Effect.fnUntraced(function* (letter: string) {
+      const href = yield* dom.href;
+      const key = markKeyForUrl(href);
+      const { x, y } = yield* scroller.position;
+      yield* update((now) => withLocalMark(key, letter, { scrollX: x, scrollY: y, savedAt: now }));
+      yield* hud.show(`Mark "${letter}" set`, BRIEFLY);
+    });
+
     /** `m` — set a mark on this page. An upper-case letter sets a global one. */
-    readonly setLocal: (letter: string) => Effect.Effect<void>;
+    const setLocal = Effect.fn("Marks.setLocal")(function* (letter: string) {
+      yield* pipe(
+        markLetter(letter),
+        MarkLetter.$match({
+          Local: ({ letter: local }) => setOnPage(local),
+          Global: ({ letter: global }) => setGlobal(global),
+        }),
+      );
+    });
+
+    /**
+     * Go to a mark on another page.
+     *
+     * The scroll position of the mark is lost across the navigation. There is
+     * no channel that survives a document change, and the next document
+     * cannot know which letter brought it there.
+     */
+    const goToMark = Effect.fnUntraced(function* (letter: string, url: string) {
+      yield* hud.show(
+        `Going to global mark "${letter}" (a userscript cannot focus another tab)`,
+        BRIEFLY,
+      );
+      // Through the tab service, which is the one place that decides what a
+      // safe URL is. A refusal is final; there is no fallback.
+      yield* pipe(
+        tabs.navigate(url),
+        Effect.catch((error) => report.error(`Could not go to the mark: ${error.detail}`)),
+      );
+    });
+
+    const jumpGlobal = Effect.fn("Marks.jumpGlobal")(function* (letter: string) {
+      const marks = yield* storage.marks.current;
+      const href = yield* dom.href;
+      yield* pipe(
+        globalJump(marks, letter, href),
+        GlobalJump.$match({
+          Unset: () => report.error(`Global mark "${letter}" is not set`),
+          Here: ({ mark }) => scroller.restore(mark.scrollX, mark.scrollY),
+          Unsafe: () =>
+            report.error(`Global mark "${letter}" points somewhere unsafe; it will not be opened`),
+          Away: ({ url }) => goToMark(letter, url),
+        }),
+      );
+    });
+
+    const jumpOnPage = Effect.fnUntraced(function* (letter: string) {
+      const href = yield* dom.href;
+      const key = markKeyForUrl(href);
+      const marks = yield* storage.marks.current;
+      yield* pipe(
+        localMark(marks, key, letter),
+        Option.match({
+          onNone: () => report.error(`Mark "${letter}" is not set on this page`),
+          onSome: (mark) =>
+            pipe(
+              scroller.restore(mark.scrollX, mark.scrollY),
+              Effect.andThen(hud.show(`Jumped to mark "${letter}"`, BRIEFLY)),
+            ),
+        }),
+      );
+    });
 
     /** `` ` `` — go to a mark on this page. */
-    readonly jumpLocal: (letter: string) => Effect.Effect<void>;
+    const jumpLocal = Effect.fn("Marks.jumpLocal")(function* (letter: string) {
+      yield* pipe(
+        markLetter(letter),
+        MarkLetter.$match({
+          Local: ({ letter: local }) => jumpOnPage(local),
+          Global: ({ letter: global }) => jumpGlobal(global),
+        }),
+      );
+    });
 
-    readonly setGlobal: (letter: string) => Effect.Effect<void>;
-
-    readonly jumpGlobal: (letter: string) => Effect.Effect<void>;
-  }
->()("vimium/features/Marks") {
-  static readonly layer: Layer.Layer<
-    Marks,
-    never,
-    Commands | Dom | Hud | Modes | Report | Scroller | Storage | Tabs
-  > = Layer.effect(
-    Marks,
-    Effect.gen(function* () {
-      const commands = yield* Commands;
-      const dom = yield* Dom;
-      const hud = yield* Hud;
-      const report = yield* Report;
-      const scroller = yield* Scroller;
-      const storage = yield* Storage;
-      const tabs = yield* Tabs;
-
-      /**
-       * `now` comes from the `Clock`, and not from `Date.now()`.
-       *
-       * Every timestamp here is stored and later compared with another one, so
-       * the clock is an input of this feature and not an ambient fact. A test
-       * can age a mark without waiting for real time, and the mark that is
-       * written and the prune that goes with it share one reading. Two
-       * `Date.now()` calls did not share one.
-       */
-      const update = Effect.fn("Marks.update")(function* (
-        change: (now: number) => (marks: MarksData) => MarksData,
-      ) {
-        const now = yield* Clock.currentTimeMillis;
-        // Pruned on every write, and not on a timer: a local mark is keyed by
-        // URL, nothing else ever removes one, so the table only grew — and
-        // the whole of it is rewritten on every mark.
-        yield* pipe(
-          storage.marks.update(flow(change(now), (marks) => pruneMarks(marks, now))),
-          Effect.catch((error) => report.error(`Could not save mark: ${error.detail}`)),
-        );
-      });
-
-      const setGlobal = Effect.fn("Marks.setGlobal")(function* (letter: string) {
-        const { x, y } = yield* scroller.position;
-        const href = yield* dom.href;
-        yield* update((now) =>
-          withGlobalMark(letter, { url: href, scrollX: x, scrollY: y, savedAt: now }),
-        );
-        yield* hud.show(`Global mark "${letter}" set`, BRIEFLY);
-      });
-
-      const setOnPage = Effect.fnUntraced(function* (letter: string) {
-        const href = yield* dom.href;
-        const key = markKeyForUrl(href);
-        const { x, y } = yield* scroller.position;
-        yield* update((now) =>
-          withLocalMark(key, letter, { scrollX: x, scrollY: y, savedAt: now }),
-        );
-        yield* hud.show(`Mark "${letter}" set`, BRIEFLY);
-      });
-
-      const setLocal = Effect.fn("Marks.setLocal")(function* (letter: string) {
-        yield* pipe(
-          markLetter(letter),
-          MarkLetter.$match({
-            Local: ({ letter: local }) => setOnPage(local),
-            Global: ({ letter: global }) => setGlobal(global),
-          }),
-        );
-      });
-
-      /**
-       * Go to a mark on another page.
-       *
-       * The scroll position of the mark is lost across the navigation. There is
-       * no channel that survives a document change, and the next document
-       * cannot know which letter brought it there.
-       */
-      const goToMark = Effect.fnUntraced(function* (letter: string, url: string) {
-        yield* hud.show(
-          `Going to global mark "${letter}" (a userscript cannot focus another tab)`,
-          BRIEFLY,
-        );
-        // Through the tab service, which is the one place that decides what a
-        // safe URL is. A refusal is final; there is no fallback.
-        yield* pipe(
-          tabs.navigate(url),
-          Effect.catch((error) => report.error(`Could not go to the mark: ${error.detail}`)),
-        );
-      });
-
-      const jumpGlobal = Effect.fn("Marks.jumpGlobal")(function* (letter: string) {
-        const marks = yield* storage.marks.current;
-        const href = yield* dom.href;
-        yield* pipe(
-          globalJump(marks, letter, href),
-          GlobalJump.$match({
-            Unset: () => report.error(`Global mark "${letter}" is not set`),
-            Here: ({ mark }) => scroller.restore(mark.scrollX, mark.scrollY),
-            Unsafe: () =>
-              report.error(
-                `Global mark "${letter}" points somewhere unsafe; it will not be opened`,
-              ),
-            Away: ({ url }) => goToMark(letter, url),
-          }),
-        );
-      });
-
-      const jumpOnPage = Effect.fnUntraced(function* (letter: string) {
-        const href = yield* dom.href;
-        const key = markKeyForUrl(href);
-        const marks = yield* storage.marks.current;
-        yield* pipe(
-          localMark(marks, key, letter),
-          Option.match({
-            onNone: () => report.error(`Mark "${letter}" is not set on this page`),
-            onSome: (mark) =>
-              pipe(
-                scroller.restore(mark.scrollX, mark.scrollY),
-                Effect.andThen(hud.show(`Jumped to mark "${letter}"`, BRIEFLY)),
-              ),
-          }),
-        );
-      });
-
-      const jumpLocal = Effect.fn("Marks.jumpLocal")(function* (letter: string) {
-        yield* pipe(
-          markLetter(letter),
-          MarkLetter.$match({
-            Local: ({ letter: local }) => jumpOnPage(local),
-            Global: ({ letter: global }) => jumpGlobal(global),
-          }),
-        );
-      });
-
-      const service = Marks.of({
-        setLocal,
-        jumpLocal,
-        setGlobal,
-        jumpGlobal,
-      });
-
-      yield* commands.registerAll({
-        "Marks.activateCreateMode": () =>
-          pipe(
-            captureNextKey({ prompt: "Set mark:", context: PLAIN_KEY_CONTEXT }),
-            Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: service.setLocal })),
-          ),
-        "Marks.activateGotoMode": () =>
-          pipe(
-            captureNextKey({ prompt: "Go to mark:", context: PLAIN_KEY_CONTEXT }),
-            Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: service.jumpLocal })),
-          ),
-      });
-
-      return service;
-    }),
-  );
-}
+    yield* commands.registerAll({
+      "Marks.activateCreateMode": () =>
+        pipe(
+          captureNextKey({ prompt: "Set mark:", context: PLAIN_KEY_CONTEXT }),
+          Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: setLocal })),
+        ),
+      "Marks.activateGotoMode": () =>
+        pipe(
+          captureNextKey({ prompt: "Go to mark:", context: PLAIN_KEY_CONTEXT }),
+          Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: jumpLocal })),
+        ),
+    });
+  }),
+);
