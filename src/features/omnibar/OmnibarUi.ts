@@ -226,7 +226,10 @@ export interface OmnibarViewOptions {
    * this scope would be interrupted with it.
    */
   readonly onActivate: (index: number, newTab: boolean) => Effect.Effect<void>;
-  /** The focus left the overlay. It runs in a fiber of this scope. */
+  /**
+   * The focus left the overlay. It runs in a fiber of this scope, so a body
+   * that closes this scope must fork the close outside it.
+   */
   readonly onDismiss: Effect.Effect<void>;
 }
 

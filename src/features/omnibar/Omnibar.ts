@@ -691,7 +691,10 @@ export class Omnibar extends Context.Service<
             placeholder: placeholderFor(source),
             onInput: () => onInput,
             onActivate: startActivation,
-            onDismiss: close,
+            // On a fiber of the layer. The blur fiber that asks belongs to the
+            // session scope, and a close that ran on it would wait for its own
+            // interruption.
+            onDismiss: startClose,
           }),
           Effect.provideContext(services),
           Scope.provide(scope),
