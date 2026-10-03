@@ -57,6 +57,7 @@ import {
   toRegExp,
   wordQuery,
 } from "~/domain/FindQuery.ts";
+import { isComposing } from "~/domain/Key.ts";
 import { FIND_HISTORY_LIMIT } from "~/domain/Persisted.ts";
 import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
@@ -354,7 +355,8 @@ const browse =
  * The step through the history that a key asks for.
  *
  * `<c-p>` and `<c-n>` are other names for the arrow keys, for the reason that
- * readline has them: the arrow keys are far from the home row.
+ * readline has them: the arrow keys are far from the home row. While an input
+ * method composes, these keys move through its candidates, and ask for none.
  */
 const historyStep = (event: KeyboardEvent): Option.Option<number> =>
   pipe(
@@ -364,6 +366,7 @@ const historyStep = (event: KeyboardEvent): Option.Option<number> =>
     Match.when({ ctrlKey: true, key: "p" }, () => 1),
     Match.when({ ctrlKey: true, key: "n" }, () => -1),
     Match.option,
+    Option.filter(() => !isComposing(event)),
   );
 
 // ---------------------------------------------------------------------------
