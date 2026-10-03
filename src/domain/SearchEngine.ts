@@ -292,6 +292,17 @@ const WITH_AUTHORITY = /^[a-z][a-z0-9+.-]*:\/\//iu;
 
 const WITHOUT_AUTHORITY = /^(?:about|view-source|file|data|javascript):/iu;
 
+/**
+ * Text that names its own scheme: `https://…`, or one of the few schemes with
+ * no authority, such as `about:`.
+ *
+ * A word and a colon are not enough. `localhost:3000`, `example.com:8080`
+ * and `user:pass@example.com` start that way, and none of them names a
+ * scheme.
+ */
+const hasExplicitScheme = (text: string): boolean =>
+  WITH_AUTHORITY.test(text) || WITHOUT_AUTHORITY.test(text);
+
 /** An `@` before the first `/`. */
 const USER_INFO = /^[^/]*@/u;
 
@@ -336,11 +347,10 @@ export const classifyQuery = (query: string): QueryKind =>
     Match.withReturnType<QueryKind>(),
     Match.when(String.isEmpty, () => "search"),
     Match.when(matches(/\s/u), () => "search"),
-    Match.when(matches(WITH_AUTHORITY), () => "url"),
-    // This is still a URL, so that the tabs service gets the chance to refuse
-    // `javascript:` and `data:` itself. We must not search for the payload
+    // `javascript:` and `data:` are still URLs, so that the tabs service gets
+    // the chance to refuse them itself. We must not search for the payload
     // without a message.
-    Match.when(matches(WITHOUT_AUTHORITY), () => "url"),
+    Match.when(hasExplicitScheme, () => "url"),
     // An `@` before the first `/` is user information. A search for it would
     // send the password to the search engine. That is the one result here that
     // cannot be undone.
@@ -351,13 +361,16 @@ export const classifyQuery = (query: string): QueryKind =>
     Match.orElse(hostKind),
   );
 
-const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:/iu;
-
-/** Add the scheme that a plain host does not have. It never guesses `http:`. */
+/**
+ * Add the scheme that the text does not name. It never guesses `http:`.
+ *
+ * `localhost:3000` therefore opens `https://localhost:3000`, and does not
+ * go to a scheme called `localhost:`.
+ */
 export const toNavigableUrl = (query: string): string =>
   pipe(
     Match.value(query.trim()),
-    Match.when(matches(HAS_SCHEME), (url) => url),
+    Match.when(hasExplicitScheme, (url) => url),
     Match.orElse((host) => `https://${host}`),
   );
 

@@ -11,6 +11,8 @@ import { Array, Effect, Option, pipe } from "effect";
 import {
   buildSearchUrl,
   classifyQuery,
+  Destination,
+  destinationOf,
   enginesMatchingPrefix,
   isSafeTemplate,
   parseSearchEngines,
@@ -38,6 +40,14 @@ const splitOf = (
   pipe(
     splitKeyword(query, ENGINES),
     Option.map(({ engine, rest }) => ({ keyword: engine.keyword, rest })),
+  );
+
+/** The URL that Enter opens for a query that is an address, and not a search. */
+const addressOf = (query: string): Option.Option<string> =>
+  pipe(
+    destinationOf(query, ENGINES, DEFAULT_SEARCH),
+    Option.liftPredicate(Destination.$is("Address")),
+    Option.map(({ url }) => url),
   );
 
 describe("SearchEngine", () => {
@@ -220,13 +230,27 @@ describe("SearchEngine", () => {
 
   it.effect("recognises a scheme, a host, localhost and an address", () =>
     Effect.sync(() => {
-      assert.strictEqual(classifyQuery("https://example.com/a?b=c"), "url");
-      assert.strictEqual(classifyQuery("about:blank"), "url");
-      assert.strictEqual(classifyQuery("view-source:https://x.test/"), "url");
-      assert.strictEqual(classifyQuery("example.com"), "url");
-      assert.strictEqual(classifyQuery("sub.example.co.uk/path"), "url");
-      assert.strictEqual(classifyQuery("localhost:8080/admin"), "url");
-      assert.strictEqual(classifyQuery("127.0.0.1:3000"), "url");
+      assert.deepEqual(
+        addressOf("https://example.com/a?b=c"),
+        Option.some("https://example.com/a?b=c"),
+      );
+      assert.deepEqual(addressOf("about:blank"), Option.some("about:blank"));
+      assert.deepEqual(
+        addressOf("view-source:https://x.test/"),
+        Option.some("view-source:https://x.test/"),
+      );
+      assert.deepEqual(addressOf("example.com"), Option.some("https://example.com"));
+      assert.deepEqual(
+        addressOf("sub.example.co.uk/path"),
+        Option.some("https://sub.example.co.uk/path"),
+      );
+      // A host and a port start with a word and a colon, and name no scheme.
+      assert.deepEqual(
+        addressOf("localhost:8080/admin"),
+        Option.some("https://localhost:8080/admin"),
+      );
+      assert.deepEqual(addressOf("example.com:8080"), Option.some("https://example.com:8080"));
+      assert.deepEqual(addressOf("127.0.0.1:3000"), Option.some("https://127.0.0.1:3000"));
     }),
   );
 
@@ -242,9 +266,18 @@ describe("SearchEngine", () => {
     Effect.sync(() => {
       // A URL with user information that falls through to a search sends the
       // password to the search engine. That result cannot be undone.
-      assert.strictEqual(classifyQuery("user:pass@example.com"), "url");
-      assert.strictEqual(classifyQuery("user:pass@example.com/path"), "url");
-      assert.strictEqual(classifyQuery("admin@10.0.0.5:8443"), "url");
+      assert.deepEqual(
+        addressOf("user:pass@example.com"),
+        Option.some("https://user:pass@example.com"),
+      );
+      assert.deepEqual(
+        addressOf("user:pass@example.com/path"),
+        Option.some("https://user:pass@example.com/path"),
+      );
+      assert.deepEqual(
+        addressOf("admin@10.0.0.5:8443"),
+        Option.some("https://admin@10.0.0.5:8443"),
+      );
       // An `@` after the first slash is part of a path, and not user
       // information.
       assert.strictEqual(classifyQuery("why/does@this"), "search");
