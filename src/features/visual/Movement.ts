@@ -512,6 +512,25 @@ export interface ViewportSize {
   readonly height: number;
 }
 
+/**
+ * A collapsed range at the focus of the selection.
+ *
+ * The focus is the end that the user steers. The range of the selection does
+ * not tell the two ends apart: its start is the anchor of a forward selection,
+ * and the focus of a backward one.
+ */
+const focusCaret = (document: Document, selection: Selection): Option.Option<Range> =>
+  pipe(
+    selection.focusNode,
+    Option.fromNullishOr,
+    Option.map((node) => {
+      const caret = document.createRange();
+      caret.setStart(node, selection.focusOffset);
+      caret.collapse(true);
+      return caret;
+    }),
+  );
+
 /** Is `rect` drawn, and not wholly inside the viewport? */
 const needsScroll = (rect: DOMRect, viewport: ViewportSize): boolean =>
   !(rect.width === 0 && rect.height === 0) &&
@@ -532,13 +551,15 @@ const needsScroll = (rect: DOMRect, viewport: ViewportSize): boolean =>
  * and during a pinch zoom, that is the part of the page that the user sees, and
  * `innerHeight` is not.
  */
-export const scrollSelectionIntoView = (selection: Selection, viewport: ViewportSize): void =>
+export const scrollSelectionIntoView = (
+  document: Document,
+  selection: Selection,
+  viewport: ViewportSize,
+): void =>
   pipe(
-    selection.rangeCount - 1,
-    Option.liftPredicate((last) => last >= 0),
-    Option.map((last) => selection.getRangeAt(last)),
-    Option.filter((range) => needsScroll(range.getBoundingClientRect(), viewport)),
-    Option.flatMap((range) => elementAt(range.startContainer)),
+    focusCaret(document, selection),
+    Option.filter((caret) => needsScroll(caret.getBoundingClientRect(), viewport)),
+    Option.flatMap((caret) => elementAt(caret.startContainer)),
     Option.match({
       onNone: constVoid,
       onSome: (element) =>

@@ -410,7 +410,7 @@ export class Visual extends Context.Service<
         const viewport = yield* ui.viewport;
         yield* withSelection((target) => {
           profileOf(kind).move(target, spec, repeat);
-          scrollSelectionIntoView(target, viewport);
+          scrollSelectionIntoView(doc, target, viewport);
         });
       });
 
@@ -418,7 +418,7 @@ export class Visual extends Context.Service<
         const viewport = yield* ui.viewport;
         yield* withSelection((target) => {
           reverseSelection(target);
-          scrollSelectionIntoView(target, viewport);
+          scrollSelectionIntoView(doc, target, viewport);
         });
       });
 
@@ -560,7 +560,7 @@ export class Visual extends Context.Service<
           const viewport = yield* ui.viewport;
           yield* dom.probeOrElse(() => {
             profileOf(kind).shape(current, capabilities);
-            scrollSelectionIntoView(current, viewport);
+            scrollSelectionIntoView(doc, current, viewport);
           }, constVoid);
         },
         Effect.catchTag("VisualStartError", (error) =>
