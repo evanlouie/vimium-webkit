@@ -935,9 +935,10 @@ export const FindLayer: Layer.Layer<
      *
      * `PASS_EVENT_TO_PAGE` stops the walk of the stack without touching the
      * event, which is exactly "our input types this, and nothing else acts".
-     * A listener of the page on `document` still sees the key, retargeted to
-     * our shadow host. Without an iframe of our own origin there is no way to
-     * prevent that.
+     * The HUD input then stops the key, so that it does not bubble out to the
+     * page. Only a listener of the page in the capture phase on `window` or
+     * `document` still sees it, retargeted to our shadow host. Without an
+     * iframe of our own origin there is no way to prevent that.
      *
      * The mode must claim these keys. The key bridge listens on `window` in
      * the capture phase, so it sees every keystroke before the capture

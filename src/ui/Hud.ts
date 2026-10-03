@@ -7,9 +7,11 @@
  *
  * - `ownsFocus` exists so that insert mode can tell our input from an input of
  *   the page, and does not treat a focus of ours as an entry into insert mode.
- * - A listener of the page on `document` still sees a key press that is aimed
- *   at this input, retargeted to the shadow host. Without an iframe of our own
- *   origin there is no way to prevent that, and we accept it.
+ * - A key event that is aimed at this input would bubble out to the page,
+ *   retargeted to the shadow host, so the input stops each one. A listener of
+ *   the page in the capture phase on `window` or `document` runs before the
+ *   input, and still sees it. Without an iframe of our own origin there is no
+ *   way to prevent that, and we accept it.
  *
  * Four rules hold this service together:
  *
@@ -784,8 +786,13 @@ export class Hud extends Context.Service<
               });
 
             // The capture phase, and `stopPropagation` for every key: the prompt
-            // owns the keyboard while it is open, and the handler stack must not
-            // see these events at all.
+            // owns the keyboard while it is open. A key event in the field
+            // bubbles out to the page as an event of our host, which is not
+            // editable, so a shortcut of the page would fire on typing. A
+            // listener of the page in the capture phase on `window` or
+            // `document` runs before the field and still sees the key. The
+            // key bridge does as well, and the mode of the prompt gives the key
+            // to the field.
             yield* dom.listenOn(
               parts.input,
               "keydown",
@@ -797,6 +804,12 @@ export class Hud extends Context.Service<
                 ),
               { capture: true },
             );
+
+            // The press and the release of a key go no further than the field
+            // either, for the same reason.
+            const stopHere = (event: Event) => Effect.sync(() => event.stopPropagation());
+            yield* dom.listenOn(parts.input, "keypress", stopHere, { capture: true });
+            yield* dom.listenOn(parts.input, "keyup", stopHere, { capture: true });
 
             yield* dom.listenOn(parts.input, "blur", () =>
               // The page or the user moved on. Treat it as a cancel, and do not
