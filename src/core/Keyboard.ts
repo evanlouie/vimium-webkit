@@ -26,7 +26,6 @@ import {
   Option,
   Record,
   Ref,
-  Scope,
   Stream,
   SubscriptionRef,
   flow,
@@ -57,7 +56,7 @@ import { Commands } from "./Commands.ts";
 import { Exclusions } from "./Exclusions.ts";
 import { CONTINUE_BUBBLING, type HandlerResult, SUPPRESS_EVENT } from "./HandlerStack.ts";
 import { Mappings } from "./Mappings.ts";
-import { isEscape, KeyPolicy, type ModeHandle, Modes } from "./Modes.ts";
+import { isEscape, KeyPolicy, Modes } from "./Modes.ts";
 import { Report } from "./Report.ts";
 import { Settings } from "./Settings.ts";
 
@@ -232,9 +231,10 @@ const keyArrival = (intake: Intake, raw: string): Arrival =>
     Match.orElse(() => Arrival.Ours({ raw })),
   );
 
-const arrivalOf = (intake: Intake): Arrival =>
+/** The notation of a key that the user made, and that is a whole keystroke. */
+const typedNotation = ({ event, context }: Intake): Option.Option<string> =>
   pipe(
-    intake.event,
+    event,
     // A key that the page made. It gives no command, and it does not touch
     // the pending sequence.
     Option.liftPredicate(isUserEvent),
@@ -242,8 +242,23 @@ const arrivalOf = (intake: Intake): Arrival =>
     // guard we eat keystrokes in the middle of composition, which is the most
     // damaging failure for a user of a CJK language, and one that the user
     // cannot work around.
-    Option.filter((event) => !isComposing(event) && !isModifierKey(event)),
-    Option.flatMap((event) => keyNotation(event, intake.context)),
+    Option.filter((key) => !isComposing(key) && !isModifierKey(key)),
+    Option.flatMap((key) => keyNotation(key, context)),
+  );
+
+/**
+ * What normal mode does with a key.
+ *
+ * The verdict is read for each key. Normal mode itself never leaves the stack,
+ * because a mode that is entered again goes on top of insert mode, and a key
+ * typed into a text field then ran a command.
+ */
+const arrivalOf = (intake: Intake): Arrival =>
+  pipe(
+    intake.exclusion,
+    // A page that the user excluded keeps every key, and the key state stays.
+    Option.liftPredicate(EffectiveRule.guards.Enabled),
+    Option.flatMap(() => typedNotation(intake)),
     Option.match({
       onNone: () => Arrival.Page(),
       onSome: (raw) => keyArrival(intake, raw),
@@ -424,15 +439,6 @@ export class Keyboard extends Context.Service<
   {
     /** The half-typed sequence, for the HUD. `None` when there is none. */
     readonly pending: SubscriptionRef.SubscriptionRef<Option.Option<string>>;
-
-    /**
-     * Enter or leave normal mode, to match the exclusion verdict now.
-     *
-     * A fiber already follows the verdict, and a fiber runs later. The start path
-     * replays the keys that the user pressed while the application was building,
-     * so it must know that normal mode is live *before* it replays them.
-     */
-    readonly syncExclusion: Effect.Effect<void>;
 
     /** Give the next `count` keystrokes to the page, without reading them. */
     readonly passNextKey: (count: number) => Effect.Effect<void>;
@@ -677,90 +683,25 @@ export class Keyboard extends Context.Service<
        */
       const onFocus = (): Effect.Effect<HandlerResult> => pipe(reset, Effect.as(CONTINUE_BUBBLING));
 
-      /**
-       * Normal mode follows the exclusion verdict.
-       *
-       * The mode belongs to the layer scope, and it owns a scope of its own
-       * inside that one. Its exit removes the handler and every finalizer that
-       * the mode registered. Nothing has to remember what to undo.
-       */
-      const layerScope = yield* Scope.Scope;
-      const normal = yield* Ref.make(Option.none<ModeHandle>());
-
-      const exitNormal = pipe(
-        normal,
-        Ref.getAndSet(Option.none<ModeHandle>()),
-        Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: (handle) => handle.exit("explicit"),
-          }),
-        ),
-      );
-
-      const openNormal = Effect.gen(function* () {
-        yield* reset;
-        const handle = yield* pipe(
-          modes.enter(
-            {
-              name: "normal",
-              indicator: Option.none(),
-              exitOn: [],
-              keyboard: KeyPolicy.Shared(),
-              singleton: Option.none(),
-            },
-            {
-              keydown: onKeydown,
-              keyup: onKeyup,
-              focus: onFocus,
-            },
-          ),
-          Scope.provide(layerScope),
-        );
-        yield* pipe(normal, Ref.set(Option.some(handle)));
-      });
-
-      /**
-       * Build normal mode, unless it is live.
-       *
-       * The mode decides whether it is live, and not the handle that this
-       * service holds. `Modes.exitAll` ends every live mode, and a soft
-       * navigation calls it, so normal mode can exit without this service. A
-       * held handle would then refuse to build the mode again, and the page
-       * would keep no key bindings at all after a `pushState`.
-       */
-      const enterNormal = pipe(
-        Ref.get(normal),
-        Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.succeed(false),
-            onSome: (handle) => handle.isActive,
-          }),
-        ),
-        Effect.flatMap(Boolean.match({ onFalse: () => openNormal, onTrue: () => Effect.void })),
-      );
-
-      const followExclusion: (rule: EffectiveRule) => Effect.Effect<void> = EffectiveRule.match({
-        Disabled: () => exitNormal,
-        Enabled: () => enterNormal,
-      });
-
-      const syncExclusion = pipe(
-        SubscriptionRef.get(exclusions.effective),
-        Effect.flatMap(followExclusion),
-      );
-
-      yield* syncExclusion;
-      yield* pipe(
-        SubscriptionRef.changes(exclusions.effective),
-        Stream.drop(1),
-        Stream.runForEach(followExclusion),
-        Effect.forkScoped,
+      // Normal mode lives as long as the layer. It reads the exclusion verdict
+      // for each key, so an excluded page needs no other mode.
+      yield* modes.enter(
+        {
+          name: "normal",
+          indicator: Option.none(),
+          exitOn: [],
+          keyboard: KeyPolicy.Shared(),
+          singleton: Option.none(),
+        },
+        {
+          keydown: onKeydown,
+          keyup: onKeyup,
+          focus: onFocus,
+        },
       );
 
       return Keyboard.of({
         pending,
-        syncExclusion,
         passNextKey: (count) => pipe(passNext, Ref.set(Math.max(1, count))),
         forgetSuppressed: pipe(suppressedCodes, Ref.set(HashSet.empty<string>())),
       });

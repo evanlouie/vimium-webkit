@@ -101,7 +101,6 @@ const stubKeyboard = (forgotten: Ref.Ref<number>): Layer.Layer<Keyboard> =>
     Effect.map((pending) =>
       Keyboard.of({
         pending,
-        syncExclusion: Effect.void,
         passNextKey: () => Effect.void,
         forgetSuppressed: pipe(
           forgotten,

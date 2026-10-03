@@ -259,7 +259,6 @@ export const BootstrapLayer: Layer.Layer<
     const refresh = Effect.gen(function* () {
       yield* settings.reload;
       yield* resolveExclusion;
-      yield* keyboard.syncExclusion;
       yield* insert.ensureEntered;
     });
 
@@ -308,7 +307,6 @@ export const BootstrapLayer: Layer.Layer<
     yield* pipe(degradationWarnings(capabilities), Effect.forEach(report.error, { discard: true }));
 
     yield* resolveExclusion;
-    yield* keyboard.syncExclusion;
 
     // Before any listener is attached. Insert mode otherwise learns about focus
     // from live events only, and the page has long since focused its search box

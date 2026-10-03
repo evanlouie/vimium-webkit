@@ -396,6 +396,28 @@ describe("Keyboard", () => {
     );
   });
 
+  it.effect("leaves every key to a page that the user excluded", () =>
+    pipe(
+      Effect.gen(function* () {
+        const stack = yield* HandlerStack;
+        const calls = yield* recorder(["scrollDown"]);
+
+        const press = new Press("j");
+        const toPage = yield* stack.bubble("keydown", press);
+
+        assert.deepEqual(yield* Ref.get(calls), []);
+        assert.isTrue(toPage);
+        assert.isFalse(press.defaultPrevented);
+      }),
+      Effect.provide(
+        layerFor({
+          mappings: "map j scrollDown",
+          exclusion: EffectiveRule.cases.Disabled.make({}),
+        }),
+      ),
+    ),
+  );
+
   /**
    * A binding that is also the prefix of a longer one.
    *
