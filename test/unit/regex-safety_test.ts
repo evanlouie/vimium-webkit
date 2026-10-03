@@ -271,6 +271,8 @@ describe("RegexSafety", () => {
       // they can.
       assert.isTrue(accepts("(?:ab|Ab)+", ""));
       assert.isFalse(accepts("(?:ab|Ab)+", "i"));
+      // No case of `σ` is `ς`, and `i` still folds both to `Σ`.
+      assert.isFalse(accepts("(?:σ|ς)+$", "i"));
 
       // `.` excludes the line terminators, so `.*\n*` competes for nothing.
       assert.isTrue(accepts(".*\\n*", ""));

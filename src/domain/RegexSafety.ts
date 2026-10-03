@@ -98,6 +98,7 @@ import {
   String as Str,
   Struct,
 } from "effect";
+import { constTrue } from "effect/Function";
 
 // ---------------------------------------------------------------------------
 // The reasons
@@ -145,6 +146,8 @@ interface ClassEscape {
   readonly holds: (code: number) => boolean;
   /** The members of the class. `\D`, `\W` and `\S` have too many to list. */
   readonly members: Option.Option<HashSet.HashSet<number>>;
+  /** The escape as a pattern writes it, as `\d`. */
+  readonly source: string;
 }
 
 /** The pieces that describe a set that this module does not list. */
@@ -217,12 +220,28 @@ const isWord = (code: number): boolean =>
 
 const isSpace = (code: number): boolean => pipe(WHITESPACE_SET, HashSet.has(code));
 
-const DIGIT: ClassEscape = { holds: isDigit, members: Option.some(HashSet.fromIterable(DIGITS)) };
-const NOT_DIGIT: ClassEscape = { holds: Predicate.not(isDigit), members: Option.none() };
-const WORD: ClassEscape = { holds: isWord, members: Option.some(WORD_CHARS) };
-const NOT_WORD: ClassEscape = { holds: Predicate.not(isWord), members: Option.none() };
-const SPACE: ClassEscape = { holds: isSpace, members: Option.some(WHITESPACE_SET) };
-const NOT_SPACE: ClassEscape = { holds: Predicate.not(isSpace), members: Option.none() };
+const DIGIT: ClassEscape = {
+  holds: isDigit,
+  members: Option.some(HashSet.fromIterable(DIGITS)),
+  source: "\\d",
+};
+const NOT_DIGIT: ClassEscape = {
+  holds: Predicate.not(isDigit),
+  members: Option.none(),
+  source: "\\D",
+};
+const WORD: ClassEscape = { holds: isWord, members: Option.some(WORD_CHARS), source: "\\w" };
+const NOT_WORD: ClassEscape = {
+  holds: Predicate.not(isWord),
+  members: Option.none(),
+  source: "\\W",
+};
+const SPACE: ClassEscape = { holds: isSpace, members: Option.some(WHITESPACE_SET), source: "\\s" };
+const NOT_SPACE: ClassEscape = {
+  holds: Predicate.not(isSpace),
+  members: Option.none(),
+  source: "\\S",
+};
 
 /** The class that a letter names, as `d` names `\d`. */
 const classEscape = pipe(
@@ -367,37 +386,22 @@ const inTerms = (terms: Terms, code: number): boolean =>
     Array.some((escape) => escape.holds(code)),
   );
 
-/** Does `set` hold this character? */
-type Holds = (set: CharSet, code: number) => boolean;
+/**
+ * Does `set` match this character?
+ *
+ * The test reads the set once, and then answers for each character.
+ */
+type Holds = (set: CharSet) => (code: number) => boolean;
 
-/** The answer is exact. */
-const holdsExactly: Holds = (set, code) =>
-  pipe(
-    set,
-    CharSet.$match({
-      Listed: ({ members }) => pipe(members, HashSet.has(code)),
-      Unlisted: (terms) => inTerms(terms, code),
-      Negated: (terms) => !inTerms(terms, code),
-    }),
-  );
-
-/** The one-character upper and lower cases of `code`. */
-const caseVariants = (code: number): ReadonlyArray<number> => {
-  const char = String.fromCharCode(code);
-  return pipe(
-    [char.toUpperCase(), char.toLowerCase()],
-    Array.filter((variant) => variant.length === 1),
-    Array.map((variant) => variant.charCodeAt(0)),
-  );
-};
-
-/** The same question, with the case folding of the `i` flag. */
-const holdsFolded: Holds = (set, code) =>
-  holdsExactly(set, code) ||
-  pipe(
-    caseVariants(code),
-    Array.some((variant) => holdsExactly(set, variant)),
-  );
+/** The answer without case folding. It is exact. */
+const holdsExactly: Holds = CharSet.$match({
+  Listed:
+    ({ members }) =>
+    (code: number) =>
+      pipe(members, HashSet.has(code)),
+  Unlisted: (terms) => (code: number) => inTerms(terms, code),
+  Negated: (terms) => (code: number) => !inTerms(terms, code),
+});
 
 /** Can one character belong to both sets? */
 type Intersect = (left: CharSet, right: CharSet) => boolean;
@@ -412,11 +416,7 @@ const intersectWith = (holds: Holds): Intersect => {
     pipe(
       listed,
       CharSet.$match({
-        Listed: ({ members }) =>
-          pipe(
-            members,
-            HashSet.some((code) => holds(other, code)),
-          ),
+        Listed: ({ members }) => pipe(members, HashSet.some(holds(other))),
         Unlisted: () => true,
         Negated: () => true,
       }),
@@ -454,20 +454,103 @@ interface Flags {
   readonly intersect: Intersect;
 }
 
-const readFlags = (flags: string): Flags => ({
-  dot: pipe(flags.includes("s"), Boolean.match({ onFalse: () => DOT_SET, onTrue: () => ANY_SET })),
-  reading: pipe(
+/** How the engine writes and reads one character, under one reading. */
+interface CharText {
+  /** The escape of the character inside a `[…]` class. */
+  readonly escape: (code: number) => string;
+  /** The character as a string that the engine reads as one character. */
+  readonly text: (code: number) => string;
+  /** The flags of a class that folds case as the pattern does. */
+  readonly foldFlags: string;
+}
+
+const charText: (reading: Reading) => CharText = Reading.$match({
+  CodePoints: (): CharText => ({
+    escape: (code) => `\\u{${code.toString(16)}}`,
+    text: (code) => String.fromCodePoint(code),
+    foldFlags: "iu",
+  }),
+  CodeUnits: (): CharText => ({
+    escape: (code) => `\\u${code.toString(16).padStart(4, "0")}`,
+    text: (code) => String.fromCharCode(code),
+    foldFlags: "i",
+  }),
+});
+
+/** The terms as the inside of a `[…]` class. */
+const termsSource = (
+  escape: (code: number) => string,
+  { chars, ranges, classes }: Terms,
+): string => {
+  const listed = pipe(Array.fromIterable(chars), Array.map(escape), Array.join(""));
+  const spans = pipe(
+    ranges,
+    Array.map(({ low, high }) => `${escape(low)}-${escape(high)}`),
+    Array.join(""),
+  );
+  const escapes = pipe(
+    classes,
+    Array.map(({ source }) => source),
+    Array.join(""),
+  );
+  return `${listed}${spans}${escapes}`;
+};
+
+/** A `[…]` class that matches the characters of a set. */
+const classSource = (escape: (code: number) => string): ((set: CharSet) => string) =>
+  CharSet.$match({
+    Listed: ({ members }) =>
+      `[${termsSource(escape, { chars: members, ranges: [], classes: [] })}]`,
+    Unlisted: (terms) => `[${termsSource(escape, terms)}]`,
+    Negated: (terms) => `[^${termsSource(escape, terms)}]`,
+  });
+
+/**
+ * The answer with the case folding of the `i` flag.
+ *
+ * The engine folds two characters together when they have one canonical
+ * form. `toUpperCase` and `toLowerCase` do not find every such pair: `σ` and
+ * `ς` both fold to `Σ`, and no case of `σ` is `ς`. The tables of the engine
+ * decide, so the engine answers. The set becomes a class, and the class runs
+ * with the flags that fold case as the pattern does. A class that cannot run
+ * matches every character, which refuses more.
+ */
+const holdsFolded = (reading: Reading): Holds => {
+  const { escape, text, foldFlags } = charText(reading);
+  return flow(
+    classSource(escape),
+    Option.liftThrowable((source) => new RegExp(source, foldFlags)),
+    Option.match({
+      onNone: () => constTrue,
+      onSome: (regexp) =>
+        flow(
+          Option.liftThrowable((code: number) => regexp.test(text(code))),
+          Option.getOrElse(constTrue),
+        ),
+    }),
+  );
+};
+
+const readFlags = (flags: string): Flags => {
+  const reading = pipe(
     flags.includes("u"),
     Boolean.match({ onFalse: () => Reading.CodeUnits(), onTrue: () => Reading.CodePoints() }),
-  ),
-  intersect: pipe(
-    flags.includes("i"),
-    Boolean.match({
-      onFalse: () => intersectWith(holdsExactly),
-      onTrue: () => intersectWith(holdsFolded),
-    }),
-  ),
-});
+  );
+  return {
+    dot: pipe(
+      flags.includes("s"),
+      Boolean.match({ onFalse: () => DOT_SET, onTrue: () => ANY_SET }),
+    ),
+    reading,
+    intersect: pipe(
+      flags.includes("i"),
+      Boolean.match({
+        onFalse: () => intersectWith(holdsExactly),
+        onTrue: () => intersectWith(holdsFolded(reading)),
+      }),
+    ),
+  };
+};
 
 // ---------------------------------------------------------------------------
 // The syntax tree
