@@ -30,12 +30,11 @@ import {
   Array,
   Boolean,
   Clock,
-  Deferred,
   Duration,
   Effect,
   Option,
   Predicate,
-  type Scope,
+  Ref,
   pipe,
   String,
 } from "effect";
@@ -241,14 +240,15 @@ const storageEstimator = (window: Window & typeof globalThis): Option.Option<Sto
     Option.map((manager) => manager.estimate.bind(manager)),
   );
 
-const PROBE_KEY = "__vimium_webkit_private_probe__";
-
-/** A write to `localStorage` that goes through. It throws where storage is blocked. */
-const writeProbe = (window: Window & typeof globalThis) => (): boolean => {
-  window.localStorage.setItem(PROBE_KEY, "1");
-  window.localStorage.removeItem(PROBE_KEY);
-  return true;
-};
+/**
+ * Can this document reach `localStorage`?
+ *
+ * The read of the property throws where storage is blocked, for example with
+ * every cookie blocked, or in a sandboxed frame. Only the property is read.
+ * Nothing is written, so no other tab of the site sees a `storage` event.
+ */
+const storageReachable = (window: Window & typeof globalThis) => (): boolean =>
+  Predicate.isNotNullish(window.localStorage);
 
 /** A quota that is small enough to look like a private window. */
 const privacyOfEstimate = (estimate: StorageEstimate): PrivacyProbe =>
@@ -275,11 +275,14 @@ const quotaPrivacy = (estimator: StorageEstimator): Effect.Effect<PrivacyProbe> 
 /**
  * Look for private browsing, as well as it can be done.
  *
- * Two probes, and both are weak on purpose:
+ * Two probes, both weak, and both reads with no effect that the page can see:
  *
- * - A `localStorage.setItem` that throws. This caught the private mode of
- *   Safari before version 11. A modern Safari allows the write, so `clear`
- *   here means "not obviously private", and never "certainly not private".
+ * - A read of `localStorage` that throws, where storage is blocked. Private
+ *   browsing allows storage in every browser that this script runs on, so
+ *   `clear` here means "not obviously private", and never "certainly not
+ *   private". The write that once caught the private mode of Safari before
+ *   version 11 is gone: it fired a `storage` event in every other tab of the
+ *   site, and the build targets Safari 16.
  * - A small quota from `navigator.storage.estimate()`. The quota is also small
  *   on a disk that is nearly full, so this gives false positives.
  *
@@ -295,7 +298,7 @@ const quotaPrivacy = (estimator: StorageEstimator): Effect.Effect<PrivacyProbe> 
 export const detectPrivateBrowsing: Effect.Effect<PrivacyProbe, never, Dom> = Effect.gen(
   function* () {
     const dom = yield* Dom;
-    const writable = yield* dom.probeOrElse(writeProbe(dom.window), constFalse);
+    const reachable = yield* dom.probeOrElse(storageReachable(dom.window), constFalse);
     // Without an estimate API we have no opinion, which is `clear`.
     const byQuota = pipe(
       dom.probeOrElse(() => storageEstimator(dom.window), Option.none),
@@ -304,7 +307,7 @@ export const detectPrivateBrowsing: Effect.Effect<PrivacyProbe, never, Dom> = Ef
       ),
     );
     return yield* pipe(
-      writable,
+      reachable,
       Boolean.match({
         onFalse: () => Effect.succeed<PrivacyProbe>("storage-blocked"),
         onTrue: () => byQuota,
@@ -337,82 +340,98 @@ const hasNoIndexDirective = (document: Document): boolean =>
 /**
  * Build the index for this frame.
  *
- * The private-browsing probe runs in a fiber of the enclosing scope, and a
- * recording waits for its answer. The wait matters: on a manager with a
- * synchronous store, the first recording comes before the probe has had a
- * turn. An answer that does not come in time counts as private, so the very
- * first page of a session cannot pass through before we know.
+ * The private-browsing probe runs only when a recording reaches its gate, so
+ * only in the top frame, which is the only frame that records, and only while
+ * the index is on. A recording waits for the answer, and an answer that does
+ * not come in time counts as private, so the very first page of a session
+ * cannot pass through before we know. A page does not enter or leave private
+ * browsing, so the first answer is kept for the life of the page.
  */
-export const makeHistoryIndex: Effect.Effect<
-  HistoryIndex,
-  never,
-  Dom | Settings | Storage | Scope.Scope
-> = Effect.gen(function* () {
-  const dom = yield* Dom;
-  const settings = yield* Settings;
-  const storage = yield* Storage;
+export const makeHistoryIndex: Effect.Effect<HistoryIndex, never, Dom | Settings | Storage> =
+  Effect.gen(function* () {
+    const dom = yield* Dom;
+    const settings = yield* Settings;
+    const storage = yield* Storage;
 
-  const privacy = yield* Deferred.make<PrivacyProbe>();
-  yield* pipe(detectPrivateBrowsing, Deferred.into(privacy), Effect.forkScoped);
+    const privacy = yield* Ref.make(Option.none<PrivacyProbe>());
 
-  /** The page and the limit. It fails at the first gate that stops the recording. */
-  const recordable = Effect.fnUntraced(function* () {
-    // Gate 1. Read on every call, and not captured once, so that the setting
-    // takes effect on the very next navigation after the user turns it off.
-    const current = yield* pipe(
-      settings.current,
-      Effect.filterOrFail(
-        ({ enableHistoryIndex, historyIndexLimit }) => enableHistoryIndex && historyIndexLimit > 0,
+    /** The answer of the probe: the kept one, or a new one that is then kept. */
+    const probePrivacy: Effect.Effect<PrivacyProbe> = pipe(
+      Ref.get(privacy),
+      Effect.flatMap(
+        Option.match({
+          onSome: Effect.succeed,
+          onNone: () =>
+            pipe(
+              detectPrivateBrowsing,
+              Effect.provideService(Dom, dom),
+              Effect.tap((answer) => Ref.set(privacy, Option.some(answer))),
+            ),
+        }),
       ),
     );
-    yield* pipe(
-      Deferred.await(privacy),
-      Effect.timeoutOption(PRIVACY_PROBE_TIMEOUT),
-      Effect.filterOrFail(Option.contains<PrivacyProbe>("clear")),
-    );
-    const url = yield* pipe(
-      dom.href,
-      Effect.map(canonicaliseUrl),
-      Effect.flatMap(Effect.fromOption),
-      Effect.filterOrFail((canonical) => !matchesDenylist(canonical, current.historyIndexDenylist)),
-    );
-    yield* pipe(
-      // A document that refuses the read is not recorded. The safe answer to
-      // "we could not tell" is "do not record".
-      dom.probeOrElse(() => hasNoIndexDirective(dom.document), constTrue),
-      Effect.filterOrFail((noindex) => !noindex),
-    );
-    return { url, limit: current.historyIndexLimit };
-  });
 
-  const record = Effect.fn("HistoryIndex.record")(
-    function* () {
-      const { url, limit } = yield* recordable();
-      const title = yield* dom.probeOrElse(
-        () => dom.document.title.trim().slice(0, MAX_TITLE_LENGTH),
-        () => "",
+    /** The page and the limit. It fails at the first gate that stops the recording. */
+    const recordable = Effect.fnUntraced(function* () {
+      // Gate 1. Read on every call, and not captured once, so that the setting
+      // takes effect on the very next navigation after the user turns it off.
+      const current = yield* pipe(
+        settings.current,
+        Effect.filterOrFail(
+          ({ enableHistoryIndex, historyIndexLimit }) =>
+            enableHistoryIndex && historyIndexLimit > 0,
+        ),
       );
-      const at = yield* Clock.currentTimeMillis;
-      // The limit is applied here, on the write, and never on a timer.
-      yield* storage.history.update((index): HistoryIndexData => ({
-        visits: mergeVisit(index.visits, { url, title, at }, limit),
-      }));
-    },
-    // A gate that stops the recording records nothing, and says nothing. A
-    // failed write is ignored too: the store already reports it on its issue
-    // stream, and one page visit is not worth a message to the user.
-    Effect.ignore,
-  );
+      yield* pipe(
+        probePrivacy,
+        Effect.timeoutOption(PRIVACY_PROBE_TIMEOUT),
+        Effect.filterOrFail(Option.contains<PrivacyProbe>("clear")),
+      );
+      const url = yield* pipe(
+        dom.href,
+        Effect.map(canonicaliseUrl),
+        Effect.flatMap(Effect.fromOption),
+        Effect.filterOrFail(
+          (canonical) => !matchesDenylist(canonical, current.historyIndexDenylist),
+        ),
+      );
+      yield* pipe(
+        // A document that refuses the read is not recorded. The safe answer to
+        // "we could not tell" is "do not record".
+        dom.probeOrElse(() => hasNoIndexDirective(dom.document), constTrue),
+        Effect.filterOrFail((noindex) => !noindex),
+      );
+      return { url, limit: current.historyIndexLimit };
+    });
 
-  return {
-    record: record(),
-    visits: pipe(
-      storage.history.current,
-      Effect.map(({ visits }) => visits),
-    ),
-    // `reset`, and not a write of an empty array: "erase my history" must not
-    // leave a hole in the shape of this script in the storage list of the
-    // manager either.
-    clear: pipe(storage.history.reset, Effect.asVoid),
-  };
-});
+    const record = Effect.fn("HistoryIndex.record")(
+      function* () {
+        const { url, limit } = yield* recordable();
+        const title = yield* dom.probeOrElse(
+          () => dom.document.title.trim().slice(0, MAX_TITLE_LENGTH),
+          () => "",
+        );
+        const at = yield* Clock.currentTimeMillis;
+        // The limit is applied here, on the write, and never on a timer.
+        yield* storage.history.update((index): HistoryIndexData => ({
+          visits: mergeVisit(index.visits, { url, title, at }, limit),
+        }));
+      },
+      // A gate that stops the recording records nothing, and says nothing. A
+      // failed write is ignored too: the store already reports it on its issue
+      // stream, and one page visit is not worth a message to the user.
+      Effect.ignore,
+    );
+
+    return {
+      record: record(),
+      visits: pipe(
+        storage.history.current,
+        Effect.map(({ visits }) => visits),
+      ),
+      // `reset`, and not a write of an empty array: "erase my history" must not
+      // leave a hole in the shape of this script in the storage list of the
+      // manager either.
+      clear: pipe(storage.history.reset, Effect.asVoid),
+    };
+  });
