@@ -396,7 +396,9 @@ The check does not promise a linear match, so a budget holds the limit as well:
   window smaller when a window costs too much. It stops at a time limit, and at
   a match that is longer than 65 536 characters. The HUD then says
   `stopped before the end of the page`, and the counts are the counts of the
-  text that was read.
+  text that was read. Find always finds a match of up to 1024 characters whole.
+  A longer match is found only when the end of the expression can keep growing,
+  as with `.+`. Otherwise find can miss it without a warning.
 
 The script drops a rule that the check refuses. It writes a warning to the
 console, it says so in the HUD when you save, and it marks the line in the
