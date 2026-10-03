@@ -308,7 +308,6 @@ export const VisualLayer: Layer.Layer<
     const clipboard = yield* Clipboard;
 
     const doc = dom.document;
-    const win = dom.window;
 
     // The layer scope owns each mode, and each fiber that the modes start.
     // Closing the runtime therefore ends the live mode, which gives the
@@ -321,30 +320,9 @@ export const VisualLayer: Layer.Layer<
     /** The count prefix, and whether a `g` is pending. */
     const typed = yield* Ref.make<Typed>(NOTHING_TYPED);
 
-    const selection: Effect.Effect<Option.Option<Selection>> = dom.probeOrElse(
-      () => Option.fromNullishOr(win.getSelection()),
-      Option.none,
-    );
-
-    /** Read or change the selection inside `dom.probeOrElse`. No selection gives `fallback`. */
-    const probeSelection = <A>(read: (selection: Selection) => A, fallback: A): Effect.Effect<A> =>
-      pipe(
-        selection,
-        Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.succeed(fallback),
-            onSome: (target) =>
-              dom.probeOrElse(
-                () => read(target),
-                () => fallback,
-              ),
-          }),
-        ),
-      );
-
     /** Run one synchronous piece of selection work, and ignore a refusal. */
     const withSelection = (body: (selection: Selection) => void): Effect.Effect<void> =>
-      probeSelection(body, undefined);
+      dom.probeSelection(body, undefined);
 
     const clearSelection: Effect.Effect<void> = withSelection((target) => {
       // Nothing to do on a refusal. The page owns the selection again in
@@ -411,7 +389,7 @@ export const VisualLayer: Layer.Layer<
     /** `y`: copy the selection and leave. */
     const yank = Effect.fn("Visual.yank")(function* () {
       // `Selection.toString()` is the only portable reader of the text.
-      const text = yield* probeSelection((target) => target.toString(), "");
+      const text = yield* dom.probeSelection((target) => target.toString(), "");
       yield* pipe(
         text,
         Option.liftPredicate((text) => text.length > 0),
@@ -468,7 +446,7 @@ export const VisualLayer: Layer.Layer<
      * `enterKind` already checked that `Selection.modify` works on it.
      */
     const modifiableSelection: Effect.Effect<Selection, VisualStartError> = pipe(
-      selection,
+      dom.selection,
       Effect.flatMap(Effect.fromOption(() => new VisualStartError({ reason: "unavailable" }))),
     );
 

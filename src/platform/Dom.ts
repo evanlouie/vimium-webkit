@@ -20,6 +20,7 @@ import {
   Exit,
   Layer,
   Match,
+  Option,
   Result,
   Schema,
   type Scope,
@@ -119,6 +120,18 @@ export class Dom extends Context.Service<
      */
     readonly attempt: <A>(api: string, run: () => A) => Effect.Effect<A, DomError>;
 
+    /** The selection of this frame, or `None` when it has none or the read is refused. */
+    readonly selection: Effect.Effect<Option.Option<Selection>>;
+
+    /**
+     * Read or change the selection of this frame, as `probeOrElse` reads a
+     * global. No selection, and a call that throws, give `fallback`.
+     */
+    readonly probeSelection: <A>(
+      read: (selection: Selection) => A,
+      fallback: A,
+    ) => Effect.Effect<A>;
+
     /**
      * Listen on `window` or `document`, for the enclosing scope.
      *
@@ -200,6 +213,29 @@ export class Dom extends Context.Service<
             }),
         });
 
+      const selection: Effect.Effect<Option.Option<Selection>> = probeOrElse(
+        () => Option.fromNullishOr(win.getSelection()),
+        Option.none,
+      );
+
+      const probeSelection = <A>(
+        read: (selection: Selection) => A,
+        fallback: A,
+      ): Effect.Effect<A> =>
+        pipe(
+          selection,
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.succeed(fallback),
+              onSome: (target) =>
+                probeOrElse(
+                  () => read(target),
+                  () => fallback,
+                ),
+            }),
+          ),
+        );
+
       const resolveTarget = (name: keyof TargetEventMap): EventTarget =>
         pipe(
           Match.value(name),
@@ -257,6 +293,8 @@ export class Dom extends Context.Service<
         visibility: Effect.sync(() => doc.visibilityState),
         probeOrElse,
         attempt,
+        selection,
+        probeSelection,
 
         listen: (target, type, handler, options) =>
           attach(resolveTarget(target), String(type), handler, options),
