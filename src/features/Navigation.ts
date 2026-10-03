@@ -27,6 +27,7 @@ import { Keyboard } from "~/core/Keyboard.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings, type SettingsData } from "~/core/Settings.ts";
 import { destinationOf } from "~/domain/SearchEngine.ts";
+import { parseUrl } from "~/domain/Url.ts";
 import { FrameLink } from "~/frames/Link.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Tabs } from "~/platform/Tabs.ts";
@@ -34,8 +35,6 @@ import { BRIEFLY, Hud } from "~/ui/Hud.ts";
 
 /** Where `go` opens a URL. */
 export type Destination = "this-tab" | "new-tab";
-
-const parseUrl = Option.liftThrowable((href: string) => new URL(href));
 
 /** A copy of the URL without its query and its fragment. */
 const undecorated = (url: URL): URL => {

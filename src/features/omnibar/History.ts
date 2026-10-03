@@ -42,6 +42,7 @@ import { constFalse, constTrue, flow } from "effect/Function";
 import { Settings } from "~/core/Settings.ts";
 import { compilePattern, MAX_REGEX_URL_LENGTH } from "~/domain/Exclusion.ts";
 import type { HistoryIndex as HistoryIndexData, Visit } from "~/domain/Persisted.ts";
+import { parseUrl } from "~/domain/Url.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Storage, type StorageError } from "~/platform/Storage.ts";
 
@@ -163,8 +164,6 @@ const MAX_QUERY_VALUE_LENGTH = 64;
 const MAX_TITLE_LENGTH = 300;
 
 const WEB_PROTOCOLS: ReadonlyArray<string> = ["https:", "http:"];
-
-const parseUrl = Option.liftThrowable((raw: string) => new URL(raw));
 
 /** A key that identifies a page, with a value too short to be a token. */
 const isPageParameter = ([key, value]: readonly [string, string]): boolean =>

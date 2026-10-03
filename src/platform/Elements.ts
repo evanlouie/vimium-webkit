@@ -49,7 +49,7 @@ export const deepActiveElement: (root: Document) => Element | null = flow(
   Option.getOrNull,
 );
 
-const MEDIA_SELECTOR = "video, audio";
+export const MEDIA_SELECTOR = "video, audio";
 
 const hasMedia = (root: ParentNode): boolean => root.querySelector(MEDIA_SELECTOR) !== null;
 

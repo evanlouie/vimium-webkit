@@ -28,11 +28,11 @@ import { Report } from "~/core/Report.ts";
 import { Settings, type SettingsData } from "~/core/Settings.ts";
 import { type SessionState, withZoom } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
+import { isElement, MEDIA_SELECTOR } from "~/platform/Elements.ts";
 import { Storage } from "~/platform/Storage.ts";
 import { type TabError, Tabs } from "~/platform/Tabs.ts";
 import { BRIEFLY, Hud } from "~/ui/Hud.ts";
 
-const MEDIA_SELECTOR = "audio, video";
 const ZOOM_MIN = 0.3;
 const ZOOM_MAX = 5;
 const ZOOM_STEP = 1.1;
@@ -95,8 +95,6 @@ const closeFailureText = (error: TabError): string =>
   );
 
 const isMedia = (node: Node): node is HTMLMediaElement => node instanceof HTMLMediaElement;
-
-const isElement = (node: Node): node is Element => node instanceof Element;
 
 /** The media elements below a node. */
 const mediaBelow = (root: ParentNode): ReadonlyArray<HTMLMediaElement> =>
