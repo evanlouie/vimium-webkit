@@ -125,12 +125,6 @@ export const topFrameVerdictLayer: Layer.Layer<TopFrameVerdict, never, FrameBus>
 export class FrameLink extends Context.Service<
   FrameLink,
   {
-    /** True when this frame belongs to a session. It never fails. */
-    readonly ready: Effect.Effect<boolean>;
-
-    /** The frames that the coordinator knows, in document order. */
-    readonly knownFrames: Effect.Effect<ReadonlyArray<FrameId>>;
-
     /** Move the focus one frame along document order. This is `gf` and `gF`. */
     readonly focusFrame: (direction: 1 | -1) => Effect.Effect<void, FrameError>;
   }
@@ -261,8 +255,6 @@ export class FrameLink extends Context.Service<
       );
 
       return FrameLink.of({
-        ready: bus.ready,
-        knownFrames: bus.peers,
         focusFrame: (direction) => bus.send(toTop, { kind: "FOCUS_FRAME", direction }),
       });
     }),
