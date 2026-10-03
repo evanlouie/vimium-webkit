@@ -45,8 +45,11 @@
  *    `frameId` is not the frame that sent it is dropped, and an element
  *    reference never leaves the frame that owns it. Only the four fields of
  *    `HintDescriptor` travel.
- * 5. **A timeout ends the named round everywhere.** The origin broadcasts
- *    `CANCEL_HINTS`. Each matching frame removes its round and session.
+ * 5. **The end of a round ends it everywhere.** Whatever ends a round in its
+ *    origin, whether an activation, Escape, a page with no hints or a timeout,
+ *    the origin sends `CANCEL_HINTS` to the top frame. The top frame forgets
+ *    the live round and sends the message on to every frame. Each matching
+ *    frame removes its round and session.
  */
 
 import {
@@ -1767,26 +1770,6 @@ export const Hints = {
           pipe(sessionRef, Ref.update(Option.filter((live) => live.id !== id))),
         );
 
-        // The top frame holds the record of the one live round. When this
-        // frame is both the top frame and the origin, no `KEYSTROKE` comes
-        // back to it, so the record is cleared here instead. Any other frame
-        // holds no record, and the update leaves it empty.
-        yield* Effect.addFinalizer(() =>
-          pipe(
-            config.role,
-            SessionRole.$match({
-              Origin: () =>
-                pipe(
-                  topRoundRef,
-                  Ref.update(
-                    Option.filter(Predicate.not(isTopRoundOf(config.roundId, bus.frameId))),
-                  ),
-                ),
-              Participant: () => Effect.void,
-            }),
-          ),
-        );
-
         // The first draw measures the targets, because the page can move
         // between the detection pass and this moment. Every later draw uses
         // the measurements of the last layout change.
@@ -1904,18 +1887,16 @@ export const Hints = {
         );
       });
 
-      /** End a round that never opened, in this frame and in every other one. */
-      const cancelRound = Effect.fnUntraced(function* (roundId: string) {
-        yield* rememberCancelled(roundId);
-        const topRound = yield* Ref.get(topRoundRef);
-        yield* pipe(
-          topRound,
-          Option.filter(isTopRoundOf(roundId, bus.frameId)),
-          whenSome(endTopRound),
-        );
-        yield* pipe(roundRef, Ref.update(Option.filter((round) => round.roundId !== roundId)));
-        yield* broadcastCancel(roundId);
-      });
+      /**
+       * Tell the top frame that a round of this frame is over.
+       *
+       * The top frame then forgets the one live round of the page, and it
+       * tells every frame to drop its record and its session of the round.
+       * The top frame sends this to itself as well, through the bus, so the
+       * end of a round is the same message in every frame.
+       */
+      const endRound = (roundId: string): Effect.Effect<void> =>
+        pipe(bus.send(toTop, { kind: "CANCEL_HINTS", roundId }), Effect.ignore);
 
       /** Open the session of a round that this frame collected. */
       const openRound = Effect.fnUntraced(function* (
@@ -1950,15 +1931,8 @@ export const Hints = {
         );
       });
 
-      const startRound = Effect.fn("Hints.startRound")(function* (mode: HintMode) {
-        yield* ensureStyles;
-        yield* pipe(pendingActivationRef, Ref.set(Option.none()));
-
-        const sequence = yield* pipe(
-          roundSeq,
-          Ref.modify((n) => [n, n + 1] as const),
-        );
-        const roundId = `${bus.frameId}-${sequence}`;
+      /** Collect the hints of a round, and open its session when the frames answered. */
+      const runRound = Effect.fnUntraced(function* (roundId: string, mode: HintMode) {
         const buffered = yield* Ref.make<readonly string[]>([]);
         const abort = yield* Deferred.make<void>();
 
@@ -1977,12 +1951,25 @@ export const Hints = {
         yield* pipe(
           collection,
           Collection.$match({
-            Aborted: () => cancelRound(roundId),
-            Unanswered: () =>
-              pipe(hud.show(HINTS_STOPPED, BRIEFLY), Effect.andThen(cancelRound(roundId))),
+            Aborted: () => Effect.void,
+            Unanswered: () => hud.show(HINTS_STOPPED, BRIEFLY),
             Collected: (collected) => openRound(roundId, mode, buffered, collected),
           }),
         );
+      });
+
+      const startRound = Effect.fn("Hints.startRound")(function* (mode: HintMode) {
+        yield* ensureStyles;
+        yield* pipe(pendingActivationRef, Ref.set(Option.none()));
+
+        const sequence = yield* pipe(
+          roundSeq,
+          Ref.modify((n) => [n, n + 1] as const),
+        );
+        const roundId = `${bus.frameId}-${sequence}`;
+        // Whatever ends the round, the top frame must hear of it. A round
+        // that it still counts as live keeps every other frame out.
+        yield* pipe(runRound(roundId, mode), Effect.ensuring(endRound(roundId)));
       });
 
       // ---------------------------------------------------------------------
@@ -2228,6 +2215,13 @@ export const Hints = {
         );
       }, noReply);
 
+      /**
+       * End a round in this frame.
+       *
+       * The origin sends this to the top frame when its round ends, for any
+       * reason. The top frame forgets the live round of the page, and sends
+       * it on to every frame.
+       */
       const onCancelHints = Effect.fnUntraced(function* ({
         message: { roundId },
         from,
@@ -2253,10 +2247,6 @@ export const Hints = {
           session,
           Option.filter(cancelsSession(roundId, from, localRound)),
           whenSome(() => FiberHandle.clear(sessionFiber)),
-        );
-        yield* pipe(
-          pendingActivationRef,
-          Ref.update(Option.filter((pending) => pending.roundId !== roundId)),
         );
       }, noReply);
 
@@ -2291,13 +2281,6 @@ export const Hints = {
         message: { roundId, notation },
         from,
       }: InboundOf<"KEYSTROKE">) {
-        // The round of the page ends when the frame that owns it leaves.
-        yield* pipe(
-          topRoundRef,
-          Ref.update(
-            Option.filter((live) => !(notation === "<esc>" && isTopRoundOf(roundId, from)(live))),
-          ),
-        );
         // A keystroke means something inside a round only, and only from the
         // frame that the user types into.
         const live = yield* Ref.get(sessionRef);
