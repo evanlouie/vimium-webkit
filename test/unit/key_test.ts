@@ -23,6 +23,7 @@ import {
   normaliseKeySequence,
   parseKeySequence,
   shiftedNonLetter,
+  typedText,
 } from "~/domain/Key.ts";
 
 /**
@@ -683,6 +684,19 @@ describe("Key", () => {
       assert.isTrue(isComposing(event({ key: "a", isComposing: true })));
       assert.isTrue(isComposing(event({ key: "a", keyCode: 229 })));
       assert.isFalse(isComposing(event({ key: "a" })));
+    }),
+  );
+
+  it.effect("types one character, and nothing for a shortcut or a named key", () =>
+    Effect.sync(() => {
+      assert.deepEqual(typedText(event({ key: "n" })), Option.some("n"));
+      assert.deepEqual(typedText(event({ key: " " })), Option.some(" "));
+      assert.deepEqual(typedText(event({ key: "😀" })), Option.some("😀"));
+      assert.deepEqual(typedText(event({ key: "é", altKey: true })), Option.some("é"));
+      assert.isTrue(Option.isNone(typedText(event({ key: "c", metaKey: true }))));
+      assert.isTrue(Option.isNone(typedText(event({ key: "c", ctrlKey: true }))));
+      assert.isTrue(Option.isNone(typedText(event({ key: "Enter" }))));
+      assert.isTrue(Option.isNone(typedText(event({ key: "a", isComposing: true }))));
     }),
   );
 

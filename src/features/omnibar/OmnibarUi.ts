@@ -22,7 +22,7 @@ import { Array, Boolean, Effect, FiberHandle, Option, Ref, type Scope, pipe, Str
 import { constNull, constVoid } from "effect/Function";
 import { whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { deepActiveElement, isHtmlElement } from "~/platform/Elements.ts";
+import { deepActiveElement, isHtmlElement, typeInto } from "~/platform/Elements.ts";
 import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
 import type { Completion } from "./Completers.ts";
 
@@ -237,6 +237,8 @@ export interface OmnibarView {
   /** The text in the field. */
   readonly value: Effect.Effect<string>;
   readonly setValue: (value: string) => Effect.Effect<void>;
+  /** Type text at the caret, as a key press would, and let `onInput` hear it. */
+  readonly typeText: (text: string) => Effect.Effect<void>;
   /** The sign in front of the field: `:` in command mode, `›` otherwise. */
   readonly setPrefix: (text: string) => Effect.Effect<void>;
   readonly setFooter: (text: string) => Effect.Effect<void>;
@@ -553,6 +555,7 @@ export const makeOmnibarView: (
         }),
         Effect.ignore,
       ),
+    typeText: (text) => Effect.sync(() => typeInto(parts.input, text)),
     setPrefix: (text) =>
       Effect.sync(() => {
         parts.prefix.textContent = text;

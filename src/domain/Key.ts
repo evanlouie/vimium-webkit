@@ -206,6 +206,25 @@ export const isModifierKey = (event: KeyEventLike): boolean => MODIFIER_KEYS.has
 export const isComposing = (event: KeyEventLike): boolean =>
   event.isComposing === true || event.keyCode === 229;
 
+/**
+ * The text that a key types into a field, when it types one character.
+ *
+ * Control and ⌘ make a shortcut, and type nothing. Option stays, because on an
+ * Apple platform it types a character of its own, and `key` already holds
+ * that character.
+ */
+export const typedText = (event: KeyEventLike): Option.Option<string> =>
+  pipe(
+    event.key,
+    Option.liftPredicate(
+      (key) =>
+        Array.length(Array.fromIterable(key)) === 1 &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !isComposing(event),
+    ),
+  );
+
 // ---------------------------------------------------------------------------
 // macOS Option chords
 // ---------------------------------------------------------------------------

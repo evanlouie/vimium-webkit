@@ -84,6 +84,21 @@ export const composedTarget = (event: Pick<Event, "composedPath" | "target">): E
  */
 export const isUserEvent = (event: Pick<Event, "isTrusted">): boolean => event.isTrusted === true;
 
+/**
+ * Type text into a field of our own at its caret, and fire the `input` event
+ * that typing fires.
+ *
+ * For a key that cannot type by itself: a key that the guard held while the
+ * page loaded has lost its default action when it plays. The event neither
+ * bubbles nor leaves our shadow root, so only the listeners of the field hear
+ * it, and they react as they do to typing.
+ */
+export const typeInto = (field: HTMLInputElement, text: string): void => {
+  const end = field.value.length;
+  field.setRangeText(text, field.selectionStart ?? end, field.selectionEnd ?? end, "end");
+  field.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: text }));
+};
+
 export const MEDIA_SELECTOR = "video, audio";
 
 const hasMedia = (root: ParentNode): boolean => root.querySelector(MEDIA_SELECTOR) !== null;

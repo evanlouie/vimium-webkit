@@ -62,9 +62,10 @@ import {
 import { isEscape, KeyPolicy, type ModeOptions, Modes } from "~/core/Modes.ts";
 import { Report, type UserMessage } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
-import { isComposing } from "~/domain/Key.ts";
+import { isComposing, typedText } from "~/domain/Key.ts";
 import { type NoFields, type Unscoped, whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
+import { typeInto } from "~/platform/Elements.ts";
 import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
 
 /** How long a message from `show` stays on screen. The upstream value. */
@@ -828,6 +829,19 @@ export class Hud extends Context.Service<
               Pass: () => Effect.succeed(SUPPRESS_PROPAGATION),
             });
 
+            /**
+             * Take a key press that missed the input, and type its character
+             * there. The prompt owns the keyboard. The keys that the guard held
+             * while the page loaded play after the key that opened the prompt,
+             * so `/nee` typed during the load reaches the prompt this way.
+             */
+            const typeMissed = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
+              pipe(
+                typedText(event),
+                whenSome((text) => Effect.sync(() => typeInto(parts.input, text))),
+                Effect.as(SUPPRESS_EVENT),
+              );
+
             /** Act on a key press aimed at the input, and take every other one. */
             const onKeydown = (
               event: KeyboardEvent,
@@ -836,7 +850,7 @@ export class Hud extends Context.Service<
                 ui.owns(event.target),
                 Boolean.match({
                   onTrue: () => pipe(keyAction(event), Effect.flatMap(perform)),
-                  onFalse: () => Effect.succeed(SUPPRESS_EVENT),
+                  onFalse: () => typeMissed(event),
                 }),
               );
 

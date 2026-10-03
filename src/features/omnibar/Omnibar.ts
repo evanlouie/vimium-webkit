@@ -51,7 +51,7 @@ import {
 import { isEscape, KeyPolicy, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
-import { isComposing } from "~/domain/Key.ts";
+import { isComposing, typedText } from "~/domain/Key.ts";
 import { whenSome } from "~/domain/Prelude.ts";
 import {
   classifyQuery,
@@ -648,13 +648,29 @@ export class Omnibar extends Context.Service<
           Boolean.match({ onTrue: () => SUPPRESS_PROPAGATION, onFalse: () => SUPPRESS_EVENT }),
         );
 
+      /**
+       * Keep a key press, and type the character of one that missed the field
+       * into it. The omnibar owns the keyboard. The keys that the guard held
+       * while the page loaded play after the `o` that opened it, and they
+       * miss the field.
+       */
+      const keepKeydown = (view: OmnibarView, event: KeyboardEvent): Effect.Effect<HandlerResult> =>
+        pipe(
+          view.ownsFocus(event.target),
+          Boolean.match({
+            onTrue: () => Effect.succeed(SUPPRESS_PROPAGATION),
+            onFalse: () =>
+              pipe(typedText(event), whenSome(view.typeText), Effect.as(SUPPRESS_EVENT)),
+          }),
+        );
+
       const onKeydown =
         (current: () => Option.Option<Session>, view: OmnibarView) =>
         (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
           pipe(
             Option.all({ action: keyAction(event), live: current() }),
             Option.match({
-              onNone: () => Effect.succeed(keepIfOurs(view, event)),
+              onNone: () => keepKeydown(view, event),
               // `preventDefault` is more than tidiness here. Without it Tab
               // moves the focus out of the overlay, and the arrows move the
               // caret in the field.

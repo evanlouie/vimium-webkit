@@ -329,6 +329,11 @@ private value store, decides alone and fully enabled. A child frame that hears
 nothing before the request deadline only assumes that it is enabled, and it
 drops the held keys instead of guessing.
 
+A held key plays without its default action, so it cannot type. When one opens
+a prompt or the omnibar, the keys after it miss the field, and the prompt or the
+omnibar types their characters into the field itself. `/nee` typed during the
+load therefore searches for `nee`.
+
 Normal mode lives as long as the application. `Keyboard` reads the verdict for
 each key, so an excluded page needs no mode of its own.
 
