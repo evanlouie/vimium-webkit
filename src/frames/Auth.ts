@@ -326,26 +326,6 @@ export class FrameAuth extends Context.Service<
         }),
       );
 
-      /**
-       * Only the top frame creates the credential.
-       *
-       * Two frames that created one at the same time would write two values,
-       * and the frame that wrote last would lock the other frames out.
-       */
-      const creator: Effect.Effect<void, FrameAuthError> = pipe(
-        realm.role,
-        FrameRole.$match({
-          Top: () => Effect.void,
-          Child: () =>
-            Effect.fail(
-              new FrameAuthError({
-                reason: "unauthenticated",
-                detail: "this frame has no credential in manager storage",
-              }),
-            ),
-        }),
-      );
-
       const createSecret = Effect.try({
         try: (): string => {
           const bytes = new Uint8Array(SECRET_BYTES);
@@ -397,8 +377,7 @@ export class FrameAuth extends Context.Service<
       });
 
       /** Create the credential, unless another frame stores one first. */
-      const createShared = Effect.fnUntraced(function* () {
-        yield* creator;
+      const createShared = Effect.gen(function* () {
         const created = yield* createSecret;
 
         // Read storage once more, immediately before the write. The top frame
@@ -421,22 +400,65 @@ export class FrameAuth extends Context.Service<
       });
 
       /**
-       * The shared credential, as storage holds it.
-       *
-       * It is private to this module. The top frame creates one when storage
-       * holds none.
+       * The shared credential as storage holds it, or what `whenAbsent` gives
+       * when storage holds none. It is private to this module.
        */
-      const secret = Effect.fn("FrameAuth.secret")(function* () {
-        yield* privateStore;
-        const current = yield* stored;
-        return yield* pipe(
-          current,
-          Option.match({
-            onSome: Effect.succeed,
-            onNone: createShared,
-          }),
+      const secretOr = (
+        whenAbsent: Effect.Effect<string, FrameAuthError>,
+      ): Effect.Effect<string, FrameAuthError> =>
+        pipe(
+          privateStore,
+          Effect.andThen(stored),
+          Effect.flatMap(
+            Option.match({
+              onSome: Effect.succeed,
+              onNone: () => whenAbsent,
+            }),
+          ),
+          Effect.withSpan("FrameAuth.secret"),
         );
-      });
+
+      /** The credential of the top frame, which creates one when storage holds none. */
+      const createdSecret = secretOr(createShared);
+
+      /** The credential of a child frame. A child that finds none cannot join. */
+      const storedSecret = secretOr(
+        Effect.fail(
+          new FrameAuthError({
+            reason: "unauthenticated",
+            detail: "this frame has no credential in manager storage",
+          }),
+        ),
+      );
+
+      /**
+       * What the role of the frame decides, chosen once.
+       *
+       * Only the top frame creates the credential. Two frames that created one
+       * at the same time would write two values, and the frame that wrote last
+       * would lock the other frames out.
+       *
+       * The top frame also creates it when this layer is built, so that it
+       * exists before the first child asks to join. A child cannot wait for a
+       * value that nobody writes, and a clean installation would otherwise
+       * keep every frame outside the session for the life of the page.
+       */
+      const { secret, prepare } = pipe(
+        realm.role,
+        FrameRole.$match({
+          Top: () => ({
+            secret: createdSecret,
+            prepare: pipe(
+              createdSecret,
+              Effect.asVoid,
+              Effect.catch((error) =>
+                Effect.logDebug(`no frame credential in this realm: ${error.detail}`),
+              ),
+            ),
+          }),
+          Child: () => ({ secret: storedSecret, prepare: Effect.void }),
+        }),
+      );
 
       const importCredential = Effect.fnUntraced(function* (value: string) {
         const api = yield* subtle;
@@ -481,7 +503,7 @@ export class FrameAuth extends Context.Service<
        * answer a false challenge could ask for the key of a link.
        */
       const mac = Effect.fn("FrameAuth.mac")(function* (payload: string) {
-        const value = yield* secret();
+        const value = yield* secret;
         const key = yield* keyFor(value);
         const api = yield* subtle;
         return yield* Effect.tryPromise({
@@ -505,7 +527,7 @@ export class FrameAuth extends Context.Service<
         handshake: FrameHandshake,
         proof: string,
       ) {
-        const value = yield* secret();
+        const value = yield* secret;
         const key = yield* keyFor(value);
         const api = yield* subtle;
         return yield* pipe(
@@ -622,24 +644,7 @@ export class FrameAuth extends Context.Service<
         return { seal, open } satisfies FrameCipher;
       });
 
-      // The credential must exist before the first child asks to join. Only
-      // the top frame can create it, and a child cannot wait for a value that
-      // nobody writes. A clean installation would otherwise keep every frame
-      // outside the session for the life of the page.
-      yield* pipe(
-        realm.role,
-        FrameRole.$match({
-          Top: () =>
-            pipe(
-              secret(),
-              Effect.asVoid,
-              Effect.catch((error) =>
-                Effect.logDebug(`no frame credential in this realm: ${error.detail}`),
-              ),
-            ),
-          Child: () => Effect.void,
-        }),
-      );
+      yield* prepare;
 
       return FrameAuth.of({
         joinProof,
