@@ -1041,9 +1041,10 @@ export class Ui extends Context.Service<
       });
 
       // The services of this layer, for the observer callback. The callback
-      // is an imperative caller, and `runSyncExitWith` is the bridge that
-      // `ARCHITECTURE.md` section 3 names. `platform/Dom.ts` uses the same
-      // helper for a listener.
+      // is an imperative caller, and `runSyncExitWith` runs an effect to its
+      // end inside it, as the section "The keyboard path is synchronous" of
+      // `ARCHITECTURE.md` asks. `platform/Dom.ts` uses the same helper for a
+      // listener.
       const services = yield* Effect.context<never>();
       const runGuard = Effect.runSyncExitWith(services);
 

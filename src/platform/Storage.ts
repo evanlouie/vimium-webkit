@@ -344,8 +344,9 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
    *
    * A handle, and not a plain fiber. Arming it again interrupts the fiber
    * that is already there, and the scope interrupts whatever is left. A
-   * detached fiber would keep the page alive after the runtime closes, and a
-   * scoped fiber for each write would add a finaliser for each write.
+   * detached fiber would keep the page alive after the application scope
+   * closes, and a scoped fiber for each write would add a finaliser for each
+   * write.
    */
   const timer = yield* FiberHandle.make<void, never>();
 

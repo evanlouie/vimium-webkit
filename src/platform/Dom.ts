@@ -8,8 +8,9 @@
  * either, because both still do the read. Only a `try` does.
  *
  * Therefore every read of a global that we do not own goes through
- * `probeOrElse` or `attempt` here, and every listener is a scoped resource. When the runtime scope closes,
- * every listener goes with it. No module keeps a list of things to remove.
+ * `probeOrElse` or `attempt` here, and every listener is a scoped resource.
+ * When the application scope closes, every listener goes with it. No module
+ * keeps a list of things to remove.
  */
 
 import {
@@ -75,8 +76,9 @@ export interface ListenOptions {
  * A listener body.
  *
  * It gives back an `Effect`, not `void`. The effect runs to completion inside
- * the browser's own dispatch, so `preventDefault` still works. Read
- * `ARCHITECTURE.md` section 3 before you put anything that suspends in here.
+ * the browser's own dispatch, so `preventDefault` still works. Read the
+ * section "The keyboard path is synchronous" of `ARCHITECTURE.md` before you
+ * put anything that suspends in here.
  */
 export type Listener<Event, R> = (event: Event) => Effect.Effect<void, never, R>;
 

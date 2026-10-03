@@ -9,8 +9,9 @@
  *
  * The rule for `write`: nothing on its path may suspend. A caller inside a
  * `keydown` task runs it with `runSyncExit`, and it must still be inside the
- * activation window when the first real write happens. Read `ARCHITECTURE.md`
- * section 3 before you change anything here.
+ * activation window when the first real write happens. Read the section "The
+ * keyboard path is synchronous" of `ARCHITECTURE.md` before you change
+ * anything here.
  *
  * The order of the write path follows from that rule:
  *

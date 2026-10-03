@@ -178,7 +178,7 @@ export class Insert extends Context.Service<
        * The element that a focus gives the keys to.
        *
        * Our HUD and omnibar inputs live in the focus tree of the page, because
-       * a userscript has no extension-origin iframe (§6.3). Focus into one of
+       * a userscript has no extension-origin iframe. Focus into one of
        * them must not start insert mode.
        */
       const adoptable: (node: EventTarget | null) => Option.Option<HTMLElement> = flow(
@@ -194,7 +194,7 @@ export class Insert extends Context.Service<
       const global = yield* Ref.make(Option.none<ModeHandle>());
 
       // Both frames belong to the layer scope, which exits them when the
-      // runtime stops. Each one owns a scope inside that one, so a frame that
+      // application scope closes. Each one owns a scope inside that one, so a frame that
       // closes leaves nothing behind there.
       const layerScope = yield* Scope.Scope;
 
@@ -390,7 +390,7 @@ export class Insert extends Context.Service<
        * Choose among the inputs.
        *
        * More than one input, and no count to choose between them. Upstream
-       * shows hints on the inputs, and so do we. The hints service is asked by
+       * shows hints on the inputs, and so do we. The hint command is run by
        * name through the registry: a feature must never import another
        * feature. A build with no hints answers "unavailable", and the count
        * path runs instead.

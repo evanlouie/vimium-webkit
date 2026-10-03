@@ -77,7 +77,7 @@ export interface ExitParts {
   readonly forgetSuppressed: Effect.Effect<void>;
   /** Write every value that is still inside its debounce window. */
   readonly flushAll: Effect.Effect<void>;
-  /** Release everything that this frame's runtime holds. */
+  /** Release everything that this frame's application holds. */
   readonly release: Effect.Effect<void>;
 }
 
@@ -94,11 +94,11 @@ export interface ExitParts {
  * 3. Flush through the storage actor as well. The actor reports a failed write
  *    and settles waiting callers. It also takes commands from its mailbox.
  *    This part completes only when the page lives on.
- * 4. Release the runtime, but only on a final exit. A release closes the scope
- *    that the storage actor lives in. A release before the flush would drop the
- *    write that this hook exists to save. A page that comes back from the
- *    back/forward cache keeps its runtime. It never runs its scripts again, so
- *    nothing would build the runtime a second time.
+ * 4. Release the application, but only on a final exit. A release closes the
+ *    scope that the storage actor lives in. A release before the flush would
+ *    drop the write that this hook exists to save. A page that comes back from
+ *    the back/forward cache keeps its application. It never runs its scripts
+ *    again, so nothing would build the application a second time.
  */
 export const onPageExit = (parts: ExitParts): ExitHook =>
   Effect.fnUntraced(function* (exit: PageExit) {

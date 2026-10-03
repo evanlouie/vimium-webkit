@@ -4,7 +4,7 @@
  * Every other service reads settings from here, and no other service knows that
  * they are persisted. A service that must react to a change subscribes to
  * `changes` in a forked fiber. The fiber belongs to the layer scope, so it stops
- * with the runtime.
+ * when the application scope closes.
  */
 
 import { Context, Effect, Layer, type Stream } from "effect";

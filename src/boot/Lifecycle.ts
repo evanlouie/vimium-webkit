@@ -44,11 +44,11 @@
  *    forward again. `unload` is not used at all. WebKit refuses to cache a page
  *    that registers it, and then does not send it either.
  * 4. **A frame exits alone.** This file runs in every frame. Each frame has its
- *    own realm, its own window, its own runtime and its own listeners.
+ *    own realm, its own window, its own application and its own listeners.
  *    `pagehide` reaches the window of the frame that is going away. "Final page
  *    exit" therefore means "this document will not run again". A child frame
  *    that leaves releases only what that child built, and the top frame keeps
- *    its own runtime.
+ *    its own application.
  */
 
 import {

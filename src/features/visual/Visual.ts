@@ -310,8 +310,8 @@ export const VisualLayer: Layer.Layer<
     const doc = dom.document;
 
     // The layer scope owns each mode, and each fiber that the modes start.
-    // Closing the runtime therefore ends the live mode, which gives the
-    // selection back to the page.
+    // Closing the application scope therefore ends the live mode, which gives
+    // the selection back to the page.
     const layerScope = yield* Scope.Scope;
     const fibers = yield* FiberSet.make();
 

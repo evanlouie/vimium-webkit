@@ -21,7 +21,7 @@
  *
  * The translation of the whole layer is correct for a scroll of the page, and
  * for nothing else. A container that scrolls inside the page, a resize and a
- * reflow all move one target and not the layer. The hints service measures the
+ * reflow all move one target and not the layer. The hint session measures the
  * targets again for those, and it calls `reanchor` before it draws the new
  * rects. The layer then holds the offset of the visual viewport only, because
  * the new rects already carry the scroll of the page.
@@ -215,13 +215,8 @@ const unescapeOne = (
 const unescapeCss = (css: string): string =>
   pipe(css, String.replaceAll(CSS_NEWLINE, "\n"), (text) => text.replace(CSS_ESCAPE, unescapeOne));
 
-/**
- * Is this user CSS that we are willing to install?
- *
- * It is exported so that the settings dialog can refuse the value at the moment
- * when the user can correct it, and not drop it later in silence.
- */
-export const isSafeUserCss = (css: string): boolean =>
+/** Is this user CSS that we are willing to install? */
+const isSafeUserCss = (css: string): boolean =>
   css.length <= MAX_USER_CSS_LENGTH && !FORBIDDEN_CSS.test(unescapeCss(css));
 
 /**

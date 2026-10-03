@@ -811,8 +811,8 @@ export class Omnibar extends Context.Service<
         "clear-history": () => clearHistory(),
       });
 
-      // The session belongs to the layer scope as well, so that the runtime
-      // takes the overlay with it when it stops.
+      // The session belongs to the layer scope as well, so that the overlay
+      // goes when the application scope closes.
       yield* Effect.addFinalizer(() => close);
 
       return Omnibar.of({

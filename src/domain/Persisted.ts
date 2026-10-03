@@ -215,7 +215,10 @@ export const settingsSchema = Schema.Struct({
    * with them everywhere, player or no player.
    */
   passMediaKeys: field(Schema.Boolean, true),
-  /** Per-origin CSS zoom. Not real browser zoom; see §4.2. Off by default. */
+  /**
+   * Per-origin CSS zoom. Not real browser zoom: it breaks `position: fixed` on
+   * some sites. Off by default.
+   */
   enableCssZoom: field(Schema.Boolean, false),
   /**
    * Record visited pages locally to power Omnibar-lite. Opt-in, and it must
@@ -461,9 +464,9 @@ export const sessionSchema = Schema.Struct({
   /**
    * CSS zoom factor per origin.
    *
-   * Not real browser zoom — see §4.2. Kept out of `settings` because it is
-   * written far more often and a corrupt entry should not cost the user their
-   * key mappings.
+   * Not real browser zoom. Kept out of `settings` because it is written far
+   * more often, and a corrupt entry should not cost the user their key
+   * mappings.
    */
   zoomByOrigin: Schema.Record(Schema.String, Schema.Finite),
 });

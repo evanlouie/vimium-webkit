@@ -288,8 +288,9 @@ const quotaPrivacy = (estimator: StorageEstimator): Effect.Effect<PrivacyProbe> 
  * There is no reliable API for this question. That is exactly why the whole
  * function is opt-in, and does not ask this probe to protect anybody.
  *
- * The estimate is the one promise in this feature. ARCHITECTURE.md section 1
- * rule 5 asks for the wrap to happen once, at the edge. This is that edge.
+ * The estimate is the one promise in this feature. The rules of
+ * `ARCHITECTURE.md` ask for the wrap to happen once, at the edge. This is that
+ * edge.
  */
 export const detectPrivateBrowsing: Effect.Effect<PrivacyProbe, never, Dom> = Effect.gen(
   function* () {

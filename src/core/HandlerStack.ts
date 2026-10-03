@@ -9,7 +9,8 @@
  *
  * A handler body is an `Effect`, and it must not suspend. The stack runs it
  * inside the browser's own dispatch, because `preventDefault` works nowhere
- * else. Read `ARCHITECTURE.md` section 3.
+ * else. Read the section "The keyboard path is synchronous" of
+ * `ARCHITECTURE.md`.
  */
 
 import type { Effect } from "effect";

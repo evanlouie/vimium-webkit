@@ -7,9 +7,9 @@
  * everything that the upstream implementation uses has been there longer than
  * Vimium has.
  *
- * The only true WebKit work is at the bottom of this file.
- * `ShadowRoot.getSelection()` does not exist in Safari, and
- * `caretPositionFromPoint` arrived only in Safari 26.2.
+ * The only true WebKit work is `readBoundaries`, which reads the selection
+ * through an open shadow root: `ShadowRoot.getSelection()` does not exist in
+ * Safari.
  *
  * Every function here takes the `Selection`, the `Document` or the
  * `CapabilityReport` that it needs, and gives an answer. None of them reads a
@@ -60,6 +60,12 @@ export type Granularity =
 export interface MovementSpec {
   readonly direction: Direction;
   readonly granularity: Granularity;
+}
+
+/** A place in the text: a node, and an offset inside it. */
+export interface CaretPoint {
+  readonly node: Node;
+  readonly offset: number;
 }
 
 export const opposite: (direction: Direction) => Direction = pipe(
@@ -306,15 +312,6 @@ export const extendToLines = (selection: Selection): void => {
     }),
   );
 };
-
-// ---------------------------------------------------------------------------
-// A point, mapped to a caret
-// ---------------------------------------------------------------------------
-
-export interface CaretPoint {
-  readonly node: Node;
-  readonly offset: number;
-}
 
 // ---------------------------------------------------------------------------
 // Selection reads that see into a shadow root

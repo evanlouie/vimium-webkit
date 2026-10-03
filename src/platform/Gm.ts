@@ -313,8 +313,9 @@ export type StoreKind = Data.TaggedEnum<{
    *
    * The map belongs to this realm, so the page cannot read it. It is not
    * shared with another frame either, which is why it is not a store for the
-   * frame credential. `ARCHITECTURE.md` section 5.1 says why the top frame
-   * does not give a credential of its own to a child instead.
+   * frame credential. The section "A page-readable store gives no
+   * cross-frame session" of `ARCHITECTURE.md` says why the top frame does not
+   * give a credential of its own to a child instead.
    */
   Memory: NoFields;
 }>;

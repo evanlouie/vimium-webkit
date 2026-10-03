@@ -142,7 +142,7 @@ describe("the application of a frame", () => {
 });
 
 describe("the order of the exit", () => {
-  it.effect("releases the runtime only after the last write", () =>
+  it.effect("releases the application only after the last write", () =>
     Effect.gen(function* () {
       // A plain array, because one of the steps is not an effect at all.
       const order: string[] = [];

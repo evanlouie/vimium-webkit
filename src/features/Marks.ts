@@ -9,7 +9,7 @@
  *
  * Storage is the manager, and never `localStorage`: ITP erases storage that a
  * script can write after seven idle days, which would lose every mark that the
- * user set (§7.4).
+ * user set.
  */
 
 import {

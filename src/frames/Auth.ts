@@ -65,7 +65,8 @@
  * silent listener. It runs in the realm of the top frame, it can answer as the
  * other end, and it can put a frame of its own in the tree. Admission needs one
  * value that the page cannot read, and only the manager has such a store.
- * `ARCHITECTURE.md` section 5.1 gives the same reason at more length.
+ * The section "A page-readable store gives no cross-frame session" of
+ * `ARCHITECTURE.md` gives the same reason at more length.
  *
  * `crypto.subtle` is absent in a context that is not secure, which means a
  * plain `http:` page. There is no route around that, and there is no

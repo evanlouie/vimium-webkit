@@ -7,7 +7,8 @@
  * browser continues.
  *
  * The rule that comes with the guarantee: nothing that this file can reach may
- * suspend. Read `ARCHITECTURE.md` section 3.
+ * suspend. Read the section "The keyboard path is synchronous" of
+ * `ARCHITECTURE.md`.
  */
 
 import { Effect, Option, type Scope, flow, pipe } from "effect";

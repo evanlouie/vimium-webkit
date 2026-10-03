@@ -1044,7 +1044,7 @@ export interface Collected<E> {
  * **What cancels a walk.** The walk is one effect in the fiber of the round.
  * Interruption of that fiber stops the walk at the next yield. `Hints.ts`
  * interrupts it when the user presses Escape, when a new round starts, when
- * the mode exits, and when the runtime scope closes on a page change.
+ * the mode exits, and when the application scope closes on a page change.
  *
  * **What a cancelled walk leaves.** Nothing. The walk holds no listener, no
  * timer and no child fiber. It writes into one array that it owns, and the

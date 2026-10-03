@@ -11,7 +11,8 @@
  *
  * Every effect in this file must run to completion inside the browser's own
  * dispatch, because `preventDefault` works nowhere else. Nothing here may
- * suspend. Read `ARCHITECTURE.md` section 3.
+ * suspend. Read the section "The keyboard path is synchronous" of
+ * `ARCHITECTURE.md`.
  */
 
 import {
