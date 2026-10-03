@@ -37,6 +37,7 @@ import {
   Layer,
   Option,
   Ref,
+  Schedule,
   Stream,
   flow,
   pipe,
@@ -107,9 +108,15 @@ const nextFrame = (
  * A child frame can ask only once it is admitted. The bus refuses every
  * request until the handshake ends, so the question waits for the admission
  * first, however late it comes: the top frame admits a frame after a sweep or
- * after the wake of a hint round as well. A top frame that does not answer in
- * time sends `VERDICT` once its verdict settles, so the question does not
- * repeat.
+ * after the wake of a hint round as well.
+ *
+ * A question that gets no answer is asked again, until one comes. A top frame
+ * that has not read its settings yet sends `VERDICT` once it has, but a top
+ * frame that had a verdict already sends nothing until the verdict changes.
+ * Its main thread can be busy for longer than the deadline while the page
+ * loads, and a restore from the back-forward cache can replace the link. A
+ * frame that gave up would then keep the verdict that it assumed, fully
+ * enabled on a page that the user may have excluded.
  */
 export const TopFrameVerdictLayer: Layer.Layer<TopFrameVerdict, never, FrameBus> = Layer.effect(
   TopFrameVerdict,
@@ -124,7 +131,9 @@ export const TopFrameVerdictLayer: Layer.Layer<TopFrameVerdict, never, FrameBus>
           onTrue: () =>
             pipe(
               bus.request(toTop, { kind: "EXCLUSION_REQUEST" }, verdictIn, REQUEST_DEADLINE),
+              Effect.retry(Schedule.spaced(REQUEST_DEADLINE)),
               Effect.asSome,
+              // The schedule never ends, so no failure comes out of it.
               Effect.catch(() => Effect.never),
             ),
         }),

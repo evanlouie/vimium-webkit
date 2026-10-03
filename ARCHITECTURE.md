@@ -113,8 +113,8 @@ The exclusion verdict takes one more step, because `core/` must not import
 declares the `TopFrameVerdict` service for what a child frame hears from the
 top frame. `TopFrameVerdictLayer` in `frames/Link.ts` gives that service over
 the bus. A child frame asks with `EXCLUSION_REQUEST` once the top frame admits
-it, however late that is, and the top frame answers once it has read its own
-settings. The top frame sends `VERDICT` to every frame each time that it takes
+it, however late that is, and asks again until it gets an answer. The top frame
+answers once it has read its own settings. The top frame sends `VERDICT` to every frame each time that it takes
 a verdict. The import goes from `frames/` to `core/`, and the layer goes the
 other way.
 
