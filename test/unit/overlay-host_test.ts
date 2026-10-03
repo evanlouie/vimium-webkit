@@ -18,13 +18,10 @@ import {
   focusIsFree,
   HOST_STYLE,
   hostDeclarations,
-  hostIsDisplaced,
   hostTranslate,
   NO_SHIFT,
   outOfDateHostProperties,
   ownedDeclarations,
-  type PaintStyle,
-  preventsOverlayPaint,
   reattachTo,
   type ViewportRect,
 } from "~/ui/Ui.ts";
@@ -320,7 +317,6 @@ describe("the place of the host in the viewport", () => {
   it.effect("finds no error while the host lies on the viewport", () =>
     Effect.sync(() => {
       assert.isTrue(Option.isNone(alignError(ON_VIEWPORT, VIEW)));
-      assert.isFalse(hostIsDisplaced(ON_VIEWPORT, VIEW));
     }),
   );
 
@@ -332,7 +328,6 @@ describe("the place of the host in the viewport", () => {
       // -2759 in WebKit with the page at 2759 px.
       const scrolled = pipe(ON_VIEWPORT, Struct.assign({ top: -2759 }));
       assert.deepEqual(alignError(scrolled, VIEW), Option.some({ dx: 0, dy: 2759 }));
-      assert.isTrue(hostIsDisplaced(scrolled, VIEW));
     }),
   );
 
@@ -343,8 +338,7 @@ describe("the place of the host in the viewport", () => {
       const shifted: ViewportRect = pipe(VIEW, Struct.assign({ offsetTop: 84 }));
       const lowered = pipe(ON_VIEWPORT, Struct.assign({ top: 84 }));
       assert.isTrue(Option.isNone(alignError(lowered, shifted)));
-      assert.isFalse(hostIsDisplaced(lowered, shifted));
-      assert.isTrue(hostIsDisplaced(ON_VIEWPORT, shifted));
+      assert.deepEqual(alignError(ON_VIEWPORT, shifted), Option.some({ dx: 0, dy: 84 }));
     }),
   );
 
@@ -355,27 +349,6 @@ describe("the place of the host in the viewport", () => {
       // guard write on every frame.
       const rounded = pipe(ON_VIEWPORT, Struct.assign({ left: 0.5, top: -0.5 }));
       assert.isTrue(Option.isNone(alignError(rounded, VIEW)));
-      assert.isFalse(hostIsDisplaced(rounded, VIEW));
-    }),
-  );
-
-  it.effect("finds a host that a page rule made small", () =>
-    Effect.sync(() => {
-      // `vimium-webkit-overlay { width: 0 !important }`, and a `scale(0)` on
-      // an ancestor, both end here. A measurement answers every cause, which
-      // a list of CSS properties written by hand cannot.
-      const narrow = pipe(ON_VIEWPORT, Struct.assign({ width: 0 }));
-      const flat = pipe(ON_VIEWPORT, Struct.assign({ height: 0 }));
-      assert.isTrue(hostIsDisplaced(narrow, VIEW));
-      assert.isTrue(hostIsDisplaced(flat, VIEW));
-      assert.isTrue(hostIsDisplaced({ left: 0, top: 0, width: 1280, height: 399 }, VIEW));
-    }),
-  );
-
-  it.effect("accepts a size that a scrollbar made smaller", () =>
-    Effect.sync(() => {
-      // A classic scrollbar costs about 15 px, and it hides no interface.
-      assert.isFalse(hostIsDisplaced({ left: 0, top: 0, width: 1265, height: 800 }, VIEW));
     }),
   );
 });
@@ -408,43 +381,6 @@ describe("the declarations that the viewport sync writes", () => {
       assert.deepEqual(valueOf("transform"), Option.some("translate(0px, 2843px)"));
       assert.deepEqual(valueOf("width"), Option.some("1280px"));
       assert.deepEqual(valueOf("height"), Option.some("800px"));
-    }),
-  );
-});
-
-describe("the paint of the host ancestor chain", () => {
-  const visible: PaintStyle = {
-    display: "block",
-    visibility: "visible",
-    opacity: "1",
-    contentVisibility: "visible",
-    filter: "none",
-    clipPath: "none",
-  };
-
-  /** Each declaration that hides the overlay on its own, by its name. */
-  const hiding: ReadonlyArray<readonly [string, PaintStyle]> = [
-    ["opacity: 0", pipe(visible, Struct.assign({ opacity: "0" }))],
-    ["visibility: hidden", pipe(visible, Struct.assign({ visibility: "hidden" }))],
-    ["filter: opacity(0)", pipe(visible, Struct.assign({ filter: "opacity(0)" }))],
-    ["contentVisibility: hidden", pipe(visible, Struct.assign({ contentVisibility: "hidden" }))],
-    ["clipPath: inset(100%)", pipe(visible, Struct.assign({ clipPath: "inset(100%)" }))],
-  ];
-
-  it.effect.each(hiding)("finds %s", ([, style]) =>
-    Effect.sync(() => {
-      assert.isTrue(preventsOverlayPaint(style));
-    }),
-  );
-
-  it.effect("keeps a visible style", () =>
-    Effect.sync(() => {
-      const untouched = pipe(
-        visible,
-        Struct.assign({ filter: "brightness(1)", clipPath: "inset(0)" }),
-      );
-      assert.isFalse(preventsOverlayPaint(visible));
-      assert.isFalse(preventsOverlayPaint(untouched));
     }),
   );
 });

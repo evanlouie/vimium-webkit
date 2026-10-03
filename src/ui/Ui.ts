@@ -24,12 +24,6 @@
  * The host cannot escape its own ancestors. Read the two classes of ancestor
  * rule at `outOfDateHostProperties`, and read `SECURITY.md`.
  *
- * **The invariant of this module.** A dialog never holds the keyboard while
- * the measured overlay is not visible. `visibilityFault` asks where the host
- * is and whether its ancestors paint it. A feature that holds the keyboard
- * must ask that question. Issue #62 records the three features that do not ask
- * yet.
- *
  * Each layer of the overlay is hidden from assistive technology while it is
  * inactive, and `expose` opens one layer at a time. A hint marker decorates a
  * link that the page already offers, so a screen reader must not read it
@@ -54,7 +48,6 @@ import {
   Context,
   Data,
   Effect,
-  Equal,
   Exit,
   FiberHandle,
   flow,
@@ -341,15 +334,10 @@ export const reattachTo = <N>(parent: Option.Option<N>, current: unknown): Optio
  * class: it measures the host box and moves the host back on to the viewport.
  *
  * **Class 2: a rule that prevents `html` from painting.** The overlay and the
- * page disappear together. Example: `html { opacity: 0 }`. The visibility
- * check reads the computed paint properties of the host and its ancestors.
- * It detects hidden display, visibility, content visibility, zero opacity,
- * zero filter opacity and a full inset clip. This is an effect list, and not a
- * complete property list.
- *
- * Class 1 leaves the page readable, and it is therefore the dangerous one.
- * `visibilityFault` measures what is left after `alignHost`, and it also asks
- * whether the ancestor chain can paint. `SECURITY.md` names both classes.
+ * page disappear together. Example: `html { opacity: 0 }`. Nothing here
+ * answers this class. The user sees that the whole page is gone, and Escape
+ * still closes a dialog and gives every key back. `SECURITY.md` names both
+ * classes.
  *
  * `read` gives the current value and the current priority of one property, and
  * `guarded` names the properties that this engine can compare. Both are
@@ -372,8 +360,8 @@ export const outOfDateHostProperties = (
  *
  * A page that removes the host inside its own mutation observer would fight us
  * in a loop of microtasks, and that loop would starve the page. The loop needs
- * *our* write, so the guard stops writing after the cap. It keeps observing,
- * and it says that it stopped: see `GuardState`.
+ * *our* write, so the guard stops writing after the cap. It keeps observing:
+ * see `GuardState`.
  */
 const REATTACH_LIMIT = 32;
 
@@ -407,10 +395,9 @@ const FRESH_GUARD: GuardState = GuardState.Repairing({ repairs: 0 });
  * The page took the host away once more.
  *
  * The budget for this second can run out here. The guard then stops writing,
- * because the loop needs our write, but it **keeps observing** and it says
- * what happened. A guard that disconnected here stayed silent for the rest of
- * the session, and the page then held an invisible interface that still took
- * every key.
+ * because the loop needs our write, but it **keeps observing**, and the next
+ * quiet second gives the repair back. A guard that disconnected here stayed
+ * off for the rest of the session.
  */
 const afterRemoval: (guard: GuardState) => GuardState = GuardState.$match({
   Repairing: ({ repairs }) =>
@@ -425,22 +412,8 @@ const afterRemoval: (guard: GuardState) => GuardState = GuardState.$match({
 });
 
 // ---------------------------------------------------------------------------
-// What the user can see
+// The place of the host in the viewport
 // ---------------------------------------------------------------------------
-
-/**
- * Why the user cannot see the overlay.
- *
- * - `misplaced` — the page holds the host somewhere else, and the guard has
- *   spent its repair budget for this second.
- * - `displaced` — the host box does not lie on the viewport, and `alignHost`
- *   could not correct it.
- * - `hidden` — a computed paint property of the host or an ancestor hides it.
- *
- * A feature that holds the keyboard must give it back while a fault stands.
- * An interface that nobody can see must not take the keys of the user.
- */
-export type OverlayFault = "misplaced" | "displaced" | "hidden";
 
 /** The border box of the host, in the coordinates of the layout viewport. */
 export interface HostBox {
@@ -449,9 +422,6 @@ export interface HostBox {
   readonly width: number;
   readonly height: number;
 }
-
-/** How far the host may sit from the viewport origin, in CSS pixels. */
-const ORIGIN_TOLERANCE = 2;
 
 /** How far the host must move before the correction writes anything. */
 const SHIFT_TOLERANCE = 1;
@@ -513,128 +483,6 @@ export const alignError = (box: HostBox, view: ViewportRect): Option.Option<Host
     { dx: view.offsetLeft - box.left, dy: view.offsetTop - box.top },
     Option.liftPredicate(Predicate.not(withinTolerance)),
   );
-
-/**
- * Does the host box disagree with the visible viewport?
- *
- * This is a measurement, and not a list of CSS properties. A list written by
- * hand was incomplete three times. The origin says that an ancestor moved the
- * host, and the size says that an ancestor or a page rule made it small. Half
- * the viewport is the bound for the size, because a scrollbar and a rounding
- * both cost a few pixels and neither one hides an interface.
- */
-export const hostIsDisplaced = (box: HostBox, view: ViewportRect): boolean =>
-  Math.abs(box.left - view.offsetLeft) > ORIGIN_TOLERANCE ||
-  Math.abs(box.top - view.offsetTop) > ORIGIN_TOLERANCE ||
-  box.width < view.width / 2 ||
-  box.height < view.height / 2;
-
-/** The computed properties that can prevent an element from painting. */
-export interface PaintStyle {
-  readonly display: string;
-  readonly visibility: string;
-  readonly opacity: string;
-  readonly contentVisibility: string;
-  readonly filter: string;
-  readonly clipPath: string;
-}
-
-const INSET_CLIP = /^inset\(\s*([^)]*?)(?:\s+round\s+[^)]*)?\s*\)$/i;
-const PERCENT = /^(\d+(?:\.\d+)?)%$/;
-const FILTER_OPACITY = /opacity\(\s*(\d+(?:\.\d+)?)\s*(%)?\s*\)/gi;
-
-/** A percentage, or `None` for any other length. */
-const percentOf = (value: string): Option.Option<number> =>
-  pipe(PERCENT.exec(value), Option.fromNullishOr, Option.flatMap(Array.get(1)), Option.map(Number));
-
-/**
- * The one to four percentages of an `inset()` clip.
- *
- * `None` for any other clip, and for an inset that holds a length other than
- * a percentage.
- */
-const insetPercents = (clipPath: string): Option.Option<Array.NonEmptyReadonlyArray<number>> =>
-  pipe(
-    INSET_CLIP.exec(clipPath),
-    Option.fromNullishOr,
-    Option.flatMap(Array.get(1)),
-    Option.map((body) => pipe(body.trim().split(/\s+/), Array.map(percentOf))),
-    Option.flatMap(Option.all),
-    Option.filter(Array.isReadonlyArrayNonEmpty<number>),
-    Option.filter((values) => values.length <= 4),
-  );
-
-/**
- * Do the insets of a clip collapse one axis of its box?
- *
- * The values follow the order of CSS: top, right, bottom and left. A missing
- * bottom takes the top, a missing right takes the top, and a missing left
- * takes the right.
- */
-const insetsCollapse = (values: Array.NonEmptyReadonlyArray<number>): boolean => {
-  const top = Array.headNonEmpty(values);
-  const right = pipe(
-    values,
-    Array.get(1),
-    Option.getOrElse(() => top),
-  );
-  const bottom = pipe(
-    values,
-    Array.get(2),
-    Option.getOrElse(() => top),
-  );
-  const left = pipe(
-    values,
-    Array.get(3),
-    Option.getOrElse(() => right),
-  );
-  return top + bottom >= 100 || right + left >= 100;
-};
-
-/** Does an `inset()` clip collapse one axis of its box? */
-const insetClipsAll = (clipPath: string): boolean =>
-  pipe(insetPercents(clipPath), Option.exists(insetsCollapse));
-
-/** Does one `opacity()` of a filter hold zero? */
-const zeroFilterMatch: (match: RegExpExecArray) => boolean = flow(
-  Array.get(1),
-  Option.map(Number),
-  Option.exists((value) => Number.isFinite(value) && value <= 0),
-);
-
-/** Does a filter hold an `opacity()` of zero? */
-const zeroFilterOpacity = (filter: string): boolean =>
-  pipe(filter.matchAll(FILTER_OPACITY), Iterable.some(zeroFilterMatch));
-
-/** Is an opacity of zero or less? Text that is not a number says nothing. */
-const zeroOpacity = (opacity: string): boolean => {
-  const value = Number.parseFloat(opacity);
-  return Number.isFinite(value) && value <= 0;
-};
-
-/** Does one computed style prevent the overlay from painting? */
-export const preventsOverlayPaint = (style: PaintStyle): boolean =>
-  style.display === "none" ||
-  style.visibility === "hidden" ||
-  style.visibility === "collapse" ||
-  style.contentVisibility === "hidden" ||
-  zeroOpacity(style.opacity) ||
-  zeroFilterOpacity(style.filter) ||
-  insetClipsAll(style.clipPath);
-
-/** What each fault says to the user, in the console. */
-const FAULT_REASON: Record.ReadonlyRecord<OverlayFault, string> = {
-  misplaced: "the page holds the overlay outside the document element",
-  displaced: "a rule of the page takes the overlay out of the viewport",
-  hidden: "a rule of the page prevents the overlay from painting",
-};
-
-/** The console line for a change of the answer. */
-const faultMessage: (fault: Option.Option<OverlayFault>) => string = Option.match({
-  onNone: () => "the overlay is visible again, and it takes its keys again",
-  onSome: (fault: OverlayFault) =>
-    `the overlay is not visible, so it gives the keyboard back: ${pipe(FAULT_REASON, Struct.get(fault))}`,
-});
 
 /**
  * May the guard give the focus back to the node that held it?
@@ -727,20 +575,6 @@ export class Ui extends Context.Service<
      * it.
      */
     readonly ensureAttached: Effect.Effect<void>;
-    /**
-     * Why the user cannot see the overlay, measured now.
-     *
-     * `None` means that the host lies on the viewport and its ancestor chain can
-     * paint. The call first repairs the style, the parent and the position. It
-     * then reads the host box and the computed paint properties.
-     *
-     * **Every feature that holds the keyboard must ask this.** A mode that keeps
-     * taking keys over an interface that nobody can see is the failure that this
-     * module exists to prevent. Give the keyboard back, and write the reason in
-     * the console: the HUD is inside the overlay, so it cannot carry the
-     * message.
-     */
-    readonly visibilityFault: Effect.Effect<Option.Option<OverlayFault>>;
     /**
      * Show one layer to assistive technology while the scope is open.
      *
@@ -848,10 +682,6 @@ export class Ui extends Context.Service<
       // The removal guard. While it has yielded, the page holds the host, so
       // the overlay is not visible.
       const guard = yield* Ref.make<GuardState>(FRESH_GUARD);
-
-      // The fault that we reported last. One line for each change, and not
-      // one line for each check.
-      const lastFault = yield* Ref.make<Option.Option<OverlayFault>>(Option.none());
 
       // A realm that refuses a shadow root cannot hold the overlay at all.
       // There is no smaller unit to lose, so this is a defect and not a
@@ -1181,33 +1011,6 @@ export class Ui extends Context.Service<
       // The removal guard
       // ---------------------------------------------------------------
 
-      /**
-       * Publish the reason why the user cannot see the overlay.
-       *
-       * One line for each change of the answer, and not one line for each
-       * check. The console is the only channel that is left, because the HUD
-       * is inside the overlay that the fault hides. The application installs
-       * a console logger with a minimum level of `Warn`, so this line
-       * reaches the developer and the user.
-       */
-      const publishFault = (
-        next: Option.Option<OverlayFault>,
-      ): Effect.Effect<Option.Option<OverlayFault>> =>
-        pipe(
-          lastFault,
-          Ref.getAndSet(next),
-          Effect.flatMap((previous) =>
-            pipe(
-              Equal.equals(previous, next),
-              Boolean.match({
-                onFalse: () => Effect.logWarning(faultMessage(next)),
-                onTrue: () => Effect.void,
-              }),
-            ),
-          ),
-          Effect.as(next),
-        );
-
       // One quiet second resets the guard. A new reattachment interrupts the
       // fiber that the one before it started.
       const reattachReset = yield* FiberHandle.make<void, never>();
@@ -1219,17 +1022,7 @@ export class Ui extends Context.Service<
        * counted down would leave a page that spent the budget with the host
        * for the rest of the session.
        */
-      const resumeGuard = Effect.gen(function* () {
-        const previous = yield* pipe(guard, Ref.getAndSet(FRESH_GUARD));
-        yield* repairHost;
-        yield* pipe(
-          previous,
-          GuardState.$match({
-            Repairing: () => Effect.void,
-            Yielded: () => publishFault(Option.none()),
-          }),
-        );
-      });
+      const resumeGuard = pipe(guard, Ref.set(FRESH_GUARD), Effect.andThen(repairHost));
 
       /** Start the quiet second again. A newer report replaces an older one. */
       const armReset = pipe(
@@ -1246,7 +1039,7 @@ export class Ui extends Context.Service<
           state,
           GuardState.$match({
             Repairing: () => repairHost,
-            Yielded: () => publishFault(Option.some("misplaced")),
+            Yielded: () => Effect.void,
           }),
         );
         yield* armReset;
@@ -1613,8 +1406,7 @@ export class Ui extends Context.Service<
        * The error is a pure translation, so one correction answers it. When
        * a second measurement says that it did not, the ancestor does
        * something that we cannot undo, for example a scale. The correction
-       * then goes back to nothing, and `visibilityFault` takes the keyboard
-       * away from the overlay instead of fighting for the geometry.
+       * then goes back to nothing, instead of fighting for the geometry.
        *
        * A page that does not do this pays one box read, and no write at all.
        */
@@ -1674,76 +1466,6 @@ export class Ui extends Context.Service<
       });
       yield* alignHost;
 
-      /** The host and every element above it, nearest first. */
-      const ancestry = (element: Element): Iterable<Element> =>
-        Iterable.unfold(
-          Option.some(element),
-          Option.map((one: Element) => [one, Option.fromNullishOr(one.parentElement)] as const),
-        );
-
-      /**
-       * The first element of the ancestor chain that does not paint.
-       *
-       * The chain is walked lazily, so a page pays one computed style for
-       * each element up to the first that hides the host.
-       */
-      const hidingAncestor: Effect.Effect<Option.Option<Element>> = dom.probeOrElse(
-        () =>
-          pipe(
-            ancestry(host),
-            Iterable.findFirst((element: Element) =>
-              preventsOverlayPaint(win.getComputedStyle(element)),
-            ),
-          ),
-        Option.none,
-      );
-
-      /** The fault of a host box that the engine gave us. */
-      const faultOfBox = (box: HostBox): Effect.Effect<Option.Option<OverlayFault>> =>
-        Effect.gen(function* () {
-          const view = yield* viewport;
-          return yield* pipe(
-            hostIsDisplaced(box, view),
-            Boolean.match({
-              onFalse: () => pipe(hidingAncestor, Effect.map(Option.as<OverlayFault>("hidden"))),
-              onTrue: () => Effect.succeedSome<OverlayFault>("displaced"),
-            }),
-          );
-        });
-
-      /**
-       * Measure the fault while the guard holds the host.
-       *
-       * The order is repair first, and judge afterwards. Repair the style,
-       * the parent and the position. Then measure the box and ask whether
-       * the ancestor chain can paint. The caller gives the keyboard back for
-       * either fault.
-       */
-      const measureFault: Effect.Effect<Option.Option<OverlayFault>> = pipe(
-        ensureAttached,
-        Effect.andThen(measureHost),
-        Effect.flatMap(
-          Option.match({
-            // A realm that refuses the read tells us nothing. Claiming a fault
-            // there would take the keyboard away for no measured reason.
-            onNone: () => Effect.succeedNone,
-            onSome: faultOfBox,
-          }),
-        ),
-      );
-
-      /** Why the user cannot see the overlay, measured now. */
-      const visibilityFault: Effect.Effect<Option.Option<OverlayFault>> = pipe(
-        Ref.get(guard),
-        Effect.flatMap(
-          GuardState.$match({
-            Repairing: () => measureFault,
-            Yielded: () => Effect.succeedSome<OverlayFault>("misplaced"),
-          }),
-        ),
-        Effect.flatMap(publishFault),
-      );
-
       // ---------------------------------------------------------------
       // Ownership
       // ---------------------------------------------------------------
@@ -1766,7 +1488,6 @@ export class Ui extends Context.Service<
         shadow,
         layer: layerOf,
         ensureAttached,
-        visibilityFault,
         expose,
         addStyle,
         setStyle,

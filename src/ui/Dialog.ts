@@ -17,11 +17,6 @@
  * Tab and moves the focus by hand inside the dialog. The dialog also gives the
  * focus back to the element that had it.
  *
- * **A dialog never holds the keyboard while the measured overlay is hidden.**
- * It asks `ui.visibilityFault` before it opens. A fiber asks again while it is
- * open. The check measures both the host box and the computed paint properties
- * of its ancestors. A fault closes the dialog and gives every key back.
- *
  * The settings form is data. `SETTINGS_SECTIONS` names every documented
  * setting, and the build step below draws the controls from that list. The
  * README promises that all of them are editable here, and only a list that a
@@ -73,20 +68,11 @@ import { Capabilities, formatCapabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { deepActiveElement } from "~/platform/Elements.ts";
 import type { KeyValueKind } from "~/platform/KeyValueStore.ts";
-import { acceptPointerEvents, type OverlayFault, Ui } from "~/ui/Ui.ts";
+import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
 
 // ---------------------------------------------------------------------------
 // Text
 // ---------------------------------------------------------------------------
-
-/**
- * How often a dialog asks whether the user can still see the overlay.
- *
- * A page needs many tasks to take the overlay away, so half a second is fast
- * enough to answer it, and slow enough to cost nothing. The check is two box
- * reads.
- */
-const OVERLAY_CHECK_MS = 500;
 
 const STORAGE_PREAMBLE = "There is no options page for a userscript, so settings " + "live here. ";
 
@@ -993,15 +979,6 @@ interface SettingsForm {
   readonly save: HTMLButtonElement;
 }
 
-/** Why a watch over an open dialog ends. */
-type WatchEnd = Data.TaggedEnum<{
-  /** The dialog closed, so there is nothing left to watch. */
-  Closed: Record<never, never>;
-  /** The user cannot see the overlay, so the dialog must give the keyboard back. */
-  Hidden: { readonly fault: OverlayFault };
-}>;
-const WatchEnd = Data.taggedEnum<WatchEnd>();
-
 /** Write the stored settings into one control. */
 const writeControl = (current: SettingsData) =>
   SettingsControl.$match({
@@ -1108,10 +1085,6 @@ export class Dialog extends Context.Service<
       // key path; it runs in this fiber instead.
       const saves = yield* FiberHandle.make<void, never>();
 
-      // One watcher at a time. It asks whether the user can still see the
-      // overlay while a dialog holds the keyboard.
-      const watches = yield* FiberHandle.make<void, never>();
-
       const close: Effect.Effect<void> = pipe(
         openScope,
         Ref.getAndSet(Option.none<Scope.Closeable>()),
@@ -1121,61 +1094,6 @@ export class Dialog extends Context.Service<
             onSome: (scope) => Scope.close(scope, Exit.void),
           }),
         ),
-      );
-
-      /**
-       * Say why the dialog gave the keyboard back.
-       *
-       * The console, and not the HUD. The HUD is inside the overlay, so a
-       * fault that hides the dialog hides the message with it. The application
-       * installs a console logger with a minimum level of `Warn`.
-       */
-      const reportHidden = (fault: OverlayFault): Effect.Effect<void> =>
-        Effect.logWarning(
-          `the dialog closed and gave the keyboard back, because the ` +
-            `overlay is not visible (${fault})`,
-        );
-
-      /** A fault of the overlay ends the watch. */
-      const faultEnd: Effect.Effect<Option.Option<WatchEnd>> = pipe(
-        ui.visibilityFault,
-        Effect.map(Option.map((fault) => WatchEnd.Hidden({ fault }))),
-      );
-
-      /** One look at the overlay. `None` means that the dialog is open and the user sees it. */
-      const lookAtOverlay: Effect.Effect<Option.Option<WatchEnd>> = pipe(
-        Ref.get(openScope),
-        Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.succeedSome(WatchEnd.Closed()),
-            onSome: () => faultEnd,
-          }),
-        ),
-      );
-
-      const endWatch = WatchEnd.$match({
-        Closed: () => Effect.void,
-        Hidden: ({ fault }) => pipe(reportHidden(fault), Effect.andThen(close)),
-      });
-
-      /**
-       * Watch the overlay while a dialog is open.
-       *
-       * A page can take the overlay away after the dialog opened: it can hold
-       * the host until the removal guard has spent its budget, or it can write
-       * a rule that takes the host out of the viewport. A modal that stayed
-       * open would keep every key over an interface that nobody can see.
-       *
-       * The fiber ends by itself when the dialog closes, so it never has to
-       * interrupt the scope that started it.
-       */
-      const watchOverlay: Effect.Effect<void> = pipe(
-        Effect.sleep(OVERLAY_CHECK_MS),
-        Effect.andThen(lookAtOverlay),
-        Effect.repeat({
-          while: (look): look is Option.None<WatchEnd> => Option.isNone(look),
-        }),
-        Effect.flatMap(({ value }) => endWatch(value)),
       );
 
       /**
@@ -1336,9 +1254,6 @@ export class Dialog extends Context.Service<
           parts.dialog.tabIndex = -1;
           parts.dialog.focus({ preventScroll: true });
         });
-
-        // Started after the dialog holds the keyboard, and not before.
-        yield* pipe(watchOverlay, FiberHandle.run(watches));
       });
 
       /**
@@ -1346,22 +1261,12 @@ export class Dialog extends Context.Service<
        *
        * `build` gets the scope, so a listener that it registers goes away with
        * the dialog.
-       *
-       * Nothing opens when the overlay is not visible. The keyboard then stays
-       * with the page, and the console carries the reason.
        */
       const present = Effect.fn("Dialog.present")(function* <
         A extends { readonly dialog: HTMLElement },
       >(build: Effect.Effect<A, never, Scope.Scope>) {
         yield* close;
-        const fault = yield* ui.visibilityFault;
-        yield* pipe(
-          fault,
-          Option.match({
-            onNone: () => open(build),
-            onSome: reportHidden,
-          }),
-        );
+        yield* open(build);
       });
 
       // ---------------------------------------------------------------
