@@ -47,6 +47,7 @@ import {
   type HandlerEventName,
   type HandlerResult,
   type Handlers,
+  PASS_EVENT_TO_PAGE,
   SUPPRESS_EVENT,
 } from "./HandlerStack.ts";
 import { recoverEvenIfInterrupted } from "./Recovery.ts";
@@ -288,6 +289,26 @@ const suppressEvent = (event: Event): void => {
   event.stopImmediatePropagation();
 };
 
+/** Do to the event what the answer of the stack says, and say whether it may go on to the page. */
+const carryOut = (event: Event, result: HandlerResult): Effect.Effect<boolean> =>
+  pipe(
+    Match.value(result),
+    Match.whenOr("continue", "pass-to-page", () => Effect.succeed(true)),
+    Match.when("suppress", () =>
+      pipe(
+        Effect.sync(() => suppressEvent(event)),
+        Effect.as(false),
+      ),
+    ),
+    Match.when("suppress-propagation", () =>
+      pipe(
+        Effect.sync(() => suppressPropagation(event)),
+        Effect.as(false),
+      ),
+    ),
+    Match.exhaustive,
+  );
+
 /** A key that the record of taken presses follows: a true key with a physical code. */
 const tracked = (event: KeyboardEvent): boolean => isUserEvent(event) && event.code.length > 0;
 
@@ -342,7 +363,8 @@ export class Modes extends Context.Service<
      * mode went stale in both cases, and then took the next release of that
      * key from a text field of the page. An entry ends with the release of its
      * key, with a later press of that key that reaches the page, or with
-     * `forgetSuppressed`.
+     * `forgetSuppressed`. A key with no physical code is the exception: the
+     * record cannot follow it, so the modes decide where its release goes.
      */
     readonly bubble: <K extends HandlerEventName>(
       name: K,
@@ -412,39 +434,50 @@ export class Modes extends Context.Service<
           Effect.as(toPage),
         );
 
-      /** The release of a press that the page did not get stays from the page as well. */
-      const settleRelease = (event: KeyboardEvent, toPage: boolean): Effect.Effect<boolean> =>
+      /**
+       * The release goes where its press went, whatever the modes answer.
+       *
+       * A mode may watch the release of a press that the page got, but it
+       * cannot keep it: the page would then believe that the key is still
+       * down. A Shift held through `O` was such a key. The record cannot
+       * follow a key with no physical code, so the modes decide for it.
+       */
+      const settleRelease = (event: KeyboardEvent, result: HandlerResult): Effect.Effect<boolean> =>
         pipe(
           tracked(event),
           Boolean.match({
-            onFalse: () => Effect.succeed(false),
-            onTrue: () => pipe(taken, Ref.modify(releaseOf(event.code))),
-          }),
-          Effect.flatMap(
-            Boolean.match({
-              onFalse: () => Effect.succeed(toPage),
-              onTrue: () =>
-                pipe(
-                  Effect.sync(() => suppressEvent(event)),
-                  Effect.as(false),
+            onFalse: () => carryOut(event, result),
+            onTrue: () =>
+              pipe(
+                taken,
+                Ref.modify(releaseOf(event.code)),
+                Effect.flatMap(
+                  Boolean.match({
+                    onFalse: () => Effect.succeed(true),
+                    onTrue: () => carryOut(event, SUPPRESS_EVENT),
+                  }),
                 ),
-            }),
-          ),
+              ),
+          }),
         );
 
       /** What the record of taken presses makes of the answer of the modes. */
       const settle: {
         readonly [K in HandlerEventName]: (
           event: HandlerEventMap[K],
-          toPage: boolean,
+          result: HandlerResult,
         ) => Effect.Effect<boolean>;
       } = {
-        keydown: notePress,
-        keypress: (_, toPage) => Effect.succeed(toPage),
+        keydown: (event, result) =>
+          pipe(
+            carryOut(event, result),
+            Effect.flatMap((toPage) => notePress(event, toPage)),
+          ),
+        keypress: carryOut,
         keyup: settleRelease,
-        click: (_, toPage) => Effect.succeed(toPage),
-        focus: (_, toPage) => Effect.succeed(toPage),
-        blur: (_, toPage) => Effect.succeed(toPage),
+        click: carryOut,
+        focus: carryOut,
+        blur: carryOut,
       };
 
       /** Show the innermost indicator that a live mode gives. */
@@ -626,11 +659,14 @@ export class Modes extends Context.Service<
           Effect.as(CONTINUE_BUBBLING),
         );
 
-      /** Walk the stack with the event, and say whether it may continue to the page. */
+      /**
+       * Walk the stack with the event, and give the answer of the mode that
+       * decided. With no such mode, the event goes on to the page.
+       */
       const dispatch = <K extends HandlerEventName>(
         name: K,
         event: HandlerEventMap[K],
-      ): Effect.Effect<boolean> => {
+      ): Effect.Effect<HandlerResult> => {
         /**
          * The answer of one mode of the snapshot.
          *
@@ -658,37 +694,18 @@ export class Modes extends Context.Service<
           );
 
         /** Give the event to each mode, from the top, until one decides. */
-        const walk: (modes: ReadonlyArray<LiveMode>) => Effect.Effect<boolean> = Array.matchRight({
-          onEmpty: () => Effect.succeed(true),
-          onNonEmpty: (below, mode) =>
-            pipe(
-              answer(mode),
-              Effect.flatMap((result) => decide(result, below)),
-            ),
-        });
-
-        const decide = (
-          result: HandlerResult,
-          below: ReadonlyArray<LiveMode>,
-        ): Effect.Effect<boolean> =>
-          pipe(
-            Match.value(result),
-            Match.when("continue", () => walk(below)),
-            Match.when("pass-to-page", () => Effect.succeed(true)),
-            Match.when("suppress", () =>
+        const walk: (modes: ReadonlyArray<LiveMode>) => Effect.Effect<HandlerResult> =
+          Array.matchRight({
+            onEmpty: () => Effect.succeed(PASS_EVENT_TO_PAGE),
+            onNonEmpty: (below, mode) =>
               pipe(
-                Effect.sync(() => suppressEvent(event)),
-                Effect.as(false),
+                answer(mode),
+                Effect.filterOrElse(
+                  (result) => result !== CONTINUE_BUBBLING,
+                  () => walk(below),
+                ),
               ),
-            ),
-            Match.when("suppress-propagation", () =>
-              pipe(
-                Effect.sync(() => suppressPropagation(event)),
-                Effect.as(false),
-              ),
-            ),
-            Match.exhaustive,
-          );
+          });
 
         /**
          * A real snapshot. Modes enter and exit while the walk is in progress,
@@ -708,14 +725,19 @@ export class Modes extends Context.Service<
       ): Effect.Effect<boolean> =>
         pipe(
           dispatch(name, event),
-          Effect.flatMap((toPage) => settle[name](event, toPage)),
+          Effect.flatMap((result) => settle[name](event, result)),
         );
 
       return Modes.of({
         enter,
         exitAll,
         bubble,
-        replay: (event) => Effect.asVoid(dispatch("keydown", event)),
+        replay: (event) =>
+          pipe(
+            dispatch("keydown", event),
+            Effect.flatMap((result) => carryOut(event, result)),
+            Effect.asVoid,
+          ),
         withhold: (codes) => pipe(taken, Ref.update(HashSet.union(codes))),
         indicator: {
           get: SubscriptionRef.get(indicator),

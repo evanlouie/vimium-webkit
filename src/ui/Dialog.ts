@@ -33,23 +33,16 @@ import {
   FiberHandle,
   flow,
   Function,
-  HashSet,
   Layer,
   Match,
   Option,
   Record,
-  Ref,
   Scope,
   pipe,
   Struct,
 } from "effect";
 import { Commands } from "~/core/Commands.ts";
-import {
-  CONTINUE_BUBBLING,
-  type HandlerResult,
-  SUPPRESS_EVENT,
-  SUPPRESS_PROPAGATION,
-} from "~/core/HandlerStack.ts";
+import { type HandlerResult, SUPPRESS_EVENT, SUPPRESS_PROPAGATION } from "~/core/HandlerStack.ts";
 import { Mappings } from "~/core/Mappings.ts";
 import { ExitTrigger, KeyPolicy, Modes } from "~/core/Modes.ts";
 import { recoverUnlessInterrupted } from "~/core/Recovery.ts";
@@ -995,23 +988,6 @@ const focusableIn = (dialog: HTMLElement): ReadonlyArray<HTMLElement> =>
     Array.filter((element) => !element.hasAttribute("disabled") && element.tabIndex >= 0),
   );
 
-/**
- * What the dialog does with the release of one key, and the presses that it
- * still holds afterwards. It takes the release of a press that it took, and
- * leaves any other release to the stack below.
- */
-const releaseOf =
-  (code: string) =>
-  (taken: HashSet.HashSet<string>): readonly [HandlerResult, HashSet.HashSet<string>] =>
-    pipe(
-      taken,
-      HashSet.has(code),
-      Boolean.match({
-        onFalse: () => [CONTINUE_BUBBLING, taken] as const,
-        onTrue: () => [SUPPRESS_PROPAGATION, pipe(taken, HashSet.remove(code))] as const,
-      }),
-    );
-
 /** The step of one Tab press. */
 const tabStep = (event: KeyboardEvent): FocusStep =>
   pipe(
@@ -1223,7 +1199,10 @@ export const DialogLayer: Layer.Layer<
      * page, and the page then sees what the user types into the form.
      *
      * A `keypress` always follows a `keydown` that the dialog took, so the
-     * dialog takes every `keypress`.
+     * dialog takes every `keypress`. It answers the same for every `keyup`.
+     * `Modes` gives the page the release of a press that the page got,
+     * whatever a mode answers: a Shift that went down before the dialog
+     * opened comes up on the page.
      */
     const keepKey: Effect.Effect<HandlerResult> = Effect.succeed(SUPPRESS_PROPAGATION);
 
@@ -1249,32 +1228,6 @@ export const DialogLayer: Layer.Layer<
             ),
         }),
       );
-
-    /**
-     * Take one `keydown`, and remember the press for its release.
-     *
-     * `pressed` holds the `event.code` of each key that went down while this
-     * dialog was open.
-     */
-    const takeKeydown =
-      (dialog: HTMLElement, pressed: Ref.Ref<HashSet.HashSet<string>>) =>
-      (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-        pipe(pressed, Ref.update(HashSet.add(event.code)), Effect.andThen(trapKey(dialog, event)));
-
-    /**
-     * Take the release of a press that this dialog took, and leave every
-     * other release to the modes below and the page.
-     *
-     * The release of a key belongs to whoever took its press. Normal mode
-     * took the `?` that opened help, and it waits for the release so that
-     * it can take that too. The page saw a Shift go down before the dialog
-     * opened, and it must see the Shift come up, or it believes that Shift
-     * is still held.
-     */
-    const releaseKey =
-      (pressed: Ref.Ref<HashSet.HashSet<string>>) =>
-      (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
-        pipe(pressed, Ref.modify(releaseOf(event.code)));
 
     /**
      * Give the focus back to the element that had it before the dialog.
@@ -1352,9 +1305,7 @@ export const DialogLayer: Layer.Layer<
         ),
       );
 
-      // The dialog owns the keyboard. `takeKeydown`, `keepKey` and
-      // `releaseKey` say how.
-      const pressed = yield* Ref.make(HashSet.empty<string>());
+      // The dialog owns the keyboard. `trapKey` and `keepKey` say how.
       const mode = yield* modes.enter(
         {
           name: "dialog",
@@ -1364,9 +1315,9 @@ export const DialogLayer: Layer.Layer<
           singleton: Option.some("dialog"),
         },
         {
-          keydown: takeKeydown(parts.dialog, pressed),
+          keydown: (event) => trapKey(parts.dialog, event),
           keypress: () => keepKey,
-          keyup: releaseKey(pressed),
+          keyup: () => keepKey,
         },
       );
       yield* mode.onExit(() => end);

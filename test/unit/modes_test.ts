@@ -678,6 +678,29 @@ describe("the release of a key", () => {
     ),
   );
 
+  it.effect("reaches the page after a press that the page got, whatever a mode answers", () =>
+    pipe(
+      Effect.gen(function* () {
+        const modes = yield* Modes;
+        yield* modes.enter(onTier("normal", ModeTier.Base()), {
+          keydown: () => Effect.succeed(PASS_EVENT_TO_PAGE),
+        });
+
+        // Shift goes down on the page, and `O` opens the omnibar, which owns
+        // the keyboard and keeps every release that it sees.
+        assert.isTrue(yield* modes.bubble("keydown", keyEvent()));
+        yield* modes.enter(plain("omnibar"), {
+          keyup: () => Effect.succeed(SUPPRESS_PROPAGATION),
+        });
+        const shift = keyEvent();
+        assert.isTrue(yield* modes.bubble("keyup", shift));
+        assert.isFalse(shift.propagationStopped);
+        assert.isFalse(shift.defaultPrevented);
+      }),
+      Effect.provide(layer),
+    ),
+  );
+
   it.effect("stays from the page after a press that a mode kept from the page", () =>
     pipe(
       Effect.gen(function* () {
