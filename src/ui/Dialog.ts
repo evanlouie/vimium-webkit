@@ -391,6 +391,22 @@ export const formatExclusionRules: (rules: ReadonlyArray<ExclusionRule>) => stri
 );
 
 /**
+ * The mapping lines that the user wrote, for the mapping field.
+ *
+ * The defaults compile first and the user's lines on top, so the field holds
+ * the user's lines only. An earlier version filled an empty field with the
+ * defaults, and a save of any setting then stored that copy as the user's
+ * own. An unchanged copy reads as empty here, so the next save drops it. Left
+ * in storage, it would keep a default binding that a later version removes.
+ */
+const ownMappings = (stored: string): string =>
+  pipe(
+    stored,
+    Option.liftPredicate((mappings) => mappings !== DEFAULT_MAPPINGS.trim()),
+    Option.getOrElse(() => ""),
+  );
+
+/**
  * Every documented setting, in the order that the dialog draws it.
  *
  * The README says that all of these are editable here, and for eight of them
@@ -400,20 +416,16 @@ export const formatExclusionRules: (rules: ReadonlyArray<ExclusionRule>) => stri
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   {
     title: "Key mappings",
-    description: Option.none(),
+    description: Option.some(
+      "Your lines apply on top of the default bindings, which the help " +
+        "dialog lists. unmap removes one default, and unmapAll removes them all.",
+    ),
     fields: [
       block({
         key: "keyMappings",
         label: "Your map, unmap, unmapAll and mapkey lines",
         minHeight: "220px",
-        // The defaults are written out when there is nothing stored, so that
-        // the user can see what to change instead of an empty box.
-        read: (settings) =>
-          pipe(
-            settings.keyMappings,
-            Option.liftPredicate((mappings: string) => mappings.length > 0),
-            Option.getOrElse(() => DEFAULT_MAPPINGS.trim()),
-          ),
+        read: (settings) => ownMappings(settings.keyMappings),
         write: (settings, value) => pipe(settings, Struct.assign({ keyMappings: value })),
       }),
     ],

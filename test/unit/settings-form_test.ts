@@ -13,6 +13,7 @@
 
 import { assert, describe, it } from "@effect/vitest";
 import { Array, Effect, Option, Order, pipe, Record, Struct } from "effect";
+import { DEFAULT_MAPPINGS } from "~/domain/Command.ts";
 import { defaultSettings } from "~/domain/Persisted.ts";
 import {
   adjustedFields,
@@ -90,6 +91,19 @@ describe("the settings form", () => {
           }),
         ),
       );
+    }),
+  );
+
+  it.effect("stores only the mapping lines that the user wrote", () =>
+    Effect.sync(() => {
+      // The defaults compile under the user's lines. A field that showed them
+      // stored a copy of them with the next save of any setting.
+      const mappings = entry("keyMappings");
+      const base = defaultSettings();
+      assert.strictEqual(mappings.read(base), "");
+      assert.strictEqual(mappings.write(base, mappings.read(base)).keyMappings, "");
+      const pinned = pipe(base, Struct.assign({ keyMappings: DEFAULT_MAPPINGS.trim() }));
+      assert.strictEqual(mappings.read(pinned), "");
     }),
   );
 
