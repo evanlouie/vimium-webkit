@@ -75,6 +75,7 @@ import {
   Record,
   Ref,
   Result,
+  Schedule,
   Schema,
   String,
   Struct,
@@ -136,7 +137,7 @@ import { Dom } from "~/platform/Dom.ts";
 import type { FrameId } from "~/domain/FrameId.ts";
 import { containsDeep, shadowHostChain } from "~/platform/Elements.ts";
 import { OpenInTabResult } from "~/platform/Gm.ts";
-import { FrameRole, Realm } from "~/platform/Realm.ts";
+import { descendantFrames, FrameRole, Realm } from "~/platform/Realm.ts";
 import { Tabs } from "~/platform/Tabs.ts";
 import { BRIEFLY, Hud, HudDuration } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
@@ -160,8 +161,18 @@ export const COLLECT_DEADLINE_MS = REQUEST_DEADLINE_MS + 500;
 /** How long a pause in the typing counts as confirmation of one match. */
 export const FILTER_CONFIRM_DELAY_MS = 200;
 
-/** Give the keyboard back after this long, and do not eat the keys of the user. */
-export const KEY_BUFFER_SAFETY_MS = COLLECT_DEADLINE_MS + 500;
+/** How long a round of the top frame waits at most for the frames that it woke to join. */
+const JOIN_GRACE_MS = 400;
+
+/** How often a round that waits for frames looks again. */
+const JOIN_POLL_MS = 25;
+
+/**
+ * Give the keyboard back after this long, and do not eat the keys of the user.
+ *
+ * The wait for the frames comes before the collection, so this covers both.
+ */
+export const KEY_BUFFER_SAFETY_MS = COLLECT_DEADLINE_MS + JOIN_GRACE_MS + 500;
 
 /** The ceiling on the link text of a descriptor. It is the bound of the wire. */
 const MAX_WIRE_LINK_TEXT = 256;
@@ -2036,11 +2047,58 @@ export const HintsLayer: Layer.Layer<
       yield* pipe(abortAfterSafety(abort, giveUp), Effect.forkScoped);
     });
 
+    /** The frames of the tree that a round has already waited for. */
+    const awaitedFramesRef = yield* Ref.make<ReadonlyArray<Window>>([]);
+
+    /** The frames of the page, once every frame of the tree has joined. */
+    const awaitJoins = Effect.gen(function* () {
+      const frames = yield* Effect.sync(() => descendantFrames(dom.window));
+      const awaited = yield* pipe(awaitedFramesRef, Ref.getAndSet(frames));
+      const isNew = (frame: Window): boolean => !awaited.includes(frame);
+      const allJoined = (peers: ReadonlyArray<FrameId>): boolean => peers.length > frames.length;
+      const peers = yield* bus.peers;
+      return yield* pipe(
+        pipe(frames, Array.some(isNew)) && !allJoined(peers),
+        Boolean.match({
+          onFalse: () => Effect.succeed(peers),
+          onTrue: () =>
+            pipe(
+              bus.peers,
+              Effect.repeat({ schedule: Schedule.spaced(JOIN_POLL_MS), until: allJoined }),
+              Effect.timeoutOrElse({ duration: JOIN_GRACE_MS, orElse: () => bus.peers }),
+            ),
+        }),
+      );
+    });
+
+    /**
+     * The frames of the page, once the frames that this round woke have
+     * joined.
+     *
+     * A child frame starts only when a round wakes it, and it joins the bus a
+     * moment later, so the first round of a page would ask none of them. A
+     * round of the top frame wakes the whole frames tree, and the top frame
+     * sees that tree. When the tree holds a frame that no round of the top
+     * frame has waited for yet, it waits until every frame of the tree has
+     * joined, for `JOIN_GRACE_MS` at most. A frame that never joins, such as
+     * a sandboxed one, costs that wait once.
+     *
+     * A child frame knows the frames that joined by their ids only, so it
+     * cannot tell which of them it woke, and it does not wait.
+     */
+    const joinedPeers = pipe(
+      bus.role,
+      FrameRole.$match({
+        Top: () => awaitJoins,
+        Child: () => bus.peers,
+      }),
+    );
+
     const collectRemote = Effect.fn("Hints.collectRemote")(function* (
       roundId: string,
       mode: HintMode,
     ) {
-      const peers = yield* bus.peers;
+      const peers = yield* joinedPeers;
       return yield* pipe(
         peers.length <= 1,
         Boolean.match({
