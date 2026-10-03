@@ -28,7 +28,6 @@ import { defaultSettings, type Settings as SettingsData } from "~/domain/Persist
 import { Capabilities, type CapabilityReport } from "~/platform/Capabilities.ts";
 import { StoreKind } from "~/platform/Gm.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { Realm } from "~/platform/Realm.ts";
 
 // ---------------------------------------------------------------------------
 // A pressed key
@@ -233,7 +232,7 @@ const layerFor = (options: Options): Layer.Layer<Commands | Keyboard | Modes> =>
     Report.layer,
     capabilitiesOf(options.applePlatform ?? false),
     Modes.layer,
-    Layer.provideMerge(Realm.layer, Dom.layer),
+    Dom.layer,
     settingsOf(options.settings ?? defaultSettings()),
     exclusionsOf(options.verdict ?? Verdict.Known({ rule: FULLY_ENABLED })),
     mappingsOf(options.mappings),

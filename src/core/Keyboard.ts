@@ -51,7 +51,6 @@ import {
 import { Dom } from "~/platform/Dom.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { mediaPlayerHasFocus } from "~/platform/Elements.ts";
-import { Realm } from "~/platform/Realm.ts";
 import { Commands } from "./Commands.ts";
 import { Exclusions, knownRule, type Verdict } from "./Exclusions.ts";
 import { CONTINUE_BUBBLING, type HandlerResult, SUPPRESS_EVENT } from "./HandlerStack.ts";
@@ -421,9 +420,6 @@ const walk = (trie: TrieNode, state: KeyState, notation: string): Step => {
   );
 };
 
-/** A hint command reaches into child frames, so they must be running. */
-const needsDescendants = (command: string): boolean => command.startsWith("LinkHints.");
-
 /**
  * The release of a press that we took is ours as well. Any other release
  * belongs to the page.
@@ -467,7 +463,7 @@ export class Keyboard extends Context.Service<
   static readonly layer: Layer.Layer<
     Keyboard,
     never,
-    Commands | Capabilities | Dom | Exclusions | Mappings | Modes | Realm | Report | Settings
+    Commands | Capabilities | Dom | Exclusions | Mappings | Modes | Report | Settings
   > = Layer.effect(
     Keyboard,
     Effect.gen(function* () {
@@ -477,7 +473,6 @@ export class Keyboard extends Context.Service<
       const exclusions = yield* Exclusions;
       const mappings = yield* Mappings;
       const modes = yield* Modes;
-      const realm = yield* Realm;
       const report = yield* Report;
       const settings = yield* Settings;
 
@@ -545,15 +540,6 @@ export class Keyboard extends Context.Service<
         count: number,
         event: KeyboardEvent,
       ) {
-        // Woken here, and not eagerly. A child frame must not be forced
-        // through a full start unless a cross-frame function needs it.
-        yield* pipe(
-          needsDescendants(command),
-          Boolean.match({
-            onFalse: () => Effect.void,
-            onTrue: () => realm.wakeDescendants,
-          }),
-        );
         yield* pipe(
           commands.run(command, { count, event: Option.some(event) }),
           Effect.catch((error) => report.error(error.detail)),
