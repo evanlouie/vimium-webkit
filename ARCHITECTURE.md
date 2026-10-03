@@ -112,9 +112,11 @@ The exclusion verdict takes one more step, because `core/` must not import
 `frames/`. `core/Exclusions.ts` owns the verdict in every frame, and it
 declares the `TopFrameVerdict` service for what a child frame hears from the
 top frame. `TopFrameVerdictLayer` in `frames/Link.ts` gives that service over
-the bus. A child frame asks with `EXCLUSION_REQUEST` when it starts, and the
-top frame sends `VERDICT` to every frame each time that it takes a verdict. The
-import goes from `frames/` to `core/`, and the layer goes the other way.
+the bus. A child frame asks with `EXCLUSION_REQUEST` once the top frame admits
+it, however late that is, and the top frame answers once it has read its own
+settings. The top frame sends `VERDICT` to every frame each time that it takes
+a verdict. The import goes from `frames/` to `core/`, and the layer goes the
+other way.
 
 Settings never travel. Every frame reads its own storage. When a save in the
 top frame reaches storage, the top frame sends `SETTINGS`, which carries
@@ -180,7 +182,7 @@ at once. It must outlive the scope that it closes.
 | Command bodies        | `core/Commands.ts`    | `Ref<HashMap<CommandName, CommandBody>>`                               |
 | Messages for the user | `core/Report.ts`      | an unbounded `Queue`                                                   |
 | Mode stack            | `core/Modes.ts`       | `Ref<ModeState>`, with the live modes ordered by tier                  |
-| Exclusion verdict     | `core/Exclusions.ts`  | `SubscriptionRef<Verdict>`, `Pending` or `Known`                       |
+| Exclusion verdict     | `core/Exclusions.ts`  | `SubscriptionRef<Verdict>`, `Pending`, `Assumed` or `Known`            |
 | Per-feature state     | the feature layer     | `Ref`                                                                  |
 
 `Modes` is the handler stack. A mode takes its place by its tier, `Base`,
@@ -303,10 +305,19 @@ nothing else.
 
 The guard holds each key that starts the application, up to 16 of them, from
 the first key until the application takes the keyboard. It suppresses each one,
-so the page does not act on it. `BootstrapLayer` attaches the key bridge, and
-then it plays the held keys, once this frame knows the exclusion verdict. A
-child frame learns the verdict from the top frame. A child frame that does not
-learn it before the request deadline drops the held keys instead of guessing.
+so the page does not act on it. It holds for three seconds at most: a start
+that takes longer gives the page its keyboard back, and the held keys are lost.
+`BootstrapLayer` attaches the key bridge and takes the keyboard at once. A
+later key reaches normal mode, which gives it to the page while the verdict is
+pending.
+
+The held keys wait for the exclusion verdict, and they play only under a
+verdict that this frame knows. The top frame knows its verdict once it has read
+its settings. A child frame learns it from the top frame, once the top frame
+admits it. A child frame that can join no session, because the manager has no
+private value store, decides alone and fully enabled. A child frame that hears
+nothing before the request deadline only assumes that it is enabled, and it
+drops the held keys instead of guessing.
 
 Normal mode lives as long as the application. `Keyboard` reads the verdict for
 each key, so an excluded page needs no mode of its own.
