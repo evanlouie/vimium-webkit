@@ -5,20 +5,25 @@
  * Upstream Vimium does the same, through `sender.tab.url`. It matters: without
  * it an excluded page would still have us live inside its third-party frames.
  *
- * A child frame cannot read the top frame's URL across origins, so it cannot
- * work the verdict out. It asks over the frame bus instead, and `frames/Link.ts`
- * calls `adopt` with the answer. This service therefore knows nothing about
- * frames, and the graph stays a tree.
+ * This service owns the verdict in every frame. The top frame matches its own
+ * URL, again whenever the rules or the URL change. A child frame cannot read
+ * the top frame's URL across origins, so it asks the top frame and listens for
+ * what the top frame pushes. It does that through `TopFrameVerdict`, which
+ * `frames/Link.ts` gives over the frame bus, so this service imports nothing
+ * from `frames/` and the graph stays a tree.
  */
 
 import {
   Array,
   Boolean,
   Context,
+  Data,
   Effect,
   Layer,
   Option,
+  type Record,
   Ref,
+  type Scope,
   Stream,
   String as Str,
   SubscriptionRef,
@@ -37,7 +42,49 @@ import { Dom } from "~/platform/Dom.ts";
 import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { Settings } from "./Settings.ts";
 
-export type { EffectiveRule };
+/** A variant that carries no data. */
+type NoFields = Record.ReadonlyRecord<never, never>;
+
+/** The verdict in force for this frame. */
+export type Verdict = Data.TaggedEnum<{
+  /**
+   * The frame does not know the verdict yet. A child frame waits for the top
+   * frame. Every key goes to the page meanwhile, because a key that we took on
+   * a page that the user excluded cannot be given back.
+   */
+  Pending: NoFields;
+  Known: { readonly rule: EffectiveRule };
+}>;
+export const Verdict = Data.taggedEnum<Verdict>();
+
+/** The rule of a known verdict. */
+export const knownRule: (verdict: Verdict) => Option.Option<EffectiveRule> = Verdict.$match({
+  Pending: () => Option.none(),
+  Known: ({ rule }) => Option.some(rule),
+});
+
+/**
+ * How a child frame hears the verdict of the top frame.
+ *
+ * `frames/Link.ts` gives it over the frame bus. The seam lets `Exclusions` own
+ * the verdict without a module of `frames/`.
+ */
+export class TopFrameVerdict extends Context.Service<
+  TopFrameVerdict,
+  {
+    /**
+     * Ask the top frame for its verdict.
+     *
+     * `None` when this frame joins no session, or when the top frame does not
+     * answer in time.
+     */
+    readonly ask: Effect.Effect<Option.Option<EffectiveRule>>;
+    /** Take every verdict that the top frame pushes, for as long as the scope is open. */
+    readonly onPush: (
+      adopt: (rule: EffectiveRule) => Effect.Effect<void>,
+    ) => Effect.Effect<void, never, Scope.Scope>;
+  }
+>()("vimium/core/TopFrameVerdict") {}
 
 /**
  * Say which rules did not compile.
@@ -90,104 +137,154 @@ export class Exclusions extends Context.Service<
   Exclusions,
   {
     /** The verdict in force for this frame. */
-    readonly effective: SubscriptionRef.SubscriptionRef<EffectiveRule>;
+    readonly current: Effect.Effect<Verdict>;
 
     /** The verdict, read synchronously. For the key path only. */
-    readonly effectiveUnsafe: () => EffectiveRule;
+    readonly currentUnsafe: () => Verdict;
+
+    /** The verdict now, and then every verdict that this frame takes. */
+    readonly changes: Stream.Stream<Verdict>;
+
+    /** Wait until the verdict is known. */
+    readonly known: Effect.Effect<void>;
+
+    /**
+     * Work the verdict out again, after the URL of this frame changed.
+     *
+     * The top frame matches its new URL. A child frame keeps the verdict of the
+     * top frame, which pushes a new one when its own URL changes.
+     */
+    readonly refresh: Effect.Effect<void>;
 
     /**
      * Work the verdict out from this frame's own URL and settings.
      *
-     * Correct in the top frame. A child frame uses `adopt` instead.
+     * Correct in the top frame, which answers a child frame with it.
      */
     readonly resolveLocal: Effect.Effect<EffectiveRule>;
 
-    /** Match a URL against the current rules. The top frame answers with this. */
+    /** Match a URL against the current rules. */
     readonly match: (url: string) => Effect.Effect<EffectiveRule>;
-
-    /** Take a verdict that the top frame sent. */
-    readonly adopt: (rule: EffectiveRule) => Effect.Effect<void>;
-
-    /** True when this frame must act on keys at all. */
-    readonly isEnabled: Effect.Effect<boolean>;
   }
 >()("vimium/core/Exclusions") {
-  static readonly layer: Layer.Layer<Exclusions, never, Settings | Dom | Realm> = Layer.effect(
-    Exclusions,
-    Effect.gen(function* () {
-      const settings = yield* Settings;
-      const dom = yield* Dom;
-      const realm = yield* Realm;
+  static readonly layer: Layer.Layer<Exclusions, never, Settings | Dom | Realm | TopFrameVerdict> =
+    Layer.effect(
+      Exclusions,
+      Effect.gen(function* () {
+        const settings = yield* Settings;
+        const dom = yield* Dom;
+        const realm = yield* Realm;
+        const top = yield* TopFrameVerdict;
 
-      const effective = yield* SubscriptionRef.make(FULLY_ENABLED);
+        const verdict = yield* SubscriptionRef.make<Verdict>(Verdict.Pending());
 
-      // The same set of dropped rules must not fill the console.
-      const warned = yield* Ref.make("");
+        // The same set of dropped rules must not fill the console.
+        const warned = yield* Ref.make("");
 
-      /** Remember the signature, and say whether it differs from the last one. */
-      const isNewSignature = (signature: string): Effect.Effect<boolean> =>
-        pipe(
-          warned,
-          Ref.getAndSet(signature),
-          Effect.map((last) => last !== signature),
+        /** Remember the signature, and say whether it differs from the last one. */
+        const isNewSignature = (signature: string): Effect.Effect<boolean> =>
+          pipe(
+            warned,
+            Ref.getAndSet(signature),
+            Effect.map((last) => last !== signature),
+          );
+
+        const warnOnce = (set: ExclusionSet): Effect.Effect<void> =>
+          pipe(
+            droppedSignature(set),
+            Option.match({
+              onNone: () => Effect.void,
+              onSome: (signature) =>
+                pipe(warnAboutDropped(set), Effect.when(isNewSignature(signature)), Effect.asVoid),
+            }),
+          );
+
+        const match = Effect.fn("Exclusions.match")(function* (url: string) {
+          const { exclusionRules } = yield* settings.current;
+          const set = makeExclusionSet(exclusionRules);
+          yield* warnOnce(set);
+          // Say when the cap takes effect, so that a rule which stops matching
+          // is not silent.
+          yield* pipe(
+            beyondRegexCap(url, exclusionRules),
+            Boolean.match({
+              onFalse: () => Effect.void,
+              onTrue: () => Effect.logWarning(REGEX_CAP_WARNING),
+            }),
+          );
+          return set.match(url);
+        });
+
+        /** Take a verdict. Every one is published, because the top frame pushes each one. */
+        const adopt = (rule: EffectiveRule): Effect.Effect<void> =>
+          pipe(verdict, SubscriptionRef.set<Verdict>(Verdict.Known({ rule })));
+
+        const resolveLocal = pipe(dom.href, Effect.flatMap(match));
+
+        const resolveHere = pipe(resolveLocal, Effect.flatMap(adopt));
+
+        /**
+         * The top frame works the verdict out from its own URL, and again
+         * whenever the rules change.
+         */
+        const followRules = pipe(
+          settings.changes,
+          Stream.runForEach(() => resolveHere),
+          Effect.forkScoped,
         );
 
-      const warnOnce = (set: ExclusionSet): Effect.Effect<void> =>
-        pipe(
-          droppedSignature(set),
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: (signature) =>
-              pipe(warnAboutDropped(set), Effect.when(isNewSignature(signature)), Effect.asVoid),
+        /**
+         * A frame that the top frame never answers stays fully enabled.
+         *
+         * An ancestor can be cross-origin with no injection, a parent can be
+         * sandboxed, and a manager with no value store forms no session.
+         * Disabling us there would disable us on a page that the user never
+         * excluded. A verdict that already came, pushed, is kept.
+         */
+        const unanswered = pipe(
+          verdict,
+          SubscriptionRef.updateSome<Verdict>(
+            Verdict.$match({
+              Pending: () => Option.some(Verdict.Known({ rule: FULLY_ENABLED })),
+              Known: () => Option.none(),
+            }),
+          ),
+        );
+
+        /** A child frame takes the verdict of the top frame, and every one that it pushes. */
+        const followTop = Effect.gen(function* () {
+          yield* top.onPush(adopt);
+          yield* pipe(
+            top.ask,
+            Effect.flatMap(Option.match({ onNone: () => unanswered, onSome: adopt })),
+            Effect.forkScoped,
+          );
+        });
+
+        const { follow, refresh } = pipe(
+          realm.role,
+          FrameRole.$match({
+            Top: () => ({ follow: followRules, refresh: resolveHere }),
+            Child: () => ({ follow: followTop, refresh: Effect.void }),
           }),
         );
 
-      const match = Effect.fn("Exclusions.match")(function* (url: string) {
-        const { exclusionRules } = yield* settings.current;
-        const set = makeExclusionSet(exclusionRules);
-        yield* warnOnce(set);
-        // Say when the cap takes effect, so that a rule which stops matching
-        // is not silent.
-        yield* pipe(
-          beyondRegexCap(url, exclusionRules),
-          Boolean.match({
-            onFalse: () => Effect.void,
-            onTrue: () => Effect.logWarning(REGEX_CAP_WARNING),
-          }),
-        );
-        return set.match(url);
-      });
+        yield* follow;
 
-      const adopt = (rule: EffectiveRule): Effect.Effect<void> =>
-        pipe(effective, SubscriptionRef.set(rule));
-
-      const resolveLocal = pipe(dom.href, Effect.flatMap(match));
-
-      // The top frame owns the verdict, so it keeps its own up to date when the
-      // rules change. A child frame waits to be told.
-      const followRules = pipe(
-        settings.changes,
-        Stream.runForEach(() => pipe(resolveLocal, Effect.flatMap(adopt))),
-        Effect.forkScoped,
-        Effect.asVoid,
-      );
-
-      yield* pipe(
-        realm.role,
-        FrameRole.$match({
-          Top: () => followRules,
-          Child: () => Effect.void,
-        }),
-      );
-
-      return Exclusions.of({
-        effective,
-        effectiveUnsafe: () => SubscriptionRef.getUnsafe(effective),
-        resolveLocal,
-        match,
-        adopt,
-        isEnabled: pipe(SubscriptionRef.get(effective), Effect.map(EffectiveRule.guards.Enabled)),
-      });
-    }),
-  );
+        return Exclusions.of({
+          current: SubscriptionRef.get(verdict),
+          currentUnsafe: () => SubscriptionRef.getUnsafe(verdict),
+          changes: SubscriptionRef.changes(verdict),
+          known: pipe(
+            SubscriptionRef.changes(verdict),
+            Stream.filter(Verdict.$is("Known")),
+            Stream.runHead,
+            Effect.asVoid,
+          ),
+          refresh,
+          resolveLocal,
+          match,
+        });
+      }),
+    );
 }

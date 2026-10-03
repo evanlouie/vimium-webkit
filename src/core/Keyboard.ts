@@ -53,7 +53,7 @@ import { Capabilities } from "~/platform/Capabilities.ts";
 import { mediaPlayerHasFocus } from "~/platform/Elements.ts";
 import { Realm } from "~/platform/Realm.ts";
 import { Commands } from "./Commands.ts";
-import { Exclusions } from "./Exclusions.ts";
+import { Exclusions, knownRule, type Verdict } from "./Exclusions.ts";
 import { CONTINUE_BUBBLING, type HandlerResult, SUPPRESS_EVENT } from "./HandlerStack.ts";
 import { Mappings } from "./Mappings.ts";
 import { isEscape, KeyPolicy, Modes, ModeTier } from "./Modes.ts";
@@ -174,7 +174,7 @@ interface Intake {
   /** The keys that `passNextKey` still owes the page. */
   readonly passes: number;
   readonly context: KeyContext;
-  readonly exclusion: EffectiveRule;
+  readonly verdict: Verdict;
   readonly passMediaKeys: boolean;
 }
 
@@ -186,12 +186,12 @@ interface Intake {
  * sequence as well, so `3 j` runs our binding for `j` even when the user gave
  * `j` to the page.
  */
-const rootArrival = ({ exclusion, passMediaKeys }: Intake, raw: string): Arrival =>
+const rootArrival = ({ passMediaKeys }: Intake, rule: EffectiveRule, raw: string): Arrival =>
   pipe(
     Match.value(raw),
     Match.withReturnType<Arrival>(),
     Match.when(
-      (key) => isPassKey(exclusion, key),
+      (key) => isPassKey(rule, key),
       () => Arrival.Page(),
     ),
     // The same rule for the keys that a focused media player owns. The check
@@ -213,7 +213,7 @@ const rootArrival = ({ exclusion, passMediaKeys }: Intake, raw: string): Arrival
  * the exclusion promised to the page. It also gave away a key that no rule
  * named.
  */
-const keyArrival = (intake: Intake, raw: string): Arrival =>
+const keyArrival = (intake: Intake, rule: EffectiveRule, raw: string): Arrival =>
   pipe(
     Match.value({
       owed: intake.passes > 0,
@@ -227,7 +227,7 @@ const keyArrival = (intake: Intake, raw: string): Arrival =>
     Match.when({ owed: true }, () => Arrival.Passed()),
     Match.when({ escape: true, atRoot: true }, () => Arrival.Page()),
     Match.when({ escape: true }, () => Arrival.Cancelled()),
-    Match.when({ atRoot: true }, () => rootArrival(intake, raw)),
+    Match.when({ atRoot: true }, () => rootArrival(intake, rule, raw)),
     Match.orElse(() => Arrival.Ours({ raw })),
   );
 
@@ -247,6 +247,15 @@ const typedNotation = ({ event, context }: Intake): Option.Option<string> =>
   );
 
 /**
+ * The rule that lets normal mode act on a key.
+ *
+ * `None` while the verdict is pending, and on a page that the user excluded.
+ * The page keeps every key in both cases.
+ */
+const activeRule = (verdict: Verdict): Option.Option<EffectiveRule> =>
+  pipe(verdict, knownRule, Option.filter(EffectiveRule.guards.Enabled));
+
+/**
  * What normal mode does with a key.
  *
  * The verdict is read for each key. Normal mode itself never leaves the stack,
@@ -255,13 +264,10 @@ const typedNotation = ({ event, context }: Intake): Option.Option<string> =>
  */
 const arrivalOf = (intake: Intake): Arrival =>
   pipe(
-    intake.exclusion,
-    // A page that the user excluded keeps every key, and the key state stays.
-    Option.liftPredicate(EffectiveRule.guards.Enabled),
-    Option.flatMap(() => typedNotation(intake)),
+    Option.all({ rule: activeRule(intake.verdict), raw: typedNotation(intake) }),
     Option.match({
       onNone: () => Arrival.Page(),
-      onSome: (raw) => keyArrival(intake, raw),
+      onSome: ({ rule, raw }) => keyArrival(intake, rule, raw),
     }),
   );
 
@@ -623,7 +629,7 @@ export class Keyboard extends Context.Service<
             ignoreKeyboardLayout: settingsNow.ignoreKeyboardLayout,
             applePlatform: capabilities.applePlatform,
           },
-          exclusion: exclusions.effectiveUnsafe(),
+          verdict: exclusions.currentUnsafe(),
           passMediaKeys: settingsNow.passMediaKeys,
         });
         return yield* pipe(

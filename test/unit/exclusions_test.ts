@@ -3,17 +3,18 @@
  *
  * The verdict comes from the URL of the *top* frame, and not from the URL of
  * this frame. A child frame cannot read that URL across origins, so it takes
- * the answer of the top frame with `adopt`.
+ * the answer of the top frame, and every verdict that the top frame pushes.
  *
  * The layers below are the real ones. `Dom` and `Realm` are built once and
  * then given a fixed URL and a fixed frame role, so no test touches a global.
+ * `TopFrameVerdict` is the one stub: the test plays the top frame.
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer, Option, Stream, SubscriptionRef, pipe, Struct } from "effect";
-import { Exclusions } from "~/core/Exclusions.ts";
+import { Deferred, Effect, Equal, Layer, Option, Queue, Stream, pipe, Struct } from "effect";
+import { Exclusions, TopFrameVerdict, Verdict } from "~/core/Exclusions.ts";
 import { Settings } from "~/core/Settings.ts";
-import { EffectiveRule } from "~/domain/Exclusion.ts";
+import { EffectiveRule, FULLY_ENABLED } from "~/domain/Exclusion.ts";
 import {
   defaultSettings,
   type ExclusionRule,
@@ -73,22 +74,64 @@ const domAt = (url: string): Layer.Layer<Dom> =>
 const realmAs = (role: FrameRole): Layer.Layer<Realm, never, Dom> =>
   pipe(Realm, Effect.map(Struct.assign({ role })), Layer.effect(Realm), Layer.provide(Realm.layer));
 
+/** The top frame, as a child frame hears it. The test answers, and pushes. */
+interface TopFrame {
+  readonly answer: Deferred.Deferred<Option.Option<EffectiveRule>>;
+  readonly pushes: Queue.Queue<EffectiveRule>;
+}
+
+/** A top frame that a test plays. A test that never touches it leaves the child waiting. */
+const topFrame: Effect.Effect<TopFrame> = Effect.all({
+  answer: Deferred.make<Option.Option<EffectiveRule>>(),
+  pushes: Queue.unbounded<EffectiveRule>(),
+});
+
+const topFrameVerdict = ({ answer, pushes }: TopFrame): Layer.Layer<TopFrameVerdict> =>
+  Layer.succeed(
+    TopFrameVerdict,
+    TopFrameVerdict.of({
+      ask: Deferred.await(answer),
+      onPush: (adopt) =>
+        pipe(Stream.fromQueue(pushes), Stream.runForEach(adopt), Effect.forkScoped, Effect.asVoid),
+    }),
+  );
+
 const layerFor = (options: {
   readonly url: string;
   readonly role: FrameRole;
   readonly rules: readonly ExclusionRule[];
+  readonly top: TopFrame;
 }): Layer.Layer<Exclusions | Settings | Storage> => {
   const dom = domAt(options.url);
   const realm = pipe(realmAs(options.role), Layer.provide(dom));
   const storage = pipe(Storage.layer, Layer.provide(storedSettings(options.rules)));
   const settings = pipe(Settings.layer, Layer.provide(storage));
-  return pipe(Exclusions.layer, Layer.provideMerge(Layer.mergeAll(dom, realm, settings, storage)));
+  return pipe(
+    Exclusions.layer,
+    Layer.provideMerge(Layer.mergeAll(dom, realm, settings, storage, topFrameVerdict(options.top))),
+  );
 };
+
+/** Wait for the verdict `expected`. */
+const verdictOf = (expected: Verdict): Effect.Effect<void, never, Exclusions> =>
+  pipe(
+    Exclusions,
+    Effect.flatMap((exclusions) =>
+      pipe(
+        exclusions.changes,
+        Stream.filter((verdict) => Equal.equals(verdict, expected)),
+        Stream.runHead,
+      ),
+    ),
+    Effect.asVoid,
+  );
 
 const DISABLED: EffectiveRule = EffectiveRule.cases.Disabled.make({});
 
 /** A verdict that keeps us on, and gives the page `passKeys`. */
 const passing = (passKeys: string): EffectiveRule => EffectiveRule.cases.Enabled.make({ passKeys });
+
+const known = (rule: EffectiveRule): Verdict => Verdict.Known({ rule });
 
 const EXCLUDED: readonly ExclusionRule[] = [
   { pattern: "https://excluded.test/*", passKeys: "" },
@@ -97,81 +140,109 @@ const EXCLUDED: readonly ExclusionRule[] = [
 
 describe("Exclusions", () => {
   it.effect("resolves the verdict from the URL of the top frame", () =>
-    pipe(
-      Effect.gen(function* () {
-        const settings = yield* Settings;
-        const exclusions = yield* Exclusions;
+    Effect.gen(function* () {
+      const top = yield* topFrame;
+      yield* pipe(
+        Effect.gen(function* () {
+          const settings = yield* Settings;
+          const exclusions = yield* Exclusions;
 
-        // The frame starts with the defaults, so the stored rules must be read
-        // before the verdict means anything.
-        yield* settings.reload;
+          // The frame starts with the defaults, so the stored rules must be read
+          // before the verdict means anything.
+          yield* settings.reload;
 
-        const local = yield* exclusions.resolveLocal;
-        assert.deepEqual(local, DISABLED);
+          const local = yield* exclusions.resolveLocal;
+          assert.deepEqual(local, DISABLED);
 
-        // The top frame keeps its own verdict up to date from the settings.
-        const applied = yield* pipe(
-          SubscriptionRef.changes(exclusions.effective),
-          Stream.filter(EffectiveRule.guards.Disabled),
-          Stream.runHead,
-        );
-        assert.isTrue(Option.isSome(applied));
-        assert.isFalse(yield* exclusions.isEnabled);
-        assert.isTrue(EffectiveRule.guards.Disabled(exclusions.effectiveUnsafe()));
-      }),
-      Effect.provide(
-        layerFor({
-          url: "https://excluded.test/inbox",
-          role: FrameRole.Top(),
-          rules: EXCLUDED,
+          // The top frame keeps its own verdict up to date from the settings.
+          yield* verdictOf(known(DISABLED));
+          assert.deepEqual(exclusions.currentUnsafe(), known(DISABLED));
         }),
-      ),
-    ),
+        Effect.provide(
+          layerFor({
+            url: "https://excluded.test/inbox",
+            role: FrameRole.Top(),
+            rules: EXCLUDED,
+            top,
+          }),
+        ),
+      );
+    }),
   );
 
   it.effect("matches any URL against the current rules", () =>
-    pipe(
-      Effect.gen(function* () {
-        const settings = yield* Settings;
-        const exclusions = yield* Exclusions;
-        yield* settings.reload;
+    Effect.gen(function* () {
+      const top = yield* topFrame;
+      yield* pipe(
+        Effect.gen(function* () {
+          const settings = yield* Settings;
+          const exclusions = yield* Exclusions;
+          yield* settings.reload;
 
-        assert.deepEqual(yield* exclusions.match("https://partial.test/doc"), passing("jk"));
-        assert.deepEqual(yield* exclusions.match("https://other.test/"), passing(""));
-      }),
-      Effect.provide(
-        layerFor({
-          url: "https://other.test/",
-          role: FrameRole.Top(),
-          rules: EXCLUDED,
+          assert.deepEqual(yield* exclusions.match("https://partial.test/doc"), passing("jk"));
+          assert.deepEqual(yield* exclusions.match("https://other.test/"), passing(""));
         }),
-      ),
-    ),
+        Effect.provide(
+          layerFor({ url: "https://other.test/", role: FrameRole.Top(), rules: EXCLUDED, top }),
+        ),
+      );
+    }),
   );
 
-  it.effect("replaces the verdict with the answer of the top frame", () =>
-    pipe(
-      Effect.gen(function* () {
-        const exclusions = yield* Exclusions;
+  it.effect("takes the answer of the top frame, and every verdict that it pushes", () =>
+    Effect.gen(function* () {
+      const top = yield* topFrame;
+      yield* pipe(
+        Effect.gen(function* () {
+          const exclusions = yield* Exclusions;
 
-        // A child frame starts fully enabled. It must not read its own URL.
-        assert.isTrue(yield* exclusions.isEnabled);
+          // A child frame waits for the top frame. It must not read its own URL.
+          assert.deepEqual(yield* exclusions.current, Verdict.Pending());
 
-        yield* exclusions.adopt(DISABLED);
-        assert.isFalse(yield* exclusions.isEnabled);
-        assert.deepEqual(yield* SubscriptionRef.get(exclusions.effective), DISABLED);
+          yield* pipe(top.answer, Deferred.succeed(Option.some<EffectiveRule>(DISABLED)));
+          yield* exclusions.known;
+          assert.deepEqual(yield* exclusions.current, known(DISABLED));
 
-        yield* exclusions.adopt(passing("jk"));
-        assert.deepEqual(exclusions.effectiveUnsafe(), passing("jk"));
-      }),
-      Effect.provide(
-        layerFor({
-          // The URL of the child frame is excluded, and it must be ignored.
-          url: "https://excluded.test/advert",
-          role: FrameRole.Child(),
-          rules: EXCLUDED,
+          yield* pipe(top.pushes, Queue.offer(passing("jk")));
+          yield* verdictOf(known(passing("jk")));
+          assert.deepEqual(exclusions.currentUnsafe(), known(passing("jk")));
         }),
-      ),
-    ),
+        Effect.provide(
+          layerFor({
+            // The URL of the child frame is excluded, and it must be ignored.
+            url: "https://excluded.test/advert",
+            role: FrameRole.Child(),
+            rules: EXCLUDED,
+            top,
+          }),
+        ),
+      );
+    }),
+  );
+
+  it.effect("stays fully enabled when the top frame never answers", () =>
+    Effect.gen(function* () {
+      const top = yield* topFrame;
+      yield* pipe(
+        Effect.gen(function* () {
+          const exclusions = yield* Exclusions;
+
+          // An ancestor with no injection, a sandboxed parent, or a manager with
+          // no value store. Disabling us there would disable us on a page that
+          // the user never excluded.
+          yield* pipe(top.answer, Deferred.succeed(Option.none<EffectiveRule>()));
+          yield* exclusions.known;
+          assert.deepEqual(yield* exclusions.current, known(FULLY_ENABLED));
+        }),
+        Effect.provide(
+          layerFor({
+            url: "https://excluded.test/advert",
+            role: FrameRole.Child(),
+            rules: EXCLUDED,
+            top,
+          }),
+        ),
+      );
+    }),
   );
 });

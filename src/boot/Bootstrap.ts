@@ -8,6 +8,7 @@
  */
 
 import {
+  Boolean,
   Context,
   Effect,
   Layer,
@@ -25,8 +26,7 @@ import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { describeThrown } from "~/domain/Failure.ts";
-import { FrameBus } from "~/frames/Bus.ts";
-import { FrameLink } from "~/frames/Link.ts";
+import { FrameBus, REQUEST_DEADLINE } from "~/frames/Bus.ts";
 import { Capabilities, degradationWarnings } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { FrameRole } from "~/platform/Realm.ts";
@@ -200,7 +200,6 @@ export const BootstrapLayer: Layer.Layer<
   | Dom
   | Exclusions
   | FrameBus
-  | FrameLink
   | Insert
   | Keyboard
   | Lifecycle
@@ -219,7 +218,6 @@ export const BootstrapLayer: Layer.Layer<
     const exclusions = yield* Exclusions;
     const insert = yield* Insert;
     const omnibar = yield* Omnibar;
-    const link = yield* FrameLink;
     const lifecycle = yield* Lifecycle;
     const modes = yield* Modes;
     const owner = yield* RuntimeOwner;
@@ -238,25 +236,35 @@ export const BootstrapLayer: Layer.Layer<
         }),
       );
 
-    /**
-     * Work out the verdict for this frame.
-     *
-     * The top frame reads its own URL. A child frame cannot read the top frame's
-     * URL across origins, so it asks, and it keeps the verdict that it holds
-     * when no answer comes. Upstream Vimium matches on the top frame's URL as
-     * well: without that, an excluded page would still have us live inside its
-     * third-party frames.
-     */
-    const resolveExclusion = pipe(
-      link.effectiveExclusion,
-      Effect.flatMap(exclusions.adopt),
-      Effect.ignore,
-    );
-
     /** Read the settings and the verdict again, after the page changed under us. */
     const refresh = Effect.gen(function* () {
       yield* settings.reload;
-      yield* resolveExclusion;
+      yield* exclusions.refresh;
+    });
+
+    /**
+     * Play the keys that the guard held, once the verdict is known.
+     *
+     * A child frame learns the verdict from the top frame, and the handshake
+     * takes time. A key that is played before then runs a command on a page
+     * that the user may have excluded. A frame that learns nothing before the
+     * deadline drops the keys instead: the guard has already taken them from
+     * the page, and a guess at the verdict is worse.
+     *
+     * The guard holds every key until the drain, so a key that the user types
+     * during the wait is held as well, and the order stays the order of typing.
+     */
+    const replayHeldKeys = Effect.gen(function* () {
+      const known = yield* pipe(
+        exclusions.known,
+        Effect.timeoutOption(REQUEST_DEADLINE),
+        Effect.map(Option.isSome),
+      );
+      const held = yield* boot.drain;
+      yield* pipe(
+        known,
+        Boolean.match({ onFalse: () => Effect.void, onTrue: () => replayBufferedKeys(held) }),
+      );
     });
 
     const wantsFocusBack = pipe(
@@ -303,7 +311,9 @@ export const BootstrapLayer: Layer.Layer<
 
     yield* pipe(degradationWarnings(capabilities), Effect.forEach(report.error, { discard: true }));
 
-    yield* resolveExclusion;
+    // The top frame matches the rules that it has just read. A child frame asked
+    // the top frame when it started.
+    yield* exclusions.refresh;
 
     // Before any listener is attached. Insert mode otherwise learns about focus
     // from live events only, and the page has long since focused its search box
@@ -317,7 +327,7 @@ export const BootstrapLayer: Layer.Layer<
     // guard scope closes. A key that arrives during the start is therefore held,
     // and then played, exactly once.
     yield* attachKeyBridge;
-    yield* pipe(boot.drain, Effect.flatMap(replayBufferedKeys));
+    yield* replayHeldKeys;
 
     // A hook, and not a subscription. The work that a page exit needs must start
     // inside the browser's dispatch. A subscriber of the bus below runs on its

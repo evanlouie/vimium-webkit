@@ -25,7 +25,7 @@ import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { FrameAuth } from "~/frames/Auth.ts";
 import { FrameBus } from "~/frames/Bus.ts";
-import { FrameLink } from "~/frames/Link.ts";
+import { FrameLink, topFrameVerdictLayer } from "~/frames/Link.ts";
 import { FindLayer } from "~/features/find/Find.ts";
 import { Hints } from "~/features/hints/Hints.ts";
 import { Insert } from "~/features/Insert.ts";
@@ -85,11 +85,22 @@ const StorageLayer = pipe(
   Layer.provideMerge(PlatformLayer),
 );
 
-/** Settings, the key trie, modes and the command registry. */
+/**
+ * The cross-frame bus, and what a child frame hears of the verdict of the top
+ * frame through it.
+ */
+const BusLayer = pipe(
+  topFrameVerdictLayer,
+  Layer.provideMerge(FrameBus.layer),
+  Layer.provideMerge(FrameAuth.layer),
+  Layer.provideMerge(StorageLayer),
+);
+
+/** Settings, the key trie, the exclusion verdict, modes and the command registry. */
 const CoreLayer = pipe(
   Layer.mergeAll(Mappings.layer, Exclusions.layer, Modes.layer, Commands.layer, Report.layer),
   Layer.provideMerge(Settings.layer),
-  Layer.provideMerge(StorageLayer),
+  Layer.provideMerge(BusLayer),
 );
 
 /**
@@ -108,13 +119,8 @@ const UiLayer = pipe(
   Layer.provideMerge(KeyboardLayer),
 );
 
-/** The cross-frame bus, and the protocol on top of it. */
-const FramesLayer = pipe(
-  FrameLink.layer,
-  Layer.provideMerge(FrameBus.layer),
-  Layer.provideMerge(FrameAuth.layer),
-  Layer.provideMerge(UiLayer),
-);
+/** The protocol on top of the cross-frame bus. */
+const FramesLayer = pipe(FrameLink.layer, Layer.provideMerge(UiLayer));
 
 const MarksWithScroller = pipe(MarksLayer, Layer.provide(Scroller.layer));
 

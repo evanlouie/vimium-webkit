@@ -13,9 +13,9 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Array, Effect, Layer, Option, Ref, Stream, SubscriptionRef, pipe } from "effect";
+import { Array, Effect, Layer, Option, Ref, Stream, pipe } from "effect";
 import { Commands } from "~/core/Commands.ts";
-import { Exclusions } from "~/core/Exclusions.ts";
+import { Exclusions, Verdict } from "~/core/Exclusions.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
 import { Mappings } from "~/core/Mappings.ts";
 import { Modes } from "~/core/Modes.ts";
@@ -169,22 +169,20 @@ const settingsOf = (data: SettingsData): Layer.Layer<Settings> =>
   );
 
 /** A verdict that keeps us on, and gives the page `passKeys`. */
-const passing = (passKeys: string): EffectiveRule => EffectiveRule.cases.Enabled.make({ passKeys });
+const passing = (passKeys: string): Verdict =>
+  Verdict.Known({ rule: EffectiveRule.cases.Enabled.make({ passKeys }) });
 
-const exclusionsOf = (rule: EffectiveRule): Layer.Layer<Exclusions> =>
-  pipe(
-    SubscriptionRef.make(rule),
-    Effect.map((effective) =>
-      Exclusions.of({
-        effective,
-        effectiveUnsafe: () => rule,
-        resolveLocal: Effect.succeed(rule),
-        match: () => Effect.succeed(rule),
-        adopt: () => Effect.void,
-        isEnabled: Effect.succeed(EffectiveRule.guards.Enabled(rule)),
-      }),
-    ),
-    Layer.effect(Exclusions),
+const exclusionsOf = (verdict: Verdict): Layer.Layer<Exclusions> =>
+  Layer.sync(Exclusions, () =>
+    Exclusions.of({
+      current: Effect.succeed(verdict),
+      currentUnsafe: () => verdict,
+      changes: Stream.make(verdict),
+      known: Effect.void,
+      refresh: Effect.void,
+      resolveLocal: Effect.succeed(FULLY_ENABLED),
+      match: () => Effect.succeed(FULLY_ENABLED),
+    }),
   );
 
 /**
@@ -218,7 +216,7 @@ const capabilitiesOf = (applePlatform: boolean): Layer.Layer<Capabilities> =>
 interface Options {
   readonly mappings: string;
   readonly settings?: SettingsData;
-  readonly exclusion?: EffectiveRule;
+  readonly verdict?: Verdict;
   /** macOS, iOS or iPadOS. It changes the reading of an Option chord. */
   readonly applePlatform?: boolean;
 }
@@ -237,7 +235,7 @@ const layerFor = (options: Options): Layer.Layer<Commands | Keyboard | Modes> =>
     Modes.layer,
     Layer.provideMerge(Realm.layer, Dom.layer),
     settingsOf(options.settings ?? defaultSettings()),
-    exclusionsOf(options.exclusion ?? FULLY_ENABLED),
+    exclusionsOf(options.verdict ?? Verdict.Known({ rule: FULLY_ENABLED })),
     mappingsOf(options.mappings),
   );
   return Layer.provideMerge(Keyboard.layer, support);
@@ -395,27 +393,37 @@ describe("Keyboard", () => {
     );
   });
 
-  it.effect("leaves every key to a page that the user excluded", () =>
-    pipe(
-      Effect.gen(function* () {
-        const modes = yield* Modes;
-        const calls = yield* recorder(["scrollDown"]);
+  /**
+   * A verdict that keeps us off the keys.
+   *
+   * The page keeps every key while the user excluded it, and while a child
+   * frame still waits for the verdict of the top frame.
+   */
+  describe("a verdict that keeps us off", () => {
+    const keepsEveryKey = (verdict: Verdict) =>
+      pipe(
+        Effect.gen(function* () {
+          const modes = yield* Modes;
+          const calls = yield* recorder(["scrollDown"]);
 
-        const press = new Press("j");
-        const toPage = yield* modes.bubble("keydown", press);
+          const press = new Press("j");
+          const toPage = yield* modes.bubble("keydown", press);
 
-        assert.deepEqual(yield* Ref.get(calls), []);
-        assert.isTrue(toPage);
-        assert.isFalse(press.defaultPrevented);
-      }),
-      Effect.provide(
-        layerFor({
-          mappings: "map j scrollDown",
-          exclusion: EffectiveRule.cases.Disabled.make({}),
+          assert.deepEqual(yield* Ref.get(calls), []);
+          assert.isTrue(toPage);
+          assert.isFalse(press.defaultPrevented);
         }),
-      ),
-    ),
-  );
+        Effect.provide(layerFor({ mappings: "map j scrollDown", verdict })),
+      );
+
+    it.effect("leaves every key to a page that the user excluded", () =>
+      keepsEveryKey(Verdict.Known({ rule: EffectiveRule.cases.Disabled.make({}) })),
+    );
+
+    it.effect("leaves every key to the page while the verdict is pending", () =>
+      keepsEveryKey(Verdict.Pending()),
+    );
+  });
 
   /**
    * A binding that is also the prefix of a longer one.
@@ -881,7 +889,7 @@ describe("Keyboard", () => {
         Effect.provide(
           layerFor({
             mappings: "map j scrollDown",
-            exclusion: passing("j"),
+            verdict: passing("j"),
           }),
         ),
       ),
@@ -915,7 +923,7 @@ describe("Keyboard", () => {
         Effect.provide(
           layerFor({
             mappings: ["map g scrollUp", "map gg scrollToTop", "map j scrollDown"].join("\n"),
-            exclusion: passing("j"),
+            verdict: passing("j"),
           }),
         ),
       ),
@@ -1055,7 +1063,7 @@ describe("Keyboard", () => {
         Effect.provide(
           layerFor({
             mappings: remap,
-            exclusion: passing("j"),
+            verdict: passing("j"),
           }),
         ),
       ),
@@ -1080,7 +1088,7 @@ describe("Keyboard", () => {
         Effect.provide(
           layerFor({
             mappings: remap,
-            exclusion: passing("k"),
+            verdict: passing("k"),
           }),
         ),
       ),

@@ -2,9 +2,8 @@
  * The application protocol on top of the frame bus.
  *
  * `FrameBus` moves a message. This service gives the meaning of the messages
- * that every frame needs: which frames exist, which frame has the focus, and
- * what the exclusion verdict of the page is. It is the only user of the bus
- * that every build has.
+ * that every frame needs: which frame has the focus, and what the exclusion
+ * verdict of the page is. It is the only user of the bus that every build has.
  *
  * Two rules from the earlier code, which cost real reviews to find:
  *
@@ -19,29 +18,18 @@
  *   an exclusion against `sender.tab.url`, which is the URL of the top frame.
  *   Without that, a rule that the user wrote for a page would stop applying
  *   inside the frames of that page, and an excluded page would still have us
- *   live inside its third-party frames. A child asks the top frame, and gives
- *   the answer to `Exclusions.adopt`.
+ *   live inside its third-party frames. `Exclusions` owns the verdict. A child
+ *   frame hears the top frame through `TopFrameVerdict`, which this file gives.
  *
  * The hint protocol travels on the same bus, and it is not here. The hints
  * service answers `COLLECT_HINTS` and the other hint kinds for itself, with
  * `FrameBus.serve`. This file must not import anything from `src/features/`.
  */
 
-import {
-  Array,
-  Boolean,
-  Context,
-  Effect,
-  Layer,
-  Option,
-  Ref,
-  Stream,
-  SubscriptionRef,
-  pipe,
-} from "effect";
+import { Array, Boolean, Context, Effect, Filter, Layer, Option, Ref, Stream, pipe } from "effect";
 import type { EffectiveRule } from "~/domain/Exclusion.ts";
-import { DEFAULT_EXCLUSION, isKind } from "~/domain/FrameMessage.ts";
-import { Exclusions } from "~/core/Exclusions.ts";
+import { isKind } from "~/domain/FrameMessage.ts";
+import { Exclusions, knownRule, TopFrameVerdict } from "~/core/Exclusions.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -56,10 +44,10 @@ import {
   toTop,
 } from "./Bus.ts";
 
-/** Read the verdict out of the reply to an exclusion request. */
-const readExclusion = (reply: InboundMessage): Option.Option<EffectiveRule> =>
+/** Read the verdict out of the answer of the top frame. */
+const verdictIn = (inbound: InboundMessage): Option.Option<EffectiveRule> =>
   pipe(
-    reply.message,
+    inbound.message,
     Option.liftPredicate(isKind("EXCLUSION_RESULT")),
     Option.map(({ exclusion }) => exclusion),
   );
@@ -98,6 +86,42 @@ const nextFrame = (
     ),
   );
 
+/**
+ * The verdict of the top frame, as a child frame hears it over the bus.
+ *
+ * A child frame can ask only once it is admitted. The bus refuses every
+ * request until the handshake ends, so the question waits for the admission
+ * first. A frame that the deadline leaves outside the session gets no answer.
+ */
+export const topFrameVerdictLayer: Layer.Layer<TopFrameVerdict, never, FrameBus> = Layer.effect(
+  TopFrameVerdict,
+  Effect.gen(function* () {
+    const bus = yield* FrameBus;
+
+    const ask = pipe(
+      bus.ready,
+      Effect.flatMap(
+        Boolean.match({
+          onFalse: () => Effect.succeedNone,
+          onTrue: () =>
+            pipe(
+              bus.request(toTop, { kind: "EXCLUSION_REQUEST" }, verdictIn, REQUEST_DEADLINE),
+              Effect.option,
+            ),
+        }),
+      ),
+    );
+
+    return TopFrameVerdict.of({
+      ask,
+      onPush: (adopt) =>
+        bus.serve("SETTINGS", ({ message }) =>
+          pipe(adopt(message.exclusion), Effect.as(Option.none())),
+        ),
+    });
+  }),
+);
+
 export class FrameLink extends Context.Service<
   FrameLink,
   {
@@ -109,23 +133,6 @@ export class FrameLink extends Context.Service<
 
     /** Move the focus one frame along document order. This is `gf` and `gF`. */
     readonly focusFrame: (direction: 1 | -1) => Effect.Effect<void, FrameError>;
-
-    /**
-     * The verdict for the URL of the *top* frame.
-     *
-     * The top frame answers from its own URL. A child frame asks the top frame,
-     * and adopts the answer. A child that gets no answer keeps the verdict that
-     * it holds, which starts as "enabled, and no key passed through".
-     */
-    readonly effectiveExclusion: Effect.Effect<EffectiveRule, FrameError>;
-
-    /**
-     * Tell every frame that the settings changed.
-     *
-     * It carries the exclusion verdict only. Each frame reads its own storage
-     * again. Below the top frame this does nothing.
-     */
-    readonly pushSettings: Effect.Effect<void>;
   }
 >()("vimium/frames/FrameLink") {
   static readonly layer: Layer.Layer<
@@ -144,37 +151,14 @@ export class FrameLink extends Context.Service<
       /** The frame that the focus cursor points at. The top frame keeps it. */
       const focusedRef = yield* Ref.make(Option.none<FrameId>());
 
-      /** The verdict for the URL of the top frame. The top frame only. */
-      const topVerdict: Effect.Effect<EffectiveRule> = pipe(
-        dom.href,
-        Effect.flatMap(exclusions.match),
-      );
-
-      const broadcastVerdict = Effect.gen(function* () {
-        const rule = yield* topVerdict;
-        yield* pipe(bus.broadcast({ kind: "SETTINGS", exclusion: rule }), Effect.ignore);
-      });
-
-      const pushSettings: Effect.Effect<void> = pipe(
-        bus.role,
-        FrameRole.$match({
-          Top: () => broadcastVerdict,
-          Child: () => Effect.void,
-        }),
-      );
-
-      const askTop: Effect.Effect<EffectiveRule, FrameError> = pipe(
-        bus.request(toTop, { kind: "EXCLUSION_REQUEST" }, readExclusion, REQUEST_DEADLINE),
-        Effect.tap((rule) => exclusions.adopt(rule)),
-      );
-
-      const effectiveExclusion: Effect.Effect<EffectiveRule, FrameError> = pipe(
-        bus.role,
-        FrameRole.$match({
-          Top: () => topVerdict,
-          Child: () => askTop,
-        }),
-      );
+      /**
+       * Tell every frame that the settings changed.
+       *
+       * The message carries the verdict of the top frame, and each frame reads
+       * its own storage again.
+       */
+      const pushSettings = (rule: EffectiveRule): Effect.Effect<void> =>
+        pipe(bus.broadcast({ kind: "SETTINGS", exclusion: rule }), Effect.ignore);
 
       /** Point the cursor at one frame, and give that frame the focus. */
       const focus = Effect.fnUntraced(function* (frameId: FrameId) {
@@ -219,7 +203,7 @@ export class FrameLink extends Context.Service<
         // child frame cannot read it across origins.
         yield* bus.serve("EXCLUSION_REQUEST", () =>
           pipe(
-            topVerdict,
+            exclusions.resolveLocal,
             Effect.map((rule) =>
               Option.some({ kind: "EXCLUSION_RESULT" as const, exclusion: rule }),
             ),
@@ -234,42 +218,27 @@ export class FrameLink extends Context.Service<
           pipe(focusedRef, Ref.set(Option.some(from)), Effect.as(Option.none())),
         );
 
-        // The top frame owns the verdict, so every change of it goes out to the
-        // frames. `Exclusions` recomputes the verdict when the settings change.
+        // The top frame owns the verdict, and `Exclusions` works it out again
+        // whenever the settings change. Each verdict that it takes therefore
+        // goes out to the frames.
         yield* pipe(
-          SubscriptionRef.changes(exclusions.effective),
-          Stream.runForEach(() => pushSettings),
+          exclusions.changes,
+          Stream.filterMap(Filter.fromPredicateOption(knownRule)),
+          Stream.runForEach(pushSettings),
           Effect.forkScoped,
         );
       });
 
-      /** The messages that a member answers, and the verdict that it asks for. */
-      const serveAsMember = Effect.gen(function* () {
-        yield* bus.serve("SETTINGS", ({ message }) =>
-          pipe(
-            settings.reload,
-            Effect.ignore,
-            // A prompt to read our own storage again, and never a value to
-            // take. Only the verdict travels.
-            Effect.andThen(exclusions.adopt(message.exclusion)),
-            Effect.as(Option.none()),
-          ),
-        );
-
-        // Until this frame is welcomed it has no verdict. A frame that started
-        // before its welcome would otherwise stay fully enabled, for the life
-        // of the document, on a page that the user excluded.
-        yield* pipe(
-          bus.ready,
-          Effect.flatMap(
-            Boolean.match({
-              onTrue: () => pipe(askTop, Effect.ignore),
-              onFalse: () => exclusions.adopt(DEFAULT_EXCLUSION),
-            }),
-          ),
-          Effect.forkScoped,
-        );
-      });
+      /**
+       * What a member does with a push: it reads its own storage again.
+       *
+       * The verdict of the push goes to `Exclusions`, through
+       * `TopFrameVerdict`. It is never a value that this frame takes from the
+       * wire.
+       */
+      const serveAsMember = bus.serve("SETTINGS", () =>
+        pipe(settings.reload, Effect.ignore, Effect.as(Option.none())),
+      );
 
       // ---------------------------------------------------------------------
       // The messages that this service answers
@@ -295,8 +264,6 @@ export class FrameLink extends Context.Service<
         ready: bus.ready,
         knownFrames: bus.peers,
         focusFrame: (direction) => bus.send(toTop, { kind: "FOCUS_FRAME", direction }),
-        effectiveExclusion,
-        pushSettings,
       });
     }),
   );
