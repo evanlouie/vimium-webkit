@@ -12,7 +12,8 @@
  * >
  * > 1. `enableHistoryIndex` is `false` by default. Recording does nothing
  * >    unless the setting is `true`. There is no other route to "on".
- * > 2. The `historyIndexDenylist` globs are read before anything is written.
+ * > 2. The `historyIndexDenylist` patterns are read before anything is
+ * >    written.
  * > 3. Private browsing is skipped where it can be seen at all. Read
  * >    `detectPrivateBrowsing` for how weak that is.
  * > 4. A page with `noindex` is skipped. A site that asked the search engines
