@@ -22,23 +22,14 @@ const healthy: CapabilityReport = {
 
   value: StoreKind.GmSync({ watchable: true }),
   openInTab: true,
-  openInTabBackground: true,
   setClipboard: true,
-  xhr: true,
   windowClose: true,
 
   adoptedStyleSheets: true,
-  constructableStyleSheets: true,
   checkVisibility: true,
   composedRanges: true,
-  caretPositionFromPoint: true,
-  caretRangeFromPoint: true,
   selectionModify: true,
   clipboardWrite: true,
-  clipboardRead: true,
-  idleCallback: true,
-  visualViewport: true,
-  secureContext: true,
   webkitLike: true,
   applePlatform: false,
 };

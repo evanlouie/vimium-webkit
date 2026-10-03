@@ -3,7 +3,7 @@
  *
  * Safari still does not have `requestIdleCallback` (true at 26.5), so idle
  * work — hint detection above all — is cut into slices by hand against a time
- * budget. Do not call `requestIdleCallback` in any other file.
+ * budget. Do not call `requestIdleCallback`.
  *
  * Most of the old module is gone, because Effect already has it:
  *
@@ -19,7 +19,7 @@
  *   the fiber, so there is no `cancel` method for a caller to remember.
  */
 
-import { Array, Boolean, Effect, Option, Predicate, Ref, flow, pipe } from "effect";
+import { Array, Boolean, Effect, Option, Ref, flow, pipe } from "effect";
 import { Dom } from "~/platform/Dom.ts";
 
 /** The length of one slice. Chosen to stay inside one 60 Hz frame. */
@@ -27,18 +27,6 @@ export const CHUNK_BUDGET_MS = 8;
 
 /** How many items are mapped before the clock is read again. */
 const DEFAULT_CHECK_EVERY = 32;
-
-/**
- * True when this realm has a native `requestIdleCallback`.
- *
- * `Capabilities` reports it. Nothing else may use it, because the answer is
- * `false` on the browser that this application targets first.
- *
- * The read can throw, because a userscript does not own its globals. Call this
- * inside `Dom.probeOrElse`.
- */
-export const hasNativeIdleCallback = (window: Window & typeof globalThis): boolean =>
-  Predicate.isFunction(window.requestIdleCallback);
 
 export interface ChunkedOptions {
   /** The time budget for one slice, in milliseconds. */

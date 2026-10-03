@@ -30,11 +30,10 @@ import {
   pipe,
 } from "effect";
 import { constFalse } from "effect/Function";
-import { clipboardReader, clipboardWriter } from "~/platform/Clipboard.ts";
+import { clipboardWriter } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Gm, StoreKind } from "~/platform/Gm.ts";
 import { KeyValueStore } from "~/platform/KeyValueStore.ts";
-import { hasNativeIdleCallback } from "~/platform/Scheduler.ts";
 
 export type ManagerName =
   | "violentmonkey"
@@ -57,24 +56,15 @@ export interface CapabilityReport {
   // --- The manager surface ---
   readonly value: StoreKind;
   readonly openInTab: boolean;
-  readonly openInTabBackground: boolean;
   readonly setClipboard: boolean;
-  readonly xhr: boolean;
   readonly windowClose: boolean;
 
   // --- The browser surface ---
   readonly adoptedStyleSheets: boolean;
-  readonly constructableStyleSheets: boolean;
   readonly checkVisibility: boolean;
   readonly composedRanges: boolean;
-  readonly caretPositionFromPoint: boolean;
-  readonly caretRangeFromPoint: boolean;
   readonly selectionModify: boolean;
   readonly clipboardWrite: boolean;
-  readonly clipboardRead: boolean;
-  readonly idleCallback: boolean;
-  readonly visualViewport: boolean;
-  readonly secureContext: boolean;
   readonly webkitLike: boolean;
   readonly applePlatform: boolean;
 }
@@ -234,8 +224,6 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
       return pipe(ua, Option.liftPredicate(Predicate.isString), Option.exists(isWebKitAgent));
     });
 
-    const constructableStyleSheets = yield* flag(() => typeof CSSStyleSheet === "function");
-
     /**
      * Is this macOS, iOS or iPadOS?
      *
@@ -247,18 +235,9 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
 
     const checkVisibility = yield* flag(() => isCallable(Element.prototype, "checkVisibility"));
     const composedRanges = yield* flag(() => isCallable(Selection.prototype, "getComposedRanges"));
-    const caretPositionFromPoint = yield* flag(() => isCallable(doc, "caretPositionFromPoint"));
-    const caretRangeFromPoint = yield* flag(() => isCallable(doc, "caretRangeFromPoint"));
-    // The same accessors that `Clipboard` calls, so the report and the feature
+    // The same accessor that `Clipboard` calls, so the report and the feature
     // cannot disagree about what exists.
     const clipboardWrite = yield* flag(() => Option.isSome(clipboardWriter(win)));
-    const clipboardRead = yield* flag(() => Option.isSome(clipboardReader(win)));
-    const idleCallback = yield* flag(() => hasNativeIdleCallback(win));
-    const visualViewport = yield* flag(() => {
-      const viewport: unknown = win.visualViewport;
-      return Predicate.isObjectKeyword(viewport);
-    });
-    const secureContext = yield* flag(() => win.isSecureContext === true);
 
     const identity = gm.identity;
 
@@ -273,25 +252,14 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
       // truth prevents that defect.
       value: kv.kind,
       openInTab: gm.canOpenInTab,
-      // No manager in the matrix refuses `{ active: false }`, but quoid ignores
-      // it. Reported as available, and checked by hand.
-      openInTabBackground: gm.canOpenInTab,
       setClipboard: gm.canSetClipboard,
-      xhr: gm.canRequest,
       windowClose: gm.canCloseWindow,
 
       adoptedStyleSheets,
-      constructableStyleSheets,
       checkVisibility,
       composedRanges,
-      caretPositionFromPoint,
-      caretRangeFromPoint,
       selectionModify,
       clipboardWrite,
-      clipboardRead,
-      idleCallback,
-      visualViewport,
-      secureContext,
       webkitLike,
       applePlatform,
     };

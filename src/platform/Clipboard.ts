@@ -60,7 +60,7 @@ const denied = (cause: unknown): ClipboardError =>
 // ---------------------------------------------------------------------------
 
 export type ClipboardWriter = (text: string) => Promise<void>;
-export type ClipboardReader = () => Promise<string>;
+type ClipboardReader = () => Promise<string>;
 
 /**
  * `navigator.clipboard.writeText`, already bound.
@@ -82,9 +82,7 @@ export const clipboardWriter = (
   );
 
 /** `navigator.clipboard.readText`, already bound. The same rules apply. */
-export const clipboardReader = (
-  window: Window & typeof globalThis,
-): Option.Option<ClipboardReader> =>
+const clipboardReader = (window: Window & typeof globalThis): Option.Option<ClipboardReader> =>
   pipe(
     window.navigator.clipboard,
     Option.fromNullishOr,

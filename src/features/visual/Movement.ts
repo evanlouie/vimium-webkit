@@ -338,65 +338,6 @@ export interface CaretPoint {
   readonly offset: number;
 }
 
-type CaretReader = (x: number, y: number) => Option.Option<CaretPoint>;
-
-const positionReader =
-  (document: Document): CaretReader =>
-  (x, y) =>
-    pipe(
-      document.caretPositionFromPoint(x, y),
-      Option.fromNullishOr,
-      Option.map((position) => ({ node: position.offsetNode, offset: position.offset })),
-    );
-
-const rangeReader =
-  (document: Document): CaretReader =>
-  (x, y) =>
-    pipe(
-      document.caretRangeFromPoint(x, y),
-      Option.fromNullishOr,
-      Option.map((range) => ({ node: range.startContainer, offset: range.startOffset })),
-    );
-
-/**
- * Change coordinates in the viewport into a caret position.
- *
- * The order of the feature detection is the **opposite** of the usual advice.
- * Everybody says to prefer the standard `caretPositionFromPoint` and to fall
- * back to the WebKit `caretRangeFromPoint`. The standard one arrived only in
- * Safari 26.2, and the older one has been there since Safari 5. The order below
- * therefore still prefers the standard API where it exists, and it does not
- * treat the absence of that API as exotic.
- *
- * The capability report decides, so that one probe answers for the whole
- * application. Each method is also looked for, because the DOM library that we
- * compile against declares both, and a realm need not have either.
- */
-export const caretAtPoint = (
-  document: Document,
-  capabilities: CapabilityReport,
-  x: number,
-  y: number,
-): Option.Option<CaretPoint> =>
-  pipe(
-    positionReader(document),
-    Option.liftPredicate(
-      () =>
-        capabilities.caretPositionFromPoint &&
-        typeof document.caretPositionFromPoint === "function",
-    ),
-    Option.orElse(() =>
-      pipe(
-        rangeReader(document),
-        Option.liftPredicate(
-          () =>
-            capabilities.caretRangeFromPoint && typeof document.caretRangeFromPoint === "function",
-        ),
-      ),
-    ),
-    Option.flatMap((read) => read(x, y)),
-  );
-
 // ---------------------------------------------------------------------------
 // Selection reads that see into a shadow root
 // ---------------------------------------------------------------------------
