@@ -29,10 +29,11 @@ import {
   Array,
   Boolean,
   Clock,
+  Deferred,
+  Duration,
   Effect,
   Option,
   Predicate,
-  Ref,
   type Scope,
   pipe,
   String,
@@ -223,6 +224,12 @@ export type PrivacyProbe = "clear" | "storage-blocked" | "tiny-quota";
  */
 const PRIVATE_QUOTA_CEILING_BYTES = 128 * 1024 * 1024;
 
+/**
+ * How long a recording waits for the probe. The probe answers in a few
+ * milliseconds, and a probe that has not answered by then counts as private.
+ */
+const PRIVACY_PROBE_TIMEOUT = Duration.seconds(1);
+
 /** `navigator.storage.estimate`, already bound to its owner. */
 type StorageEstimator = () => Promise<StorageEstimate>;
 
@@ -354,9 +361,11 @@ interface Recordable {
 /**
  * Build the index for this frame.
  *
- * The private-browsing probe runs in a fiber of the enclosing scope. Until it
- * answers, the state is "unknown", which counts as private. The very first
- * page of a session therefore cannot pass through before we know.
+ * The private-browsing probe runs in a fiber of the enclosing scope, and a
+ * recording waits for its answer. The wait matters: on a manager with a
+ * synchronous store, the first recording comes before the probe has had a
+ * turn. An answer that does not come in time counts as private, so the very
+ * first page of a session cannot pass through before we know.
  */
 export const makeHistoryIndex: Effect.Effect<
   HistoryIndex,
@@ -367,12 +376,8 @@ export const makeHistoryIndex: Effect.Effect<
   const settings = yield* Settings;
   const storage = yield* Storage;
 
-  const privacy = yield* Ref.make(Option.none<PrivacyProbe>());
-  yield* pipe(
-    detectPrivateBrowsing,
-    Effect.flatMap((result) => Ref.set(privacy, Option.some(result))),
-    Effect.forkScoped,
-  );
+  const privacy = yield* Deferred.make<PrivacyProbe>();
+  yield* pipe(detectPrivateBrowsing, Deferred.into(privacy), Effect.forkScoped);
 
   /** The page and the limit, or the first gate that stops the recording. */
   const recordable = Effect.fnUntraced(function* (): Effect.fn.Return<Recordable, RecordingBlock> {
@@ -390,7 +395,8 @@ export const makeHistoryIndex: Effect.Effect<
       ),
     );
     yield* pipe(
-      Ref.get(privacy),
+      Deferred.await(privacy),
+      Effect.timeoutOption(PRIVACY_PROBE_TIMEOUT),
       Effect.filterOrFail(Option.contains<PrivacyProbe>("clear"), (): RecordingBlock => "private"),
     );
     const url = yield* pipe(

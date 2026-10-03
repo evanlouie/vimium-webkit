@@ -31,6 +31,7 @@ import {
   Context,
   Effect,
   Exit,
+  FiberSet,
   Layer,
   Match,
   Option,
@@ -303,7 +304,12 @@ const withSignal =
 export class Omnibar extends Context.Service<
   Omnibar,
   {
-    /** Record this page in the local index, when the user turned the index on. */
+    /**
+     * Record this page in the local index, when the user turned the index on.
+     *
+     * It returns at once. The recording waits for the private-browsing probe
+     * on a fiber of the layer, so the caller never waits for it.
+     */
     readonly noteVisit: Effect.Effect<void>;
   }
 >()("vimium/features/omnibar/Omnibar") {
@@ -337,6 +343,10 @@ export class Omnibar extends Context.Service<
 
       const history = yield* makeHistoryIndex;
       const suggester = yield* makeSuggester;
+
+      // The fibers that outlive the call that starts them. They belong to the
+      // layer, and stop with it.
+      const fibers = yield* FiberSet.make<void, never>();
 
       // The services that the view needs, captured once. A session is opened
       // from a command body, which carries nothing of its own.
@@ -816,7 +826,12 @@ export class Omnibar extends Context.Service<
       yield* Effect.addFinalizer(() => close);
 
       return Omnibar.of({
-        noteVisit: pipe(history.record, Effect.andThen(heartbeat())),
+        noteVisit: pipe(
+          history.record,
+          Effect.andThen(heartbeat()),
+          FiberSet.run(fibers),
+          Effect.asVoid,
+        ),
       });
     }),
   );
