@@ -349,9 +349,12 @@ export class Omnibar extends Context.Service<
       // layer, and stop with it.
       const fibers = yield* FiberSet.make<void, never>();
 
-      // The services that the view needs, captured once. A session is opened
-      // from a command body, which carries nothing of its own.
-      const services = yield* Effect.context<Dom | Ui>();
+      // The services that the view needs, and only those. A session is opened
+      // from a command body, which carries nothing of its own. The whole
+      // context of the layer would carry the layer scope too, and that scope
+      // would take the view from the session scope: closing the session would
+      // leave the overlay on screen.
+      const services = pipe(Context.make(Dom, dom), Context.add(Ui, ui));
 
       // Installed once, with the layer. CSSOM only: a `<style>` element here
       // would obey the `style-src` of the page and be dropped on any site with
