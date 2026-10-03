@@ -10,7 +10,12 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Array, Effect, flow, Iterable, Option, pipe, String as Str } from "effect";
 import { compilePattern, MAX_REGEX_URL_LENGTH } from "~/domain/Exclusion.ts";
-import { collectSpans, MAX_MATCH_LENGTH, SEARCH_WINDOW } from "~/features/find/Engine.ts";
+import {
+  collectSpans,
+  DEFAULT_MATCH_LIMIT,
+  MAX_MATCH_LENGTH,
+  SEARCH_WINDOW,
+} from "~/features/find/Engine.ts";
 
 /** A URL that no expression can match, and that every loop must walk. */
 const hostileUrl = (length: number): string => "a".repeat(length);
@@ -73,20 +78,27 @@ describe("the find budget", () => {
     Effect.sync(() => {
       const haystack = `head${"a".repeat(3 * SEARCH_WINDOW)}tail`;
 
+      // `/a+tail$/` costs the square of each window. On a loaded machine the
+      // search can outlast `MATCH_BUDGET_MS`, and it then stops before the
+      // window that holds the end of the text. That stop is the budget at
+      // work, and not a broken `$`, so these searches have no deadline.
+      const search = (pattern: RegExp) =>
+        collectSpans(haystack, pattern, DEFAULT_MATCH_LIMIT, Number.POSITIVE_INFINITY);
+
       // `^` matches at the start of the text, and nowhere else. A window that
       // begins in the middle must not give it a second start.
-      const heads = collectSpans(haystack, /^head|head/g);
+      const heads = search(/^head|head/g);
       assert.deepEqual(heads.spans, [{ start: 0, end: 4 }]);
 
       // `$` matches at the end of the text, and not at the end of a window.
-      const tails = collectSpans(haystack, /a+tail$/g);
+      const tails = search(/a+tail$/g);
       const ends = pipe(
         tails.spans,
         Array.map(({ end }) => end),
       );
       assert.deepStrictEqual(ends, [haystack.length]);
 
-      const nothing = collectSpans(haystack, /a$/g);
+      const nothing = search(/a$/g);
       assert.deepEqual(nothing.spans, []);
     }),
   );
