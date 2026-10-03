@@ -9,9 +9,10 @@
  *
  * The old version told the HUD to show the indicator. This one does not, and it
  * must not: a feature does not speak to the user interface, and the HUD reads
- * the indicator of the mode stack. Insert mode therefore opens a second, empty
- * mode frame whose only content is the indicator, and closes it again when the
- * user stops typing.
+ * the indicator of the mode stack. Element insert mode therefore opens a second,
+ * empty mode frame whose only content is the indicator, and closes it again when
+ * the user stops typing. Global insert mode is a mode of its own, and it carries
+ * its own indicator.
  */
 
 import {
@@ -24,7 +25,6 @@ import {
   Predicate,
   Ref,
   Scope,
-  Struct,
   flow,
   pipe,
 } from "effect";
@@ -187,16 +187,6 @@ const caretToEnd = (field: HTMLInputElement | HTMLTextAreaElement): void => {
   field.setSelectionRange(end, end);
 };
 
-interface InsertState {
-  /** The element that has focus, when it is one that we gave the keys to. */
-  readonly element: Option.Option<HTMLElement>;
-  /** Global insert mode: every key goes to the page, whatever has focus. */
-  readonly global: boolean;
-}
-
-/** Nobody is typing. */
-const IDLE: InsertState = { element: Option.none(), global: false };
-
 export class Insert extends Context.Service<
   Insert,
   {
@@ -223,11 +213,15 @@ export class Insert extends Context.Service<
         const report = yield* Report;
         const settings = yield* Settings;
 
-        const state = yield* Ref.make<InsertState>(IDLE);
+        /** The element that has focus, when it is one that we gave the keys to. */
+        const field = yield* Ref.make(Option.none<HTMLElement>());
+        /** The frame that shows the indicator while the user types into `field`. */
         const badge = yield* Ref.make(Option.none<ModeHandle>());
+        /** Global insert mode. The live mode is the state, and it carries its own indicator. */
+        const global = yield* Ref.make(Option.none<ModeHandle>());
 
-        // The indicator frame belongs to the layer scope, which exits it when
-        // the runtime stops. It owns a scope inside that one, so a frame that
+        // Both frames belong to the layer scope, which exits them when the
+        // runtime stops. Each one owns a scope inside that one, so a frame that
         // closes leaves nothing behind there.
         const layerScope = yield* Scope.Scope;
 
@@ -273,11 +267,6 @@ export class Insert extends Context.Service<
           );
         });
 
-        const isInserting = pipe(
-          Ref.get(state),
-          Effect.map((current) => current.global || Option.isSome(current.element)),
-        );
-
         /**
          * Show the indicator, as a mode frame of its own.
          *
@@ -303,11 +292,7 @@ export class Insert extends Context.Service<
 
         /** Give the keys to an element that has the focus. */
         const adopt = (element: HTMLElement): Effect.Effect<void> =>
-          pipe(
-            state,
-            Ref.update(Struct.assign({ element: Option.some(element) })),
-            Effect.andThen(showIndicator()),
-          );
+          pipe(field, Ref.set(Option.some(element)), Effect.andThen(showIndicator()));
 
         /** The page may have detached the element already. */
         const blurElement = (element: HTMLElement): Effect.Effect<void> =>
@@ -335,11 +320,11 @@ export class Insert extends Context.Service<
 
         const onKeydown = (event: KeyboardEvent): Effect.Effect<HandlerResult> =>
           pipe(
-            isInserting,
+            Ref.get(field),
             Effect.flatMap(
-              Boolean.match({
-                onFalse: () => Effect.succeed(CONTINUE_BUBBLING),
-                onTrue: () => typedKey(event),
+              Option.match({
+                onNone: () => Effect.succeed(CONTINUE_BUBBLING),
+                onSome: () => typedKey(event),
               }),
             ),
           );
@@ -366,42 +351,56 @@ export class Insert extends Context.Service<
           return CONTINUE_BUBBLING;
         });
 
-        /** The element that had the keys lost the focus. Global insert mode keeps its indicator. */
-        const leave = Effect.fnUntraced(function* (current: InsertState) {
-          const left: InsertState = pipe(current, Struct.assign({ element: Option.none() }));
-          yield* pipe(state, Ref.set(left));
-          yield* pipe(
-            current.global,
-            Boolean.match({ onFalse: () => hideIndicator, onTrue: () => Effect.void }),
-          );
-        });
+        /** The element that had the keys lost the focus. */
+        const leave = pipe(
+          field,
+          Ref.set(Option.none<HTMLElement>()),
+          Effect.andThen(hideIndicator),
+        );
 
         const onBlur = Effect.fnUntraced(function* (event: FocusEvent) {
-          const current = yield* Ref.get(state);
+          const current = yield* Ref.get(field);
           // The same rule as the focus above. The blur of a field inside an
           // open shadow root names the host, so a compare against
           // `event.target` never matched. Insert mode then stayed on after the
           // field went away.
           const target = yield* focusedNode(event);
           yield* pipe(
-            current.element,
+            current,
             Option.filter((element) => element === target),
-            Option.match({ onNone: () => Effect.void, onSome: () => leave(current) }),
+            Option.match({ onNone: () => Effect.void, onSome: () => leave }),
           );
           return CONTINUE_BUBBLING;
         });
 
+        /**
+         * `i` — global insert mode, as a mode of its own.
+         *
+         * While the mode is live, every key goes to the page and the HUD says
+         * so. A navigation exits it as it exits every transient mode, and no
+         * flag is left behind that still gives the keys away.
+         */
         const enterGlobal = Effect.fn("Insert.enter")(function* () {
-          yield* pipe(state, Ref.update(Struct.assign({ global: true })));
-          yield* showIndicator();
+          yield* ensureFrame(
+            global,
+            modes.enter(
+              {
+                name: "insert-global",
+                indicator: Option.some(INSERT_INDICATOR),
+                exitOn: [],
+                keyboard: KeyPolicy.Shared(),
+                singleton: Option.none(),
+              },
+              { keydown: typedKey },
+            ),
+          );
         });
 
+        /** Escape: stop typing, whichever insert mode had the keys. */
         const exitInsert = Effect.fn("Insert.exit")(function* () {
-          const current = yield* pipe(state, Ref.getAndSet(IDLE));
-          yield* pipe(
-            current.element,
-            Option.match({ onNone: () => Effect.void, onSome: blurElement }),
-          );
+          yield* closeFrame(global);
+          const typing = yield* pipe(field, Ref.getAndSet(Option.none<HTMLElement>()));
+          yield* pipe(typing, Option.match({ onNone: () => Effect.void, onSome: blurElement }));
           yield* hideIndicator;
         });
 
@@ -495,10 +494,9 @@ export class Insert extends Context.Service<
         });
 
         /** Blur the field that the page focused, and take the keys back from it. */
-        const giveBack = Effect.fnUntraced(function* (field: HTMLElement) {
-          yield* blurElement(field);
-          yield* pipe(state, Ref.update(Struct.assign({ element: Option.none<HTMLElement>() })));
-          yield* hideIndicator;
+        const giveBack = Effect.fnUntraced(function* (element: HTMLElement) {
+          yield* blurElement(element);
+          yield* leave;
         });
 
         /**
