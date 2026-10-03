@@ -40,6 +40,7 @@ import {
   Layer,
   MutableRef,
   Option,
+  PubSub,
   Queue,
   Result,
   Schema,
@@ -120,6 +121,16 @@ export interface ValueGroup<A> {
 
   /** The current value, and then every later value. */
   readonly changes: Stream.Stream<A>;
+
+  /**
+   * One element each time a write or a reset of this frame reaches the backend.
+   *
+   * `changes` comes earlier, because memory takes a written value before the
+   * backend does. Wait for this when another frame must find the value in the
+   * backend. A change from another tab is not here: each frame hears that for
+   * itself.
+   */
+  readonly committed: Stream.Stream<void>;
 
   /** Read the backend again. This never fails; it reports and uses defaults. */
   readonly hydrate: Effect.Effect<A>;
@@ -213,7 +224,7 @@ type Held<A> = Data.TaggedEnum<{
   Holding: { readonly value: A; readonly waiters: Array.NonEmptyReadonlyArray<Waiter> };
   /**
    * The exit path wrote the held value. The callers still wait for the actor,
-   * which answers them on its next turn.
+   * which answers them, and announces the write, on its next turn.
    */
   Written: { readonly waiters: Array.NonEmptyReadonlyArray<Waiter> };
 }>;
@@ -318,6 +329,7 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
 
   const memory = yield* SubscriptionRef.make(spec.defaults());
   const mailbox = yield* Queue.unbounded<Command<A>>();
+  const commits = yield* PubSub.unbounded<void>();
 
   // References and not `Ref`s, because the exit path reads and writes them with
   // no effect. Apart from that path, only the group fiber touches them, so
@@ -367,6 +379,24 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
     Effect.sync(() => {
       pipe(readFailure, MutableRef.set(failed));
     });
+
+  /** Tell whoever waits on `committed` that a write of this frame reached the backend. */
+  const announce: Effect.Effect<void> = pipe(
+    commits,
+    PubSub.publish<void>(undefined),
+    Effect.asVoid,
+  );
+
+  /**
+   * A write or a reset of this frame reached the backend.
+   *
+   * The backend holds what this build wrote, so `update` may work from
+   * memory again.
+   */
+  const reachedBackend: Effect.Effect<void> = pipe(
+    setReadFailure(Option.none()),
+    Effect.andThen(announce),
+  );
 
   // -- decoding ------------------------------------------------------------
 
@@ -493,7 +523,7 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
       Effect.flatMap((bytes) =>
         pipe(kv.set(key, bytes), Effect.mapError(backendWriteFailure), Effect.tapError(report)),
       ),
-      Effect.andThen(setReadFailure(Option.none())),
+      Effect.andThen(reachedBackend),
     );
 
   /** One direct write. A throw becomes a failure, so the exit path never throws. */
@@ -595,7 +625,9 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
       Held.$match({
         Empty: () => Effect.succeed(Exit.void),
         Holding: ({ value }) => Effect.exit(commit(value)),
-        Written: () => Effect.succeed(Exit.void),
+        // The exit path cleared the read failure when it wrote. A failure that
+        // a later read found must stand.
+        Written: () => pipe(announce, Effect.as(Exit.void)),
       }),
     );
     yield* settle(waitersOf(taken), outcome);
@@ -737,7 +769,7 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
       removed,
       Exit.match({
         onFailure: () => Effect.void,
-        onSuccess: () => setReadFailure(Option.none()),
+        onSuccess: () => reachedBackend,
       }),
     );
     const answer = pipe(
@@ -863,6 +895,7 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
     current: SubscriptionRef.get(memory),
     currentUnsafe: () => SubscriptionRef.getUnsafe(memory),
     changes: SubscriptionRef.changes(memory),
+    committed: Stream.fromPubSub(commits),
     hydrate: ask<A, never>((reply) => Command.Hydrate({ reply })),
     write: (next) => ask<void, StorageError>((reply) => Command.Write({ value: next, reply })),
     update: (change) => ask<A, StorageError>((reply) => Command.Update({ change, reply })),

@@ -28,6 +28,14 @@ export class Settings extends Context.Service<
     readonly changes: Stream.Stream<SettingsData>;
 
     /**
+     * One element each time settings that this frame saved reach storage.
+     *
+     * `changes` comes earlier, because memory takes the settings before
+     * storage does. Wait for this when another frame must read them.
+     */
+    readonly committed: Stream.Stream<void>;
+
+    /**
      * Replace the settings.
      *
      * It completes when the value reaches storage. The value that it gives back
@@ -50,6 +58,7 @@ export class Settings extends Context.Service<
         current: group.current,
         currentUnsafe: group.currentUnsafe,
         changes: group.changes,
+        committed: group.committed,
         save: Effect.fn("Settings.save")(function* (next: SettingsData) {
           yield* group.write(next);
           // Adopt what was stored, and not what was offered. The schema repairs

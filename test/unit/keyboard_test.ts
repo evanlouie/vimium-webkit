@@ -162,6 +162,7 @@ const settingsOf = (data: SettingsData): Layer.Layer<Settings> =>
       current: Effect.succeed(data),
       currentUnsafe: () => data,
       changes: Stream.make(data),
+      committed: Stream.empty,
       save: (next) => Effect.succeed(next),
       reload: Effect.succeed(data),
     }),
