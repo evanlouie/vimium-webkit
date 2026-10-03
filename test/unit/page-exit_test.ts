@@ -10,19 +10,18 @@
  *    write that the exit hook exists to save.
  * 3. A page that the browser keeps is not released. `pagehide` with
  *    `persisted === true` means that the page may come back, and a restored
- *    page never runs its scripts again. A released runtime cannot be used
- *    again: `dispose` replaces its context with a defect and closes its scope.
- *    A frame that released there would come back dead.
+ *    page never runs its scripts again. A released application cannot be used
+ *    again: its scope is closed, and every listener of it is gone. A frame that
+ *    released there would come back dead.
  *
- * The test uses a true `ManagedRuntime` over a layer that counts what it
- * acquires and what it releases, so the answers come from Effect and not from a
- * model of it.
+ * The test launches a true layer that counts what it acquires and what it
+ * releases, so the answers come from Effect and not from a model of it.
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Exit, Layer, ManagedRuntime, pipe } from "effect";
+import { Deferred, Effect, Layer, pipe } from "effect";
 import { constVoid } from "effect/Function";
-import { type ExitParts, makeOwnedRuntime, onPageExit } from "~/boot/Bootstrap.ts";
+import { type ExitParts, launch, onPageExit, RuntimeOwner } from "~/boot/Bootstrap.ts";
 import { PageExit } from "~/boot/Lifecycle.ts";
 
 // ---------------------------------------------------------------------------
@@ -48,15 +47,19 @@ const countedLayer = (log: string[]): Layer.Layer<never> =>
     ),
   );
 
-/** Build a runtime for one frame, and give back what the exit hook needs. */
-const startFrame = (log: string[]) =>
-  makeOwnedRuntime((owner) => ManagedRuntime.make(Layer.merge(countedLayer(log), owner)));
-
-/** Run one effect in a frame. The layer is lazy, so the first run builds it. */
-const runIn = <A>(
-  frame: ReturnType<typeof startFrame>,
-  effect: Effect.Effect<A>,
-): Effect.Effect<A> => Effect.promise(() => frame.runtime.runPromise(effect));
+/** Launch a frame, and keep the release that it gives its application. */
+const startFrame = (log: string[]): Effect.Effect<Effect.Effect<void>> =>
+  Effect.gen(function* () {
+    const owner = yield* Deferred.make<Effect.Effect<void>>();
+    const keepRelease = Layer.effectDiscard(
+      pipe(
+        RuntimeOwner,
+        Effect.flatMap(({ release }) => pipe(owner, Deferred.succeed(release))),
+      ),
+    );
+    yield* launch(Layer.mergeAll(countedLayer(log), keepRelease));
+    return yield* Deferred.await(owner);
+  });
 
 /** The parts of an exit hook that write nothing, around one release. */
 const releaseOnly = (release: Effect.Effect<void>): ExitParts => ({
@@ -70,17 +73,14 @@ const releaseOnly = (release: Effect.Effect<void>): ExitParts => ({
 // The tests
 // ---------------------------------------------------------------------------
 
-describe("the runtime of a frame", () => {
+describe("the application of a frame", () => {
   it.effect("acquires and releases in step over repeated starts and exits", () =>
     Effect.gen(function* () {
       const log: string[] = [];
 
       const startAndExit = Effect.gen(function* () {
-        const frame = startFrame(log);
-        // The layer is lazy. Running one effect builds it, exactly as the
-        // first run of the application does.
-        yield* runIn(frame, Effect.void);
-        yield* onPageExit(releaseOnly(frame.release))(PageExit.Final());
+        const release = yield* startFrame(log);
+        yield* onPageExit(releaseOnly(release))(PageExit.Final());
       });
 
       yield* pipe(startAndExit, Effect.replicateEffect(3, { discard: true }));
@@ -99,37 +99,28 @@ describe("the runtime of a frame", () => {
   it.effect("keeps everything when the browser keeps the page", () =>
     Effect.gen(function* () {
       const log: string[] = [];
-      const frame = startFrame(log);
-      yield* runIn(frame, Effect.void);
+      const release = yield* startFrame(log);
 
-      yield* onPageExit(releaseOnly(frame.release))(PageExit.Resumable());
+      yield* onPageExit(releaseOnly(release))(PageExit.Resumable());
 
       assert.deepStrictEqual(log, ["acquire"]);
 
-      // The proof that matters for the back/forward cache: the frame still
-      // works. A restored page never runs its scripts again, so this runtime
-      // is the only one that it will ever have.
-      const answer = yield* runIn(frame, Effect.succeed("alive"));
-      assert.strictEqual(answer, "alive");
+      // A restored page never runs its scripts again, so this application is
+      // the only one that it will ever have. It is still there to release.
+      yield* onPageExit(releaseOnly(release))(PageExit.Final());
+      assert.deepStrictEqual(log, ["acquire", "release"]);
     }),
   );
 
-  it.effect("cannot be used again after a final exit", () =>
+  it.effect("releases once, however often it is asked", () =>
     Effect.gen(function* () {
       const log: string[] = [];
-      const frame = startFrame(log);
-      yield* runIn(frame, Effect.void);
+      const release = yield* startFrame(log);
 
-      yield* onPageExit(releaseOnly(frame.release))(PageExit.Final());
+      yield* onPageExit(releaseOnly(release))(PageExit.Final());
+      yield* onPageExit(releaseOnly(release))(PageExit.Final());
 
       assert.deepStrictEqual(log, ["acquire", "release"]);
-
-      // This is why a persisted exit must not release. `dispose` puts a
-      // defect in the place of the context.
-      const outcome = yield* Effect.promise(() =>
-        frame.runtime.runPromiseExit(Effect.succeed("alive")),
-      );
-      assert.isTrue(Exit.isFailure(outcome), "a released runtime must refuse work");
     }),
   );
 
@@ -137,20 +128,15 @@ describe("the runtime of a frame", () => {
     Effect.gen(function* () {
       const top: string[] = [];
       const child: string[] = [];
-      const topFrame = startFrame(top);
-      const childFrame = startFrame(child);
-      yield* runIn(topFrame, Effect.void);
-      yield* runIn(childFrame, Effect.void);
+      yield* startFrame(top);
+      const releaseChild = yield* startFrame(child);
 
       // The child document goes away. Each frame has its own realm, its own
-      // window and its own runtime, so `pagehide` reaches the child only.
-      yield* onPageExit(releaseOnly(childFrame.release))(PageExit.Final());
+      // window and its own application, so `pagehide` reaches the child only.
+      yield* onPageExit(releaseOnly(releaseChild))(PageExit.Final());
 
       assert.deepStrictEqual(child, ["acquire", "release"]);
       assert.deepStrictEqual(top, ["acquire"]);
-
-      const answer = yield* runIn(topFrame, Effect.succeed("alive"));
-      assert.strictEqual(answer, "alive");
     }),
   );
 });

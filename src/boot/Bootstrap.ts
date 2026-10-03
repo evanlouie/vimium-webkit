@@ -9,13 +9,14 @@
 
 import {
   Boolean,
+  type Cause,
   Context,
   Effect,
+  Exit,
   Layer,
-  type ManagedRuntime,
   Match,
-  MutableRef,
   Option,
+  Scope,
   Stream,
   pipe,
 } from "effect";
@@ -25,7 +26,7 @@ import { Keyboard } from "~/core/Keyboard.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
-import { describeThrown } from "~/domain/Failure.ts";
+import { describeCause } from "~/domain/Failure.ts";
 import { FrameBus, REQUEST_DEADLINE } from "~/frames/Bus.ts";
 import { Capabilities, degradationWarnings } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -49,16 +50,16 @@ export class Boot extends Context.Service<Boot, BootSignal>()("vimium/boot/Boot"
 }
 
 /**
- * Who owns the runtime of this frame.
+ * Who owns the scope of this frame's application.
  *
- * A runtime cannot close its own scope from inside itself. `src/main.ts` builds
- * the runtime, so `src/main.ts` gives this service. The application asks for the
- * release, and it never decides how the release happens.
+ * The application cannot close its own scope from inside itself. `launch`
+ * makes the scope, so `launch` gives this service. The application asks for
+ * the release, and it never decides how the release happens.
  */
 export class RuntimeOwner extends Context.Service<
   RuntimeOwner,
   {
-    /** Release everything that this frame's runtime holds. */
+    /** Release everything that this frame's application holds. */
     readonly release: Effect.Effect<void>;
   }
 >()("vimium/boot/RuntimeOwner") {
@@ -111,59 +112,43 @@ export const onPageExit = (parts: ExitParts): ExitHook =>
     );
   });
 
-/** A runtime, and the one effect that closes it. */
-export interface OwnedRuntime<R, ER> {
-  readonly runtime: ManagedRuntime.ManagedRuntime<R, ER>;
-  /** Close the runtime scope. It is safe to run it more than once. */
-  readonly release: Effect.Effect<void>;
-}
-
 /**
- * Say that a runtime failed to close.
+ * Say that the application failed to start.
  *
- * `console.error`, because the runtime that would log it is the one that is
- * closing, and a userscript shares its console with the page. The console
+ * `console.error`, because the logger of the application is part of what
+ * failed, and a userscript shares its console with the page. The console
  * therefore gets the text of the failure, and not the value itself.
  */
-const reportReleaseFailure = (cause: unknown): void => {
-  console.error("[vimium-webkit] failed to release", describeThrown(cause));
-};
-
-/** Close one runtime. `dispose` gives a promise, so this is the one edge for it. */
-const dispose = <R, ER>(runtime: ManagedRuntime.ManagedRuntime<R, ER>): Effect.Effect<void> =>
-  Effect.promise(() => runtime.dispose().catch(reportReleaseFailure));
+const reportStartFailure = (cause: Cause.Cause<unknown>): Effect.Effect<void> =>
+  Effect.sync(() => {
+    console.error("[vimium-webkit] failed to start", describeCause(cause));
+  });
 
 /**
- * Build a runtime that can ask to be released.
+ * Build the application in a scope of its own, and give it the release of that
+ * scope.
  *
- * The two needs make a circle: the layer needs a way to release the runtime,
- * and the runtime does not exist until the layer is built. The holder below
- * breaks the circle, because `Effect.suspend` reads it when the release runs.
- * The release empties the holder, so a second release finds nothing to close.
+ * The release closes the scope, so every listener, port, stylesheet, manager
+ * callback and fiber of the graph goes with it, and nothing of the graph runs
+ * again. The application must therefore ask for the release only when this
+ * document will not run again. A second release does nothing.
  *
- * `dispose` closes the scope that the layer owns, so every listener, port,
- * stylesheet, manager callback and fiber goes with it. It also replaces the
- * context of the runtime with a defect. A runtime that was released cannot run
- * anything again. The caller must therefore ask for the release only when this
- * document will not run again.
+ * A failure to start must never break the page. It is reported once, and the
+ * part of the graph that was built before it is released: that part holds
+ * listeners of the page, and nothing else knows about it.
  */
-export const makeOwnedRuntime = <R, ER>(
-  build: (owner: Layer.Layer<RuntimeOwner>) => ManagedRuntime.ManagedRuntime<R, ER>,
-): OwnedRuntime<R, ER> => {
-  const live = MutableRef.make(Option.none<ManagedRuntime.ManagedRuntime<R, ER>>());
-
-  const release = Effect.suspend(() =>
-    pipe(
-      live,
-      MutableRef.getAndSet(Option.none<ManagedRuntime.ManagedRuntime<R, ER>>()),
-      Option.match({ onNone: () => Effect.void, onSome: dispose }),
-    ),
-  );
-
-  const runtime = build(RuntimeOwner.layerFrom(release));
-  pipe(live, MutableRef.set(Option.some(runtime)));
-  return { runtime, release };
-};
+export const launch = (application: Layer.Layer<never, never, RuntimeOwner>): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    const scope = yield* Scope.make();
+    const release = Scope.close(scope, Exit.void);
+    yield* pipe(
+      application,
+      Layer.provide(RuntimeOwner.layerFrom(release)),
+      Layer.buildWithScope(scope),
+      Effect.asVoid,
+      Effect.catchCause((cause) => pipe(reportStartFailure(cause), Effect.andThen(release))),
+    );
+  });
 
 /**
  * Say what a storage failure means to the user.
