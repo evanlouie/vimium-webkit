@@ -1202,7 +1202,9 @@ export const DialogLayer: Layer.Layer<
      * dialog takes every `keypress`. It answers the same for every `keyup`.
      * `Modes` gives the page the release of a press that the page got,
      * whatever a mode answers: a Shift that went down before the dialog
-     * opened comes up on the page.
+     * opened comes up on the page. `Modes` keeps the default action of every
+     * other release, and Space presses a focused button or checkbox on its
+     * release.
      */
     const keepKey: Effect.Effect<HandlerResult> = Effect.succeed(SUPPRESS_PROPAGATION);
 

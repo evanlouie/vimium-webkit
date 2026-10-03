@@ -656,7 +656,7 @@ describe("the release of a key", () => {
         });
         const release = keyEvent();
         assert.isFalse(yield* modes.bubble("keyup", release));
-        assert.isTrue(release.defaultPrevented);
+        assert.isTrue(release.propagationStopped);
         yield* find.exit();
 
         // macOS sends no release for a key pressed with ⌘. The next press that
@@ -701,6 +701,29 @@ describe("the release of a key", () => {
     ),
   );
 
+  it.effect("keeps the default action of a release whose press kept it", () =>
+    pipe(
+      Effect.gen(function* () {
+        const modes = yield* Modes;
+
+        // The dialog lets Space through to a focused checkbox, which toggles on
+        // the release of Space. The release stays from the page, and toggles.
+        yield* modes.enter(plain("dialog"), {
+          keydown: () => Effect.succeed(SUPPRESS_PROPAGATION),
+          keyup: () => Effect.succeed(SUPPRESS_PROPAGATION),
+        });
+        const press = keyEvent();
+        assert.isFalse(yield* modes.bubble("keydown", press));
+        assert.isFalse(press.defaultPrevented);
+        const release = keyEvent();
+        assert.isFalse(yield* modes.bubble("keyup", release));
+        assert.isTrue(release.propagationStopped);
+        assert.isFalse(release.defaultPrevented);
+      }),
+      Effect.provide(layer),
+    ),
+  );
+
   it.effect("stays from the page after a press that a mode kept from the page", () =>
     pipe(
       Effect.gen(function* () {
@@ -720,6 +743,7 @@ describe("the release of a key", () => {
         const closing = keyEvent();
         assert.isFalse(yield* modes.bubble("keyup", closing));
         assert.isTrue(closing.propagationStopped);
+        assert.isFalse(closing.defaultPrevented);
 
         // The guard held a key while the application started. Its replay
         // reached the page in no case, whatever normal mode answers now.

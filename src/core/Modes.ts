@@ -49,6 +49,7 @@ import {
   type Handlers,
   PASS_EVENT_TO_PAGE,
   SUPPRESS_EVENT,
+  SUPPRESS_PROPAGATION,
 } from "./HandlerStack.ts";
 import { recoverEvenIfInterrupted } from "./Recovery.ts";
 
@@ -441,6 +442,12 @@ export class Modes extends Context.Service<
        * cannot keep it: the page would then believe that the key is still
        * down. A Shift held through `O` was such a key. The record cannot
        * follow a key with no physical code, so the modes decide for it.
+       *
+       * A release that the page did not get stops, and keeps its default
+       * action. Space activates a focused button or checkbox on its release,
+       * so a dialog that let the press through needs that action, and a
+       * press that normal mode took was prevented already, so its release
+       * has no action to give.
        */
       const settleRelease = (event: KeyboardEvent, result: HandlerResult): Effect.Effect<boolean> =>
         pipe(
@@ -454,7 +461,7 @@ export class Modes extends Context.Service<
                 Effect.flatMap(
                   Boolean.match({
                     onFalse: () => Effect.succeed(true),
-                    onTrue: () => carryOut(event, SUPPRESS_EVENT),
+                    onTrue: () => carryOut(event, SUPPRESS_PROPAGATION),
                   }),
                 ),
               ),
