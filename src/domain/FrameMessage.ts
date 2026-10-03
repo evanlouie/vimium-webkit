@@ -784,7 +784,8 @@ const activateHint = define({
 
 /**
  * The origin to the top frame, and the top frame on to every frame: stop one
- * round and remove its state.
+ * round. Its sessions end and it takes no new frame, but the one activation
+ * that the origin may have sent before still counts.
  */
 const cancelHints = define({
   kind: Schema.Literal("CANCEL_HINTS"),
