@@ -26,7 +26,7 @@ import {
   Data,
   Duration,
   Effect,
-  Exit,
+  FiberSet,
   Layer,
   Match,
   Option,
@@ -91,13 +91,6 @@ const characters = (count: number): string =>
       onFalse: () => `${count} characters`,
     }),
   );
-
-/** A live mode, and the scope that owns it. */
-interface LiveVisual {
-  readonly kind: VisualKind;
-  readonly scope: Scope.Closeable;
-  readonly handle: ModeHandle;
-}
 
 // ---------------------------------------------------------------------------
 // What sets the kinds apart
@@ -318,7 +311,14 @@ export const VisualLayer: Layer.Layer<
     const doc = dom.document;
     const win = dom.window;
 
-    const live = yield* Ref.make<Option.Option<LiveVisual>>(Option.none());
+    // The layer scope owns each mode, and each fiber that the modes start.
+    // Closing the runtime therefore ends the live mode, which gives the
+    // selection back to the page.
+    const layerScope = yield* Scope.Scope;
+    const fibers = yield* FiberSet.make();
+
+    /** The mode that was entered last. */
+    const live = yield* Ref.make(Option.none<ModeHandle>());
     /** The count prefix, and whether a `g` is pending. */
     const typed = yield* Ref.make<Typed>(NOTHING_TYPED);
 
@@ -355,27 +355,6 @@ export const VisualLayer: Layer.Layer<
 
     // -- the lifecycle of a mode ---------------------------------------
 
-    /**
-     * End the live mode, and close its scope.
-     *
-     * `reason` decides what happens to the selection. `"singleton"` is the
-     * hand-over from `v` to `V` or to `c`, and the selection survives it.
-     */
-    const release = Effect.fn("Visual.release")(function* (reason: ExitReason) {
-      const entry = yield* pipe(live, Ref.getAndSet(Option.none<LiveVisual>()));
-      yield* pipe(
-        entry,
-        Option.match({
-          onNone: () => Effect.void,
-          // The exit comes first, and with the true reason. Closing the
-          // scope alone would exit the mode with `"navigation"`, and the
-          // hand-over would then throw the selection away.
-          onSome: ({ handle, scope }) =>
-            pipe(handle.exit(reason), Effect.andThen(Scope.close(scope, Exit.void))),
-        }),
-      );
-    });
-
     /** End the live mode from inside one of its own key handlers. */
     const exitCurrent = Effect.fn("Visual.exitCurrent")(function* () {
       const entry = yield* Ref.get(live);
@@ -383,7 +362,7 @@ export const VisualLayer: Layer.Layer<
         entry,
         Option.match({
           onNone: () => Effect.void,
-          onSome: ({ handle }) => handle.exit("explicit"),
+          onSome: (handle) => handle.exit("explicit"),
         }),
       );
     });
@@ -420,8 +399,8 @@ export const VisualLayer: Layer.Layer<
      * and the first suspension spends it, after which
      * `navigator.clipboard.writeText` refuses.
      *
-     * `Effect.forkDetach` with `startImmediately` is what keeps that true.
-     * The child fiber runs on this stack until it suspends, so the manager
+     * `FiberSet.run` starts its fiber at once, and that is what keeps it
+     * true. The fiber runs on this stack until it suspends, so the manager
      * write and the start of the promise both happen inside the dispatch of
      * the browser. Only the wait for the answer runs later.
      */
@@ -429,7 +408,7 @@ export const VisualLayer: Layer.Layer<
       pipe(
         clipboard.write(text),
         Effect.catch((error) => report.error(`Copy failed: ${error.detail}`)),
-        Effect.forkDetach({ startImmediately: true }),
+        FiberSet.run(fibers),
         Effect.andThen(hud.show(`Yanked ${characters(text.length)}`, BRIEFLY)),
       );
 
@@ -567,12 +546,15 @@ export const VisualLayer: Layer.Layer<
         Match.orElse(() => clearSelection),
       );
 
+    /**
+     * Enter a mode in the `visual` singleton group.
+     *
+     * The group makes the hand-over: the mode before this one exits with
+     * `"singleton"`, so it keeps the selection.
+     */
     const openMode = Effect.fn("Visual.openMode")(function* (kind: VisualKind) {
-      // The hand-over. The mode before this one keeps the selection.
-      yield* release("singleton");
       yield* pipe(typed, Ref.set<Typed>(NOTHING_TYPED));
 
-      const scope = yield* Scope.make();
       const handle = yield* pipe(
         modes.enter(
           {
@@ -589,11 +571,11 @@ export const VisualLayer: Layer.Layer<
             keydown: onKeydown(kind),
           },
         ),
-        Scope.provide(scope),
+        Scope.provide(layerScope),
       );
 
       yield* handle.onExit(afterExit);
-      yield* pipe(live, Ref.set(Option.some({ kind, scope, handle })));
+      yield* pipe(live, Ref.set(Option.some(handle)));
       yield* start(kind);
     });
 
@@ -610,10 +592,6 @@ export const VisualLayer: Layer.Layer<
         }),
       );
     });
-
-    // The layer scope owns the live mode. Closing the runtime therefore ends
-    // the mode and gives the selection back to the page.
-    yield* Effect.addFinalizer(() => release("navigation"));
 
     yield* commands.registerAll({
       enterVisualMode: () => enterKind("visual"),

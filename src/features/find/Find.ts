@@ -32,6 +32,7 @@ import {
   Effect,
   Exit,
   FiberHandle,
+  FiberSet,
   Layer,
   Match,
   Number,
@@ -50,7 +51,7 @@ import {
   SUPPRESS_EVENT,
   SUPPRESS_PROPAGATION,
 } from "~/core/HandlerStack.ts";
-import { ExitTrigger, KeyPolicy, Modes } from "~/core/Modes.ts";
+import { ExitTrigger, KeyPolicy, type ModeHandle, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import {
@@ -415,9 +416,14 @@ export const FindLayer: Layer.Layer<
     const win = dom.window;
 
     // The services that the highlighter needs, captured once. The overlay is
-    // built in a scope of its own, and that scope is not the layer scope, so
-    // the context must travel with it.
+    // built later, in a scope of its own, so the context must travel with it.
     const overlayServices = yield* Effect.context<Dom | Ui>();
+
+    // The layer scope owns the session, the overlay, the mode that lives on
+    // and each fiber that find starts. Closing the runtime therefore takes
+    // every `Range` with it.
+    const layerScope = yield* Scope.Scope;
+    const fibers = yield* FiberSet.make();
 
     // -- state ---------------------------------------------------------
 
@@ -434,8 +440,8 @@ export const FindLayer: Layer.Layer<
     const query = yield* Ref.make<Option.Option<ParsedFindQuery>>(Option.none());
     const heading = yield* Ref.make(FORWARD);
     const highlight = yield* Ref.make<Option.Option<LiveHighlight>>(Option.none());
-    /** The scope of the mode that lives on after Enter. */
-    const postScope = yield* Ref.make<Option.Option<Scope.Closeable>>(Option.none());
+    /** The mode that lives on after Enter, once one was entered. */
+    const post = yield* Ref.make(Option.none<ModeHandle>());
     const sessionFiber = yield* FiberHandle.make<void, never>();
 
     // -- the browser ---------------------------------------------------
@@ -503,7 +509,7 @@ export const FindLayer: Layer.Layer<
 
     const buildHighlight = Effect.gen(function* () {
       yield* ensureStyles;
-      const scope = yield* Scope.make();
+      const scope = yield* Scope.fork(layerScope);
       const highlighter = yield* pipe(
         makeHighlighter,
         Effect.provideContext(overlayServices),
@@ -554,18 +560,6 @@ export const FindLayer: Layer.Layer<
       yield* pipe(runs, Ref.set(NO_RUNS));
       yield* pipe(hits, Ref.set<Hits>(NO_HITS));
     });
-
-    /**
-     * Hold the matches for the enclosing scope.
-     *
-     * A match holds a live `Range`, and a `Range` pins the nodes at its two
-     * boundaries. One session measured 4001 detached nodes and up to 500 live
-     * ranges, and they survived every soft navigation after it. The finalizer
-     * is what gives them back, so no caller has to remember a teardown call.
-     */
-    const holdMatches: Effect.Effect<void, never, Scope.Scope> = Effect.addFinalizer(
-      () => clearState,
-    );
 
     // -- searching -----------------------------------------------------
 
@@ -800,12 +794,12 @@ export const FindLayer: Layer.Layer<
     // -- the mode that lives on after Enter -----------------------------
 
     const closePost = pipe(
-      postScope,
-      Ref.getAndSet(Option.none<Scope.Closeable>()),
+      post,
+      Ref.getAndSet(Option.none<ModeHandle>()),
       Effect.flatMap(
         Option.match({
           onNone: () => Effect.void,
-          onSome: (scope) => Scope.close(scope, Exit.void),
+          onSome: (handle) => handle.exit(),
         }),
       ),
     );
@@ -821,46 +815,43 @@ export const FindLayer: Layer.Layer<
      */
     const enterPost = Effect.fn("Find.enterPost")(function* () {
       yield* closePost;
-      const scope = yield* Scope.make();
       const handle = yield* pipe(
-        // The matches belong to this scope. A `Range` for each match holds
-        // the nodes at its boundaries, and this is what gives them back.
-        holdMatches,
-        Effect.andThen(
-          modes.enter(
-            {
-              name: "post-find",
-              indicator: Option.none(),
-              exitOn: [ExitTrigger.Escape(), ExitTrigger.Click(), ExitTrigger.Focus()],
-              keyboard: KeyPolicy.Shared(),
-              singleton: Option.some("find"),
-            },
-            {
-              // Everything except Escape, which the mode itself takes,
-              // belongs to the page and to the key trie of normal mode, so
-              // that `n` and `N` keep working.
-              keydown: (): Effect.Effect<HandlerResult> => Effect.succeed(CONTINUE_BUBBLING),
-            },
-          ),
+        modes.enter(
+          {
+            name: "post-find",
+            indicator: Option.none(),
+            exitOn: [ExitTrigger.Escape(), ExitTrigger.Click(), ExitTrigger.Focus()],
+            keyboard: KeyPolicy.Shared(),
+            singleton: Option.some("find"),
+          },
+          {
+            // Everything except Escape, which the mode itself takes,
+            // belongs to the page and to the key trie of normal mode, so
+            // that `n` and `N` keep working.
+            keydown: (): Effect.Effect<HandlerResult> => Effect.succeed(CONTINUE_BUBBLING),
+          },
         ),
-        Scope.provide(scope),
+        Scope.provide(layerScope),
       );
-      // The scope owns the mode, and the mode now owns the scope. An exit
-      // for any reason therefore closes the scope, and a defect exit leaves
-      // no scope that only the next `closePost` would release. The scope is
-      // stored first, because `onExit` runs its body at once when the mode
-      // already exited.
-      yield* pipe(postScope, Ref.set(Option.some(scope)));
-      yield* handle.onExit(() => pipe(clearState, Effect.andThen(closePost)));
+      yield* pipe(post, Ref.set(Option.some(handle)));
+      // The mode owns the matches. A match holds a live `Range`, and a
+      // `Range` pins the nodes at its two boundaries. One session measured
+      // 4001 detached nodes and up to 500 live ranges, and they survived every
+      // soft navigation after it. An exit for any reason gives them back, so
+      // no caller has to remember a teardown call.
+      yield* handle.onExit(() => clearState);
     });
 
     /** Open the mode again when nothing holds the highlights. */
     const ensurePost = Effect.fn("Find.ensurePost")(function* () {
-      const scope = yield* Ref.get(postScope);
-      const names = yield* modes.activeNames;
-      const live = pipe(
-        scope,
-        Option.exists(() => pipe(names, Array.contains("post-find"))),
+      const live = yield* pipe(
+        Ref.get(post),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => Effect.succeed(false),
+            onSome: (handle) => handle.isActive,
+          }),
+        ),
       );
       yield* pipe(
         live,
@@ -1085,9 +1076,9 @@ export const FindLayer: Layer.Layer<
     /**
      * Save `text` in the history.
      *
-     * Detached, because the group waits for its own debounce before the
-     * write completes. The user must not wait half a second for the
-     * highlight.
+     * On a fiber of its own, because the group waits for its own debounce
+     * before the write completes. The user must not wait half a second for
+     * the highlight.
      */
     const rememberQuery = (text: string): Effect.Effect<void> =>
       pipe(
@@ -1095,7 +1086,7 @@ export const FindLayer: Layer.Layer<
           queries: Array.copy(pushHistory(history.queries, text)),
         })),
         Effect.catch((error) => report.error(`Could not save the search: ${error.detail}`)),
-        Effect.forkDetach,
+        FiberSet.run(fibers),
         Effect.asVoid,
       );
 
@@ -1192,9 +1183,8 @@ export const FindLayer: Layer.Layer<
     const stepQuery = Effect.fn("Find.stepQuery")(function* (last: ParsedFindQuery, count: number) {
       yield* ensureStyles;
       // The highlights need an owner. Without one they would stay on screen
-      // with nothing left to take them away. The mode is opened before the
-      // step, because opening it drops a mode that already ended, and that
-      // release clears the matches.
+      // with nothing left to take them away, so the mode is opened before
+      // the step draws them.
       yield* ensurePost();
       const { step: sign } = yield* Ref.get(heading);
       const delta = count * sign;
@@ -1249,10 +1239,6 @@ export const FindLayer: Layer.Layer<
         }),
       );
     });
-
-    // The layer scope owns the session, the overlay and the mode that lives
-    // on. Closing the runtime therefore takes every `Range` with it.
-    yield* Effect.addFinalizer(() => pipe(closePost, Effect.andThen(clearState)));
 
     yield* commands.registerAll({
       enterFindMode: () => enter(FORWARD),
