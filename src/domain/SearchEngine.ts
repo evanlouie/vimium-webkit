@@ -421,28 +421,3 @@ export const destinationOf = (
         Destination.EngineSearch({ engine, query: rest, url: buildSearchUrl(engine.url, rest) }),
     }),
   );
-
-export interface ResolvedQuery {
-  readonly url: string;
-  readonly kind: QueryKind;
-}
-
-/**
- * Turn a raw omnibar query into the URL that Enter must open.
- *
- * `defaultSearchUrl` is `settings.searchUrl`. A keyword at the front replaces
- * it.
- */
-export const resolveQuery = (
-  query: string,
-  engines: readonly SearchEngine[],
-  defaultSearchUrl: string,
-): ResolvedQuery =>
-  pipe(
-    destinationOf(query, engines, defaultSearchUrl),
-    Destination.$match({
-      EngineSearch: ({ url }): ResolvedQuery => ({ url, kind: "search" }),
-      Address: ({ url }): ResolvedQuery => ({ url, kind: "url" }),
-      DefaultSearch: ({ url }): ResolvedQuery => ({ url, kind: "search" }),
-    }),
-  );

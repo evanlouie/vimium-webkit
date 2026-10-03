@@ -16,7 +16,6 @@ import {
   enginesMatchingPrefix,
   isSafeTemplate,
   parseSearchEngines,
-  resolveQuery,
   type SearchEngine,
   splitKeyword,
   toNavigableUrl,
@@ -351,24 +350,28 @@ describe("SearchEngine", () => {
   );
 
   it.effect("prefers a keyword engine over the default", () =>
-    Effect.sync(() => {
-      assert.deepEqual(resolveQuery("w bohr", ENGINES, DEFAULT_SEARCH), {
-        url: "https://wiki.test/?q=bohr",
-        kind: "search",
-      });
+    Effect.gen(function* () {
+      const engine = yield* first(ENGINES);
+      assert.deepEqual(
+        destinationOf("w bohr", ENGINES, DEFAULT_SEARCH),
+        Destination.EngineSearch({ engine, query: "bohr", url: "https://wiki.test/?q=bohr" }),
+      );
     }),
   );
 
   it.effect("navigates to a URL and searches for everything else", () =>
     Effect.sync(() => {
-      assert.deepEqual(resolveQuery("example.com", ENGINES, DEFAULT_SEARCH), {
-        url: "https://example.com",
-        kind: "url",
-      });
-      assert.deepEqual(resolveQuery("hello there", ENGINES, DEFAULT_SEARCH), {
-        url: "https://www.google.com/search?q=hello%20there",
-        kind: "search",
-      });
+      assert.deepEqual(
+        destinationOf("example.com", ENGINES, DEFAULT_SEARCH),
+        Destination.Address({ url: "https://example.com" }),
+      );
+      assert.deepEqual(
+        destinationOf("hello there", ENGINES, DEFAULT_SEARCH),
+        Destination.DefaultSearch({
+          query: "hello there",
+          url: "https://www.google.com/search?q=hello%20there",
+        }),
+      );
     }),
   );
 
@@ -376,10 +379,10 @@ describe("SearchEngine", () => {
     Effect.sync(() => {
       // `w` alone has no query for the engine, so it must not open the search
       // page of Wikipedia for the empty string.
-      assert.deepEqual(resolveQuery("w", ENGINES, DEFAULT_SEARCH), {
-        url: "https://www.google.com/search?q=w",
-        kind: "search",
-      });
+      assert.deepEqual(
+        destinationOf("w", ENGINES, DEFAULT_SEARCH),
+        Destination.DefaultSearch({ query: "w", url: "https://www.google.com/search?q=w" }),
+      );
     }),
   );
 });

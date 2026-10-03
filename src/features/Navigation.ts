@@ -25,6 +25,7 @@ import { Commands } from "~/core/Commands.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings, type SettingsData } from "~/core/Settings.ts";
+import { destinationOf } from "~/domain/SearchEngine.ts";
 import { FrameLink } from "~/frames/Link.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Tabs } from "~/platform/Tabs.ts";
@@ -32,31 +33,6 @@ import { BRIEFLY, Hud } from "~/ui/Hud.ts";
 
 /** Where `go` opens a URL. */
 export type Destination = "this-tab" | "new-tab";
-
-/** Text that begins with a scheme, such as `https:` or `mailto:`. */
-const SCHEME = /^[a-z][a-z0-9+.-]*:/i;
-
-/** A host name with a dot in it, and nothing or a path after it. */
-const BARE_HOST = /^[^\s/]+\.[^\s/]{2,}(\/|$)/;
-
-/**
- * A bare word becomes a search. Anything that looks like a URL is a URL.
- *
- * Pure, and exported, so that the rule is testable without a document.
- */
-export const toUrl = (input: string, searchUrl: string): string =>
-  pipe(
-    Match.value(input.trim()),
-    Match.when(
-      (text) => SCHEME.test(text),
-      (text) => text,
-    ),
-    Match.when(
-      (text) => BARE_HOST.test(text),
-      (text) => `https://${text}`,
-    ),
-    Match.orElse((text) => searchUrl.replace("%s", encodeURIComponent(text))),
-  );
 
 const parseUrl = Option.liftThrowable((href: string) => new URL(href));
 
@@ -262,7 +238,9 @@ export class Navigation extends Context.Service<
 
       const go = Effect.fn("Navigation.go")(function* (input: string, destination: Destination) {
         const current = yield* settings.current;
-        const url = toUrl(input, current.searchUrl);
+        // The rule of the omnibar, without the engine keywords: a pasted text
+        // is a URL or a search with the default engine.
+        const { url } = destinationOf(input, [], current.searchUrl);
         yield* pipe(
           Match.value(destination),
           Match.when("this-tab", () => tabs.navigate(url)),
