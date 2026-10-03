@@ -15,8 +15,7 @@ Vimium-WebKit ports algorithms and behaviour from Vimium. No Vimium source is
 copied verbatim — the implementation is original TypeScript — but the designs
 below are derived closely enough that attribution is required, not merely
 courteous. Each file below names the upstream file that it derives from in its
-header comment, except `src/domain/HintRound.ts`, which holds the hint-round
-rules that moved out of `src/features/hints/Hints.ts`.
+header comment.
 
 Ported designs:
 

@@ -1,6 +1,9 @@
 /**
  * The rules of a cross-frame hint round.
  *
+ * Ported from the Vimium `content_scripts/link_hints.js` (`HintCoordinator`),
+ * MIT.
+ *
  * A round is one press of a hint key, across every frame of the page. The top
  * frame holds the one live round of the page. Every other frame that answered
  * the collection holds a record of the round that it answered, and that record
