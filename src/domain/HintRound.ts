@@ -5,8 +5,8 @@
  * frame holds the one live round of the page. Every other frame that answered
  * the collection holds a record of the round that it answered, and that record
  * is what authorises an activation from another frame. The decisions over
- * those records are here, and they take plain data. The hints service reads
- * the records, asks these functions, and carries out the answer.
+ * those records are here, and they take plain data. The hints layer reads the
+ * records, asks these functions, and carries out the answer.
  */
 
 import { Array, Data, flow, Match, Option, pipe, Record } from "effect";
