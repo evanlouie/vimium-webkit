@@ -7,6 +7,7 @@
  */
 
 import { Array, Context, Effect, Layer, Match, Option, Schema, pipe } from "effect";
+import { resolveUrl } from "~/domain/Url.ts";
 import { Dom } from "./Dom.ts";
 import { Gm, type GmError, type OpenInTabResult } from "./Gm.ts";
 
@@ -68,14 +69,13 @@ const schemesFor = (trust: UrlTrust): ReadonlyArray<string> =>
     Match.exhaustive,
   );
 
-const parseUrl = Option.liftThrowable((url: string, baseUri: string) => new URL(url, baseUri));
-
 /** The URL, resolved, when it is one that we will go to, given where it came from. */
 const navigableUrl =
   (baseUri: string, trust: UrlTrust) =>
   (url: string): Option.Option<URL> =>
     pipe(
-      parseUrl(url, baseUri),
+      url,
+      resolveUrl(baseUri),
       Option.filter((parsed) => pipe(schemesFor(trust), Array.contains(parsed.protocol))),
     );
 

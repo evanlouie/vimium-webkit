@@ -12,3 +12,14 @@ import { Option } from "effect";
 export const parseUrl: (href: string) => Option.Option<URL> = Option.liftThrowable(
   (href: string) => new URL(href),
 );
+
+/**
+ * The URL that the text names when it is read against `base`, or nothing when
+ * it names none.
+ *
+ * Curried, and not an optional argument of `parseUrl`: `parseUrl` is passed
+ * as a callback, and a callback can be given more arguments than its type
+ * names, such as the index that `Array.map` gives.
+ */
+export const resolveUrl = (base: string): ((href: string) => Option.Option<URL>) =>
+  Option.liftThrowable((href: string) => new URL(href, base));

@@ -32,14 +32,13 @@ import { PLAIN_KEY_CONTEXT } from "~/domain/Key.ts";
 import type { GlobalMark, Marks as MarksData } from "~/domain/Persisted.ts";
 import { localMark, pruneMarks, withGlobalMark, withLocalMark } from "~/domain/Persisted.ts";
 import { type NoFields, whenSome } from "~/domain/Prelude.ts";
+import { parseUrl } from "~/domain/Url.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Storage } from "~/platform/Storage.ts";
 import { Tabs } from "~/platform/Tabs.ts";
 import { BRIEFLY, Hud } from "~/ui/Hud.ts";
 import { captureNextKey } from "./CaptureKey.ts";
 import { Scroller } from "./Scroller.ts";
-
-const parseUrl = Option.liftThrowable((href: string) => new URL(href));
 
 /** The URL as text, without its fragment. */
 const withoutFragment = (url: URL): string => {
