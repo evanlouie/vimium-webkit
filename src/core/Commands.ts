@@ -35,7 +35,7 @@ import {
   type CommandName,
   COMMANDS,
 } from "~/domain/Command.ts";
-import { whenSome } from "~/domain/Prelude.ts";
+import { bindServices, type Unscoped, whenSome } from "~/domain/Prelude.ts";
 import { recoverEvenIfInterrupted } from "./Recovery.ts";
 
 export const CommandFailureReason = Schema.Literals([
@@ -70,16 +70,18 @@ export class Commands extends Context.Service<
      * Give a body to one command.
      *
      * The services that the body needs are captured once, here. The key path then
-     * runs the body with nothing left to supply.
+     * runs the body with nothing left to supply. The scope of the caller stays
+     * behind, so a body that acquires a resource makes its own scope. Read
+     * `Unscoped` in `domain/Prelude.ts`.
      */
     readonly register: <R>(
       name: CommandName,
-      body: CommandBody<R>,
+      body: CommandBody<Unscoped<R>>,
     ) => Effect.Effect<void, never, R>;
 
     /** Give a body to several commands that share one implementation. */
     readonly registerAll: <R>(
-      bodies: Partial<Record.ReadonlyRecord<CommandName, CommandBody<R>>>,
+      bodies: Partial<Record.ReadonlyRecord<CommandName, CommandBody<Unscoped<R>>>>,
     ) => Effect.Effect<void, never, R>;
 
     readonly run: (
@@ -98,11 +100,11 @@ export class Commands extends Context.Service<
 
       const register = <R>(
         name: CommandName,
-        body: CommandBody<R>,
+        body: CommandBody<Unscoped<R>>,
       ): Effect.Effect<void, never, R> =>
         Effect.gen(function* () {
-          const services = yield* Effect.context<R>();
-          const bound: CommandBody<never> = flow(body, Effect.provideContext(services));
+          const bind = yield* bindServices<R>();
+          const bound: CommandBody<never> = flow(body, bind);
           yield* pipe(bodies, Ref.update(HashMap.set(name, bound)));
         });
 

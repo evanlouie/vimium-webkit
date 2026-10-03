@@ -29,6 +29,7 @@ import {
 } from "effect";
 import { constVoid } from "effect/Function";
 import { describeCause, describeThrown } from "~/domain/Failure.ts";
+import { captureServices, type Unscoped } from "~/domain/Prelude.ts";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -79,8 +80,11 @@ export interface ListenOptions {
  * the browser's own dispatch, so `preventDefault` still works. Read the
  * section "The keyboard path is synchronous" of `ARCHITECTURE.md` before you
  * put anything that suspends in here.
+ *
+ * The scope that `listen` takes holds the listener, and not the work of the
+ * body. Read `Unscoped` in `domain/Prelude.ts`.
  */
-export type Listener<Event, R> = (event: Event) => Effect.Effect<void, never, R>;
+export type Listener<Event, R> = (event: Event) => Effect.Effect<void, never, Unscoped<R>>;
 
 /**
  * The options that the browser reads. An `undefined` member of the dictionary
@@ -193,7 +197,7 @@ export class Dom extends Context.Service<
   static readonly layer: Layer.Layer<Dom> = Layer.effect(
     Dom,
     Effect.gen(function* () {
-      const services = yield* Effect.context<never>();
+      const services = yield* captureServices<never>();
       // `globalThis` is the `Window` of this frame. The DOM types declare the
       // global `name` as `void`, so they cannot see the global scope as a
       // `Window`, and no runtime check can prove it either. This one assertion
@@ -260,7 +264,7 @@ export class Dom extends Context.Service<
         handler: Listener<E, R>,
         options?: ListenOptions,
       ) {
-        const handlerServices = yield* Effect.context<R>();
+        const handlerServices = yield* captureServices<R>();
         const run = Effect.runSyncExitWith(Context.merge(services, handlerServices));
         const listen = (event: Event): void =>
           pipe(

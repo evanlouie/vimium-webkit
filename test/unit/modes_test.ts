@@ -9,7 +9,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Array, Effect, Option, Ref, Struct, pipe } from "effect";
+import { Array, Effect, Option, Ref, Scope, Struct, pipe } from "effect";
 import {
   CONTINUE_BUBBLING,
   type Handlers,
@@ -605,6 +605,29 @@ describe("the walk of the stack", () => {
         const taken = keyEvent();
         assert.isFalse(yield* modes.bubble("keydown", taken));
         assert.isTrue(taken.defaultPrevented);
+      }),
+      Effect.provide(layer),
+    ),
+  );
+
+  it.effect("runs a body without the scope of the code that entered the mode", () =>
+    pipe(
+      Effect.gen(function* () {
+        const modes = yield* Modes;
+        const found = yield* Ref.make<ReadonlyArray<boolean>>([]);
+        yield* modes.enter(plain("top"), {
+          keydown: () =>
+            pipe(
+              Effect.serviceOption(Scope.Scope),
+              Effect.flatMap((scope) =>
+                pipe(found, Ref.update(Array.append(Option.isSome(scope)))),
+              ),
+              Effect.as(CONTINUE_BUBBLING),
+            ),
+        });
+
+        yield* modes.bubble("keydown", keyEvent());
+        assert.deepEqual(yield* Ref.get(found), [false]);
       }),
       Effect.provide(layer),
     ),

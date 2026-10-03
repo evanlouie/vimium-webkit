@@ -63,7 +63,7 @@ import {
   PubSub,
   Ref,
   Schedule,
-  type Scope,
+  Scope,
   Stream,
   pipe,
 } from "effect";
@@ -154,6 +154,9 @@ export class Lifecycle extends Context.Service<
       const url = yield* pipe(dom.href, Effect.flatMap(Ref.make));
       const poller = yield* Ref.make(Option.none<Poller>());
       const exitHook = yield* Ref.make(Option.none<ExitHook>());
+      // The poller belongs to this layer, and a listener starts it. A listener
+      // runs without the scope of its caller, so it names the scope here.
+      const layerScope = yield* Scope.Scope;
 
       const emit = (event: LifecycleEvent): Effect.Effect<void> =>
         pipe(bus, PubSub.publish(event), Effect.asVoid);
@@ -176,7 +179,7 @@ export class Lifecycle extends Context.Service<
               pipe(
                 check,
                 Effect.repeat(Schedule.spaced(`${URL_POLL_MS} millis`)),
-                Effect.forkScoped,
+                Effect.forkIn(layerScope),
                 Effect.flatMap(keepPoller),
               ),
           }),

@@ -66,7 +66,7 @@ import {
 } from "effect";
 import { Settings } from "~/core/Settings.ts";
 import { describeCause } from "~/domain/Failure.ts";
-import { type NoFields, whenSome } from "~/domain/Prelude.ts";
+import { captureServices, type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { isHtmlElement } from "~/platform/Elements.ts";
@@ -1045,7 +1045,7 @@ export class Ui extends Context.Service<
       // end inside it, as the section "The keyboard path is synchronous" of
       // `ARCHITECTURE.md` asks. `platform/Dom.ts` uses the same helper for a
       // listener.
-      const services = yield* Effect.context<never>();
+      const services = yield* captureServices<never>();
       const runGuard = Effect.runSyncExitWith(services);
 
       /**

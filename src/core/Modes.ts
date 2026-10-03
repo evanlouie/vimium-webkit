@@ -39,7 +39,7 @@ import {
   flow,
   pipe,
 } from "effect";
-import { type NoFields, whenSome } from "~/domain/Prelude.ts";
+import { bindServices, type NoFields, type Unscoped, whenSome } from "~/domain/Prelude.ts";
 import { isUserEvent } from "~/platform/Elements.ts";
 import {
   CONTINUE_BUBBLING,
@@ -309,10 +309,15 @@ export class Modes extends Context.Service<
      * own scope cannot leave the mode behind. A service that enters a mode again
      * and again for as long as its layer lives gives the layer scope, and holds
      * only the handle: each mode that ends takes its own scope with it.
+     *
+     * That scope holds the mode, and not the work of its bodies. A body runs
+     * on each event with the services of the caller and without the scope, so
+     * a body that acquires a resource makes its own scope. Read `Unscoped` in
+     * `domain/Prelude.ts`.
      */
     readonly enter: <R>(
       options: ModeOptions,
-      handlers?: Handlers<R>,
+      handlers?: Handlers<Unscoped<R>>,
     ) => Effect.Effect<ModeHandle, never, R | Scope.Scope>;
 
     /**
@@ -434,7 +439,7 @@ export class Modes extends Context.Service<
 
       const enter = <R>(
         options: ModeOptions,
-        handlers: Handlers<R> = {},
+        handlers: Handlers<Unscoped<R>> = {},
       ): Effect.Effect<ModeHandle, never, R | Scope.Scope> =>
         Effect.gen(function* () {
           const group = options.singleton;
@@ -497,17 +502,17 @@ export class Modes extends Context.Service<
 
           // The services of the bodies are captured once, so a body needs
           // nothing when the key path runs it.
-          const services = yield* Effect.context<R>();
+          const bind = yield* bindServices<R>();
 
           const provided = <A extends Event>(
-            body: ((event: A) => Effect.Effect<HandlerResult, never, R>) | undefined,
+            body: ((event: A) => Effect.Effect<HandlerResult, never, Unscoped<R>>) | undefined,
           ): ((event: A) => Effect.Effect<Option.Option<HandlerResult>>) =>
             pipe(
               body,
               Option.fromUndefinedOr,
               Option.match({
                 onNone: () => () => Effect.succeedNone,
-                onSome: (run) => flow(run, Effect.asSome, Effect.provideContext(services)),
+                onSome: (run) => flow(run, Effect.asSome, bind),
               }),
             );
 

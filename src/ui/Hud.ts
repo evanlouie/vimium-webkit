@@ -62,7 +62,7 @@ import {
 import { isEscape, KeyPolicy, type ModeOptions, Modes } from "~/core/Modes.ts";
 import { Report, type UserMessage } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
-import { type NoFields, whenSome } from "~/domain/Prelude.ts";
+import { type NoFields, type Unscoped, whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
 
@@ -121,7 +121,7 @@ export interface HudPromptOptions<R = never> {
   readonly initialValue?: string;
   readonly placeholder?: string;
   /** Run for every change of the text. A new run interrupts the one before. */
-  readonly onInput?: (value: string) => Effect.Effect<void, never, R>;
+  readonly onInput?: (value: string) => Effect.Effect<void, never, Unscoped<R>>;
   /**
    * Run for every key press in the field, before the prompt acts on it.
    *
@@ -131,7 +131,10 @@ export interface HudPromptOptions<R = never> {
    * body must not suspend, because `preventDefault` works only inside the
    * dispatch of the browser.
    */
-  readonly onKeydown?: (event: KeyboardEvent, value: string) => Effect.Effect<KeyClaim, never, R>;
+  readonly onKeydown?: (
+    event: KeyboardEvent,
+    value: string,
+  ) => Effect.Effect<KeyClaim, never, Unscoped<R>>;
 }
 
 export interface HudLine {
@@ -769,7 +772,7 @@ export class Hud extends Context.Service<
              * live search of find can suspend. A newer change interrupts the
              * older search.
              */
-            const changed = (text: string): Effect.Effect<void, never, R> =>
+            const changed = (text: string): Effect.Effect<void, never, Unscoped<R>> =>
               pipe(
                 options.onInput,
                 Option.fromNullishOr,
@@ -779,7 +782,7 @@ export class Hud extends Context.Service<
               );
 
             /** Let the caller see the key first, and then decide what it does. */
-            const keyAction = (key: KeyboardEvent): Effect.Effect<PromptKey, never, R> =>
+            const keyAction = (key: KeyboardEvent): Effect.Effect<PromptKey, never, Unscoped<R>> =>
               pipe(
                 options.onKeydown,
                 Option.fromNullishOr,
@@ -818,7 +821,9 @@ export class Hud extends Context.Service<
             });
 
             /** Act on a key press aimed at the input, and take every other one. */
-            const onKeydown = (event: KeyboardEvent): Effect.Effect<HandlerResult, never, R> =>
+            const onKeydown = (
+              event: KeyboardEvent,
+            ): Effect.Effect<HandlerResult, never, Unscoped<R>> =>
               pipe(
                 ui.owns(event.target),
                 Boolean.match({
