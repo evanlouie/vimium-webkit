@@ -43,7 +43,8 @@ import {
 import { FrameId } from "~/domain/FrameId.ts";
 import { frameCredentialGroup, sessionGroup } from "~/domain/Persisted.ts";
 import { FrameAuth, type FrameHandshake } from "~/frames/Auth.ts";
-import { KeyValueStore, STORAGE_PREFIX, StoreKind } from "~/platform/KeyValueStore.ts";
+import { StoreKind } from "~/platform/Gm.ts";
+import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
 import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
 

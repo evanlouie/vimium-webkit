@@ -20,6 +20,7 @@ import {
   Array,
   Context,
   Effect,
+  Formatter,
   Layer,
   Match,
   Option,
@@ -31,8 +32,8 @@ import {
 import { constFalse } from "effect/Function";
 import { clipboardReader, clipboardWriter } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { Gm } from "~/platform/Gm.ts";
-import { type KeyValueKind, kindName, KeyValueStore, StoreKind } from "~/platform/KeyValueStore.ts";
+import { Gm, StoreKind } from "~/platform/Gm.ts";
+import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 import { hasNativeIdleCallback } from "~/platform/Scheduler.ts";
 
 export type ManagerName =
@@ -54,8 +55,7 @@ export interface CapabilityReport {
   readonly world: WorldName;
 
   // --- The manager surface ---
-  readonly value: KeyValueKind;
-  readonly valueChangeListener: boolean;
+  readonly value: StoreKind;
   readonly openInTab: boolean;
   readonly openInTabBackground: boolean;
   readonly setClipboard: boolean;
@@ -271,15 +271,7 @@ export const probeCapabilities: Effect.Effect<CapabilityReport, never, Gm | KeyV
       // Asked of the selected store, and not derived again. Separate predicates
       // can make the warning disagree with the selected backend. One source of
       // truth prevents that defect.
-      value: kindName(kv.kind),
-      valueChangeListener: pipe(
-        kv.kind,
-        StoreKind.$match({
-          GmAsync: constFalse,
-          GmSync: ({ watchable }) => watchable,
-          Memory: constFalse,
-        }),
-      ),
+      value: kv.kind,
       openInTab: gm.canOpenInTab,
       // No manager in the matrix refuses `{ active: false }`, but quoid ignores
       // it. Reported as available, and checked by hand.
@@ -332,7 +324,7 @@ interface Warning {
 
 const WARNINGS: ReadonlyArray<Warning> = [
   {
-    applies: (report) => report.value === "memory",
+    applies: (report) => StoreKind.$is("Memory")(report.value),
     text:
       "No durable storage is available. Your userscript manager gives no " +
       "value store, so your settings, marks and history are lost when this " +
@@ -366,6 +358,7 @@ export const formatCapabilities = (report: CapabilityReport): string =>
     Struct.evolve({
       managerVersion: (version) => Option.getOrNull(version),
       scriptVersion: (version) => Option.getOrNull(version),
+      value: (kind) => Formatter.format(kind),
     }),
     Record.toEntries,
     Array.map(([key, value]) => `${key.padEnd(24)} ${String(value)}`),

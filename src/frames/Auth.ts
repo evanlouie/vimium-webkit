@@ -99,7 +99,8 @@ import {
   type SealedMessage,
 } from "~/domain/FrameMessage.ts";
 import { type FrameCredential, frameCredentialGroup } from "~/domain/Persisted.ts";
-import { KeyValueStore, StoreKind } from "~/platform/KeyValueStore.ts";
+import { StoreKind } from "~/platform/Gm.ts";
+import { KeyValueStore } from "~/platform/KeyValueStore.ts";
 import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { makeGroup, type StorageError } from "~/platform/Storage.ts";
 

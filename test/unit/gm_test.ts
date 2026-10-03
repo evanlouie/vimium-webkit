@@ -3,7 +3,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import { Array, Effect, MutableRef, Option, pipe } from "effect";
 import { Dom } from "~/platform/Dom.ts";
-import { Gm, type GmSurface, GmValueApi } from "~/platform/Gm.ts";
+import { Gm, type GmSurface, StoreKind } from "~/platform/Gm.ts";
 
 /** The calls that one form of the value API received, in order. */
 const callLog = () => {
@@ -62,7 +62,9 @@ describe("Gm value API selection", () => {
           assert.isTrue(Option.isSome(gm.values));
 
           const values = yield* pipe(gm.values, Effect.fromOption);
-          assert.isTrue(GmValueApi.$is("Sync")(values));
+          // The manager gives no change listener, so the store sees no write of
+          // another tab.
+          assert.deepEqual(values.kind, StoreKind.GmSync({ watchable: false }));
           assert.deepEqual(yield* values.get("one"), Option.some("sync"));
           yield* values.set("two", "value");
           yield* values.remove("three");

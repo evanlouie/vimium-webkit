@@ -11,6 +11,7 @@ import {
   degradationWarnings,
   isApplePlatform,
 } from "~/platform/Capabilities.ts";
+import { StoreKind } from "~/platform/Gm.ts";
 
 /** A report in which everything works, so one test changes one field. */
 const healthy: CapabilityReport = {
@@ -19,8 +20,7 @@ const healthy: CapabilityReport = {
   scriptVersion: Option.none(),
   world: "unknown",
 
-  value: "gm-sync",
-  valueChangeListener: true,
+  value: StoreKind.GmSync({ watchable: true }),
   openInTab: true,
   openInTabBackground: true,
   setClipboard: true,

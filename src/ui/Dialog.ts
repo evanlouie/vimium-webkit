@@ -67,7 +67,7 @@ import {
 import { Capabilities, formatCapabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { deepActiveElement } from "~/platform/Elements.ts";
-import type { KeyValueKind } from "~/platform/KeyValueStore.ts";
+import type { StoreKind } from "~/platform/Gm.ts";
 import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
 
 // ---------------------------------------------------------------------------
@@ -82,17 +82,18 @@ const STORAGE_PREAMBLE = "There is no options page for a userscript, so settings
  * The explanation identifies the selected storage surface because it changes
  * persistence. It must agree with `Capabilities`.
  */
-const storageExplanation = (backend: KeyValueKind): string =>
+const storageExplanation = (backend: StoreKind): string =>
   pipe(
     Match.value(backend),
-    Match.when(
-      Match.is("gm-sync", "gm-async"),
+    Match.tag(
+      "GmSync",
+      "GmAsync",
       () =>
         `${STORAGE_PREAMBLE}They are stored with your userscript manager, which ` +
         "is durable and survives Safari's seven-day storage purge.",
     ),
-    Match.when(
-      "memory",
+    Match.tag(
+      "Memory",
       () =>
         `${STORAGE_PREAMBLE}No storage is available at all, so they last only ` +
         "until this page is closed.",

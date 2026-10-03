@@ -30,8 +30,8 @@ import {
 } from "effect";
 import { TestClock } from "effect/testing";
 import { defaultSettings } from "~/domain/Persisted.ts";
-import { GmError } from "~/platform/Gm.ts";
-import { KeyValueStore, STORAGE_PREFIX, StoreKind } from "~/platform/KeyValueStore.ts";
+import { GmError, StoreKind } from "~/platform/Gm.ts";
+import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
 import { Storage, type StorageError } from "~/platform/Storage.ts";
 
 const SETTINGS_KEY = `${STORAGE_PREFIX}settings`;

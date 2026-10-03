@@ -20,7 +20,8 @@ import {
   SETTINGS_SCHEMA_VERSION,
 } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { KeyValueStore, STORAGE_PREFIX, StoreKind } from "~/platform/KeyValueStore.ts";
+import { StoreKind } from "~/platform/Gm.ts";
+import { KeyValueStore, STORAGE_PREFIX } from "~/platform/KeyValueStore.ts";
 import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
 

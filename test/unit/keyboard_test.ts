@@ -27,6 +27,7 @@ import { EffectiveRule, FULLY_ENABLED } from "~/domain/Exclusion.ts";
 import { compileMappings } from "~/domain/Mapping.ts";
 import { defaultSettings, type Settings as SettingsData } from "~/domain/Persisted.ts";
 import { Capabilities, type CapabilityReport } from "~/platform/Capabilities.ts";
+import { StoreKind } from "~/platform/Gm.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Realm } from "~/platform/Realm.ts";
 
@@ -201,8 +202,7 @@ const capabilitiesOf = (applePlatform: boolean): Layer.Layer<Capabilities> =>
       managerVersion: Option.none(),
       scriptVersion: Option.none(),
       world: "unknown",
-      value: "memory",
-      valueChangeListener: false,
+      value: StoreKind.Memory(),
       openInTab: false,
       openInTabBackground: false,
       setClipboard: false,

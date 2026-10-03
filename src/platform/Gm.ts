@@ -286,46 +286,76 @@ const readIdentity = (info: unknown): ManagerIdentity => {
 };
 
 // ---------------------------------------------------------------------------
-// The value API
+// The value store
 // ---------------------------------------------------------------------------
 
-/** The calls that every value API gives. */
-type GmValueCalls = {
-  readonly get: (key: string) => Effect.Effect<Option.Option<string>, GmError>;
-  readonly set: (key: string, value: string) => Effect.Effect<void, GmError>;
-  readonly remove: (key: string) => Effect.Effect<void, GmError>;
-};
+/**
+ * Which backend holds the values, and what it can do.
+ *
+ * The two forms of the manager's store survive a page load, and they belong
+ * to the userscript manager. Two properties come with that store, and a
+ * service that holds a secret needs both: page code cannot read it, and every
+ * frame of the page reads the same values, whatever the origin of the frame.
+ * `frames/Auth.ts` keeps the frame credential only in such a store.
+ */
+export type StoreKind = Data.TaggedEnum<{
+  /** The promise form of the manager's store. It cannot report another tab's write. */
+  GmAsync: Record<never, never>;
+  /** The synchronous form of the manager's store. */
+  GmSync: {
+    /** True when another tab's write can be seen without a poll. */
+    readonly watchable: boolean;
+  };
+  /**
+   * A map in this realm, which is lost when the page unloads. `KeyValueStore`
+   * uses it when the manager gives no store.
+   *
+   * The map belongs to this realm, so the page cannot read it. It is not
+   * shared with another frame either, which is why it is not a store for the
+   * frame credential. `ARCHITECTURE.md` section 5.1 says why the top frame
+   * does not give a credential of its own to a child instead.
+   */
+  Memory: Record<never, never>;
+}>;
+
+export const StoreKind = Data.taggedEnum<StoreKind>();
 
 /**
- * A string-in, string-out value API.
+ * A string-in, string-out value store. `KeyValueStore` serves this shape.
  *
  * We store JSON strings, and never the managers' own structured values. quoid
  * goes through JSON anyway, Tampermonkey and Violentmonkey disagree on what
  * they accept, and owning the serialisation is what lets `Storage.ts` check
  * every read against a schema.
- *
- * `get` gives an `Option`. "Absent" is a normal answer here, not a failure, and
- * it must not be confused with a stored empty string.
  */
-export type GmValueApi = Data.TaggedEnum<{
-  /** The promise form, `GM.getValue` and the rest. */
-  Async: GmValueCalls;
-  /** The synchronous form, `GM_getValue` and the rest. */
-  Sync: GmValueCalls & {
-    /** The write of `set`, as a plain call that completes before it returns. */
-    readonly setUnsafe: (key: string, value: string) => void;
-    /** Changes made in another tab. `None` when the manager has no such API. */
-    readonly changes: Option.Option<(key: string) => Stream.Stream<Option.Option<string>>>;
-  };
-}>;
+export interface ValueStore {
+  /** Which backend this is, and so what it can do. */
+  readonly kind: StoreKind;
 
-export const GmValueApi = Data.taggedEnum<GmValueApi>();
+  /**
+   * `None` for a key with no value. "Absent" is a normal answer here, not a
+   * failure, and it must not be confused with a stored empty string.
+   */
+  readonly get: (key: string) => Effect.Effect<Option.Option<string>, GmError>;
+  readonly set: (key: string, value: string) => Effect.Effect<void, GmError>;
+  readonly remove: (key: string) => Effect.Effect<void, GmError>;
+  /**
+   * The write of `set`, as a plain call that completes before it returns.
+   *
+   * The promise form of the manager gives `None`. Storage sends those writes
+   * through its actor before the page exit.
+   */
+  readonly setUnsafe: Option.Option<(key: string, value: string) => void>;
+  /** Values written by another tab. Empty when the backend cannot report them. */
+  readonly changes: (key: string) => Stream.Stream<Option.Option<string>>;
+}
 
 /** A stored value as text. A manager that gives another primitive gives its text. */
 const asOption = (value: GmValue | undefined): Option.Option<string> =>
   pipe(value, Option.fromNullishOr, Option.map(String));
 
-const asyncValueApi = (surface: GmSurface): Option.Option<GmValueApi> =>
+/** The promise form, `GM.getValue` and the rest. */
+const asyncValueStore = (surface: GmSurface): Option.Option<ValueStore> =>
   pipe(
     surface.namespace,
     Option.flatMap((ns) =>
@@ -335,13 +365,14 @@ const asyncValueApi = (surface: GmSurface): Option.Option<GmValueApi> =>
         deleteValue: Option.fromNullishOr(ns.deleteValue),
       }),
     ),
-    Option.map(({ getValue, setValue, deleteValue }) =>
-      GmValueApi.Async({
-        get: (key) => gmAttemptAsync("GM.getValue", () => getValue(key).then(asOption)),
-        set: (key, value) => gmAttemptAsync("GM.setValue", () => setValue(key, value)),
-        remove: (key) => gmAttemptAsync("GM.deleteValue", () => deleteValue(key)),
-      }),
-    ),
+    Option.map(({ getValue, setValue, deleteValue }): ValueStore => ({
+      kind: StoreKind.GmAsync(),
+      get: (key) => gmAttemptAsync("GM.getValue", () => getValue(key).then(asOption)),
+      set: (key, value) => gmAttemptAsync("GM.setValue", () => setValue(key, value)),
+      remove: (key) => gmAttemptAsync("GM.deleteValue", () => deleteValue(key)),
+      setUnsafe: Option.none(),
+      changes: () => Stream.empty,
+    })),
   );
 
 /**
@@ -394,34 +425,44 @@ const watchValue =
       return Effect.acquireRelease(listen, (id) => stopWatching(unwatch, id));
     });
 
-const syncValueApi = (surface: GmSurface): Option.Option<GmValueApi> =>
-  pipe(
+/** The synchronous form, `GM_getValue` and the rest. */
+const syncValueStore = (surface: GmSurface): Option.Option<ValueStore> => {
+  /** Changes made in another tab. `None` when the manager has no such API. */
+  const watch = pipe(
+    surface.addValueChangeListener,
+    Option.map((listen) => watchValue(listen, surface.removeValueChangeListener)),
+  );
+  return pipe(
     Option.all({
       getValue: surface.getValueSync,
       setValue: surface.setValueSync,
       deleteValue: surface.deleteValueSync,
     }),
-    Option.map(({ getValue, setValue, deleteValue }) =>
-      GmValueApi.Sync({
-        get: (key) => gmAttempt("GM_getValue", () => asOption(getValue(key))),
-        set: (key, value) =>
-          gmAttempt("GM_setValue", () => {
-            setValue(key, value);
-          }),
-        remove: (key) =>
-          gmAttempt("GM_deleteValue", () => {
-            deleteValue(key);
-          }),
-        setUnsafe: (key, value) => {
+    Option.map(({ getValue, setValue, deleteValue }): ValueStore => ({
+      kind: StoreKind.GmSync({ watchable: Option.isSome(watch) }),
+      get: (key) => gmAttempt("GM_getValue", () => asOption(getValue(key))),
+      set: (key, value) =>
+        gmAttempt("GM_setValue", () => {
           setValue(key, value);
-        },
-        changes: pipe(
-          surface.addValueChangeListener,
-          Option.map((watch) => watchValue(watch, surface.removeValueChangeListener)),
-        ),
+        }),
+      remove: (key) =>
+        gmAttempt("GM_deleteValue", () => {
+          deleteValue(key);
+        }),
+      setUnsafe: Option.some((key, value) => {
+        setValue(key, value);
       }),
-    ),
+      changes: (key) =>
+        pipe(
+          watch,
+          Option.match({
+            onNone: () => Stream.empty,
+            onSome: (changesOf) => changesOf(key),
+          }),
+        ),
+    })),
   );
+};
 
 // ---------------------------------------------------------------------------
 // Tabs, clipboard and network
@@ -668,8 +709,8 @@ export class Gm extends Context.Service<
     /** Diagnostics only. */
     readonly identity: ManagerIdentity;
 
-    /** The best value API that this manager has, if it has one. */
-    readonly values: Option.Option<GmValueApi>;
+    /** The best value store that this manager has, if it has one. */
+    readonly values: Option.Option<ValueStore>;
 
     /** True when the manager gives the page-world `unsafeWindow`. */
     readonly hasUnsafeWindow: boolean;
@@ -798,11 +839,11 @@ const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
     identity: readIdentity(surface.info),
     values: pipe(
       surface,
-      syncValueApi,
+      syncValueStore,
       Option.orElse(
         // Prefer a complete synchronous surface. This changes Stay and other
         // managers that give both forms. Storage debounces the selected kind.
-        () => asyncValueApi(surface),
+        () => asyncValueStore(surface),
       ),
     ),
     hasUnsafeWindow: surface.hasUnsafeWindow,
