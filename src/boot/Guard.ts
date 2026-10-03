@@ -21,10 +21,12 @@
 import {
   Array,
   Boolean,
+  Data,
   Deferred,
   Effect,
   Option,
   Predicate,
+  type Record,
   Ref,
   Schema,
   type Scope,
@@ -54,7 +56,9 @@ const GUARD = Symbol.for("vimium-webkit.stage0");
  * How many keys to hold while the application starts.
  *
  * Holding them cannot be avoided. Reading the settings is asynchronous on every
- * manager, because `GM.getValue` gives only a promise on quoid.
+ * manager, because `GM.getValue` gives only a promise on quoid. The guard holds
+ * every key from the first one until the application takes the keyboard, so a
+ * user who types `gg` at once loses neither key.
  */
 const MAX_BUFFERED_KEYS = 16;
 
@@ -69,19 +73,43 @@ export interface BootSignal {
   /** Whether the user typed into an editable element since we started. */
   readonly typedIntoEditable: Effect.Effect<boolean>;
   /**
-   * Take the held keys, oldest first.
+   * Stop holding keys, and take the held ones, oldest first.
    *
-   * Call this after the key bridge is attached, and immediately before the
-   * guard scope closes. The buffer keeps filling until then, so a key that
-   * arrives while the application starts is not lost.
+   * This is the signal that the application is ready. Call it once the key
+   * bridge is attached, and before the guard scope closes. The guard holds every
+   * key until then, so a key that arrives while the application starts is not
+   * lost. From then on the key bridge takes every key.
    */
   readonly drain: Effect.Effect<ReadonlyArray<KeyboardEvent>>;
 }
 
-/** The keys that the guard holds while the application starts, oldest first. */
-type HeldKeys = ReadonlyArray<KeyboardEvent>;
+/** A variant that carries no data. */
+type NoFields = Record.ReadonlyRecord<never, never>;
 
-const NO_KEYS: HeldKeys = [];
+/** What the guard does with a key that would start the application. */
+type Hold = Data.TaggedEnum<{
+  /** The application is not ready. The keys wait here, oldest first. */
+  Holding: { readonly keys: ReadonlyArray<KeyboardEvent> };
+  /** The application has the keyboard. */
+  Released: NoFields;
+}>;
+const Hold = Data.taggedEnum<Hold>();
+
+const NO_KEYS: ReadonlyArray<KeyboardEvent> = [];
+
+/** Hold one more key, up to the limit. A released guard holds nothing. */
+const held = (event: KeyboardEvent): ((hold: Hold) => Hold) =>
+  Hold.$match({
+    Holding: ({ keys }) =>
+      Hold.Holding({ keys: pipe(keys, Array.append(event), Array.take(MAX_BUFFERED_KEYS)) }),
+    Released: (released) => released,
+  });
+
+/** The keys that a guard held when it let go of them. */
+const heldKeys: (hold: Hold) => ReadonlyArray<KeyboardEvent> = Hold.$match({
+  Holding: ({ keys }) => keys,
+  Released: () => NO_KEYS,
+});
 
 /** The keys that only change what another key means. */
 const MODIFIER_KEYS: ReadonlyArray<string> = ["Shift", "Control", "Alt", "Meta"];
@@ -194,7 +222,7 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
     const dom = yield* Dom;
     const realm = yield* Realm;
 
-    const buffer = yield* Ref.make(NO_KEYS);
+    const hold = yield* Ref.make<Hold>(Hold.Holding({ keys: NO_KEYS }));
     const typed = yield* Ref.make(false);
     const started = yield* Deferred.make<ActivationReason>();
 
@@ -219,10 +247,7 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
      * A key past the limit of the buffer is still suppressed, and not held.
      */
     const holdKey = Effect.fnUntraced(function* (event: KeyboardEvent) {
-      yield* pipe(
-        buffer,
-        Ref.update<HeldKeys>(flow(Array.append(event), Array.take(MAX_BUFFERED_KEYS))),
-      );
+      yield* pipe(hold, Ref.update(held(event)));
       yield* Effect.sync(() => {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -243,10 +268,12 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
         typed,
         Ref.update((before) => before || isEditable(source)),
       );
-      const waiting = yield* pipe(started, Deferred.isDone, Effect.map(Boolean.not));
+      // Not the activation: the application is ready only once it drains the
+      // keys, and a key between the two must wait as well.
+      const holding = yield* pipe(Ref.get(hold), Effect.map(Hold.$is("Holding")));
       yield* pipe(
         event,
-        Option.liftPredicate((key) => waiting && startsApplication(key, source)),
+        Option.liftPredicate((key) => holding && startsApplication(key, source)),
         Option.match({ onNone: () => Effect.void, onSome: holdKey }),
       );
     });
@@ -300,6 +327,6 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
     return {
       reason,
       typedIntoEditable: Ref.get(typed),
-      drain: pipe(buffer, Ref.getAndSet(NO_KEYS)),
+      drain: pipe(hold, Ref.getAndSet<Hold>(Hold.Released()), Effect.map(heldKeys)),
     };
   });
