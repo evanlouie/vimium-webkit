@@ -333,7 +333,9 @@ Two messages travel between frames before the handshake, and the difference
 matters:
 
 - **wake** starts a frame that has not started. Only an ancestor may send it.
-  Every hint round sends it to the frames below the frame that starts the round.
+  The top frame sends it to every frame of the page at the start of each hint
+  round, whichever frame starts the round. A frame that is joining or has
+  joined ignores it.
 - **announce** asks a frame that is _already_ running to say so again. The
   coordinator sweeps with this when it starts, because a frame that started
   before its listener existed hears nothing. The guard ignores it.
