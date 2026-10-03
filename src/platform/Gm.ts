@@ -122,7 +122,7 @@ type AddValueChangeListener = (
 type RemoveValueChangeListener = (listenerId: string | number) => void;
 
 /** Every binding of the manager that this module can use. `None` is an absent binding. */
-interface GmSurface {
+export interface GmSurface {
   readonly namespace: Option.Option<GmNamespace>;
   readonly info: unknown;
   readonly getValueSync: Option.Option<SyncGetValue>;
@@ -856,5 +856,3 @@ const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
     closeWindow,
   });
 };
-
-export type { GmSurface };
