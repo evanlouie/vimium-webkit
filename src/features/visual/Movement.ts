@@ -543,6 +543,3 @@ export const scrollSelectionIntoView = (
         element.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" }),
     }),
   );
-
-/** The selected text. `Selection.toString()` is the only portable reader. */
-export const selectionText = (selection: Selection): string => selection.toString();

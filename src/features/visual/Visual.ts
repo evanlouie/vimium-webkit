@@ -62,7 +62,6 @@ import {
   reverseSelection,
   runMovement,
   scrollSelectionIntoView,
-  selectionText,
 } from "./Movement.ts";
 
 export type VisualKind = "visual" | "visual-line" | "caret";
@@ -413,7 +412,8 @@ export const VisualLayer: Layer.Layer<
 
     /** `y`: copy the selection and leave. */
     const yank = Effect.fn("Visual.yank")(function* () {
-      const text = yield* probeSelection(selectionText, "");
+      // `Selection.toString()` is the only portable reader of the text.
+      const text = yield* probeSelection((target) => target.toString(), "");
       yield* pipe(
         text,
         Option.liftPredicate((text) => text.length > 0),
