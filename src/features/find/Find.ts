@@ -27,6 +27,7 @@
 import {
   Array,
   Boolean,
+  Context,
   Data,
   Deferred,
   Effect,
@@ -415,9 +416,12 @@ export const FindLayer: Layer.Layer<
     const doc = dom.document;
     const win = dom.window;
 
-    // The services that the highlighter needs, captured once. The overlay is
-    // built later, in a scope of its own, so the context must travel with it.
-    const overlayServices = yield* Effect.context<Dom | Ui>();
+    // The services that the highlighter needs, and only those. The overlay is
+    // built later, in a scope of its own, so they must travel with it. The
+    // whole context of the layer holds the layer scope too, and that scope
+    // took the overlay from its own: closing it removed nothing, and each new
+    // search drew over the highlights of the one before.
+    const overlayServices = pipe(Context.make(Dom, dom), Context.add(Ui, ui));
 
     // The layer scope owns the session, the overlay, the mode that lives on
     // and each fiber that find starts. Closing the runtime therefore takes
