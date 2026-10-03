@@ -203,7 +203,6 @@ const INDICATORS: Record.ReadonlyRecord<HintMode, string> = {
   "copy-link-url": "Hints: copy URL",
   "copy-link-text": "Hints: copy text",
   "open-with-omnibar": "Hints: omnibar",
-  download: "Hints: download",
 };
 
 /** The modes that write the clipboard, and that therefore need a true gesture. */
@@ -221,7 +220,6 @@ const targetsFor = (mode: HintMode): HintTargets =>
       "activate-new-tab-background",
       "copy-link-url",
       "open-with-omnibar",
-      "download",
       () => HintTargets.Linked(),
     ),
     Match.exhaustive,
@@ -231,11 +229,6 @@ const targetsFor = (mode: HintMode): HintTargets =>
 const MOVED_DETAIL = "The page moved that hint. Nothing was activated.";
 
 const HINTS_STOPPED = "Hints stopped: the page did not answer in time.";
-
-const DOWNLOAD_DETAIL =
-  "Download-link hints are not possible in a userscript on " +
-  "WebKit. A synthetic Alt-click cannot start a download. " +
-  "Use Control-click, then select Download Linked File.";
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -800,7 +793,6 @@ const planActivation = (mode: HintMode, hint: LocalHint): Activation =>
       Activation.Copy({ text: hint.linkText, label: "link text" }),
     ),
     Match.when("open-with-omnibar", () => Activation.Omnibar({ href: hint.href })),
-    Match.when("download", () => Activation.Refuse({ detail: DOWNLOAD_DETAIL })),
     Match.exhaustive,
   );
 

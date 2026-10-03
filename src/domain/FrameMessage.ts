@@ -255,7 +255,6 @@ export const hintModeSchema = Schema.Literals([
   "copy-link-url",
   "copy-link-text",
   "open-with-omnibar",
-  "download",
 ]);
 
 export type HintMode = typeof hintModeSchema.Type;

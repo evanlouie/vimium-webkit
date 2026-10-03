@@ -99,9 +99,8 @@ export const isSecondary = (hint: LocalHint): boolean => HintRank.$is("Secondary
 /**
  * Which elements a detection pass hints.
  *
- * `Linked` keeps only an element that truly has a URL. The new-tab, copy-URL,
- * omnibar and download modes act on the URL, so a hint without one would do
- * nothing.
+ * `Linked` keeps only an element that truly has a URL. The new-tab, copy-URL
+ * and omnibar modes act on the URL, so a hint without one would do nothing.
  */
 export type HintTargets = Data.TaggedEnum<{
   Clickable: NoFields;
