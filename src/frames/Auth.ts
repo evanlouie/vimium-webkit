@@ -244,10 +244,11 @@ export class FrameAuth extends Context.Service<
     readonly cipher: (handshake: FrameHandshake) => Effect.Effect<FrameCipher, FrameAuthError>;
 
     /**
-     * Whether this realm can hold a credential at all.
+     * Whether this realm can make and check a proof at all.
      *
-     * `false` on a manager with no private value store. No frame of the page
-     * can then join a session, so nothing need wait for one.
+     * `false` on a manager with no private value store, and on a page that is
+     * not a secure context, which has no Web Crypto. No frame of the page can
+     * then join a session, so nothing need wait for one.
      */
     readonly available: boolean;
   }
@@ -300,7 +301,7 @@ export class FrameAuth extends Context.Service<
        * hostile page could otherwise read the credential out of
        * `localStorage` and calculate a valid proof.
        */
-      const available = pipe(
+      const storeIsPrivate = pipe(
         kv.kind,
         StoreKind.$match({
           GmAsync: () => true,
@@ -309,8 +310,13 @@ export class FrameAuth extends Context.Service<
         }),
       );
 
+      // A plain `http:` page has no Web Crypto, and it never gets it, so
+      // every proof would fail there.
+      const hasSubtle = yield* Effect.sync(() => Option.isSome(readSubtle()));
+      const available = storeIsPrivate && hasSubtle;
+
       const privateStore: Effect.Effect<void, FrameAuthError> = pipe(
-        available,
+        storeIsPrivate,
         Boolean.match({
           onTrue: () => Effect.void,
           onFalse: () =>
