@@ -49,7 +49,7 @@ import {
   openBranch,
   type TrieNode,
 } from "~/domain/Mapping.ts";
-import type { NoFields } from "~/domain/Prelude.ts";
+import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { isUserEvent, mediaPlayerHasFocus } from "~/platform/Elements.ts";
@@ -480,12 +480,7 @@ export class Keyboard extends Context.Service<
       const reset = pipe(
         state,
         Ref.getAndSet(Option.none<HalfTyped>()),
-        Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: () => show(Option.none()),
-          }),
-        ),
+        Effect.flatMap(whenSome(() => show(Option.none()))),
       );
 
       // A new trie must not leave a half-walked sequence behind it.
@@ -500,10 +495,7 @@ export class Keyboard extends Context.Service<
         pipe(
           event.code,
           Option.liftPredicate((code) => code.length > 0),
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: (code) => pipe(suppressedCodes, Ref.update(HashSet.add(code))),
-          }),
+          whenSome((code) => pipe(suppressedCodes, Ref.update(HashSet.add(code)))),
           Effect.as(SUPPRESS_EVENT),
         );
 

@@ -39,6 +39,7 @@ import {
   String,
 } from "effect";
 import { Settings } from "~/core/Settings.ts";
+import { whenSome } from "~/domain/Prelude.ts";
 import { buildSearchUrl } from "~/domain/SearchEngine.ts";
 import {
   parseSuggestResponse,
@@ -187,10 +188,7 @@ export const makeSuggester: Effect.Effect<Suggester, never, Gm | Settings | Scop
           const suggestions = yield* fetch(question);
           yield* pipe(
             suggestions,
-            Option.match({
-              onNone: () => Effect.void,
-              onSome: (found) => remember(question, found, onResults),
-            }),
+            whenSome((found) => remember(question, found, onResults)),
           );
         }),
         FiberHandle.run(inFlight),
@@ -235,10 +233,7 @@ export const makeSuggester: Effect.Effect<Suggester, never, Gm | Settings | Scop
           onFalse: () => Option.none<Question>(),
           onTrue: () => questionFor(searchUrl, query),
         }),
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: (question) => ask(question, onResults),
-        }),
+        whenSome((question) => ask(question, onResults)),
       );
     });
 

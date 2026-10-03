@@ -24,6 +24,7 @@
  */
 
 import { Array, Boolean, Effect, FiberHandle, Option, Ref, Scope, pipe } from "effect";
+import { whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Ui } from "~/ui/Ui.ts";
 import type { FindMatch } from "./Engine.ts";
@@ -451,17 +452,15 @@ export const makeHighlighter: Effect.Effect<Highlighter, never, Dom | Ui | Scope
     );
     yield* pipe(
       visualViewport,
-      Option.match({
-        onNone: () => Effect.void,
-        onSome: (visual) =>
-          pipe(
-            ["resize", "scroll"],
-            Effect.forEach(
-              (type) => dom.listenOn(visual, type, () => reposition, { passive: true }),
-              { discard: true },
-            ),
+      whenSome((visual) =>
+        pipe(
+          ["resize", "scroll"],
+          Effect.forEach(
+            (type) => dom.listenOn(visual, type, () => reposition, { passive: true }),
+            { discard: true },
           ),
-      }),
+        ),
+      ),
     );
 
     const start = yield* readScroll;

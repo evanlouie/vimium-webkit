@@ -31,7 +31,7 @@ import { Report } from "~/core/Report.ts";
 import { PLAIN_KEY_CONTEXT } from "~/domain/Key.ts";
 import type { GlobalMark, Marks as MarksData } from "~/domain/Persisted.ts";
 import { localMark, pruneMarks, withGlobalMark, withLocalMark } from "~/domain/Persisted.ts";
-import type { NoFields } from "~/domain/Prelude.ts";
+import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Storage } from "~/platform/Storage.ts";
 import { Tabs } from "~/platform/Tabs.ts";
@@ -266,12 +266,12 @@ export const MarksLayer: Layer.Layer<
       "Marks.activateCreateMode": () =>
         pipe(
           captureNextKey({ prompt: "Set mark:", context: PLAIN_KEY_CONTEXT }),
-          Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: setLocal })),
+          Effect.flatMap(whenSome(setLocal)),
         ),
       "Marks.activateGotoMode": () =>
         pipe(
           captureNextKey({ prompt: "Go to mark:", context: PLAIN_KEY_CONTEXT }),
-          Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: jumpLocal })),
+          Effect.flatMap(whenSome(jumpLocal)),
         ),
     });
   }),

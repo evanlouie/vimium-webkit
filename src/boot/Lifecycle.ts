@@ -67,7 +67,7 @@ import {
   Stream,
   pipe,
 } from "effect";
-import type { NoFields } from "~/domain/Prelude.ts";
+import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 
 export type LifecycleEvent = Data.TaggedEnum<{
@@ -161,10 +161,7 @@ export class Lifecycle extends Context.Service<
       const check = Effect.gen(function* () {
         const next = yield* dom.href;
         const previous = yield* pipe(url, Ref.getAndSet(next));
-        yield* pipe(
-          urlChange(previous, next),
-          Option.match({ onNone: () => Effect.void, onSome: emit }),
-        );
+        yield* pipe(urlChange(previous, next), whenSome(emit));
       });
 
       const keepPoller = (fiber: Poller): Effect.Effect<void> =>
@@ -189,7 +186,7 @@ export class Lifecycle extends Context.Service<
       const stopPolling = pipe(
         poller,
         Ref.getAndSet(Option.none<Poller>()),
-        Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: Fiber.interrupt })),
+        Effect.flatMap(whenSome(Fiber.interrupt)),
       );
 
       const isVisible = pipe(
@@ -222,11 +219,9 @@ export class Lifecycle extends Context.Service<
         pipe(
           Ref.get(exitHook),
           Effect.flatMap(
-            Option.match({
-              onNone: () => Effect.void,
-              onSome: (hook) =>
-                pipe(hook(exit), Effect.forkDetach({ startImmediately: true }), Effect.asVoid),
-            }),
+            whenSome((hook) =>
+              pipe(hook(exit), Effect.forkDetach({ startImmediately: true }), Effect.asVoid),
+            ),
           ),
         );
 

@@ -34,6 +34,7 @@ import { isKind } from "~/domain/FrameMessage.ts";
 import { Exclusions, knownRule, TopFrameVerdict } from "~/core/Exclusions.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
+import { whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import type { FrameId } from "~/domain/FrameId.ts";
 import { FrameRole } from "~/platform/Realm.ts";
@@ -169,13 +170,7 @@ export class FrameLink extends Context.Service<
       const elect = Effect.fn("FrameLink.elect")(function* (direction: 1 | -1) {
         const frames = yield* bus.peers;
         const cursor = yield* Ref.get(focusedRef);
-        yield* pipe(
-          nextFrame(frames, cursor, direction),
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: focus,
-          }),
-        );
+        yield* pipe(nextFrame(frames, cursor, direction), whenSome(focus));
       });
 
       /** Take the focus, and tell the user which frame now has it. */

@@ -49,6 +49,7 @@ import { Commands } from "~/core/Commands.ts";
 import { recoverUnlessInterrupted } from "~/core/Recovery.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
+import { whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { deepActiveElement, isUserEvent } from "~/platform/Elements.ts";
 
@@ -715,7 +716,7 @@ export class Scroller extends Context.Service<
           pipe(
             rootElement(),
             Option.liftPredicate((root) => root !== element),
-            Option.match({ onNone: () => Effect.void, onSome: shift(axis, delta) }),
+            whenSome(shift(axis, delta)),
           );
 
         /** What a page step measures: the viewport for the document, and the box of a container. */
@@ -1043,16 +1044,14 @@ export class Scroller extends Context.Service<
           yield* pipe(
             amount,
             nonZero,
-            Option.match({
-              onNone: () => Effect.void,
-              onSome: (moved) =>
-                scrollDistance(
-                  axis,
-                  moved,
-                  event,
-                  Effect.suspend(() => target(axis, directionOf(moved))),
-                ),
-            }),
+            whenSome((moved) =>
+              scrollDistance(
+                axis,
+                moved,
+                event,
+                Effect.suspend(() => target(axis, directionOf(moved))),
+              ),
+            ),
           );
         });
 
@@ -1067,10 +1066,7 @@ export class Scroller extends Context.Service<
           yield* pipe(
             Math.round(pageSize(element, axis) * fraction),
             nonZero,
-            Option.match({
-              onNone: () => Effect.void,
-              onSome: (moved) => scrollDistance(axis, moved, event, Effect.succeed(element)),
-            }),
+            whenSome((moved) => scrollDistance(axis, moved, event, Effect.succeed(element))),
           );
         });
 
@@ -1102,22 +1098,19 @@ export class Scroller extends Context.Service<
             generation,
             Ref.update((value) => value + 1),
           );
-          yield* pipe(
-            physicalKey(event),
-            Option.match({ onNone: () => Effect.void, onSome: hold }),
-          );
+          yield* pipe(physicalKey(event), whenSome(hold));
         });
 
         /** A key that the page made neither presses nor releases anything. */
         const noteKeydown = flow(
           Option.liftPredicate((event: KeyboardEvent) => isUserEvent(event) && !event.repeat),
-          Option.match({ onNone: () => Effect.void, onSome: notePress }),
+          whenSome(notePress),
         );
 
         const noteKeyup = flow(
           Option.liftPredicate((event: KeyboardEvent) => isUserEvent(event)),
           Option.flatMap(physicalKey),
-          Option.match({ onNone: () => Effect.void, onSome: release }),
+          whenSome(release),
         );
 
         // The press counter and the held keys follow every key of the user.

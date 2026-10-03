@@ -30,7 +30,7 @@ import {
 } from "effect";
 import { constVoid, flow } from "effect/Function";
 import { describeThrown } from "~/domain/Failure.ts";
-import type { NoFields } from "~/domain/Prelude.ts";
+import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "./Dom.ts";
 import type {
   GmNamespace,
@@ -388,14 +388,12 @@ const stopWatching = (
 ): Effect.Effect<void> =>
   pipe(
     unwatch,
-    Option.match({
-      onNone: () => Effect.void,
-      onSome: (remove) =>
-        pipe(
-          Effect.try(() => remove(id)),
-          Effect.ignore,
-        ),
-    }),
+    whenSome((remove) =>
+      pipe(
+        Effect.try(() => remove(id)),
+        Effect.ignore,
+      ),
+    ),
   );
 
 /**

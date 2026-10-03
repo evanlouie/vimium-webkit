@@ -118,7 +118,7 @@ import {
 } from "~/domain/HintSession.ts";
 import { isComposing, type KeyContext, keyNotation } from "~/domain/Key.ts";
 import type { Settings as SettingsData } from "~/domain/Persisted.ts";
-import type { NoFields } from "~/domain/Prelude.ts";
+import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import {
   FrameBus,
   type InboundMessage,
@@ -239,12 +239,6 @@ const HINTS_STOPPED = "Hints stopped: the page did not answer in time.";
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
-
-/** Run `f` on a value that is present. Absence does nothing. */
-const whenSome = <A>(
-  f: (value: A) => Effect.Effect<void>,
-): ((option: Option.Option<A>) => Effect.Effect<void>) =>
-  Option.match({ onNone: () => Effect.void, onSome: f });
 
 /** Run `effect` when a mode exited on Escape, and nothing for any other reason. */
 const whenEscaped =

@@ -11,6 +11,7 @@
 import { Effect, FiberSet, Layer, Match, Option, pipe } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Report } from "~/core/Report.ts";
+import { whenSome } from "~/domain/Prelude.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { BRIEFLY, Hud } from "~/ui/Hud.ts";
@@ -60,12 +61,7 @@ export const UrlClipboardLayer: Layer.Layer<
     const previewClipboard = pipe(
       clipboard.read,
       Effect.map(Option.liftPredicate(hasContent)),
-      Effect.flatMap(
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: (text) => hud.show(`Clipboard: ${text.slice(0, 80)}`, BRIEFLY),
-        }),
-      ),
+      Effect.flatMap(whenSome((text) => hud.show(`Clipboard: ${text.slice(0, 80)}`, BRIEFLY))),
       Effect.ignore,
     );
 
@@ -89,10 +85,7 @@ export const UrlClipboardLayer: Layer.Layer<
       yield* pipe(
         answer,
         Option.filter(hasContent),
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: (input) => navigation.go(input.trim(), destination),
-        }),
+        whenSome((input) => navigation.go(input.trim(), destination)),
       );
     });
 

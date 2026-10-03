@@ -27,6 +27,7 @@
 
 import { Boolean, Context, Effect, Layer, Option, Predicate, Schema, pipe } from "effect";
 import { describeThrown } from "~/domain/Failure.ts";
+import { whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { Gm } from "~/platform/Gm.ts";
 
@@ -117,14 +118,12 @@ const restoreFocus = (previous: Element | null): Effect.Effect<void> =>
   pipe(
     previous,
     Option.liftPredicate((element) => element instanceof HTMLElement),
-    Option.match({
-      onNone: () => Effect.void,
-      onSome: (element) =>
-        pipe(
-          Effect.try(() => element.focus({ preventScroll: true })),
-          Effect.ignore,
-        ),
-    }),
+    whenSome((element) =>
+      pipe(
+        Effect.try(() => element.focus({ preventScroll: true })),
+        Effect.ignore,
+      ),
+    ),
   );
 
 /**

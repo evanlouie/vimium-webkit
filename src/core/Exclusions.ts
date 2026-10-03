@@ -37,7 +37,7 @@ import {
   MAX_REGEX_URL_LENGTH,
 } from "~/domain/Exclusion.ts";
 import type { ExclusionRule } from "~/domain/Persisted.ts";
-import type { NoFields } from "~/domain/Prelude.ts";
+import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { Settings } from "./Settings.ts";
@@ -189,11 +189,9 @@ export class Exclusions extends Context.Service<
         const warnOnce = (set: ExclusionSet): Effect.Effect<void> =>
           pipe(
             droppedSignature(set),
-            Option.match({
-              onNone: () => Effect.void,
-              onSome: (signature) =>
-                pipe(warnAboutDropped(set), Effect.when(isNewSignature(signature)), Effect.asVoid),
-            }),
+            whenSome((signature) =>
+              pipe(warnAboutDropped(set), Effect.when(isNewSignature(signature)), Effect.asVoid),
+            ),
           );
 
         const match = Effect.fn("Exclusions.match")(function* (url: string) {

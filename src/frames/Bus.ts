@@ -104,7 +104,7 @@ import {
   WIRE_TARGET_ALL,
   WIRE_TARGET_TOP,
 } from "~/domain/FrameMessage.ts";
-import type { NoFields } from "~/domain/Prelude.ts";
+import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import {
   ANNOUNCE_MESSAGE,
@@ -400,10 +400,7 @@ export const makeSealedLink = Effect.fn("FrameBus.link")(function* (
   const sealAt = (seq: number, message: FrameWire | WelcomeMessage): Effect.Effect<void> =>
     pipe(
       serialize(message),
-      Option.match({
-        onNone: () => Effect.void,
-        onSome: (text) => sealText(seq, text),
-      }),
+      whenSome((text) => sealText(seq, text)),
     );
 
   const sealAndPost = Effect.fnUntraced(function* (message: FrameWire | WelcomeMessage) {
@@ -470,9 +467,7 @@ export const makeSealedLink = Effect.fn("FrameBus.link")(function* (
   yield* pipe(Queue.take(mailbox), Effect.flatMap(open), Effect.forever, Effect.forkScoped);
 
   yield* host.listenOn(port, "message", (event) =>
-    Effect.suspend(() =>
-      pipe(event.data, parseSealed, Option.match({ onNone: () => Effect.void, onSome: deliver })),
-    ),
+    Effect.suspend(() => pipe(event.data, parseSealed, whenSome(deliver))),
   );
 
   yield* Effect.acquireRelease(
@@ -901,10 +896,7 @@ const makeCoordinator = Effect.fnUntraced(function* (publishLocal: PublishLocal)
     pipe(
       parseWire(data),
       Option.filter((wire) => wire.from === frameId),
-      Option.match({
-        onNone: () => Effect.void,
-        onSome: actOnChild(frameId),
-      }),
+      whenSome(actOnChild(frameId)),
     );
 
   /** The link of one child, which a `messageerror` removes. */
@@ -1051,14 +1043,12 @@ const makeCoordinator = Effect.fnUntraced(function* (publishLocal: PublishLocal)
   const dropOldestJoin: Effect.Effect<void> = pipe(
     Queue.poll(pendingJoins),
     Effect.flatMap(
-      Option.match({
-        onNone: () => Effect.void,
-        onSome: (oldest) =>
-          pipe(
-            closePort(oldest.port),
-            Effect.andThen(Effect.logDebug("too many joins wait, so the oldest one is dropped")),
-          ),
-      }),
+      whenSome((oldest) =>
+        pipe(
+          closePort(oldest.port),
+          Effect.andThen(Effect.logDebug("too many joins wait, so the oldest one is dropped")),
+        ),
+      ),
     ),
   );
 
@@ -1143,10 +1133,7 @@ const makeCoordinator = Effect.fnUntraced(function* (publishLocal: PublishLocal)
   const onTopWindowMessage = (event: MessageEvent): Effect.Effect<void> =>
     pipe(
       parseWindowToTop(event.data),
-      Option.match({
-        onNone: () => Effect.void,
-        onSome: (message) => onHandshake(event, message),
-      }),
+      whenSome((message) => onHandshake(event, message)),
     );
 
   // ---------------------------------------------------------------------
@@ -1277,12 +1264,7 @@ const makeMember = Effect.fnUntraced(function* (publishLocal: PublishLocal) {
     Ref.make(Option.none<Attempt>()),
     flow(
       Ref.getAndSet(Option.none<Attempt>()),
-      Effect.flatMap(
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: (attempt) => attempt.release,
-        }),
-      ),
+      Effect.flatMap(whenSome((attempt) => attempt.release)),
     ),
   );
 
@@ -1346,15 +1328,7 @@ const makeMember = Effect.fnUntraced(function* (publishLocal: PublishLocal) {
       Effect.ignore,
     );
 
-  const announce: Effect.Effect<void> = pipe(
-    topWindow,
-    Effect.flatMap(
-      Option.match({
-        onNone: () => Effect.void,
-        onSome: postHello,
-      }),
-    ),
-  );
+  const announce: Effect.Effect<void> = pipe(topWindow, Effect.flatMap(whenSome(postHello)));
 
   const joinSession = Effect.fnUntraced(function* (welcome: WelcomeMessage) {
     yield* pipe(rosterRef, Ref.set(welcome.frames));
@@ -1363,23 +1337,11 @@ const makeMember = Effect.fnUntraced(function* (publishLocal: PublishLocal) {
 
   const onWelcome = Effect.fnUntraced(function* (welcome: WelcomeMessage) {
     const accepted = yield* pipe(attemptRef, Ref.modify(acceptWelcome(welcome, realm.frameId)));
-    yield* pipe(
-      accepted,
-      Option.match({
-        onNone: () => Effect.void,
-        onSome: joinSession,
-      }),
-    );
+    yield* pipe(accepted, whenSome(joinSession));
   });
 
   const receiveWelcome = (data: unknown): Effect.Effect<void> =>
-    pipe(
-      parseWelcome(data),
-      Option.match({
-        onNone: () => Effect.void,
-        onSome: onWelcome,
-      }),
-    );
+    pipe(parseWelcome(data), whenSome(onWelcome));
 
   /**
    * Deliver one routed message of the top frame.
@@ -1397,13 +1359,7 @@ const makeMember = Effect.fnUntraced(function* (publishLocal: PublishLocal) {
   });
 
   const receiveRouted = (data: unknown): Effect.Effect<void> =>
-    pipe(
-      parseWire(data),
-      Option.match({
-        onNone: () => Effect.void,
-        onSome: deliverFromTop,
-      }),
-    );
+    pipe(parseWire(data), whenSome(deliverFromTop));
 
   /** Read one message that the top frame sent on the link of this frame. */
   const receiveFromTop = (data: unknown): Effect.Effect<void> =>
@@ -1454,10 +1410,7 @@ const makeMember = Effect.fnUntraced(function* (publishLocal: PublishLocal) {
       );
       yield* pipe(
         previous,
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: (attempt) => attempt.release,
-        }),
+        whenSome((attempt) => attempt.release),
       );
 
       yield* pipe(
@@ -1530,10 +1483,7 @@ const makeMember = Effect.fnUntraced(function* (publishLocal: PublishLocal) {
   const onChallengeMessage = (event: MessageEvent): Effect.Effect<void> =>
     pipe(
       parseChallenge(event.data),
-      Option.match({
-        onNone: () => Effect.void,
-        onSome: (message) => acceptChallenge(event, message),
-      }),
+      whenSome((message) => acceptChallenge(event, message)),
     );
 
   const onChildWindowMessage = (event: MessageEvent): Effect.Effect<void> =>
@@ -1792,15 +1742,7 @@ export class FrameBus extends Context.Service<
           Stream.fromPubSub(inbox),
           Stream.filter(isInboundOf(kind)),
           Stream.runForEach((inbound) =>
-            pipe(
-              handler(inbound),
-              Effect.flatMap(
-                Option.match({
-                  onNone: () => Effect.void,
-                  onSome: replyTo(inbound),
-                }),
-              ),
-            ),
+            pipe(handler(inbound), Effect.flatMap(whenSome(replyTo(inbound)))),
           ),
           Effect.forkScoped,
         );

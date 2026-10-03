@@ -39,6 +39,7 @@ import {
 import { isEscape, KeyPolicy, type ModeHandle, Modes, ModeTier } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
+import { whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { composedTarget, deepActiveElement } from "~/platform/Elements.ts";
 import { Ui } from "~/ui/Ui.ts";
@@ -213,12 +214,7 @@ export class Insert extends Context.Service<
 
       const closeFrame: (cell: Ref.Ref<Option.Option<ModeHandle>>) => Effect.Effect<void> = flow(
         Ref.getAndSet(Option.none<ModeHandle>()),
-        Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: (handle) => handle.exit("explicit"),
-          }),
-        ),
+        Effect.flatMap(whenSome((handle) => handle.exit("explicit"))),
       );
 
       /** Open a mode frame in the layer scope, and keep its handle in the cell. */
@@ -319,7 +315,7 @@ export class Insert extends Context.Service<
 
       const onFocus = Effect.fnUntraced(function* (event: FocusEvent) {
         const target = yield* focusedNode(event);
-        yield* pipe(adoptable(target), Option.match({ onNone: () => Effect.void, onSome: adopt }));
+        yield* pipe(adoptable(target), whenSome(adopt));
         return CONTINUE_BUBBLING;
       });
 
@@ -336,7 +332,7 @@ export class Insert extends Context.Service<
         yield* pipe(
           current,
           Option.filter((element) => element === target),
-          Option.match({ onNone: () => Effect.void, onSome: () => leave }),
+          whenSome(() => leave),
         );
         return CONTINUE_BUBBLING;
       });
@@ -368,7 +364,7 @@ export class Insert extends Context.Service<
       const exitInsert = Effect.fn("Insert.exit")(function* () {
         yield* closeFrame(global);
         const typing = yield* pipe(field, Ref.getAndSet(Option.none<HTMLElement>()));
-        yield* pipe(typing, Option.match({ onNone: () => Effect.void, onSome: blurElement }));
+        yield* pipe(typing, whenSome(blurElement));
         yield* hideIndicator;
       });
 
@@ -390,10 +386,8 @@ export class Insert extends Context.Service<
         yield* adopt(target);
       });
 
-      const focusNth: (target: Option.Option<HTMLElement>) => Effect.Effect<void> = Option.match({
-        onNone: () => Effect.void,
-        onSome: focusElement,
-      });
+      const focusNth: (target: Option.Option<HTMLElement>) => Effect.Effect<void> =
+        whenSome(focusElement);
 
       /**
        * Choose among the inputs.
@@ -453,12 +447,7 @@ export class Insert extends Context.Service<
        * commands (OSU-02).
        */
       const seedFromFocus = Effect.fn("Insert.seedFromFocus")(function* () {
-        yield* pipe(
-          dom.document,
-          deepActiveElement,
-          adoptable,
-          Option.match({ onNone: () => Effect.void, onSome: adopt }),
-        );
+        yield* pipe(dom.document, deepActiveElement, adoptable, whenSome(adopt));
       });
 
       /** Blur the field that the page focused, and take the keys back from it. */
@@ -487,7 +476,7 @@ export class Insert extends Context.Service<
             onFalse: () => Option.none<HTMLElement>(),
             onTrue: () => pipe(dom.document, deepActiveElement, typingTarget),
           }),
-          Option.match({ onNone: () => Effect.void, onSome: giveBack }),
+          whenSome(giveBack),
         );
       });
 

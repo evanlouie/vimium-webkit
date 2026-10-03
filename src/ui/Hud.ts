@@ -51,7 +51,7 @@ import { Keyboard } from "~/core/Keyboard.ts";
 import { isEscape, Modes } from "~/core/Modes.ts";
 import { Report, type UserMessage } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
-import type { NoFields } from "~/domain/Prelude.ts";
+import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
 
@@ -600,10 +600,7 @@ export class Hud extends Context.Service<
             const { prompt: previous } = yield* Ref.get(state);
             yield* pipe(
               previous,
-              Option.match({
-                onNone: () => Effect.void,
-                onSome: ({ cancel }) => cancel,
-              }),
+              whenSome(({ cancel }) => cancel),
             );
             yield* FiberHandle.clear(timer);
 
@@ -694,15 +691,13 @@ export class Hud extends Context.Service<
             yield* pipe(
               options.onInput,
               Option.fromNullishOr,
-              Option.match({
-                onNone: () => Effect.void,
-                onSome: (onInput) =>
-                  dom.listenOn(parts.input, "input", () =>
-                    // Forked, because a body such as the live search of find can
-                    // suspend. A newer keystroke interrupts the older search.
-                    pipe(onInput(parts.input.value), FiberHandle.run(inputFiber), Effect.asVoid),
-                  ),
-              }),
+              whenSome((onInput) =>
+                dom.listenOn(parts.input, "input", () =>
+                  // Forked, because a body such as the live search of find can
+                  // suspend. A newer keystroke interrupts the older search.
+                  pipe(onInput(parts.input.value), FiberHandle.run(inputFiber), Effect.asVoid),
+                ),
+              ),
             );
 
             /** Let the caller see the key first, and then decide what it does. */

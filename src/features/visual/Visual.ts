@@ -45,7 +45,7 @@ import { type ExitReason, ExitTrigger, KeyPolicy, type ModeHandle, Modes } from 
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { appendCountDigit, isComposing, isCountDigit, keyNotation } from "~/domain/Key.ts";
-import type { NoFields } from "~/domain/Prelude.ts";
+import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Capabilities, type CapabilityReport } from "~/platform/Capabilities.ts";
 import { Clipboard } from "~/platform/Clipboard.ts";
 import { Dom } from "~/platform/Dom.ts";
@@ -359,10 +359,7 @@ export const VisualLayer: Layer.Layer<
       const entry = yield* Ref.get(live);
       yield* pipe(
         entry,
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: (handle) => handle.exit("explicit"),
-        }),
+        whenSome((handle) => handle.exit("explicit")),
       );
     });
 
@@ -459,10 +456,7 @@ export const VisualLayer: Layer.Layer<
               applePlatform: capabilities.applePlatform,
             }),
           ),
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: (notation) => handleKey(kind, notation),
-          }),
+          whenSome((notation) => handleKey(kind, notation)),
           Effect.as(SUPPRESS_EVENT),
         );
 

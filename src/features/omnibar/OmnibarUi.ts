@@ -20,6 +20,7 @@
 
 import { Array, Boolean, Effect, FiberHandle, Option, Ref, type Scope, pipe, String } from "effect";
 import { constNull, constVoid } from "effect/Function";
+import { whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { deepActiveElement } from "~/platform/Elements.ts";
 import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
@@ -300,11 +301,9 @@ export const makeOmnibarView: (
           Option.none,
         ),
         Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: (element) =>
-              dom.attempt("HTMLElement.focus", () => element.focus({ preventScroll: true })),
-          }),
+          whenSome((element) =>
+            dom.attempt("HTMLElement.focus", () => element.focus({ preventScroll: true })),
+          ),
         ),
         Effect.ignore,
       ),
@@ -486,17 +485,14 @@ export const makeOmnibarView: (
   );
   yield* pipe(
     visualViewport,
-    Option.match({
-      onNone: () => Effect.void,
-      onSome: (visual) =>
-        pipe(
-          ["resize", "scroll"],
-          Effect.forEach(
-            (type) => dom.listenOn(visual, type, () => reposition, { passive: true }),
-            { discard: true },
-          ),
-        ),
-    }),
+    whenSome((visual) =>
+      pipe(
+        ["resize", "scroll"],
+        Effect.forEach((type) => dom.listenOn(visual, type, () => reposition, { passive: true }), {
+          discard: true,
+        }),
+      ),
+    ),
   );
 
   yield* applyViewport;
@@ -538,12 +534,7 @@ export const makeOmnibarView: (
     pipe(
       Ref.get(rowElements),
       Effect.map(rowIndexOf(event.target)),
-      Effect.flatMap(
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: (index) => options.onActivate(index, wantsNewTab(event)),
-        }),
-      ),
+      Effect.flatMap(whenSome((index) => options.onActivate(index, wantsNewTab(event)))),
     ),
   );
 

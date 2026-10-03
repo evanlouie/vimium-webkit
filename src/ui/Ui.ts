@@ -66,7 +66,7 @@ import {
 } from "effect";
 import { Settings } from "~/core/Settings.ts";
 import { describeCause } from "~/domain/Failure.ts";
-import type { NoFields } from "~/domain/Prelude.ts";
+import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { BASE_CSS, type ColorScheme, detectPageScheme, schemeOf } from "~/ui/Styles.ts";
@@ -981,10 +981,7 @@ export class Ui extends Context.Service<
         // every other control in it. Release it as soon as we see it.
         yield* pipe(
           departed,
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: () => forgetFocus,
-          }),
+          whenSome(() => forgetFocus),
         );
       });
 
@@ -1076,10 +1073,7 @@ export class Ui extends Context.Service<
           );
           yield* pipe(
             misplaced,
-            Option.match({
-              onNone: () => Effect.void,
-              onSome: () => answerRemoval,
-            }),
+            whenSome(() => answerRemoval),
           );
         });
 
@@ -1254,18 +1248,16 @@ export class Ui extends Context.Service<
 
       yield* pipe(
         schemeQuery,
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: (query) =>
-            dom.listenOn(
-              query,
-              "change",
-              // Forked, because the scheme calculation reads a service and this
-              // listener is not on the key path. A newer change interrupts the
-              // one before it.
-              () => pipe(syncColorScheme, FiberHandle.run(schemeFiber), Effect.asVoid),
-            ),
-        }),
+        whenSome((query) =>
+          dom.listenOn(
+            query,
+            "change",
+            // Forked, because the scheme calculation reads a service and this
+            // listener is not on the key path. A newer change interrupts the
+            // one before it.
+            () => pipe(syncColorScheme, FiberHandle.run(schemeFiber), Effect.asVoid),
+          ),
+        ),
       );
 
       // The setting is live. Rebuilding the overlay to read it again would
@@ -1375,10 +1367,7 @@ export class Ui extends Context.Service<
           const residual = yield* hostError(view);
           yield* pipe(
             residual,
-            Option.match({
-              onNone: () => Effect.void,
-              onSome: () => dropAlignment,
-            }),
+            whenSome(() => dropAlignment),
           );
         });
 
@@ -1405,10 +1394,7 @@ export class Ui extends Context.Service<
         const error = yield* hostError(view);
         yield* pipe(
           error,
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: (shift) => correctBy(shift, view),
-          }),
+          whenSome((shift) => correctBy(shift, view)),
         );
       });
 
@@ -1440,13 +1426,7 @@ export class Ui extends Context.Service<
           yield* applyOwned;
         });
 
-      yield* pipe(
-        visualViewport,
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: followVisualViewport,
-        }),
-      );
+      yield* pipe(visualViewport, whenSome(followVisualViewport));
 
       // The page scroll, because a host under a containing block of class 1
       // moves with the document. A page that does not have such an ancestor

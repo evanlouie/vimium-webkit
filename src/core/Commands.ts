@@ -35,6 +35,7 @@ import {
   type CommandName,
   COMMANDS,
 } from "~/domain/Command.ts";
+import { whenSome } from "~/domain/Prelude.ts";
 import { recoverEvenIfInterrupted } from "./Recovery.ts";
 
 export const CommandFailureReason = Schema.Literals([
@@ -162,10 +163,7 @@ export class Commands extends Context.Service<
                   entries,
                   Struct.get(name),
                   Option.fromUndefinedOr,
-                  Option.match({
-                    onNone: () => Effect.void,
-                    onSome: (body) => register(name, body),
-                  }),
+                  whenSome((body) => register(name, body)),
                 ),
               { discard: true },
             ),

@@ -37,7 +37,7 @@ import {
   flow,
   pipe,
 } from "effect";
-import type { NoFields } from "~/domain/Prelude.ts";
+import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import {
   CONTINUE_BUBBLING,
   type HandlerEventMap,
@@ -403,12 +403,7 @@ export class Modes extends Context.Service<
           yield* pipe(
             Ref.get(state),
             Effect.map(holderOf(group)),
-            Effect.flatMap(
-              Option.match({
-                onNone: () => Effect.void,
-                onSome: (previous) => previous.exit("singleton"),
-              }),
-            ),
+            Effect.flatMap(whenSome((previous) => previous.exit("singleton"))),
           );
 
           // The services of the bodies are captured once, so a body needs

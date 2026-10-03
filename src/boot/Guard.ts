@@ -34,7 +34,7 @@ import {
 } from "effect";
 import { constFalse } from "effect/Function";
 import { isComposing, isModifierKey } from "~/domain/Key.ts";
-import type { NoFields } from "~/domain/Prelude.ts";
+import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { composedTarget, isEditable, isUserEvent } from "~/platform/Elements.ts";
 import { FrameRole, Realm, WAKE_MESSAGE } from "~/platform/Realm.ts";
@@ -240,7 +240,7 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
       yield* pipe(
         event,
         Option.liftPredicate((key) => holding && startsApplication(key, source)),
-        Option.match({ onNone: () => Effect.void, onSome: holdKey }),
+        whenSome(holdKey),
       );
     });
 
@@ -255,10 +255,7 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
     yield* dom.listen(
       "window",
       "keydown",
-      flow(
-        Option.liftPredicate(isUserEvent),
-        Option.match({ onNone: () => Effect.void, onSome: onUserKey }),
-      ),
+      flow(Option.liftPredicate(isUserEvent), whenSome(onUserKey)),
       { capture: true },
     );
 
@@ -267,7 +264,7 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
       "message",
       flow(
         Option.liftPredicate((message: MessageEvent) => isWakeMessage(message.data)),
-        Option.match({ onNone: () => Effect.void, onSome: (message) => wakeFrom(message.source) }),
+        whenSome((message) => wakeFrom(message.source)),
       ),
     );
 

@@ -14,6 +14,7 @@ import { Effect, Option, type Scope, flow, pipe } from "effect";
 import type { HandlerEventMap, HandlerEventName } from "~/core/HandlerStack.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
 import { Modes } from "~/core/Modes.ts";
+import { whenSome } from "~/domain/Prelude.ts";
 import { Dom, type ListenOptions } from "~/platform/Dom.ts";
 import { isUserEvent } from "~/platform/Elements.ts";
 
@@ -24,10 +25,7 @@ const CAPTURE: ListenOptions = { capture: true };
 const fromUser = <E extends Event, R>(
   body: (event: E) => Effect.Effect<void, never, R>,
 ): ((event: E) => Effect.Effect<void, never, R>) =>
-  flow(
-    Option.liftPredicate(isUserEvent),
-    Option.match({ onNone: () => Effect.void, onSome: body }),
-  );
+  flow(Option.liftPredicate(isUserEvent), whenSome(body));
 
 /**
  * Attach every listener that the mode stack needs.

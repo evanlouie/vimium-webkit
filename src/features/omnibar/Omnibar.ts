@@ -52,6 +52,7 @@ import { isEscape, KeyPolicy, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { isComposing } from "~/domain/Key.ts";
+import { whenSome } from "~/domain/Prelude.ts";
 import {
   classifyQuery,
   parseSearchEngines,
@@ -386,15 +387,13 @@ export class Omnibar extends Context.Service<
       const close: Effect.Effect<void> = pipe(
         Ref.getAndSet(session, Option.none()),
         Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: (current) =>
-              pipe(
-                suggester.cancel,
-                // The scope owns the overlay, the listeners and the mode frame.
-                Effect.andThen(Scope.close(current.scope, Exit.void)),
-              ),
-          }),
+          whenSome((current) =>
+            pipe(
+              suggester.cancel,
+              // The scope owns the overlay, the listeners and the mode frame.
+              Effect.andThen(Scope.close(current.scope, Exit.void)),
+            ),
+          ),
         ),
       );
 
@@ -460,22 +459,20 @@ export class Omnibar extends Context.Service<
 
         yield* pipe(
           suggestionTarget(query, parsed.engines, config.searchUrl),
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: ({ template, text, badge }) =>
-              suggester.request(template, text, (_answered, items) =>
-                pipe(
-                  Ref.set(
-                    current.suggestions,
-                    Option.some({ query: forQuery, template, badge, items }),
-                  ),
-                  // Draw again only. To ask again here would loop.
-                  Effect.andThen(render(current)),
-                  Effect.when(isLive(current)),
-                  Effect.asVoid,
+          whenSome(({ template, text, badge }) =>
+            suggester.request(template, text, (_answered, items) =>
+              pipe(
+                Ref.set(
+                  current.suggestions,
+                  Option.some({ query: forQuery, template, badge, items }),
                 ),
+                // Draw again only. To ask again here would loop.
+                Effect.andThen(render(current)),
+                Effect.when(isLive(current)),
+                Effect.asVoid,
               ),
-          }),
+            ),
+          ),
         );
       });
 
@@ -671,10 +668,7 @@ export class Omnibar extends Context.Service<
       const onInput: Effect.Effect<void> = pipe(
         Ref.get(session),
         Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.void,
-            onSome: (live) => pipe(Ref.set(live.selected, 0), Effect.andThen(refresh(live))),
-          }),
+          whenSome((live) => pipe(Ref.set(live.selected, 0), Effect.andThen(refresh(live)))),
         ),
       );
 

@@ -15,6 +15,7 @@ import { Deferred, Effect, Option, flow, pipe } from "effect";
 import { SUPPRESS_EVENT } from "~/core/HandlerStack.ts";
 import { ExitTrigger, KeyPolicy, Modes } from "~/core/Modes.ts";
 import { isComposing, isModifierKey, type KeyContext, keyNotation } from "~/domain/Key.ts";
+import { whenSome } from "~/domain/Prelude.ts";
 
 export interface CaptureKeyOptions {
   /** The text that the HUD shows while the mode waits, for example `Set mark:`. */
@@ -66,11 +67,9 @@ export const captureNextKey: (
     {
       keydown: flow(
         typedNotation(options.context),
-        Option.match({
-          onNone: () => Effect.void,
-          onSome: (notation) =>
-            pipe(answer, Deferred.succeed(Option.some(notation)), Effect.asVoid),
-        }),
+        whenSome((notation) =>
+          pipe(answer, Deferred.succeed(Option.some(notation)), Effect.asVoid),
+        ),
         Effect.as(SUPPRESS_EVENT),
       ),
     },
