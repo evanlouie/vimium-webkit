@@ -352,6 +352,13 @@ const scrollTarget = (
     Option.getOrElse(() => root),
   );
 
+/** A reference that does not keep `element` alive. */
+const weakly = (element: Element): WeakRef<Element> => new WeakRef(element);
+
+/** The element that a weak reference still holds. */
+const held = (reference: WeakRef<Element>): Option.Option<Element> =>
+  Option.fromNullishOr(reference.deref());
+
 /**
  * Where the walk for the scroll target starts.
  *
@@ -680,8 +687,14 @@ export class Scroller extends Context.Service<
         /** Increased on every keydown that is not a repeat: "this press". */
         const generation = yield* Ref.make(0);
         const heldCodes = yield* Ref.make(HashSet.empty<string>());
-        /** The element that the user pressed last. */
-        const pressed = yield* Ref.make(Option.none<Element>());
+        /**
+         * The element that the user pressed last.
+         *
+         * A `WeakRef`, because the page can remove it at any time, and a
+         * strong reference to it for the life of the page is a leak on a page
+         * that scrolls without end.
+         */
+        const pressed = yield* Ref.make(Option.none<WeakRef<Element>>());
         const animations: Record<ScrollAxis, Ref.Ref<Option.Option<Animation>>> = {
           x: yield* Ref.make(Option.none<Animation>()),
           y: yield* Ref.make(Option.none<Animation>()),
@@ -754,6 +767,7 @@ export class Scroller extends Context.Service<
         const target = (axis: ScrollAxis, direction: Direction): Effect.Effect<Element> =>
           pipe(
             Ref.get(pressed),
+            Effect.map(Option.flatMap(held)),
             Effect.flatMap((last) =>
               dom.probeOrElse(
                 () =>
@@ -1139,8 +1153,8 @@ export class Scroller extends Context.Service<
           "pointerdown",
           (event) =>
             pipe(
-              dom.probeOrElse(() => pressedElement(event), Option.none),
-              Effect.flatMap((element) => pipe(pressed, Ref.set(element))),
+              dom.probeOrElse(() => pipe(event, pressedElement, Option.map(weakly)), Option.none),
+              Effect.flatMap((reference) => pipe(pressed, Ref.set(reference))),
             ),
           { capture: true, passive: true },
         );
