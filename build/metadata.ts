@@ -8,7 +8,7 @@
 
 import { Array, pipe } from "effect";
 import { SUGGEST_HOSTS } from "~/domain/SearchSuggest.ts";
-import { BuildMode } from "./vite-config.ts";
+import type { BuildMode } from "./vite-config.ts";
 
 export interface MetadataInput {
   readonly version: string;
@@ -17,12 +17,6 @@ export interface MetadataInput {
   readonly updateUrl: string;
   readonly mode: BuildMode;
 }
-
-/** The name that the manager shows. A dev bundle says that it is one. */
-const scriptName: (mode: BuildMode) => string = BuildMode.$match({
-  Development: () => "Vimium-WebKit (dev)",
-  Production: () => "Vimium-WebKit",
-});
 
 type Line = readonly [key: string, value: string];
 
@@ -60,7 +54,7 @@ const GRANTS: readonly string[] = [
 
 export const buildMetadata = (input: MetadataInput): string => {
   const lines: ReadonlyArray<Line> = [
-    ["name", scriptName(input.mode)],
+    ["name", input.mode.name],
     ["namespace", input.repository],
     ["version", input.version],
     [

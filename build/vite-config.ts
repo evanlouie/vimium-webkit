@@ -14,7 +14,7 @@
  * unminified, with an inline sourcemap, for debugging.
  */
 
-import { Data, type Record, pipe } from "effect";
+import type { Record } from "effect";
 import { fileURLToPath } from "node:url";
 import type { InlineConfig } from "vite";
 
@@ -27,44 +27,60 @@ export const ROOT = fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/,
  */
 export const BUILD_TARGET = ["safari16", "chrome111", "firefox101"];
 
-/**
- * What a bundle is for.
- *
- * `Development` is the dev bundle, with its sourcemap inline. `Production` is
- * the artefact that ships, and the only one that `@updateURL` may name.
- */
-export type BuildMode = Data.TaggedEnum<{
-  Development: Record.ReadonlyRecord<never, never>;
-  Production: Record.ReadonlyRecord<never, never>;
-}>;
+/** What a bundle is for, and everything that follows from it. */
+export interface BuildMode {
+  /** The `NODE_ENV` that the bundle sees. */
+  readonly nodeEnv: string;
+  readonly sourcemap: "inline" | false;
+  /**
+   * oxc and not esbuild: oxc gives the smaller artefact (397 KB against 426 KB
+   * when measured). Treating property reads as pure saves 3 KB, and it can
+   * delete a DOM read that is there to force layout, so it stays off.
+   */
+  readonly minify: "oxc" | false;
+  /** The artefact, under `dist/`. */
+  readonly file: string;
+  /** The name that the manager shows. A dev bundle says that it is one. */
+  readonly name: string;
+  /**
+   * Whether the build writes `meta.js`, the update manifest.
+   *
+   * `@updateURL` points at it, so a dev block there would tell every
+   * installed copy that the current release is called "Vimium-WebKit (dev)".
+   */
+  readonly manifest: boolean;
+}
 
-export const BuildMode = Data.taggedEnum<BuildMode>();
+/**
+ * Every build mode, with all of its facts in one place.
+ *
+ * `production` is the artefact that ships, and the only one that `@updateURL`
+ * may name. `development` is the dev bundle, unminified, with its sourcemap
+ * inline.
+ */
+export const MODES: Record.ReadonlyRecord<"production" | "development", BuildMode> = {
+  production: {
+    nodeEnv: "production",
+    sourcemap: false,
+    minify: "oxc",
+    file: "vimium-webkit.user.js",
+    name: "Vimium-WebKit",
+    manifest: true,
+  },
+  development: {
+    nodeEnv: "development",
+    sourcemap: "inline",
+    minify: false,
+    file: "vimium-webkit.dev.user.js",
+    name: "Vimium-WebKit (dev)",
+    manifest: false,
+  },
+};
 
 export interface BundleOptions {
   readonly entry: string;
   readonly mode: BuildMode;
 }
-
-/** The `NODE_ENV` that the bundle sees. */
-const nodeEnv: (mode: BuildMode) => string = BuildMode.$match({
-  Development: () => "development",
-  Production: () => "production",
-});
-
-const sourcemap: (mode: BuildMode) => "inline" | false = BuildMode.$match({
-  Development: () => "inline" as const,
-  Production: () => false as const,
-});
-
-/**
- * oxc and not esbuild: oxc gives the smaller artefact (397 KB against 426 KB
- * when measured). Treating property reads as pure saves 3 KB, and it can
- * delete a DOM read that is there to force layout, so it stays off.
- */
-const minifier: (mode: BuildMode) => "oxc" | false = BuildMode.$match({
-  Development: () => false as const,
-  Production: () => "oxc" as const,
-});
 
 export const bundleConfig = (options: BundleOptions): InlineConfig => ({
   root: ROOT,
@@ -75,7 +91,7 @@ export const bundleConfig = (options: BundleOptions): InlineConfig => ({
   },
   define: {
     // Nothing bundled here should ever take a Node branch.
-    "process.env.NODE_ENV": pipe(options.mode, nodeEnv, JSON.stringify),
+    "process.env.NODE_ENV": JSON.stringify(options.mode.nodeEnv),
     // Effect reads `globalThis.process` for `hrtime`. That is harmless in
     // Node and not harmless here: a page or a sandboxing manager can make
     // `process` an accessor that *throws*, and this artefact is one IIFE
@@ -87,8 +103,8 @@ export const bundleConfig = (options: BundleOptions): InlineConfig => ({
   build: {
     write: false,
     target: BUILD_TARGET,
-    minify: pipe(options.mode, minifier),
-    sourcemap: pipe(options.mode, sourcemap),
+    minify: options.mode.minify,
+    sourcemap: options.mode.sourcemap,
     reportCompressedSize: false,
     modulePreload: false,
     cssCodeSplit: false,

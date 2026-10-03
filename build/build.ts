@@ -32,7 +32,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { build as viteBuild, type Rolldown } from "vite";
 import { describeThrown } from "~/domain/Failure.ts";
 import { BANNER_NOTICE, buildMetadata } from "./metadata.ts";
-import { BuildMode, bundleConfig, type BundleOptions, ROOT } from "./vite-config.ts";
+import { type BuildMode, bundleConfig, type BundleOptions, MODES, ROOT } from "./vite-config.ts";
 
 const DIST = `${ROOT}/dist`;
 const REPOSITORY = "https://github.com/evanlouie/vimium-webkit";
@@ -149,28 +149,17 @@ const sizeReport = (chunk: Rolldown.OutputChunk): ReadonlyArray<ModuleSize> =>
 
 /** The mode that `--dev` on the command line asks for. */
 const modeOf: (dev: boolean) => BuildMode = Boolean.match({
-  onTrue: () => BuildMode.Development(),
-  onFalse: () => BuildMode.Production(),
+  onTrue: () => MODES.development,
+  onFalse: () => MODES.production,
 });
 
-const artefactPath: (mode: BuildMode) => string = BuildMode.$match({
-  Development: () => `${DIST}/vimium-webkit.dev.user.js`,
-  Production: () => `${DIST}/vimium-webkit.user.js`,
-});
-
-/**
- * Write the update manifest, in production only.
- *
- * `meta.js` is what `@updateURL` points at, so writing a dev block there would
- * tell every installed copy that the current release is called "Vimium-WebKit
- * (dev)".
- */
+/** Write the update manifest, when the mode has one. */
 const writeUpdateManifest = (mode: BuildMode, metadata: string): Effect.Effect<void, BuildError> =>
   pipe(
-    mode,
-    BuildMode.$match({
-      Development: () => Effect.void,
-      Production: () => writeText(`${DIST}/vimium-webkit.meta.js`, metadata),
+    mode.manifest,
+    Boolean.match({
+      onFalse: () => Effect.void,
+      onTrue: () => writeText(`${DIST}/vimium-webkit.meta.js`, metadata),
     }),
   );
 
@@ -186,7 +175,7 @@ const buildOnce = Effect.fnUntraced(function* ({ mode, version, metadata }: Rele
   const output = `${metadata}${BANNER_NOTICE}\n${chunk.code}`;
   const totalBytes = byteLength(output);
 
-  yield* writeText(artefactPath(mode), output);
+  yield* writeText(`${DIST}/${mode.file}`, output);
   yield* writeUpdateManifest(mode, metadata);
   yield* writeText(
     `${DIST}/report.json`,
