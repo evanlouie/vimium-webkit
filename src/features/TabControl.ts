@@ -30,6 +30,7 @@ import { type SessionState, type Settings as SettingsData, withZoom } from "~/do
 import type { NoFields } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { isElement, MEDIA_SELECTOR } from "~/platform/Elements.ts";
+import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { Storage } from "~/platform/Storage.ts";
 import { type TabError, Tabs } from "~/platform/Tabs.ts";
 import { BRIEFLY, Hud } from "~/ui/Hud.ts";
@@ -127,12 +128,13 @@ const muteAdded = (record: MutationRecord): void =>
 export const TabControlLayer: Layer.Layer<
   never,
   never,
-  Commands | Dom | Hud | Report | Settings | Storage | Tabs
+  Commands | Dom | Hud | Realm | Report | Settings | Storage | Tabs
 > = Layer.effectDiscard(
   Effect.gen(function* () {
     const commands = yield* Commands;
     const dom = yield* Dom;
     const hud = yield* Hud;
+    const realm = yield* Realm;
     const report = yield* Report;
     const settings = yield* Settings;
     const storage = yield* Storage;
@@ -246,18 +248,45 @@ export const TabControlLayer: Layer.Layer<
       );
     });
 
+    /**
+     * Zoom only in the top frame.
+     *
+     * Zoom belongs to the tab, as the browser's own zoom does in upstream
+     * Vimium, and the top frame holds the tab. A child frame neither applies
+     * nor stores a zoom. Its origin can be the origin of a page that the user
+     * zoomed, such as an embedded video, and a zoom of its own would multiply
+     * the zoom of the top frame around it.
+     */
+    const inTopFrame = (zoom: Effect.Effect<void>): Effect.Effect<void> =>
+      pipe(
+        realm.role,
+        FrameRole.$match({
+          Top: () => zoom,
+          Child: () =>
+            report.error(
+              "CSS zoom works in the top frame only; move the focus out of this frame first.",
+            ),
+        }),
+      );
+
     // Put the stored zoom back on the page. The store answers only after the
     // layer is built, and another tab of this origin can change it later, so
     // this follows the store. Every page starts at 100%, and a page that was
     // never zoomed keeps its own style: the first zoom written is the first
     // one that is not 100%.
-    yield* pipe(
+    const followStoredZoom = pipe(
       settings.changes,
       Stream.zipLatest(storage.session.changes),
       Stream.map(pageZoom(origin)),
       Stream.changes,
       Stream.dropWhile((zoom) => zoom === 1),
       Stream.runForEach(setZoom),
+    );
+
+    // Only the top frame follows the store. Read `inTopFrame` for why.
+    yield* pipe(
+      realm.role,
+      FrameRole.$match({ Top: () => followStoredZoom, Child: () => Effect.void }),
       Effect.forkScoped,
     );
 
@@ -285,9 +314,9 @@ export const TabControlLayer: Layer.Layer<
         ),
 
       toggleMuteTab: () => toggleMute(),
-      zoomIn: () => zoomIfEnabled(ZOOM_STEP),
-      zoomOut: () => zoomIfEnabled(1 / ZOOM_STEP),
-      zoomReset: () => applyZoom(ZoomChange.Reset()),
+      zoomIn: () => inTopFrame(zoomIfEnabled(ZOOM_STEP)),
+      zoomOut: () => inTopFrame(zoomIfEnabled(1 / ZOOM_STEP)),
+      zoomReset: () => inTopFrame(applyZoom(ZoomChange.Reset())),
     });
   }),
 );
