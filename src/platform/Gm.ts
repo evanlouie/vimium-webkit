@@ -793,12 +793,12 @@ const makeGm = (surface: GmSurface, dom: Dom["Service"]): Gm["Service"] => {
     Option.orElse(() => pipe(surface.openInTabSync, Option.map(syncOpener))),
   );
 
+  // With `noopener`, `window.open` gives `null` even when the tab opens, so
+  // its result says nothing. A popup blocker that stops the tab cannot be
+  // told apart from success; only a throw is a failure.
   const windowOpen = (url: string): Effect.Effect<OpenInTabResult, GmError> =>
     pipe(
       gmAttempt("window.open", () => dom.window.open(url, "_blank", "noopener,noreferrer")),
-      Effect.filterOrFail(Predicate.isNotNull, () =>
-        gmFailed("window.open")(new Error("window.open was blocked (no transient activation?)")),
-      ),
       Effect.as(OpenInTabResult.Window()),
     );
 
