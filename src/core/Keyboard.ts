@@ -77,6 +77,15 @@ export const MEDIA_KEYS: ReadonlySet<string> = new Set([
   "<space>",
 ]);
 
+/**
+ * The keys that open our find instead of the find of the browser, while
+ * `shadowNativeFind` is on: ⌘F, and Ctrl+F where the platform uses it.
+ */
+const NATIVE_FIND_KEYS: ReadonlySet<string> = new Set(["<m-f>", "<c-f>"]);
+
+/** What a native find key runs instead. */
+const OUR_FIND: Pick<KeyBinding, "command"> = { command: "enterFindMode" };
+
 // ---------------------------------------------------------------------------
 // The key state
 // ---------------------------------------------------------------------------
@@ -516,7 +525,7 @@ export class Keyboard extends Context.Service<
        * fail as a defect instead of running.
        */
       const runCommand = Effect.fnUntraced(function* (
-        { command }: KeyBinding,
+        { command }: Pick<KeyBinding, "command">,
         count: number,
         event: KeyboardEvent,
       ) {
@@ -526,6 +535,31 @@ export class Keyboard extends Context.Service<
           FiberSet.run(running),
         );
       });
+
+      /**
+       * A key at the root that starts nothing.
+       *
+       * While `shadowNativeFind` is on, ⌘F and Ctrl+F open our find instead
+       * of the find of the browser. Only a key that no mapping binds reaches
+       * this, so a mapping wins, as the default `<c-f>` does. So do an
+       * excluded page, a pass key and every mode above normal mode, insert
+       * mode included, because each of them decides before the walk. The
+       * setting is read for each key, so a change applies at once.
+       *
+       * Off by default: Safari on macOS lets a page prevent ⌘F, but WebKit
+       * bug 191768 means that iOS may not.
+       */
+      const miss = (notation: string, event: KeyboardEvent): Effect.Effect<HandlerResult> =>
+        pipe(
+          notation,
+          Option.liftPredicate(
+            (key) => settings.currentUnsafe().shadowNativeFind && NATIVE_FIND_KEYS.has(key),
+          ),
+          Option.match({
+            onNone: () => Effect.succeed(CONTINUE_BUBBLING),
+            onSome: () => pipe(runCommand(OUR_FIND, 1, event), Effect.andThen(suppress(event))),
+          }),
+        );
 
       /**
        * Take one key that is ours into the branch walk.
@@ -578,7 +612,7 @@ export class Keyboard extends Context.Service<
                 Effect.andThen(onKeydown(event)),
               ),
             Drop: () => pipe(reset, Effect.andThen(suppress(event))),
-            Miss: () => pipe(reset, Effect.as(CONTINUE_BUBBLING)),
+            Miss: () => pipe(reset, Effect.andThen(miss(notation, event))),
           }),
         );
       });
