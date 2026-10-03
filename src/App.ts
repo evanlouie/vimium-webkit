@@ -1,20 +1,21 @@
 /**
- * The application: one layer graph, and one runtime for one frame.
+ * The application: one layer graph for one frame.
  *
  * Everything that this frame can do is here. A service asks for what it needs,
  * and this file is the only place that says where each thing comes from. There
  * is no god object, and no service reaches for a global.
  *
- * The runtime carries a `Scope`. Every listener, observer, port, stylesheet and
- * fiber that the graph acquires belongs to that scope. Closing it removes all of
- * them. Teardown is therefore correct by construction, and not correct because
- * somebody remembered to write it.
+ * `launch` in `src/boot/Bootstrap.ts` builds the graph in a `Scope`. Every
+ * listener, observer, port, stylesheet and fiber that the graph acquires
+ * belongs to that scope. Closing it removes all of them. Teardown is therefore
+ * correct by construction, and not correct because somebody remembered to
+ * write it.
  *
  * The graph is built once, when the frame decides that the user wants us. Read
  * `src/boot/Guard.ts` for that decision.
  */
 
-import { Layer, Logger, ManagedRuntime, References, pipe } from "effect";
+import { Layer, Logger, References, pipe } from "effect";
 import { Lifecycle } from "~/boot/Lifecycle.ts";
 import { Commands } from "~/core/Commands.ts";
 import { Exclusions } from "~/core/Exclusions.ts";
@@ -122,22 +123,26 @@ const UiLayer = pipe(
 /** The protocol on top of the cross-frame bus. */
 const FramesLayer = pipe(FrameLink.layer, Layer.provideMerge(UiLayer));
 
+// Two features ask another feature for a service, and not the registry for a
+// command. `Marks` reads and restores the scroll position through `Scroller`.
+// `UrlClipboard` opens a URL that the user pasted, which is the same step that
+// `Navigation` takes for a typed URL, so it asks for that service rather than
+// repeating the rule about what a bare word means. The graph builds each layer
+// once, so these share the instances that the features below build.
 const MarksWithScroller = pipe(MarksLayer, Layer.provide(Scroller.layer));
 
-// `UrlClipboard` opens a URL that the user pasted, which is the same step that
-// `Navigation` takes for a typed URL. It asks for that service rather than
-// repeating the rule about what a bare word means.
 const UrlClipboardWithNavigation = pipe(UrlClipboardLayer, Layer.provide(Navigation.layer));
 
 /**
- * The features.
+ * The whole application: the features, on top of everything else.
  *
- * Each one writes its own command bodies into the registry when its layer is
- * built, and each one serves its own messages on the frame bus. No feature
- * imports another feature. A feature that needs what another feature does asks
- * the registry by name, with `Commands.run`.
+ * Each feature writes its own command bodies into the registry when its layer
+ * is built, and each one serves its own messages on the frame bus. Apart from
+ * the two above, a feature that needs what another feature does asks the
+ * registry by name, with `Commands.run`. The registry is one shared value, so
+ * the order of the features does not decide correctness.
  */
-const FeatureLayer = pipe(
+export const AppLayer = pipe(
   Layer.mergeAll(
     Scroller.layer,
     Insert.layer,
@@ -152,19 +157,3 @@ const FeatureLayer = pipe(
   ),
   Layer.provideMerge(FramesLayer),
 );
-
-/**
- * The whole application.
- *
- * A feature layer writes its command bodies into the registry when it is built,
- * and the keyboard reads that registry. The registry is one shared value, so
- * the order does not decide correctness. The order below is the order that a
- * reader expects.
- */
-export const AppLayer = FeatureLayer;
-
-export type AppServices = Layer.Success<typeof AppLayer>;
-
-export type AppRuntime = ManagedRuntime.ManagedRuntime<AppServices, never>;
-
-export const makeAppRuntime = (): AppRuntime => ManagedRuntime.make(AppLayer);
