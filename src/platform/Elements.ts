@@ -92,7 +92,8 @@ const hasMedia = (root: ParentNode): boolean => root.querySelector(MEDIA_SELECTO
 const containsMedia = (element: Element): boolean =>
   hasMedia(element) || pipe(element.shadowRoot, Option.fromNullishOr, Option.exists(hasMedia));
 
-const isHtmlElement = (value: unknown): value is HTMLElement => value instanceof HTMLElement;
+/** Is `value` an HTML element of this realm? */
+export const isHtmlElement = (value: unknown): value is HTMLElement => value instanceof HTMLElement;
 
 /**
  * Does a media player have focus?

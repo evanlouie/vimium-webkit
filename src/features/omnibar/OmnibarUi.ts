@@ -22,7 +22,7 @@ import { Array, Boolean, Effect, FiberHandle, Option, Ref, type Scope, pipe, Str
 import { constNull, constVoid } from "effect/Function";
 import { whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { deepActiveElement } from "~/platform/Elements.ts";
+import { deepActiveElement, isHtmlElement } from "~/platform/Elements.ts";
 import { acceptPointerEvents, Ui } from "~/ui/Ui.ts";
 import type { Completion } from "./Completers.ts";
 
@@ -295,7 +295,7 @@ export const makeOmnibarView: (
           () =>
             pipe(
               previous,
-              Option.filter((element) => element instanceof HTMLElement),
+              Option.filter(isHtmlElement),
               Option.filter((element) => element.isConnected),
             ),
           Option.none,

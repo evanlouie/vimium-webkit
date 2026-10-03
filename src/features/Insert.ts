@@ -41,7 +41,7 @@ import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { composedTarget, deepActiveElement } from "~/platform/Elements.ts";
+import { composedTarget, deepActiveElement, isHtmlElement } from "~/platform/Elements.ts";
 import { Ui } from "~/ui/Ui.ts";
 
 /** What the HUD shows while the user types. */
@@ -61,9 +61,6 @@ const EDITABLE_INPUT_TYPES: ReadonlyArray<string> = [
   "time",
   "tel",
 ];
-
-const isHTMLElement = (node: EventTarget | null): node is HTMLElement =>
-  node instanceof HTMLElement;
 
 /**
  * Can the user type into this element *now*?
@@ -85,7 +82,7 @@ const acceptsTyping = (element: HTMLElement): boolean =>
 
 /** The node, when it is an element that the user can type into now. */
 const typingTarget: (node: EventTarget | null) => Option.Option<HTMLElement> = flow(
-  Option.liftPredicate(isHTMLElement),
+  Option.liftPredicate(isHtmlElement),
   Option.filter(acceptsTyping),
 );
 
@@ -127,7 +124,7 @@ const focusableInputs = (view: Window, root: ParentNode): ReadonlyArray<HTMLElem
   pipe(
     root,
     deepElements,
-    Array.filter(isHTMLElement),
+    Array.filter(isHtmlElement),
     Array.filter((element) => acceptsTyping(element) && isVisible(view, element)),
   );
 

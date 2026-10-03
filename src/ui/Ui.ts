@@ -69,6 +69,7 @@ import { describeCause } from "~/domain/Failure.ts";
 import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
+import { isHtmlElement } from "~/platform/Elements.ts";
 import { BASE_CSS, type ColorScheme, detectPageScheme, schemeOf } from "~/ui/Styles.ts";
 
 // ---------------------------------------------------------------------------
@@ -902,9 +903,6 @@ export class Ui extends Context.Service<
             onNonEmpty: () => writeImportant(host)(hostDeclarations(owned)),
           }),
         );
-
-      const isHtmlElement = (target: EventTarget | null): target is HTMLElement =>
-        target instanceof HTMLElement;
 
       /** Remember the node inside the overlay that has the focus, or that none has it. */
       const rememberFocus = (focused: Option.Option<HTMLElement>): Effect.Effect<void> =>

@@ -29,6 +29,7 @@ import { Boolean, Context, Effect, Layer, Option, Predicate, Schema, pipe } from
 import { describeThrown } from "~/domain/Failure.ts";
 import { whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
+import { isHtmlElement } from "~/platform/Elements.ts";
 import { Gm } from "~/platform/Gm.ts";
 
 // ---------------------------------------------------------------------------
@@ -117,7 +118,7 @@ const offscreenArea = (doc: Document, text: string): HTMLTextAreaElement => {
 const restoreFocus = (previous: Element | null): Effect.Effect<void> =>
   pipe(
     previous,
-    Option.liftPredicate((element) => element instanceof HTMLElement),
+    Option.liftPredicate(isHtmlElement),
     whenSome((element) =>
       pipe(
         Effect.try(() => element.focus({ preventScroll: true })),

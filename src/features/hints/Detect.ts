@@ -45,7 +45,7 @@ import { constTrue } from "effect/Function";
 import type { NoFields } from "~/domain/Prelude.ts";
 import type { CapabilityReport } from "~/platform/Capabilities.ts";
 import type { Dom } from "~/platform/Dom.ts";
-import { containsDeep, shadowHostChain } from "~/platform/Elements.ts";
+import { containsDeep, isHtmlElement, shadowHostChain } from "~/platform/Elements.ts";
 import {
   CHUNK_BUDGET_MS,
   type ChunkedOptions,
@@ -252,8 +252,6 @@ const traitsOf: (classification: Classification) => Traits = Classification.$mat
 // ---------------------------------------------------------------------------
 // Element narrowing
 // ---------------------------------------------------------------------------
-
-const isHtmlElement = (element: Element): element is HTMLElement => element instanceof HTMLElement;
 
 const isInput = (element: Element): element is HTMLInputElement =>
   element instanceof HTMLInputElement;
