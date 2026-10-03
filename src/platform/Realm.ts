@@ -14,7 +14,7 @@
 
 import { Array, Context, Data, Effect, Layer, Option, Predicate, Result, pipe } from "effect";
 import { Hex } from "effect/encoding";
-import { constFalse } from "effect/Function";
+import { constFalse, constTrue } from "effect/Function";
 import { FrameId } from "~/domain/FrameId.ts";
 import type { NoFields } from "~/domain/Prelude.ts";
 import { Dom } from "./Dom.ts";
@@ -130,6 +130,90 @@ export const descendantFrames = (root: Window): ReadonlyArray<Window> => {
 
   walk(root, 0);
   return out;
+};
+
+/** A `sandbox` attribute that lets the frame run scripts. Its tokens ignore case. */
+const ALLOWS_SCRIPTS = /(?:^|\s)allow-scripts(?:\s|$)/i;
+
+/** The schemes that the script matches. */
+const WEB_ADDRESS = /^https?:/i;
+
+/**
+ * Whether the element of a frame lets the frame run the script.
+ *
+ * The script matches `http:` and `https:` documents that the frame loads
+ * from its `src`. A frame with no `src` is `about:blank`, a `srcdoc` frame
+ * is `about:srcdoc`, and a sandbox without `allow-scripts` runs no script
+ * at all. The element can come from another realm, where `instanceof` fails,
+ * so `src` is read by name.
+ */
+const elementRunsScript = (element: Element): boolean =>
+  !pipe(
+    Option.fromNullishOr(element.getAttribute("sandbox")),
+    Option.exists((tokens) => !ALLOWS_SCRIPTS.test(tokens)),
+  ) &&
+  !element.hasAttribute("srcdoc") &&
+  "src" in element &&
+  Predicate.isString(element.src) &&
+  WEB_ADDRESS.test(element.src);
+
+/**
+ * The windows of the frame elements of `view` that cannot run the script.
+ *
+ * None when this realm cannot read the document of `view`.
+ */
+const scriptlessIn = (view: Window): ReadonlyArray<unknown> =>
+  pipe(
+    Result.try(() =>
+      pipe(
+        Array.fromIterable(view.document.querySelectorAll("iframe, frame")),
+        Array.filter((element) => !elementRunsScript(element)),
+        Array.map((element) => ("contentWindow" in element ? element.contentWindow : undefined)),
+      ),
+    ),
+    Result.getOrElse(() => []),
+  );
+
+/**
+ * Whether the address of a frame lets the script run.
+ *
+ * A frame of another origin hides its address, so it may run the script.
+ */
+const addressRunsScript = (frame: Window): boolean =>
+  pipe(
+    Result.try(() => frame.location.protocol),
+    Result.match({
+      onFailure: constTrue,
+      onSuccess: (protocol) => WEB_ADDRESS.test(protocol),
+    }),
+  );
+
+/**
+ * The frames below `root` that may run the script, as far as this realm can
+ * tell, in the order of `descendantFrames`.
+ *
+ * Many frames of a page never run it. An advertisement slot is often a frame
+ * with no `src` that the page writes into, a `srcdoc` or `data:` frame, or
+ * a sandbox without scripts. A wait for such a frame to join is a wait for
+ * nothing.
+ *
+ * Two checks can rule a frame out. Its element does, when this realm can read
+ * the document of its parent. A written frame needs that check, because
+ * `document.open` gives it the address of the page that wrote it. Its address
+ * does, when this realm can read it, which covers a frame of our origin whose
+ * parent has another origin. Any other frame may run the script.
+ *
+ * A frame that the page sends to a web address without a `src` counts as one
+ * that cannot run the script. It still joins when a round wakes it, and the
+ * next round has it.
+ */
+export const scriptableFrames = (root: Window): ReadonlyArray<Window> => {
+  const frames = descendantFrames(root);
+  const scriptless = new Set(pipe([root, ...frames], Array.flatMap(scriptlessIn)));
+  return pipe(
+    frames,
+    Array.filter((frame) => !scriptless.has(frame) && addressRunsScript(frame)),
+  );
 };
 
 /**

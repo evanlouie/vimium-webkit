@@ -515,6 +515,7 @@ interface Role {
   /** Deliver one message of this frame. The message already has its envelope. */
   readonly route: (wire: FrameWire) => Effect.Effect<void, FrameError>;
   readonly peers: Effect.Effect<ReadonlyArray<FrameId>>;
+  readonly joinedFrames: Effect.Effect<ReadonlyArray<Window>>;
   readonly ready: Effect.Effect<boolean>;
 }
 
@@ -1184,6 +1185,7 @@ const makeCoordinator = Effect.fnUntraced(function* (publishLocal: PublishLocal)
   return {
     route,
     peers: pipe(sweep, Effect.map(rosterOf)),
+    joinedFrames: pipe(sweep, Effect.map(Array.map((record) => record.source))),
     ready: Effect.succeed(true),
   } satisfies Role;
 });
@@ -1635,8 +1637,10 @@ const makeMember = Effect.fnUntraced(function* (publishLocal: PublishLocal) {
   return {
     route,
     peers: roster,
-    // A frame that cannot hold the credential never joins, so it says so at
-    // once.
+    // The roster names the frames, and only the top frame holds their
+    // windows.
+    joinedFrames: Effect.succeed([]),
+    // A frame that cannot make a proof never joins, so it says so at once.
     ready: pipe(
       auth.available,
       Boolean.match({
@@ -1712,6 +1716,13 @@ export class FrameBus extends Context.Service<
 
     /** The frames that the coordinator knows, in document order. */
     readonly peers: Effect.Effect<ReadonlyArray<FrameId>>;
+
+    /**
+     * The windows of the child frames that have joined, in document order.
+     *
+     * Only the top frame holds them. A child frame gives none.
+     */
+    readonly joinedFrames: Effect.Effect<ReadonlyArray<Window>>;
   }
 >()("vimium/frames/FrameBus") {
   static readonly layer: Layer.Layer<FrameBus, never, Dom | Realm | FrameAuth> = Layer.effect(
@@ -1728,7 +1739,7 @@ export class FrameBus extends Context.Service<
 
       // The role of the realm is fixed, so it is chosen once, here. The rest
       // of the service is the same in both roles.
-      const { route, peers, ready } = yield* pipe(
+      const { route, peers, joinedFrames, ready } = yield* pipe(
         realm.role,
         FrameRole.$match({
           Top: () => makeCoordinator(publishLocal),
@@ -1833,6 +1844,7 @@ export class FrameBus extends Context.Service<
         request,
         serve,
         peers,
+        joinedFrames,
       });
     }),
   );

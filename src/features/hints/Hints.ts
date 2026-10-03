@@ -137,7 +137,7 @@ import { Dom } from "~/platform/Dom.ts";
 import type { FrameId } from "~/domain/FrameId.ts";
 import { containsDeep, shadowHostChain } from "~/platform/Elements.ts";
 import { OpenInTabResult } from "~/platform/Gm.ts";
-import { descendantFrames, FrameRole, Realm } from "~/platform/Realm.ts";
+import { FrameRole, Realm, scriptableFrames } from "~/platform/Realm.ts";
 import { Tabs } from "~/platform/Tabs.ts";
 import { BRIEFLY, Hud, HudDuration } from "~/ui/Hud.ts";
 import { Ui } from "~/ui/Ui.ts";
@@ -1047,30 +1047,33 @@ const coordinate = Effect.gen(function* () {
    * moment later, so the first round of a page would ask none of them. Every
    * round passes through here, whichever frame started it, so a round wakes
    * the whole frames tree. A wake is harmless to a frame that is joining or
-   * has joined. When the tree holds a frame that no round has waited for yet,
-   * this waits until every frame of the tree has joined, for `JOIN_GRACE_MS`
-   * at most. A frame that never joins, such as a sandboxed one, costs that
-   * wait once.
+   * has joined.
+   *
+   * The round then waits, for `JOIN_GRACE_MS` at most, until each frame that
+   * no round has waited for yet has joined. It waits only for the frames that
+   * can run the script, so an `about:blank` advertisement or a sandbox costs
+   * nothing, and a frame that cannot join for another reason costs the wait
+   * once. A frame that the page adds later costs its own join, and no more.
    */
   const wakePage = Effect.gen(function* () {
     yield* realm.wakeDescendants;
-    const frames = yield* Effect.sync(() => descendantFrames(dom.window));
+    const frames = yield* Effect.sync(() => scriptableFrames(dom.window));
     const awaited = yield* pipe(awaitedFramesRef, Ref.getAndSet(frames));
-    const isNew = (frame: Window): boolean => !awaited.includes(frame);
-    const allJoined = (peers: ReadonlyArray<FrameId>): boolean => peers.length > frames.length;
-    const peers = yield* bus.peers;
-    return yield* pipe(
-      pipe(frames, Array.some(isNew)) && !allJoined(peers),
-      Boolean.match({
-        onFalse: () => Effect.succeed(peers),
-        onTrue: () =>
-          pipe(
-            bus.peers,
-            Effect.repeat({ schedule: Schedule.spaced(JOIN_POLL_MS), until: allJoined }),
-            Effect.timeoutOrElse({ duration: JOIN_GRACE_MS, orElse: () => bus.peers }),
-          ),
-      }),
+    const fresh = pipe(
+      frames,
+      Array.filter((frame) => !awaited.includes(frame)),
     );
+    const freshJoined = (joined: ReadonlyArray<Window>): boolean =>
+      pipe(
+        fresh,
+        Array.every((frame) => joined.includes(frame)),
+      );
+    yield* pipe(
+      bus.joinedFrames,
+      Effect.repeat({ schedule: Schedule.spaced(JOIN_POLL_MS), until: freshJoined }),
+      Effect.timeoutOption(JOIN_GRACE_MS),
+    );
+    return yield* bus.peers;
   });
 
   /** Ask one frame for its descriptors. A frame that does not answer gives none. */
