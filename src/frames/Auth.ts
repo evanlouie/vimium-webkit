@@ -77,7 +77,6 @@ import {
   Context,
   Effect,
   flow,
-  Iterable,
   Layer,
   Match,
   Option,
@@ -89,6 +88,7 @@ import {
   Struct,
   pipe,
 } from "effect";
+import { Base64Url } from "effect/encoding";
 import { describeThrown } from "~/domain/Failure.ts";
 import {
   joinProofPayload,
@@ -159,24 +159,6 @@ export interface FrameCipher {
   ) => Effect.Effect<Option.Option<string>, FrameAuthError>;
 }
 
-/** One character for each byte, which is the text that `btoa` takes. */
-const binaryText: (bytes: Uint8Array) => string = Iterable.reduce(
-  "",
-  (binary: string, byte: number) => binary + String.fromCharCode(byte),
-);
-
-/** Base64, in the alphabet that a URL accepts, with no padding. */
-const toBase64Url: (bytes: Uint8Array) => string = flow(binaryText, btoa, (base64) =>
-  base64.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""),
-);
-
-const fromBase64Url = (value: string): Uint8Array<ArrayBuffer> => {
-  const base64 =
-    value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - (value.length % 4)) % 4);
-  const binary = atob(base64);
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-};
-
 /**
  * Read `crypto.subtle`, which a hostile realm can replace with an accessor.
  *
@@ -191,12 +173,18 @@ const readSubtle = (): Option.Option<SubtleCrypto> =>
     Option.flatMap(Option.fromNullishOr),
   );
 
-/** A value that is not base64 is a rejection, and not a failure of ours. */
-const decodeBase64Url = (value: string): Option.Option<Uint8Array<ArrayBuffer>> =>
-  pipe(
-    Result.try(() => fromBase64Url(value)),
-    Result.getSuccess,
-  );
+/**
+ * Read a value in base64 for a URL. A value that is not base64 is a rejection,
+ * and not a failure of ours.
+ *
+ * The copy gives Web Crypto the view of an `ArrayBuffer` that it takes. The
+ * type of the decoder also allows a shared buffer.
+ */
+const decodeBase64Url: (value: string) => Option.Option<Uint8Array<ArrayBuffer>> = flow(
+  Base64Url.decode,
+  Result.getSuccess,
+  Option.map((bytes) => new Uint8Array(bytes)),
+);
 
 /** The first byte of an initialisation vector names the direction. */
 const directionByte = (direction: SealDirection): number =>
@@ -362,7 +350,7 @@ export class FrameAuth extends Context.Service<
         try: (): string => {
           const bytes = new Uint8Array(SECRET_BYTES);
           crypto.getRandomValues(bytes);
-          return toBase64Url(bytes);
+          return Base64Url.encode(bytes);
         },
         catch: (cause) =>
           new FrameAuthError({
@@ -510,7 +498,7 @@ export class FrameAuth extends Context.Service<
         const signature = yield* mac(
           joinProofPayload(handshake.token, handshake.helloId, handshake.frameId),
         );
-        return toBase64Url(new Uint8Array(signature));
+        return Base64Url.encode(new Uint8Array(signature));
       });
 
       const verifyJoin = Effect.fn("FrameAuth.verifyJoin")(function* (
@@ -582,7 +570,7 @@ export class FrameAuth extends Context.Service<
                 detail: `could not seal the message: ${describeThrown(cause)}`,
               }),
           });
-          return sealedMessage(seq, toBase64Url(new Uint8Array(sealed)));
+          return sealedMessage(seq, Base64Url.encode(new Uint8Array(sealed)));
         });
 
         // Every failure of `decrypt` is one answer: this message is not ours.
