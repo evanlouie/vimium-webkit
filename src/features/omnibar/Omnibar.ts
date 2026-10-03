@@ -14,10 +14,11 @@
  * - **Problem.** `SUPPRESS_EVENT` calls `preventDefault`, so to suppress every
  *   key would stop the field from receiving any text.
  * - **Opportunity.** We see the events first, so we can take exactly the
- *   navigation keys and give the rest on with `PASS_EVENT_TO_PAGE`. That stops
+ *   navigation keys and stop the rest with `SUPPRESS_PROPAGATION`. That stops
  *   the walk down the stack — normal mode and insert mode never see a
- *   character that was typed into the omnibar — and it keeps the default
- *   action, so the field still types the character.
+ *   character that was typed into the omnibar — and the page does not see it
+ *   either. It keeps the default action, so the field still types the
+ *   character.
  *
  * The mode owns the keyboard, with `KeyPolicy.Owned`. That is the backstop: a
  * keyboard event that this file does not classify is swallowed, and does not
@@ -44,7 +45,6 @@ import { Commands } from "~/core/Commands.ts";
 import {
   CONTINUE_BUBBLING,
   type HandlerResult,
-  PASS_EVENT_TO_PAGE,
   SUPPRESS_EVENT,
   SUPPRESS_PROPAGATION,
 } from "~/core/HandlerStack.ts";
@@ -630,18 +630,22 @@ export class Omnibar extends Context.Service<
         );
 
       /**
-       * Let our own field have the key, and swallow a key from anywhere else.
+       * Let our own field have the key, and nobody else, and swallow a key
+       * from anywhere else.
        *
-       * `PASS_EVENT_TO_PAGE` stops the walk down the stack and leaves the
-       * event alone, which is exactly "our field types this, and nothing else
-       * reacts". A listener of the page on `document` still sees it,
-       * retargeted to our shadow host. That cannot be prevented without the
-       * extension-origin iframe that upstream Vimium has and we do not.
+       * `SUPPRESS_PROPAGATION` stops the event where the stack sees it, in the
+       * capture phase of `window`, and leaves its default action alone. That
+       * is exactly "our field types this, and nothing else reacts": not the
+       * modes below us, and not a listener of the page on `document` or
+       * `window`, where the event would name our shadow host as its target.
+       * A capture listener that the page added to `window` before ours still
+       * sees it. No content script can stop that one; upstream Vimium avoids
+       * it with an extension-origin iframe that we do not have.
        */
-      const passIfOurs = (view: OmnibarView, event: KeyboardEvent): HandlerResult =>
+      const keepIfOurs = (view: OmnibarView, event: KeyboardEvent): HandlerResult =>
         pipe(
           view.ownsFocus(event.target),
-          Boolean.match({ onTrue: () => PASS_EVENT_TO_PAGE, onFalse: () => SUPPRESS_EVENT }),
+          Boolean.match({ onTrue: () => SUPPRESS_PROPAGATION, onFalse: () => SUPPRESS_EVENT }),
         );
 
       const onKeydown =
@@ -650,7 +654,7 @@ export class Omnibar extends Context.Service<
           pipe(
             Option.all({ action: keyAction(event), live: current() }),
             Option.match({
-              onNone: () => Effect.succeed(passIfOurs(view, event)),
+              onNone: () => Effect.succeed(keepIfOurs(view, event)),
               // `preventDefault` is more than tidiness here. Without it Tab
               // moves the focus out of the overlay, and the arrows move the
               // caret in the field.
@@ -714,8 +718,8 @@ export class Omnibar extends Context.Service<
             },
             {
               keydown: onKeydown(() => Ref.getUnsafe(session), view),
-              keypress: (event) => Effect.succeed(passIfOurs(view, event)),
-              keyup: (event) => Effect.succeed(passIfOurs(view, event)),
+              keypress: (event) => Effect.succeed(keepIfOurs(view, event)),
+              keyup: (event) => Effect.succeed(keepIfOurs(view, event)),
               focus: (event) =>
                 // Keep insert mode, which sits below us, from reading a focus on
                 // our own field as the page asking for insert mode.
