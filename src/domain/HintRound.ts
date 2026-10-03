@@ -133,12 +133,6 @@ export const judgeHintRequest = (
     }),
   );
 
-/** A `CANCEL_HINTS` from the origin or the coordinator of this round ends it here. */
-export const cancelsLocalRound =
-  (roundId: string, from: FrameId) =>
-  (round: LocalRound): boolean =>
-    round.roundId === roundId && (round.origin === from || round.coordinator === from);
-
 /** A `CANCEL_HINTS` ends a session of the round that this frame follows. */
 export const cancelsSession =
   (roundId: string, from: FrameId, localRound: Option.Option<LocalRound>) =>

@@ -50,7 +50,9 @@
  *    origin, whether an activation, Escape, a page with no hints or a timeout,
  *    the origin sends `CANCEL_HINTS` to the top frame. The top frame forgets
  *    the live round and sends the message on to every frame. Each matching
- *    frame removes its round and session.
+ *    frame removes its session, and it no longer joins the round. Its record
+ *    of the round still admits the one activation of rule 2, because that
+ *    request and the end of the round can arrive in either order.
  */
 
 import {
@@ -94,7 +96,6 @@ import {
 import { type FilterMatch, matchedPrefixLength } from "~/domain/HintFilter.ts";
 import {
   blocksRound,
-  cancelsLocalRound,
   cancelsSession,
   followsKeysOf,
   HintRequest,
@@ -1784,7 +1785,7 @@ export const HintsLayer: Layer.Layer<
 
       // A participant draws and follows, and the origin is the frame that
       // acts. It acts here, or it addresses the frame that owns the entry,
-      // which can be this frame as well.
+      // which can be this frame as well. Either way the session ends.
       const act = (entry: HintEntry): Effect.Effect<void> =>
         pipe(
           config.role,
@@ -1793,23 +1794,23 @@ export const HintsLayer: Layer.Layer<
               pipe(
                 entry.hint,
                 Option.match({
-                  onNone: () => activateRemote(entry),
-                  onSome: (hint) => activateHere(entry, hint),
+                  // The request leaves first. The end of the session ends the
+                  // round in every frame, and the request belongs to the round.
+                  onNone: () =>
+                    pipe(activateRemote(entry), Effect.andThen(exitSession("explicit"))),
+                  // The overlay goes first: activation can move the focus,
+                  // and a marker that is still drawn would be visible for one
+                  // frame after a navigation starts.
+                  onSome: (hint) =>
+                    pipe(exitSession("explicit"), Effect.andThen(activateHere(entry, hint))),
                 }),
               ),
-            Participant: () => Effect.void,
+            Participant: () => exitSession("explicit"),
           }),
         );
 
       const activateIndex = (index: number): Effect.Effect<void> =>
-        pipe(
-          config.entries,
-          Array.get(index),
-          // The overlay goes first: activation can move the focus, and a
-          // marker that is still drawn would be visible for one frame after
-          // a navigation starts.
-          whenSome((entry) => pipe(exitSession("explicit"), Effect.andThen(act(entry)))),
-        );
+        pipe(config.entries, Array.get(index), whenSome(act));
 
       // -- keys --------------------------------------------------------
 
@@ -2228,10 +2229,13 @@ export const HintsLayer: Layer.Layer<
 
     const onActivate = Effect.fnUntraced(function* ({ message: payload }: InboundOf<"ACTIVATE">) {
       const round = yield* Ref.get(roundRef);
+      const ended = yield* Ref.get(cancelledRoundsRef);
       const now = yield* dom.now;
       yield* pipe(
         round,
         Option.filter(joinsRound(payload, bus.frameId, now)),
+        // A round that ended draws nothing, and takes no keyboard.
+        Option.filter(() => !pipe(ended, Array.contains(payload.roundId))),
         whenSome(() => joinRound(payload)),
       );
     }, noReply);
@@ -2288,7 +2292,13 @@ export const HintsLayer: Layer.Layer<
      * End a round in this frame.
      *
      * The origin sends this to the top frame when its round ends, for any
-     * reason, and the coordinator sends it on to every frame.
+     * reason, and the coordinator sends it on to every frame. The session of
+     * the round ends, and the round can no longer be joined.
+     *
+     * The record of the round stays. It still lets the origin activate one
+     * hint of this frame, until that activation, a new round or the age
+     * limit, because the request of the origin and the end of its round can
+     * reach this frame in either order.
      */
     const onCancelHints = Effect.fnUntraced(function* ({
       message: { roundId },
@@ -2297,12 +2307,6 @@ export const HintsLayer: Layer.Layer<
       yield* rememberCancelled(roundId);
 
       const localRound = yield* Ref.get(roundRef);
-      yield* pipe(
-        localRound,
-        Option.filter(cancelsLocalRound(roundId, from)),
-        whenSome(() => pipe(roundRef, Ref.set(Option.none()))),
-      );
-
       const session = yield* Ref.get(sessionRef);
       yield* pipe(
         session,
