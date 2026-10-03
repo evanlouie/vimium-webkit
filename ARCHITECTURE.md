@@ -166,9 +166,8 @@ completes inside the user activation, and a wait for storage or for another
 frame goes on after the listener returns. The fiber belongs to the layer scope,
 and it stops when that scope closes.
 
-Two places fork a detached fiber instead, which also starts at once: a hint
-activation, and the page-exit hook. The exit hook must outlive the scope that it
-closes.
+The page-exit hook is the one fiber that is forked detached, and it also starts
+at once. It must outlive the scope that it closes.
 
 ## 4. State
 
