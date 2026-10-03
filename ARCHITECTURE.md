@@ -305,8 +305,13 @@ nothing else.
 
 The guard holds each key that starts the application, up to 16 of them, from
 the first key until the application takes the keyboard. It suppresses each one,
-so the page does not act on it. It holds for three seconds at most: a start
-that takes longer gives the page its keyboard back, and the held keys are lost.
+so the page does not act on it. A chord with Control or ⌘ starts the
+application but goes on to the page, because a held key cannot get its default
+action back, and ⌘C must still copy. The guard holds for three seconds at most:
+a start that takes longer gives the page its keyboard back, and the held keys
+are lost. A held key that the application gives to the page is lost as well.
+This includes each key that starts a page that the settings exclude, because
+the guard reads no settings.
 `BootstrapLayer` attaches the key bridge and takes the keyboard at once. A
 later key reaches normal mode, which gives it to the page while the verdict is
 pending.

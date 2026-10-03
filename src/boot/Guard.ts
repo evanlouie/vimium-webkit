@@ -60,6 +60,11 @@ const GUARD = Symbol.for("vimium-webkit.stage0");
  * manager, because `GM.getValue` gives only a promise on quoid. The guard holds
  * every key from the first one until the application takes the keyboard, so a
  * user who types `gg` at once loses neither key.
+ *
+ * A key that the application then gives to the page is lost, because the page
+ * never saw it. That includes every key on a page that the settings exclude.
+ * The guard cannot know the rules: reading them is what the start does, and
+ * the guard reads no storage.
  */
 const MAX_BUFFERED_KEYS = 16;
 
@@ -174,6 +179,18 @@ const startsApplication = (event: KeyboardEvent, source: EventTarget | null): bo
   !isComposing(event) && !isModifierKey(event) && !isEditable(source);
 
 /**
+ * Is this key a chord with Control or ⌘?
+ *
+ * Such a chord is a shortcut of the browser or of the system as often as it is
+ * one of ours: ⌘C copies, and ⌘L opens the address bar. The guard cannot give a
+ * held key its default action back, so a chord starts the application and goes
+ * on to the page. A binding on such a chord then misses its first press. An
+ * Option chord is held like any other key: on an Apple platform it types a
+ * character, which may be a binding.
+ */
+const isShortcut = (event: KeyboardEvent): boolean => event.ctrlKey || event.metaKey;
+
+/**
  * The wake message, as `platform/Realm.ts` sends it.
  *
  * Only an ancestor may wake us. An ancestor can already create and destroy this
@@ -252,7 +269,7 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
       yield* pipe(
         event,
         Option.liftPredicate((key) => holding && startsApplication(key, source)),
-        whenSome(holdKey),
+        whenSome((key) => (isShortcut(key) ? activate("keydown") : holdKey(key))),
       );
     });
 
