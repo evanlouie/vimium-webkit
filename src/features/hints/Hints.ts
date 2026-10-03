@@ -115,9 +115,6 @@ import { Ui } from "~/ui/Ui.ts";
 import { detectHints, type HintRect, HintTargets, isSecondary, type LocalHint } from "./Detect.ts";
 import { hintCss, makeMarkerLayer, MarkerSpec } from "./Markers.ts";
 
-export type { LocalHint } from "./Detect.ts";
-export { HINT_CSS, hintCss, isSafeUserCss } from "./Markers.ts";
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
