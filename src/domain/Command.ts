@@ -10,7 +10,7 @@
  * gives an explanation instead of silence.
  */
 
-import { Data, Option, Record, Struct, pipe } from "effect";
+import { Data, Option, Record, Schema, Struct, pipe } from "effect";
 
 /**
  * Whether this userscript can do a command.
@@ -522,6 +522,9 @@ const SPECS = {
 } satisfies Record.ReadonlyRecord<string, CommandSpec>;
 
 export type CommandName = keyof typeof SPECS;
+
+/** Is this text the name of a command in the catalogue? */
+export const isCommandName = Schema.is(Schema.Literals(Record.keys(SPECS)));
 
 export interface CommandDef extends CommandSpec {
   readonly name: CommandName;

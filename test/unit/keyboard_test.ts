@@ -13,7 +13,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Array, Effect, Layer, Option, Ref, Stream, SubscriptionRef, Record, pipe } from "effect";
+import { Array, Effect, Layer, Option, Ref, Stream, SubscriptionRef, pipe } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Exclusions } from "~/core/Exclusions.ts";
 import { HandlerStack } from "~/core/HandlerStack.ts";
@@ -22,7 +22,7 @@ import { Mappings } from "~/core/Mappings.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
-import { COMMANDS, type CommandName } from "~/domain/Command.ts";
+import type { CommandName } from "~/domain/Command.ts";
 import { EffectiveRule, FULLY_ENABLED } from "~/domain/Exclusion.ts";
 import { compileMappings } from "~/domain/Mapping.ts";
 import { defaultSettings, type Settings as SettingsData } from "~/domain/Persisted.ts";
@@ -144,13 +144,10 @@ class Focus extends UiEventDouble implements FocusEvent {
 // The layers
 // ---------------------------------------------------------------------------
 
-const KNOWN_COMMANDS: ReadonlySet<string> = new Set(Record.keys(COMMANDS));
-
 /** The compiled mappings of one source, with no defaults under them. */
 const mappingsOf = (source: string): Layer.Layer<Mappings> =>
   Layer.sync(Mappings, () => {
     const compiled = compileMappings(source, {
-      knownCommands: KNOWN_COMMANDS,
       rejectReservedShortcuts: false,
     });
     return Mappings.of({

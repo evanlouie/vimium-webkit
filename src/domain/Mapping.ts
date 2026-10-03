@@ -20,6 +20,7 @@ import {
   flow,
   pipe,
 } from "effect";
+import { type CommandName, isCommandName } from "~/domain/Command.ts";
 import {
   isCountDigit,
   normaliseKeySequence,
@@ -30,7 +31,7 @@ import {
 export interface KeyBinding {
   /** The canonical notation of each key in the sequence. */
   readonly keys: Array.NonEmptyReadonlyArray<string>;
-  readonly command: string;
+  readonly command: CommandName;
   /** The source line, for the error message and for the help dialog. */
   readonly source: string;
   /** The raw line number in the compiled source. See `ParseOptions.lineOffset`. */
@@ -68,8 +69,6 @@ export interface CompiledMappings {
 }
 
 export interface ParseOptions {
-  /** The command names that exist. An unknown name becomes a diagnostic. */
-  readonly knownCommands: ReadonlySet<string>;
   /**
    * Refuse a binding on a key combination that Safari never sends.
    *
@@ -221,7 +220,6 @@ const warning = (message: string): Finding => ({ severity: "warning", message })
 
 /** What the compiler reads from `ParseOptions`, decided once. */
 interface Rules {
-  readonly knownCommands: ReadonlySet<string>;
   /** The finding for a key that Safari never sends. */
   readonly reserved: (key: string, reason: string) => Finding;
 }
@@ -237,7 +235,6 @@ const reservedFinding = Boolean.match({
 });
 
 const rulesOf = (options: ParseOptions): Rules => ({
-  knownCommands: options.knownCommands,
   reserved: reservedFinding(options.rejectReservedShortcuts),
 });
 
@@ -368,17 +365,14 @@ const sequenceFindings = (
 
 const mapStep = (rules: Rules, line: LogicalLine, args: ReadonlyArray<string>): LineStep =>
   Result.gen(function* () {
-    const [sequence, command] = yield* pipe(
+    const [sequence, name] = yield* pipe(
       Option.all([pipe(args, Array.get(0)), pipe(args, Array.get(1))]),
       Result.fromOption(() => [error("map needs a key sequence and a command")]),
     );
     const keys = yield* normalised(sequence);
-    yield* pipe(
-      command,
-      Result.liftPredicate(
-        (name) => rules.knownCommands.has(name),
-        (name) => [error(`unknown command "${name}"`)],
-      ),
+    const command = yield* pipe(
+      name,
+      Result.liftPredicate(isCommandName, () => [error(`unknown command "${name}"`)]),
     );
     const findings = yield* sequenceFindings(rules, keys);
     // A token after the command is an option of upstream, such as
@@ -727,7 +721,7 @@ export const keysByCommand = (
 ): Record.ReadonlyRecord<string, Array.NonEmptyReadonlyArray<string>> =>
   pipe(
     mappings.bindings,
-    Array.groupBy((binding) => binding.command),
+    Array.groupBy((binding): string => binding.command),
     Record.map(Array.map((binding) => written(binding.keys))),
   );
 

@@ -3,12 +3,10 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Array, Effect, Option, Record, pipe } from "effect";
-import { COMMANDS, DEFAULT_MAPPINGS } from "~/domain/Command.ts";
+import { Array, Effect, Option, pipe } from "effect";
+import { DEFAULT_MAPPINGS } from "~/domain/Command.ts";
 import { type KeyEventLike, keyNotation } from "~/domain/Key.ts";
 import { compileMappings } from "~/domain/Mapping.ts";
-
-const names: ReadonlySet<string> = new Set(Record.keys(COMMANDS));
 
 describe("Command", () => {
   /**
@@ -112,10 +110,7 @@ describe("Command", () => {
           applePlatform: true,
         }),
       );
-      const compiled = compileMappings(DEFAULT_MAPPINGS, {
-        knownCommands: names,
-        rejectReservedShortcuts: true,
-      });
+      const compiled = compileMappings(DEFAULT_MAPPINGS, { rejectReservedShortcuts: true });
       const command = pipe(
         compiled.bindings,
         Array.findFirst(({ keys }) => keys.length === 1 && Array.headNonEmpty(keys) === notation),

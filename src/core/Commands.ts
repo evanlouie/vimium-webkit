@@ -46,8 +46,6 @@ export type {
 } from "~/domain/Command.ts";
 
 export const CommandFailureReason = Schema.Literals([
-  /** No command of that name is in the catalogue. */
-  "unknown",
   /** The command is in the catalogue, and nothing can run it here. */
   "unavailable",
   /** The body ran and it failed. */
@@ -92,7 +90,7 @@ export class Commands extends Context.Service<
     ) => Effect.Effect<void, never, R>;
 
     readonly run: (
-      name: string,
+      name: CommandName,
       invocation: CommandInvocation,
     ) => Effect.Effect<void, CommandError>;
 
@@ -121,25 +119,12 @@ export class Commands extends Context.Service<
         });
 
       const run = Effect.fn("Commands.run")(function* (
-        name: string,
+        name: CommandName,
         invocation: CommandInvocation,
       ) {
-        const definition = yield* pipe(
-          definitionOf(name),
-          Result.fromOption(
-            () =>
-              new CommandError({
-                reason: "unknown",
-                command: name,
-                detail: `there is no command named ${name}`,
-              }),
-          ),
-          Effect.fromResult,
-        );
-
         const body = yield* pipe(
           Ref.get(bodies),
-          Effect.map(HashMap.get(definition.name)),
+          Effect.map(HashMap.get(name)),
           Effect.flatMap(
             flow(
               Result.fromOption(
@@ -148,7 +133,9 @@ export class Commands extends Context.Service<
                     reason: "unavailable",
                     command: name,
                     detail: pipe(
-                      definition.availability,
+                      COMMANDS,
+                      Struct.get(name),
+                      Struct.get("availability"),
                       CommandAvailability.$match({
                         Available: () => `${name} cannot run in this frame`,
                         Unavailable: ({ reason }) => reason,

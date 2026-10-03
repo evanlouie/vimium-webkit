@@ -8,7 +8,7 @@
 
 import { assert, describe, it } from "@effect/vitest";
 import { Array, Effect, Option, Record, flow, pipe } from "effect";
-import { COMMANDS, DEFAULT_MAPPINGS } from "~/domain/Command.ts";
+import { DEFAULT_MAPPINGS } from "~/domain/Command.ts";
 import {
   type BranchCursor,
   canExtend,
@@ -28,13 +28,8 @@ import {
   type TrieNode,
 } from "~/domain/Mapping.ts";
 
-const known: ReadonlySet<string> = new Set(["scrollDown", "scrollUp", "showHelp", "reload"]);
-
 const compile = (source: string, rejectReserved = false) =>
-  compileMappings(source, {
-    knownCommands: known,
-    rejectReservedShortcuts: rejectReserved,
-  });
+  compileMappings(source, { rejectReservedShortcuts: rejectReserved });
 
 /** The child of a node for one key. */
 const childAt =
@@ -88,13 +83,7 @@ const firstSeverity = (result: CompiledMappings): string | null =>
     Option.getOrNull,
   );
 
-const allCommandNames: ReadonlySet<string> = new Set(Record.keys(COMMANDS));
-
-const compileDefaults = () =>
-  compileMappings(DEFAULT_MAPPINGS, {
-    knownCommands: allCommandNames,
-    rejectReservedShortcuts: true,
-  });
+const compileDefaults = () => compileMappings(DEFAULT_MAPPINGS, { rejectReservedShortcuts: true });
 
 describe("Mapping", () => {
   it.effect("removes comments and joins continuations", () =>
@@ -208,7 +197,6 @@ describe("Mapping", () => {
     Effect.sync(() => {
       // The user cannot edit the defaults, so a line number below 1 is noise.
       const result = compileMappings("map <c-a scrollUp\nmap j scrollDown", {
-        knownCommands: known,
         rejectReservedShortcuts: false,
         lineOffset: 1,
       });
@@ -297,7 +285,6 @@ describe("Mapping", () => {
   it.effect("puts the user mappings on top of the defaults", () =>
     Effect.sync(() => {
       const result = compileMappings(`${DEFAULT_MAPPINGS}\nunmap j\nmap J showHelp`, {
-        knownCommands: allCommandNames,
         rejectReservedShortcuts: true,
       });
       assert.isTrue(Option.isNone(lookup(result.trie, ["j"])));
