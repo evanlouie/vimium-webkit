@@ -86,7 +86,7 @@ flowchart TD
   Report --> Dialog
   Ui --> Dialog
 
-  Exclusions --> Link["FrameLink<br/>topFrameVerdictLayer"]
+  Exclusions --> Link["FrameLink<br/>TopFrameVerdictLayer"]
   FrameBus --> Link
   Report --> Link
 
@@ -111,7 +111,7 @@ platform and `domain/`, so the graph has no cycle.
 The exclusion verdict takes one more step, because `core/` must not import
 `frames/`. `core/Exclusions.ts` owns the verdict in every frame, and it
 declares the `TopFrameVerdict` service for what a child frame hears from the
-top frame. `topFrameVerdictLayer` in `frames/Link.ts` gives that service over
+top frame. `TopFrameVerdictLayer` in `frames/Link.ts` gives that service over
 the bus. A child frame asks with `EXCLUSION_REQUEST` when it starts, and the
 top frame sends `VERDICT` to every frame each time that it takes a verdict. The
 import goes from `frames/` to `core/`, and the layer goes the other way.

@@ -111,7 +111,7 @@ const nextFrame = (
  * time sends `VERDICT` once its verdict settles, so the question does not
  * repeat.
  */
-export const topFrameVerdictLayer: Layer.Layer<TopFrameVerdict, never, FrameBus> = Layer.effect(
+export const TopFrameVerdictLayer: Layer.Layer<TopFrameVerdict, never, FrameBus> = Layer.effect(
   TopFrameVerdict,
   Effect.gen(function* () {
     const bus = yield* FrameBus;

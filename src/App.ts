@@ -26,7 +26,7 @@ import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { FrameAuth } from "~/frames/Auth.ts";
 import { FrameBus } from "~/frames/Bus.ts";
-import { FrameLink, topFrameVerdictLayer } from "~/frames/Link.ts";
+import { FrameLink, TopFrameVerdictLayer } from "~/frames/Link.ts";
 import { FindLayer } from "~/features/find/Find.ts";
 import { HintsLayer } from "~/features/hints/Hints.ts";
 import { Insert } from "~/features/Insert.ts";
@@ -91,7 +91,7 @@ const StorageLayer = pipe(
  * frame through it.
  */
 const BusLayer = pipe(
-  topFrameVerdictLayer,
+  TopFrameVerdictLayer,
   Layer.provideMerge(FrameBus.layer),
   Layer.provideMerge(FrameAuth.layer),
   Layer.provideMerge(StorageLayer),
