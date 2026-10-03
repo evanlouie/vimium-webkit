@@ -26,7 +26,8 @@ import {
 import { Commands } from "~/core/Commands.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
 import { Report } from "~/core/Report.ts";
-import { Settings, type SettingsData } from "~/core/Settings.ts";
+import { Settings } from "~/core/Settings.ts";
+import type { Settings as SettingsData } from "~/domain/Persisted.ts";
 import { destinationOf } from "~/domain/SearchEngine.ts";
 import { parseUrl } from "~/domain/Url.ts";
 import { FrameLink } from "~/frames/Link.ts";

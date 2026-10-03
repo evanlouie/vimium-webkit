@@ -25,8 +25,8 @@ import {
 } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Report } from "~/core/Report.ts";
-import { Settings, type SettingsData } from "~/core/Settings.ts";
-import { type SessionState, withZoom } from "~/domain/Persisted.ts";
+import { Settings } from "~/core/Settings.ts";
+import { type SessionState, type Settings as SettingsData, withZoom } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { isElement, MEDIA_SELECTOR } from "~/platform/Elements.ts";
 import { Storage } from "~/platform/Storage.ts";

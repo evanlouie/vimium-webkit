@@ -11,8 +11,6 @@ import { Context, Effect, Layer, type Stream } from "effect";
 import type { Settings as SettingsData } from "~/domain/Persisted.ts";
 import { Storage, type StorageError } from "~/platform/Storage.ts";
 
-export type { SettingsData };
-
 export class Settings extends Context.Service<
   Settings,
   {
@@ -38,11 +36,6 @@ export class Settings extends Context.Service<
      */
     readonly save: (next: SettingsData) => Effect.Effect<SettingsData, StorageError>;
 
-    /** Change some fields, as one indivisible step. */
-    readonly patch: (
-      change: (current: SettingsData) => SettingsData,
-    ) => Effect.Effect<SettingsData, StorageError>;
-
     /** Read the stored settings again. Another tab may have changed them. */
     readonly reload: Effect.Effect<SettingsData>;
   }
@@ -63,7 +56,6 @@ export class Settings extends Context.Service<
           // a bad field rather than rejecting it, so the two differ.
           return yield* group.current;
         }),
-        patch: group.update,
         reload: group.hydrate,
       });
     }),

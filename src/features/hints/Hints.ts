@@ -80,7 +80,7 @@ import { Commands } from "~/core/Commands.ts";
 import { type HandlerResult, SUPPRESS_EVENT } from "~/core/HandlerStack.ts";
 import { type ExitReason, ExitTrigger, KeyPolicy, type ModeHandle, Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
-import { Settings, type SettingsData } from "~/core/Settings.ts";
+import { Settings } from "~/core/Settings.ts";
 import {
   type FrameMessage,
   type HintDescriptor,
@@ -117,6 +117,7 @@ import {
   step,
 } from "~/domain/HintSession.ts";
 import { isComposing, type KeyContext, keyNotation } from "~/domain/Key.ts";
+import type { Settings as SettingsData } from "~/domain/Persisted.ts";
 import {
   FrameBus,
   type InboundMessage,
