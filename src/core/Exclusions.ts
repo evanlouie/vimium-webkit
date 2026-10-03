@@ -18,14 +18,17 @@ import {
   Boolean,
   Context,
   Data,
+  Duration,
   Effect,
   Layer,
   Option,
+  Predicate,
   Ref,
   type Scope,
   Stream,
   String as Str,
   SubscriptionRef,
+  flow,
   pipe,
 } from "effect";
 import {
@@ -36,11 +39,15 @@ import {
   makeExclusionSet,
   MAX_REGEX_URL_LENGTH,
 } from "~/domain/Exclusion.ts";
+import { REQUEST_DEADLINE_MS } from "~/domain/FrameMessage.ts";
 import type { ExclusionRule } from "~/domain/Persisted.ts";
 import { type NoFields, whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { Settings } from "./Settings.ts";
+
+/** How long a child frame waits for the top frame before it assumes a verdict. */
+const ANSWER_DEADLINE: Duration.Duration = Duration.millis(REQUEST_DEADLINE_MS);
 
 /** The verdict in force for this frame. */
 export type Verdict = Data.TaggedEnum<{
@@ -50,13 +57,24 @@ export type Verdict = Data.TaggedEnum<{
    * a page that the user excluded cannot be given back.
    */
   Pending: NoFields;
+  /**
+   * A child frame that can join the session of the top frame, but heard
+   * nothing before the deadline, acts fully enabled until it hears.
+   *
+   * An ancestor can be cross-origin with no injection, and a parent can be
+   * sandboxed. Disabling us there would disable us on a page that the user
+   * never excluded. It is a guess, and not an answer, so the keys that the
+   * guard held during the start are not played under it.
+   */
+  Assumed: NoFields;
   Known: { readonly rule: EffectiveRule };
 }>;
 export const Verdict = Data.taggedEnum<Verdict>();
 
-/** The rule of a known verdict. */
-export const knownRule: (verdict: Verdict) => Option.Option<EffectiveRule> = Verdict.$match({
+/** The rule that a verdict puts in force. A pending verdict puts none. */
+export const ruleOf: (verdict: Verdict) => Option.Option<EffectiveRule> = Verdict.$match({
   Pending: () => Option.none(),
+  Assumed: () => Option.some(FULLY_ENABLED),
   Known: ({ rule }) => Option.some(rule),
 });
 
@@ -70,10 +88,11 @@ export class TopFrameVerdict extends Context.Service<
   TopFrameVerdict,
   {
     /**
-     * Ask the top frame for its verdict.
+     * Ask the top frame for its verdict, once this frame joins its session.
      *
-     * `None` when this frame joins no session, or when the top frame does not
-     * answer in time.
+     * That can take any time, because the top frame admits a frame whenever
+     * it hears it: after a sweep, or after the wake of a hint round. `None`
+     * at once when this frame can never join a session.
      */
     readonly ask: Effect.Effect<Option.Option<EffectiveRule>>;
     /** Take every verdict that the top frame pushes, for as long as the scope is open. */
@@ -229,32 +248,32 @@ export class Exclusions extends Context.Service<
           Effect.forkScoped,
         );
 
-        /**
-         * A frame that the top frame never answers stays fully enabled.
-         *
-         * An ancestor can be cross-origin with no injection, a parent can be
-         * sandboxed, and a manager with no value store forms no session.
-         * Disabling us there would disable us on a page that the user never
-         * excluded. A verdict that already came, pushed, is kept.
-         */
-        const unanswered = pipe(
+        /** Act fully enabled, unless a verdict came in time. Read `Verdict.Assumed`. */
+        const assume = pipe(
           verdict,
           SubscriptionRef.updateSome<Verdict>(
-            Verdict.$match({
-              Pending: () => Option.some(Verdict.Known({ rule: FULLY_ENABLED })),
-              Known: () => Option.none(),
-            }),
+            flow(Option.liftPredicate(Verdict.$is("Pending")), Option.as(Verdict.Assumed())),
           ),
         );
 
-        /** A child frame takes the verdict of the top frame, and every one that it pushes. */
+        /**
+         * A child frame takes the verdict of the top frame, and every one that
+         * it pushes.
+         *
+         * A frame that can never join a session decides alone, and fully
+         * enabled: a manager with no private value store forms no session, and
+         * the user excluded nothing that this frame could know of. A frame
+         * that can join assumes the same verdict at the deadline, and takes
+         * the answer whenever it comes.
+         */
         const followTop = Effect.gen(function* () {
           yield* top.onPush(adopt);
           yield* pipe(
             top.ask,
-            Effect.flatMap(Option.match({ onNone: () => unanswered, onSome: adopt })),
+            Effect.flatMap(Option.match({ onNone: () => adopt(FULLY_ENABLED), onSome: adopt })),
             Effect.forkScoped,
           );
+          yield* pipe(assume, Effect.delay(ANSWER_DEADLINE), Effect.forkScoped);
         });
 
         const { follow, refresh } = pipe(
@@ -273,7 +292,7 @@ export class Exclusions extends Context.Service<
           changes: SubscriptionRef.changes(verdict),
           settled: pipe(
             SubscriptionRef.changes(verdict),
-            Stream.filter(Verdict.$is("Known")),
+            Stream.filter(Predicate.not(Verdict.$is("Pending"))),
             Stream.runHead,
             // The changes of a live reference never end, so the head is there.
             Effect.flatMap(Option.match({ onNone: () => Effect.never, onSome: Effect.succeed })),

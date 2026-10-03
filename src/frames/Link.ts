@@ -42,8 +42,8 @@ import {
   pipe,
 } from "effect";
 import type { EffectiveRule } from "~/domain/Exclusion.ts";
-import { isKind } from "~/domain/FrameMessage.ts";
-import { Exclusions, knownRule, TopFrameVerdict } from "~/core/Exclusions.ts";
+import { isKind, type MessageOf } from "~/domain/FrameMessage.ts";
+import { Exclusions, ruleOf, TopFrameVerdict } from "~/core/Exclusions.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { whenSome } from "~/domain/Prelude.ts";
@@ -106,7 +106,10 @@ const nextFrame = (
  *
  * A child frame can ask only once it is admitted. The bus refuses every
  * request until the handshake ends, so the question waits for the admission
- * first. A frame that the deadline leaves outside the session gets no answer.
+ * first, however late it comes: the top frame admits a frame after a sweep or
+ * after the wake of a hint round as well. A top frame that does not answer in
+ * time sends `VERDICT` once its verdict settles, so the question does not
+ * repeat.
  */
 export const topFrameVerdictLayer: Layer.Layer<TopFrameVerdict, never, FrameBus> = Layer.effect(
   TopFrameVerdict,
@@ -121,7 +124,8 @@ export const topFrameVerdictLayer: Layer.Layer<TopFrameVerdict, never, FrameBus>
           onTrue: () =>
             pipe(
               bus.request(toTop, { kind: "EXCLUSION_REQUEST" }, verdictIn, REQUEST_DEADLINE),
-              Effect.option,
+              Effect.asSome,
+              Effect.catch(() => Effect.never),
             ),
         }),
       ),
@@ -209,8 +213,11 @@ export class FrameLink extends Context.Service<
             exclusions.settled,
             Effect.map(
               flow(
-                knownRule,
-                Option.map((rule) => ({ kind: "EXCLUSION_RESULT" as const, exclusion: rule })),
+                ruleOf,
+                Option.map((rule): MessageOf<"EXCLUSION_RESULT"> => ({
+                  kind: "EXCLUSION_RESULT",
+                  exclusion: rule,
+                })),
               ),
             ),
           ),
@@ -229,7 +236,7 @@ export class FrameLink extends Context.Service<
         // therefore goes out to the frames at once.
         yield* pipe(
           exclusions.changes,
-          Stream.filterMap(Filter.fromPredicateOption(knownRule)),
+          Stream.filterMap(Filter.fromPredicateOption(ruleOf)),
           Stream.runForEach(pushVerdict),
           Effect.forkScoped,
         );

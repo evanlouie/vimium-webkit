@@ -55,7 +55,7 @@ import { Dom } from "~/platform/Dom.ts";
 import { Capabilities } from "~/platform/Capabilities.ts";
 import { isUserEvent, mediaPlayerHasFocus } from "~/platform/Elements.ts";
 import { Commands } from "./Commands.ts";
-import { Exclusions, knownRule, type Verdict } from "./Exclusions.ts";
+import { Exclusions, ruleOf, type Verdict } from "./Exclusions.ts";
 import { CONTINUE_BUBBLING, type HandlerResult, SUPPRESS_EVENT } from "./HandlerStack.ts";
 import { Mappings } from "./Mappings.ts";
 import { isEscape, KeyPolicy, Modes, ModeTier } from "./Modes.ts";
@@ -246,7 +246,7 @@ const typedNotation = ({ event, context }: Intake): Option.Option<string> =>
  * The page keeps every key in both cases.
  */
 const activeRule = (verdict: Verdict): Option.Option<EffectiveRule> =>
-  pipe(verdict, knownRule, Option.filter(EffectiveRule.guards.Enabled));
+  pipe(verdict, ruleOf, Option.filter(EffectiveRule.guards.Enabled));
 
 /**
  * What normal mode does with a key.

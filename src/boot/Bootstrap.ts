@@ -16,20 +16,19 @@ import {
   Exit,
   Layer,
   Match,
-  Option,
   Scope,
   Stream,
   Struct,
   pipe,
 } from "effect";
 import { Commands } from "~/core/Commands.ts";
-import { Exclusions } from "~/core/Exclusions.ts";
+import { Exclusions, Verdict } from "~/core/Exclusions.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
 import { Modes } from "~/core/Modes.ts";
 import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { describeCause } from "~/domain/Failure.ts";
-import { FrameBus, REQUEST_DEADLINE } from "~/frames/Bus.ts";
+import { FrameBus } from "~/frames/Bus.ts";
 import { Capabilities, degradationWarnings } from "~/platform/Capabilities.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { FrameRole } from "~/platform/Realm.ts";
@@ -261,22 +260,19 @@ export const BootstrapLayer: Layer.Layer<
      *
      * A child frame learns the verdict from the top frame, and the handshake
      * takes time. A key that is played before then runs a command on a page
-     * that the user may have excluded. A frame that learns nothing before the
-     * deadline drops the keys instead: the guard has already taken them from
-     * the page, and a guess at the verdict is worse.
+     * that the user may have excluded. A child frame that hears nothing before
+     * the deadline only assumes a verdict, and it drops the keys instead: the
+     * guard has already taken them from the page, and a guess at the verdict
+     * is worse.
      *
      * The guard holds every key until the drain, so a key that the user types
      * during the wait is held as well, and the order stays the order of typing.
      */
     const replayHeldKeys = Effect.gen(function* () {
-      const known = yield* pipe(
-        exclusions.settled,
-        Effect.timeoutOption(REQUEST_DEADLINE),
-        Effect.map(Option.isSome),
-      );
+      const answered = yield* pipe(exclusions.settled, Effect.map(Verdict.$is("Known")));
       const held = yield* boot.drain;
       yield* pipe(
-        known,
+        answered,
         Boolean.match({ onFalse: () => Effect.void, onTrue: () => replayBufferedKeys(held) }),
       );
     });

@@ -12,9 +12,11 @@
 
 import { assert, describe, it } from "@effect/vitest";
 import { Deferred, Effect, Equal, Layer, Option, Queue, Stream, pipe, Struct } from "effect";
+import { TestClock } from "effect/testing";
 import { Exclusions, TopFrameVerdict, Verdict } from "~/core/Exclusions.ts";
 import { Settings } from "~/core/Settings.ts";
 import { EffectiveRule, FULLY_ENABLED } from "~/domain/Exclusion.ts";
+import { REQUEST_DEADLINE_MS } from "~/domain/FrameMessage.ts";
 import {
   defaultSettings,
   type ExclusionRule,
@@ -222,19 +224,17 @@ describe("Exclusions", () => {
     }),
   );
 
-  it.effect("stays fully enabled when the top frame never answers", () =>
+  it.effect("decides alone, fully enabled, when it can join no session", () =>
     Effect.gen(function* () {
       const top = yield* topFrame;
       yield* pipe(
         Effect.gen(function* () {
           const exclusions = yield* Exclusions;
 
-          // An ancestor with no injection, a sandboxed parent, or a manager with
-          // no value store. Disabling us there would disable us on a page that
-          // the user never excluded.
+          // A manager with no private value store forms no session. Disabling
+          // us there would disable us on a page that the user never excluded.
           yield* pipe(top.answer, Deferred.succeed(Option.none<EffectiveRule>()));
-          yield* exclusions.settled;
-          assert.deepEqual(yield* exclusions.current, known(FULLY_ENABLED));
+          assert.deepEqual(yield* exclusions.settled, known(FULLY_ENABLED));
         }),
         Effect.provide(
           layerFor({
@@ -246,5 +246,36 @@ describe("Exclusions", () => {
         ),
       );
     }),
+  );
+
+  it.effect(
+    "assumes that it is enabled when the top frame is silent, and takes a late answer",
+    () =>
+      Effect.gen(function* () {
+        const top = yield* topFrame;
+        yield* pipe(
+          Effect.gen(function* () {
+            const exclusions = yield* Exclusions;
+
+            // An ancestor with no injection, or a sandboxed parent. The frame acts
+            // fully enabled, but it knows that it guessed.
+            yield* TestClock.adjust(REQUEST_DEADLINE_MS);
+            assert.deepEqual(yield* exclusions.settled, Verdict.Assumed());
+
+            // The top frame admits a frame whenever it hears it, and the frame
+            // asks then.
+            yield* pipe(top.answer, Deferred.succeed(Option.some<EffectiveRule>(DISABLED)));
+            yield* verdictOf(known(DISABLED));
+          }),
+          Effect.provide(
+            layerFor({
+              url: "https://other.test/advert",
+              role: FrameRole.Child(),
+              rules: EXCLUDED,
+              top,
+            }),
+          ),
+        );
+      }),
   );
 });

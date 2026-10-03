@@ -1565,19 +1565,12 @@ const makeMember = Effect.fnUntraced(function* (publishLocal: PublishLocal) {
     route,
     peers: roster,
     // A frame that cannot hold the credential never joins, so it says so at
-    // once instead of at the deadline.
+    // once.
     ready: pipe(
       auth.available,
       Boolean.match({
         onFalse: () => Effect.succeed(false),
-        onTrue: () =>
-          pipe(
-            Deferred.await(admitted),
-            Effect.timeoutOrElse({
-              duration: REQUEST_DEADLINE,
-              orElse: () => Effect.succeed(false),
-            }),
-          ),
+        onTrue: () => Deferred.await(admitted),
       }),
     ),
   } satisfies Role;
@@ -1603,12 +1596,14 @@ export class FrameBus extends Context.Service<
     readonly role: FrameRole;
 
     /**
-     * True when this frame belongs to a session.
+     * Wait until this frame belongs to a session, and give `true`.
      *
-     * It gives `false` after the deadline, and it does not fail. A frame with no
-     * coordinator is a supported configuration, and not an error: an ancestor can
-     * be cross-origin with no injection, or a parent can be sandboxed. A frame
-     * that cannot hold the credential gives `false` at once.
+     * It can wait for ever, and it does not fail. A frame with no coordinator
+     * is a supported configuration, and not an error: an ancestor can be
+     * cross-origin with no injection, or a parent can be sandboxed. The
+     * coordinator also admits a frame whenever it hears it, so a deadline here
+     * would turn a late admission into none. A caller that cannot wait races
+     * it. A frame that cannot hold the credential gives `false` at once.
      */
     readonly ready: Effect.Effect<boolean>;
 
