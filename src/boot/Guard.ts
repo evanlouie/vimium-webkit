@@ -24,6 +24,7 @@ import {
   Data,
   Deferred,
   Effect,
+  HashSet,
   Option,
   Predicate,
   Ref,
@@ -90,7 +91,7 @@ export interface BootSignal {
   /** Whether the user typed into an editable element since we started. */
   readonly typedIntoEditable: Effect.Effect<boolean>;
   /**
-   * Stop holding keys, and take the held ones, oldest first.
+   * Stop holding keys, and take the held ones.
    *
    * This is the signal that the application is ready. Call it once the key
    * bridge is attached, and before the guard scope closes. The guard holds every
@@ -98,33 +99,77 @@ export interface BootSignal {
    * lost. From then on the key bridge takes every key. A start that takes
    * longer than `MAX_HOLD_MS` finds the guard let go already, and no keys.
    */
-  readonly drain: Effect.Effect<ReadonlyArray<KeyboardEvent>>;
+  readonly drain: Effect.Effect<HeldKeys>;
+}
+
+/** The keys that the guard held, as it gives them to the application. */
+export interface HeldKeys {
+  /** The presses, oldest first, up to the limit of the buffer. */
+  readonly keys: ReadonlyArray<KeyboardEvent>;
+  /**
+   * The code of each held key whose release has not come yet.
+   *
+   * The page never got these presses, so it must not get their releases
+   * either. The guard takes a release while it holds keys, and the
+   * application takes the rest.
+   */
+  readonly down: HashSet.HashSet<string>;
 }
 
 /** What the guard does with a key that would start the application. */
 type Hold = Data.TaggedEnum<{
-  /** The application is not ready. The keys wait here, oldest first. */
-  Holding: { readonly keys: ReadonlyArray<KeyboardEvent> };
+  /** The application is not ready. The keys wait here. */
+  Holding: HeldKeys;
   /** The application has the keyboard. */
   Released: NoFields;
 }>;
 const Hold = Data.taggedEnum<Hold>();
 
-const NO_KEYS: ReadonlyArray<KeyboardEvent> = [];
+const NOTHING_HELD: HeldKeys = { keys: [], down: HashSet.empty() };
 
-/** Hold one more key, up to the limit. A released guard holds nothing. */
+/**
+ * Hold one more key, up to the limit. A released guard holds nothing.
+ *
+ * A key past the limit is still suppressed, so its release is taken too.
+ */
 const held = (event: KeyboardEvent): ((hold: Hold) => Hold) =>
   Hold.$match({
-    Holding: ({ keys }) =>
-      Hold.Holding({ keys: pipe(keys, Array.append(event), Array.take(MAX_BUFFERED_KEYS)) }),
+    Holding: ({ keys, down }) =>
+      Hold.Holding({
+        keys: pipe(keys, Array.append(event), Array.take(MAX_BUFFERED_KEYS)),
+        // A key with no physical code cannot be told from another one.
+        down: event.code.length > 0 ? HashSet.add(down, event.code) : down,
+      }),
     Released: (released) => released,
   });
 
+/** Take the release of `code` when the guard holds its press, and say whether it did. */
+const releaseOf =
+  (code: string) =>
+  (hold: Hold): readonly [boolean, Hold] =>
+    pipe(
+      hold,
+      Hold.$match({
+        Holding: ({ keys, down }): readonly [boolean, Hold] => [
+          HashSet.has(down, code),
+          Hold.Holding({ keys, down: HashSet.remove(down, code) }),
+        ],
+        Released: (released): readonly [boolean, Hold] => [false, released],
+      }),
+    );
+
 /** The keys that a guard held when it let go of them. */
-const heldKeys: (hold: Hold) => ReadonlyArray<KeyboardEvent> = Hold.$match({
-  Holding: ({ keys }) => keys,
-  Released: () => NO_KEYS,
+const heldKeys: (hold: Hold) => HeldKeys = Hold.$match({
+  Holding: (holding) => ({ keys: holding.keys, down: holding.down }),
+  Released: () => NOTHING_HELD,
 });
+
+/** Keep a key from the page: from its default action and from its listeners. */
+const suppress = (event: KeyboardEvent): Effect.Effect<void> =>
+  Effect.sync(() => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  });
 
 /** Is the marker of an instance on this realm already? */
 const isClaimed: (window: Window) => boolean = flow(
@@ -217,7 +262,7 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
     const dom = yield* Dom;
     const realm = yield* Realm;
 
-    const hold = yield* Ref.make<Hold>(Hold.Holding({ keys: NO_KEYS }));
+    const hold = yield* Ref.make<Hold>(Hold.Holding(NOTHING_HELD));
     const typed = yield* Ref.make(false);
     const started = yield* Deferred.make<ActivationReason>();
 
@@ -243,12 +288,24 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
      */
     const holdKey = Effect.fnUntraced(function* (event: KeyboardEvent) {
       yield* pipe(hold, Ref.update(held(event)));
-      yield* Effect.sync(() => {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      });
+      yield* suppress(event);
       yield* activate("keydown");
     });
+
+    /**
+     * Take the release of a key whose press the guard holds.
+     *
+     * The page never got the press, so it must not get the release either. A
+     * release that comes after the guard let go belongs to the application.
+     */
+    const onUserKeyup = (event: KeyboardEvent): Effect.Effect<void> =>
+      pipe(
+        hold,
+        Ref.modify(releaseOf(event.code)),
+        Effect.flatMap(
+          Boolean.match({ onFalse: () => Effect.void, onTrue: () => suppress(event) }),
+        ),
+      );
 
     const onUserKey = Effect.fnUntraced(function* (event: KeyboardEvent) {
       // The composed path, and not `event.target`. A key inside an open shadow
@@ -285,6 +342,12 @@ export const awaitActivation: Effect.Effect<BootSignal, never, Dom | Realm | Sco
       "window",
       "keydown",
       flow(Option.liftPredicate(isUserEvent), whenSome(onUserKey)),
+      { capture: true },
+    );
+    yield* dom.listen(
+      "window",
+      "keyup",
+      flow(Option.liftPredicate(isUserEvent), whenSome(onUserKeyup)),
       { capture: true },
     );
 

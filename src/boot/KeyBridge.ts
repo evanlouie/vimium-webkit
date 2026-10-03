@@ -100,8 +100,5 @@ export const replayBufferedKeys = Effect.fnUntraced(function* (
   events: ReadonlyArray<KeyboardEvent>,
 ): Effect.fn.Return<void, never, Modes> {
   const modes = yield* Modes;
-  yield* pipe(
-    events,
-    Effect.forEach((event) => modes.bubble("keydown", event), { discard: true }),
-  );
+  yield* pipe(events, Effect.forEach(modes.replay, { discard: true }));
 });

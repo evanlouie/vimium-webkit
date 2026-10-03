@@ -305,7 +305,9 @@ nothing else.
 
 The guard holds each key that starts the application, up to 16 of them, from
 the first key until the application takes the keyboard. It suppresses each one,
-so the page does not act on it. A chord with Control or ⌘ starts the
+so the page does not act on it, and it takes the release of each one as well.
+A release that comes after the guard lets go goes to `Modes`, which takes it
+too. A chord with Control or ⌘ starts the
 application but goes on to the page, because a held key cannot get its default
 action back, and ⌘C must still copy. The guard holds for three seconds at most:
 a start that takes longer gives the page its keyboard back, and the held keys

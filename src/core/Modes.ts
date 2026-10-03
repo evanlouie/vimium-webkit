@@ -349,6 +349,23 @@ export class Modes extends Context.Service<
       event: HandlerEventMap[K],
     ) => Effect.Effect<boolean>;
 
+    /**
+     * Give the stack a press that the guard held while the application started.
+     *
+     * The walk is the one of `bubble`, and the record of the presses that the
+     * page did not get stays as it is. The page never got this press, whatever
+     * the modes answer now, and `withhold` took its release already.
+     */
+    readonly replay: (event: KeyboardEvent) => Effect.Effect<void>;
+
+    /**
+     * Keep the release of each of these keys from the page.
+     *
+     * For presses that the page did not get, and that `bubble` never saw: the
+     * keys that the guard held, and that are still down when it lets go.
+     */
+    readonly withhold: (codes: HashSet.HashSet<string>) => Effect.Effect<void>;
+
     /** The indicator of the innermost live mode that has one. */
     readonly indicator: {
       readonly get: Effect.Effect<ModeIndicator>;
@@ -609,7 +626,8 @@ export class Modes extends Context.Service<
           Effect.as(CONTINUE_BUBBLING),
         );
 
-      const bubble = <K extends HandlerEventName>(
+      /** Walk the stack with the event, and say whether it may continue to the page. */
+      const dispatch = <K extends HandlerEventName>(
         name: K,
         event: HandlerEventMap[K],
       ): Effect.Effect<boolean> => {
@@ -681,14 +699,24 @@ export class Modes extends Context.Service<
         return pipe(
           Ref.get(state),
           Effect.flatMap(({ active }) => walk(active)),
-          Effect.flatMap((toPage) => settle[name](event, toPage)),
         );
       };
+
+      const bubble = <K extends HandlerEventName>(
+        name: K,
+        event: HandlerEventMap[K],
+      ): Effect.Effect<boolean> =>
+        pipe(
+          dispatch(name, event),
+          Effect.flatMap((toPage) => settle[name](event, toPage)),
+        );
 
       return Modes.of({
         enter,
         exitAll,
         bubble,
+        replay: (event) => Effect.asVoid(dispatch("keydown", event)),
+        withhold: (codes) => pipe(taken, Ref.update(HashSet.union(codes))),
         indicator: {
           get: SubscriptionRef.get(indicator),
           changes: SubscriptionRef.changes(indicator),

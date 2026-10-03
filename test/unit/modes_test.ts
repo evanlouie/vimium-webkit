@@ -9,7 +9,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Array, Effect, Option, Ref, Scope, Struct, pipe } from "effect";
+import { Array, Effect, HashSet, Option, Ref, Scope, Struct, pipe } from "effect";
 import {
   CONTINUE_BUBBLING,
   type Handlers,
@@ -673,6 +673,38 @@ describe("the release of a key", () => {
         assert.isFalse(yield* modes.bubble("keydown", keyEvent()));
         yield* modes.forgetSuppressed;
         assert.isTrue(yield* modes.bubble("keyup", keyEvent()));
+      }),
+      Effect.provide(layer),
+    ),
+  );
+
+  it.effect("stays from the page after a press that a mode kept from the page", () =>
+    pipe(
+      Effect.gen(function* () {
+        const modes = yield* Modes;
+        yield* modes.enter(onTier("normal", ModeTier.Base()), {
+          keydown: () => Effect.succeed(PASS_EVENT_TO_PAGE),
+          keyup: () => Effect.succeed(PASS_EVENT_TO_PAGE),
+        });
+
+        // A prompt gives a key to its own field and keeps it from the page.
+        // The key closes the prompt, and its release comes after the mode.
+        const prompt = yield* modes.enter(plain("prompt"), {
+          keydown: () => Effect.succeed(SUPPRESS_PROPAGATION),
+        });
+        assert.isFalse(yield* modes.bubble("keydown", keyEvent()));
+        yield* prompt.exit();
+        const closing = keyEvent();
+        assert.isFalse(yield* modes.bubble("keyup", closing));
+        assert.isTrue(closing.propagationStopped);
+
+        // The guard held a key while the application started. Its replay
+        // reached the page in no case, whatever normal mode answers now.
+        yield* modes.withhold(HashSet.make("KeyX"));
+        yield* modes.replay(keyEvent());
+        const held = keyEvent();
+        assert.isFalse(yield* modes.bubble("keyup", held));
+        assert.isTrue(held.propagationStopped);
       }),
       Effect.provide(layer),
     ),

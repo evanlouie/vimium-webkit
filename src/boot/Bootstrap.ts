@@ -260,6 +260,9 @@ export const BootstrapLayer: Layer.Layer<
      * it to the page while the verdict is pending. Holding it instead would
      * take the keyboard from the page for as long as a child frame waits.
      *
+     * The page never got the held presses, so it does not get the release of
+     * one that is still down either: `Modes` takes it from here.
+     *
      * The held keys are already taken from the page, so they wait. A child
      * frame learns the verdict from the top frame, and the handshake takes
      * time. A key that is played before then runs a command on a page that
@@ -270,11 +273,15 @@ export const BootstrapLayer: Layer.Layer<
      */
     const replayHeldKeys = Effect.gen(function* () {
       const held = yield* boot.drain;
+      yield* modes.withhold(held.down);
       yield* pipe(
         exclusions.settled,
         Effect.map(Verdict.$is("Known")),
         Effect.flatMap(
-          Boolean.match({ onFalse: () => Effect.void, onTrue: () => replayBufferedKeys(held) }),
+          Boolean.match({
+            onFalse: () => Effect.void,
+            onTrue: () => replayBufferedKeys(held.keys),
+          }),
         ),
         Effect.forkScoped({ startImmediately: true }),
       );
