@@ -1,26 +1,25 @@
 /**
  * The command catalogue.
  *
- * This file is pure data. It gives the name, the description, the tier and the
- * group of every command. It holds no body, so the help dialog and the mapping
- * compiler can read it without a feature service.
+ * This file is pure data. It gives the name, the description, the
+ * availability and the group of every command. It holds no body, so the help
+ * dialog and the mapping compiler can read it without a feature service.
  *
- * A tier C command stays in the catalogue. It is a command that this userscript
- * cannot do. The help dialog shows it grey, beside the native browser shortcut,
- * and a key press gives an explanation instead of silence.
+ * A command that this userscript cannot do stays in the catalogue. The help
+ * dialog shows it grey, beside the native browser shortcut, and a key press
+ * gives an explanation instead of silence.
  */
 
-import { Data, Option } from "effect";
+import { Data, Option, Record, Struct, pipe } from "effect";
 
 /**
  * Whether this userscript can do a command.
  *
- * A command that works is tier A, with full parity, or tier B, with a caveat.
- * A tier C command is `Unavailable`. It says why, and it names the shortcut of
- * the browser when there is one, for example "⌘⇧T".
+ * A command that cannot work is `Unavailable`. It says why, and it names the
+ * shortcut of the browser when there is one, for example "⌘⇧T".
  */
 export type CommandAvailability = Data.TaggedEnum<{
-  Available: { readonly tier: "A" | "B" };
+  Available: Record<never, never>;
   Unavailable: { readonly reason: string; readonly nativeAlternative: Option.Option<string> };
 }>;
 
@@ -37,139 +36,91 @@ export type CommandGroup =
   | "marks"
   | "misc";
 
-export interface CommandDef {
-  readonly name: CommandName;
+/** What the catalogue says about one command. The key of the entry is the name. */
+interface CommandSpec {
   readonly description: string;
   readonly availability: CommandAvailability;
   readonly group: CommandGroup;
-  /** Honours the count prefix. */
-  readonly repeatable?: boolean;
-  /** Runs in the top frame only. A child frame forwards it. */
-  readonly topFrameOnly?: boolean;
   /** Hidden from the default help dialog. */
   readonly advanced?: boolean;
 }
 
-/**
- * The shape that each entry of `COMMANDS` must have.
- *
- * `CommandDef` types `name` as `CommandName`, and `CommandName` comes from
- * `COMMANDS`. A `satisfies CommandDef` in the initializer of `COMMANDS` is
- * therefore circular. This local type breaks the cycle. It keeps `name` as a
- * plain string, and `as const` keeps each literal key.
- */
-interface CommandSpec {
-  readonly name: string;
-  readonly description: string;
-  readonly availability: CommandAvailability;
-  readonly group: CommandGroup;
-  readonly repeatable?: boolean;
-  readonly topFrameOnly?: boolean;
-  readonly advanced?: boolean;
-}
+const AVAILABLE = CommandAvailability.Available();
 
-/** Tier A: full parity, and no manager capability. */
-const TIER_A = CommandAvailability.Available({ tier: "A" });
-
-/** Tier B: it works, with a documented caveat or a manager capability. */
-const TIER_B = CommandAvailability.Available({ tier: "B" });
-
-/** The reason that every tab command is tier C. */
+/** The reason that every tab command is unavailable. */
 const NO_TAB_API = "a userscript has no tab-management API";
 
 /** Every command, keyed by name. */
-export const COMMANDS = {
+const SPECS = {
   // --- Scrolling ---------------------------------------------------------
   scrollDown: {
-    name: "scrollDown",
     group: "scrolling",
     description: "Scroll down",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
   },
   scrollUp: {
-    name: "scrollUp",
     group: "scrolling",
     description: "Scroll up",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
   },
   scrollLeft: {
-    name: "scrollLeft",
     group: "scrolling",
     description: "Scroll left",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
   },
   scrollRight: {
-    name: "scrollRight",
     group: "scrolling",
     description: "Scroll right",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
   },
   scrollPageDown: {
-    name: "scrollPageDown",
     group: "scrolling",
     description: "Scroll a half page down",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
   },
   scrollPageUp: {
-    name: "scrollPageUp",
     group: "scrolling",
     description: "Scroll a half page up",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
   },
   scrollFullPageDown: {
-    name: "scrollFullPageDown",
     group: "scrolling",
     description: "Scroll a full page down",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
   },
   scrollFullPageUp: {
-    name: "scrollFullPageUp",
     group: "scrolling",
     description: "Scroll a full page up",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
   },
   scrollToTop: {
-    name: "scrollToTop",
     group: "scrolling",
     description: "Scroll to the top of the page",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   scrollToBottom: {
-    name: "scrollToBottom",
     group: "scrolling",
     description: "Scroll to the bottom of the page",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   scrollToLeft: {
-    name: "scrollToLeft",
     group: "scrolling",
     description: "Scroll all the way left",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   scrollToRight: {
-    name: "scrollToRight",
     group: "scrolling",
     description: "Scroll all the way right",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
 
   // --- Navigation --------------------------------------------------------
   reload: {
-    name: "reload",
     group: "navigation",
     description: "Reload the page",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   reloadHard: {
-    name: "reloadHard",
     group: "navigation",
     description: "Reload, bypassing the cache",
     availability: CommandAvailability.Unavailable({
@@ -178,96 +129,78 @@ export const COMMANDS = {
     }),
   },
   goBack: {
-    name: "goBack",
     group: "navigation",
     description: "Go back in history",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
   },
   goForward: {
-    name: "goForward",
     group: "navigation",
     description: "Go forward in history",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
   },
   goUp: {
-    name: "goUp",
     group: "navigation",
     description: "Go up the URL hierarchy",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
   },
   goToRoot: {
-    name: "goToRoot",
     group: "navigation",
     description: "Go to the site root",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   goPrevious: {
-    name: "goPrevious",
     group: "navigation",
     description: 'Follow the "previous" link',
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   goNext: {
-    name: "goNext",
     group: "navigation",
     description: 'Follow the "next" link',
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
 
   // --- Hints -------------------------------------------------------------
   "LinkHints.activateMode": {
-    name: "LinkHints.activateMode",
     group: "hints",
     description: "Open a link",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   "LinkHints.activateModeToOpenInNewTab": {
-    name: "LinkHints.activateModeToOpenInNewTab",
     group: "hints",
     description: "Open a link in a new background tab",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   "LinkHints.activateModeToOpenInNewForegroundTab": {
-    name: "LinkHints.activateModeToOpenInNewForegroundTab",
     group: "hints",
     description: "Open a link in a new foreground tab",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   "LinkHints.activateModeToHover": {
-    name: "LinkHints.activateModeToHover",
     group: "hints",
     description: "Hover over an element",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   "LinkHints.activateModeToFocus": {
-    name: "LinkHints.activateModeToFocus",
     group: "hints",
     description: "Focus an element",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   "LinkHints.activateModeToCopyLinkUrl": {
-    name: "LinkHints.activateModeToCopyLinkUrl",
     group: "hints",
     description: "Copy a link's URL",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   "LinkHints.activateModeToCopyLinkText": {
-    name: "LinkHints.activateModeToCopyLinkText",
     group: "hints",
     description: "Copy a link's text",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   "LinkHints.activateModeWithOmnibar": {
-    name: "LinkHints.activateModeWithOmnibar",
     group: "hints",
     description: "Open a link with the omnibar",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   "LinkHints.activateModeToDownloadLink": {
-    name: "LinkHints.activateModeToDownloadLink",
     group: "hints",
     description: "Download a link",
     availability: CommandAvailability.Unavailable({
@@ -277,7 +210,6 @@ export const COMMANDS = {
     }),
   },
   "LinkHints.activateModeToOpenIncognito": {
-    name: "LinkHints.activateModeToOpenIncognito",
     group: "hints",
     description: "Open a link in a private window",
     availability: CommandAvailability.Unavailable({
@@ -288,142 +220,117 @@ export const COMMANDS = {
 
   // --- Find --------------------------------------------------------------
   enterFindMode: {
-    name: "enterFindMode",
     group: "find",
     description: "Search the page",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   performFind: {
-    name: "performFind",
     group: "find",
     description: "Go to the next match",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
   },
   performBackwardsFind: {
-    name: "performBackwardsFind",
     group: "find",
     description: "Go to the previous match",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
   },
   searchWordForwards: {
-    name: "searchWordForwards",
     group: "find",
     description: "Search for the word under the cursor",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   searchWordBackwards: {
-    name: "searchWordBackwards",
     group: "find",
     description: "Search backwards for the word under the cursor",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
 
   // --- Text --------------------------------------------------------------
   enterVisualMode: {
-    name: "enterVisualMode",
     group: "text",
     description: "Enter visual mode",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   enterVisualLineMode: {
-    name: "enterVisualLineMode",
     group: "text",
     description: "Enter visual line mode",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   enterCaretMode: {
-    name: "enterCaretMode",
     group: "text",
     description: "Enter caret mode",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   enterInsertMode: {
-    name: "enterInsertMode",
     group: "text",
     description: "Enter insert mode",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   focusInput: {
-    name: "focusInput",
     group: "text",
     description: "Focus a text input",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
   },
 
   // --- Clipboard ---------------------------------------------------------
   copyCurrentUrl: {
-    name: "copyCurrentUrl",
     group: "clipboard",
     description: "Copy this page's URL",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   copyCurrentTitle: {
-    name: "copyCurrentTitle",
     group: "clipboard",
     description: "Copy this page's title",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   openCopiedUrlInCurrentTab: {
-    name: "openCopiedUrlInCurrentTab",
     group: "clipboard",
     description: "Open a pasted URL",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   openCopiedUrlInNewTab: {
-    name: "openCopiedUrlInNewTab",
     group: "clipboard",
     description: "Open a pasted URL in a new tab",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
 
   // --- Tabs --------------------------------------------------------------
   createTab: {
-    name: "createTab",
     group: "tabs",
     description: "Open a new tab",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   removeTab: {
-    name: "removeTab",
     group: "tabs",
     description: "Close this tab",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   toggleMuteTab: {
-    name: "toggleMuteTab",
     group: "tabs",
     description: "Mute or unmute media on this page",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   zoomIn: {
-    name: "zoomIn",
     group: "tabs",
     description: "Zoom in (CSS zoom)",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   zoomOut: {
-    name: "zoomOut",
     group: "tabs",
     description: "Zoom out (CSS zoom)",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   zoomReset: {
-    name: "zoomReset",
     group: "tabs",
     description: "Reset zoom",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   toggleViewSource: {
-    name: "toggleViewSource",
     group: "navigation",
     description: "View this page's source",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   restoreTab: {
-    name: "restoreTab",
     group: "tabs",
     description: "Reopen the last closed tab",
     availability: CommandAvailability.Unavailable({
@@ -432,7 +339,6 @@ export const COMMANDS = {
     }),
   },
   nextTab: {
-    name: "nextTab",
     group: "tabs",
     description: "Go to the next tab",
     availability: CommandAvailability.Unavailable({
@@ -441,7 +347,6 @@ export const COMMANDS = {
     }),
   },
   previousTab: {
-    name: "previousTab",
     group: "tabs",
     description: "Go to the previous tab",
     availability: CommandAvailability.Unavailable({
@@ -450,7 +355,6 @@ export const COMMANDS = {
     }),
   },
   firstTab: {
-    name: "firstTab",
     group: "tabs",
     description: "Go to the first tab",
     availability: CommandAvailability.Unavailable({
@@ -459,7 +363,6 @@ export const COMMANDS = {
     }),
   },
   lastTab: {
-    name: "lastTab",
     group: "tabs",
     description: "Go to the last tab",
     availability: CommandAvailability.Unavailable({
@@ -468,7 +371,6 @@ export const COMMANDS = {
     }),
   },
   visitPreviousTab: {
-    name: "visitPreviousTab",
     group: "tabs",
     description: "Go to the previously visited tab",
     availability: CommandAvailability.Unavailable({
@@ -477,7 +379,6 @@ export const COMMANDS = {
     }),
   },
   moveTabLeft: {
-    name: "moveTabLeft",
     group: "tabs",
     description: "Move this tab left",
     availability: CommandAvailability.Unavailable({
@@ -486,7 +387,6 @@ export const COMMANDS = {
     }),
   },
   moveTabRight: {
-    name: "moveTabRight",
     group: "tabs",
     description: "Move this tab right",
     availability: CommandAvailability.Unavailable({
@@ -495,7 +395,6 @@ export const COMMANDS = {
     }),
   },
   moveTabToNewWindow: {
-    name: "moveTabToNewWindow",
     group: "tabs",
     description: "Move this tab to a new window",
     availability: CommandAvailability.Unavailable({
@@ -504,7 +403,6 @@ export const COMMANDS = {
     }),
   },
   togglePinTab: {
-    name: "togglePinTab",
     group: "tabs",
     description: "Pin or unpin this tab",
     availability: CommandAvailability.Unavailable({
@@ -513,7 +411,6 @@ export const COMMANDS = {
     }),
   },
   duplicateTab: {
-    name: "duplicateTab",
     group: "tabs",
     description: "Duplicate this tab",
     availability: CommandAvailability.Unavailable({
@@ -522,7 +419,6 @@ export const COMMANDS = {
     }),
   },
   closeTabsOnLeft: {
-    name: "closeTabsOnLeft",
     group: "tabs",
     description: "Close tabs to the left",
     availability: CommandAvailability.Unavailable({
@@ -531,7 +427,6 @@ export const COMMANDS = {
     }),
   },
   closeTabsOnRight: {
-    name: "closeTabsOnRight",
     group: "tabs",
     description: "Close tabs to the right",
     availability: CommandAvailability.Unavailable({
@@ -540,7 +435,6 @@ export const COMMANDS = {
     }),
   },
   closeOtherTabs: {
-    name: "closeOtherTabs",
     group: "tabs",
     description: "Close all other tabs",
     availability: CommandAvailability.Unavailable({
@@ -551,45 +445,38 @@ export const COMMANDS = {
 
   // --- Marks -------------------------------------------------------------
   "Marks.activateCreateMode": {
-    name: "Marks.activateCreateMode",
     group: "marks",
     description: "Set a mark",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   "Marks.activateGotoMode": {
-    name: "Marks.activateGotoMode",
     group: "marks",
     description: "Jump to a mark",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
 
   // --- Omnibar -----------------------------------------------------------
   "Vomnibar.activate": {
-    name: "Vomnibar.activate",
     group: "navigation",
     description: "Open the omnibar",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   "Vomnibar.activateInNewTab": {
-    name: "Vomnibar.activateInNewTab",
     group: "navigation",
     description: "Open the omnibar (new tab)",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   "Vomnibar.activateCommands": {
-    name: "Vomnibar.activateCommands",
     group: "misc",
     description: "Open the command palette",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   "Vomnibar.activateSearch": {
-    name: "Vomnibar.activateSearch",
     group: "navigation",
     description: "Search with a custom engine",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   "Vomnibar.activateBookmarks": {
-    name: "Vomnibar.activateBookmarks",
     group: "navigation",
     description: "Search bookmarks",
     availability: CommandAvailability.Unavailable({
@@ -598,56 +485,58 @@ export const COMMANDS = {
     }),
   },
   "clear-history": {
-    name: "clear-history",
     group: "misc",
     description: "Erase the local history index",
-    availability: TIER_B,
-    topFrameOnly: true,
+    availability: AVAILABLE,
   },
 
   // --- Frames ------------------------------------------------------------
   nextFrame: {
-    name: "nextFrame",
     group: "navigation",
     description: "Focus the next frame",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
   mainFrame: {
-    name: "mainFrame",
     group: "navigation",
     description: "Focus the main frame",
-    availability: TIER_B,
+    availability: AVAILABLE,
   },
 
   // --- Misc --------------------------------------------------------------
   showHelp: {
-    name: "showHelp",
     group: "misc",
     description: "Show the help dialog",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   showSettings: {
-    name: "showSettings",
     group: "misc",
     description: "Open settings",
-    availability: TIER_A,
+    availability: AVAILABLE,
   },
   passNextKey: {
-    name: "passNextKey",
     group: "misc",
     description: "Pass the next key to the page",
-    availability: TIER_A,
-    repeatable: true,
+    availability: AVAILABLE,
     advanced: true,
   },
-} as const satisfies Record<string, CommandSpec>;
+} satisfies Record.ReadonlyRecord<string, CommandSpec>;
 
-export type CommandName = keyof typeof COMMANDS;
+export type CommandName = keyof typeof SPECS;
+
+export interface CommandDef extends CommandSpec {
+  readonly name: CommandName;
+}
+
+/** Every command, keyed by name. Each entry carries its name. */
+export const COMMANDS: Record.ReadonlyRecord<CommandName, CommandDef> = pipe(
+  SPECS,
+  Record.map((spec, name) => pipe(spec, Struct.assign({ name }))),
+);
 
 /**
  * The default `map` lines, compiled before the user's own.
  *
- * These are the default bindings of Vimium. A tier C command keeps its binding.
+ * These are the default bindings of Vimium. An unavailable command keeps its binding.
  * A press of `J` must give the reason why tab control is not possible. It must
  * not do nothing.
  */

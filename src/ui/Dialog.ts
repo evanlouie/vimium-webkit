@@ -1020,7 +1020,7 @@ const tierOf = (command: CommandDef): string =>
   pipe(
     command.availability,
     CommandAvailability.$match({
-      Available: ({ tier }) => tier,
+      Available: () => "AB",
       Unavailable: () => "C",
     }),
   );

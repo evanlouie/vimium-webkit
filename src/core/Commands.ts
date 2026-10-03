@@ -1,9 +1,9 @@
 /**
  * The command registry.
  *
- * The catalogue — every command, its description, its tier and its group — is
- * pure data in `~/domain/Command.ts`. This service holds the *bodies*, and a
- * feature layer puts its own bodies in when it is built.
+ * The catalogue — every command, its description, its availability and its
+ * group — is pure data in `~/domain/Command.ts`. This service holds the
+ * *bodies*, and a feature layer puts its own bodies in when it is built.
  *
  * That split is what keeps the graph a tree. The key handler reads the
  * registry, so it never imports a feature. A feature registers into the
@@ -208,15 +208,13 @@ export class Commands extends Context.Service<
   );
 }
 
-/** Every command, by a name that may not be one. */
-const COMMANDS_BY_NAME: Record.ReadonlyRecord<string, CommandDef> = COMMANDS;
+const COMMAND_LIST: ReadonlyArray<CommandDef> = Record.values(COMMANDS);
 
-const COMMAND_LIST: ReadonlyArray<CommandDef> = Record.values(COMMANDS_BY_NAME);
+const COMMAND_NAMES: ReadonlyArray<CommandName> = Record.keys(COMMANDS);
 
-const COMMAND_NAMES: ReadonlyArray<CommandName> = pipe(
-  COMMAND_LIST,
-  Array.map((definition) => definition.name),
-);
-
+/** The command of a name that may not be one. */
 const definitionOf = (name: string): Option.Option<CommandDef> =>
-  pipe(COMMANDS_BY_NAME, Record.get(name));
+  pipe(
+    COMMAND_LIST,
+    Array.findFirst((definition) => definition.name === name),
+  );
