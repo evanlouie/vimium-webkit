@@ -105,7 +105,18 @@ import { constTrue } from "effect/Function";
 // ---------------------------------------------------------------------------
 
 const UNSUPPORTED_SYNTAX = "this pattern uses syntax that the safety check does not know";
-const TOO_LONG = "this pattern is too long for the safety check";
+
+/**
+ * The longest pattern that the check reads.
+ *
+ * This is the one cap on the length of a pattern, and neither caller holds
+ * another. The work of the check grows faster than the length: an alternation
+ * of short words costs about 60 ms at this length, and three times as much at
+ * twice the length. Find runs the check on each key that the user types.
+ */
+const MAX_PATTERN_LENGTH = 512;
+
+const TOO_LONG = `this pattern is longer than ${MAX_PATTERN_LENGTH} characters`;
 const BACKREFERENCE = "a backreference can hang the page";
 const EMPTY_LOOP = "a quantifier over an expression that matches nothing can hang the page";
 const AMBIGUOUS_LOOP = "a quantifier whose body can grow past its own end can hang the page";
@@ -2172,15 +2183,6 @@ const isOverBudget = (node: Node): boolean => node.cost > PATH_BUDGET;
 // ---------------------------------------------------------------------------
 // The check
 // ---------------------------------------------------------------------------
-
-/**
- * The longest pattern that this module reads.
- *
- * The work of the check grows with the size of the tree. Both callers already
- * cap the pattern below this limit, so the limit is the third limit on the
- * same value.
- */
-export const MAX_PATTERN_LENGTH = 2048;
 
 /**
  * Why is this expression unsafe to run against text that a page controls?

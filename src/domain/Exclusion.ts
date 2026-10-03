@@ -81,9 +81,6 @@ const MAX_URL_LENGTH = 4096;
  */
 export const MAX_REGEX_URL_LENGTH = 512;
 
-/** The longest regular expression from the user that we compile. */
-const MAX_PATTERN_LENGTH = 1024;
-
 /**
  * A compiled URL pattern.
  *
@@ -256,10 +253,6 @@ const readExpression = (body: string): Result.Result<SafePattern, string> =>
 const readPattern: (pattern: string) => Result.Result<SafePattern, string> = flow(
   Str.trim,
   Result.liftPredicate(Str.isNonEmpty, () => "the rule is empty"),
-  Result.filterOrFail(
-    (trimmed) => trimmed.length <= MAX_PATTERN_LENGTH,
-    () => `the pattern is longer than ${MAX_PATTERN_LENGTH} characters`,
-  ),
   Result.flatMap((trimmed) =>
     pipe(
       isRawPattern(trimmed),

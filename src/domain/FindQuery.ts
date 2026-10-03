@@ -257,9 +257,6 @@ export const stripDirectives = (text: string): Directives => {
 
 const BASE_FLAGS = "g";
 
-/** The longest pattern from the user that we compile. */
-const MAX_PATTERN_LENGTH = 512;
-
 /** The `RegExp` source that a pattern of this kind gives. */
 const sourceOf = (kind: FindQueryKind, pattern: string): string =>
   pipe(
@@ -286,10 +283,8 @@ const compile = (source: string, flags: string): Result.Result<RegExp, string> =
 /** A `None` when `source` and `flags` compile *and* are safe to run. */
 const compileError = (source: string, flags: string): Option.Option<string> =>
   pipe(
-    source,
-    Option.liftPredicate((text) => text.length > MAX_PATTERN_LENGTH),
-    Option.map(() => `pattern is longer than ${MAX_PATTERN_LENGTH} characters`),
-    Option.orElse(() => pipe(compile(source, flags), Result.getFailure)),
+    compile(source, flags),
+    Result.getFailure,
     // The safety check reads the text of the pattern, and never runs it. A
     // measurement cannot protect the page here, because the measurement cannot
     // end before the match ends: `(a|a|a|a)*$` takes minutes against twenty
