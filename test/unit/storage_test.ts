@@ -350,7 +350,7 @@ describe("Storage", () => {
     }),
   );
 
-  it.effect("gives the defaults for a value from a newer build", () =>
+  it.effect("gives the defaults for a value from a newer build, and keeps it", () =>
     Effect.gen(function* () {
       const backend = yield* makeBackend;
 
@@ -359,8 +359,11 @@ describe("Storage", () => {
           const storage = yield* Storage;
           // A newer build in another tab wrote this. Do not go backwards, and do
           // not overwrite it.
-          const newer = pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 }));
-          yield* backend.seed(SETTINGS_KEY, envelope(99, newer));
+          const newer = envelope(
+            99,
+            pipe(defaultSettings(), Struct.assign({ scrollStepSize: 120 })),
+          );
+          yield* backend.seed(SETTINGS_KEY, newer);
 
           const value = yield* storage.settings.hydrate;
           assert.deepEqual(value, defaultSettings());
@@ -374,9 +377,17 @@ describe("Storage", () => {
           );
           assert.include(detail, "99");
 
-          // The stored value is left alone.
-          const raw = yield* backend.read(SETTINGS_KEY);
-          assert.isTrue(Option.isSome(raw));
+          // The defaults are no base for a change, so an update is refused and
+          // the stored value is left alone.
+          const failure = yield* pipe(
+            storage.settings.update(Struct.assign({ smoothScroll: false })),
+            failureOf,
+          );
+          assert.deepEqual(
+            outline(failure, ["reason", "direction"]),
+            Option.some({ reason: "invalid", direction: "read" }),
+          );
+          assert.deepEqual(yield* backend.read(SETTINGS_KEY), Option.some(newer));
         }),
         Effect.provide(Storage.layer),
         Effect.provide(backend.layer),

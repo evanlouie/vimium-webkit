@@ -21,7 +21,9 @@
  * Storage is untrusted input. The user can edit it in the manager's interface,
  * an older build may have written it, and a newer build in another tab may have
  * written it. Every read is decoded against the group schema, and every failure
- * gives the defaults and one message on the issue stream.
+ * gives the defaults and one message on the issue stream. A failed read also
+ * stops `update` until a read, a write or a reset succeeds, so the defaults
+ * never replace a stored value that this build could not read.
  */
 
 import {
@@ -132,7 +134,12 @@ export interface ValueGroup<A> {
   /** Replace the value. It completes when the write reaches the backend. */
   readonly write: (value: A) => Effect.Effect<void, StorageError>;
 
-  /** Read, change and write, as one indivisible step. */
+  /**
+   * Read, change and write, as one indivisible step.
+   *
+   * It fails while the stored value cannot be read, because the defaults in
+   * memory are no base for a change.
+   */
   readonly update: (change: (current: A) => A) => Effect.Effect<A, StorageError>;
 
   /** Erase the stored value and go back to the defaults. */
@@ -306,7 +313,7 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
   // no effect. Apart from that path, only the group fiber touches them, so
   // nothing can interleave.
   const held = MutableRef.make<Held<A>>(Held.Empty());
-  /** Why the last read failed, until a later read or write succeeds. */
+  /** Why the last read failed, until a later read, write or reset succeeds. */
   const readFailure = MutableRef.make(Option.none<StorageError>());
 
   /**
@@ -428,17 +435,31 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
       }),
     );
 
-  /** The decoded value, or the defaults and one issue. */
-  const orDefaults = (decoded: Result.Result<A, StorageError>): Effect.Effect<A> =>
-    pipe(
-      decoded,
-      Result.match({
-        onFailure: (error) => pipe(report(error), Effect.as(spec.defaults())),
-        onSuccess: Effect.succeed,
-      }),
-    );
+  /**
+   * Report a read that failed, and stop `update` until a read, a write or a
+   * reset succeeds.
+   *
+   * The value in memory is an answer for this caller, and not the state of the
+   * world. An unrelated update must not write it over the stored value.
+   */
+  const unreadable = (error: StorageError): Effect.Effect<void> =>
+    pipe(report(error), Effect.andThen(setReadFailure(Option.some(error))));
 
-  const decodeOrDefaults = flow(decode, orDefaults);
+  /**
+   * Take a stored value into memory.
+   *
+   * A value that cannot be decoded gives the defaults. It can come from a newer
+   * build, so it stays in storage until something replaces it on purpose.
+   */
+  const adopt = (raw: Option.Option<string>): Effect.Effect<A> =>
+    pipe(
+      decode(raw),
+      Result.match({
+        onFailure: (error) => pipe(unreadable(error), Effect.as(spec.defaults())),
+        onSuccess: (value) => pipe(setReadFailure(Option.none()), Effect.as(value)),
+      }),
+      Effect.tap(publish),
+    );
 
   // -- the backend ---------------------------------------------------------
 
@@ -655,9 +676,8 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
       }),
     );
 
-  // Do not publish the defaults after a transport failure. They are an answer
-  // for this caller, not the state of the world. An unrelated update must not
-  // write them over good data later.
+  // A transport failure says nothing about the stored value, so memory keeps
+  // what it holds and nothing is published.
   //
   // The error keeps a fixed message and the text of the first failure, and not
   // the `Cause`. A whole cause names every nested cause of the manager.
@@ -667,22 +687,15 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
       "read",
       `could not read the stored value: ${describeCause(cause)}`,
     );
-    return pipe(
-      report(error),
-      Effect.andThen(setReadFailure(Option.some(error))),
-      Effect.andThen(SubscriptionRef.get(memory)),
-    );
+    return pipe(unreadable(error), Effect.andThen(SubscriptionRef.get(memory)));
   };
-
-  const readStored = (raw: Option.Option<string>): Effect.Effect<A> =>
-    pipe(setReadFailure(Option.none()), Effect.andThen(decodeOrDefaults(raw)), Effect.tap(publish));
 
   const hydrate = Effect.fnUntraced(function* (reply: Deferred.Deferred<A>) {
     // A value still inside its debounce window is newer than the disk. Write
     // it first, or the read brings back the value that it is about to replace.
     yield* commitHeld;
     const stored = yield* Effect.exit(kv.get(key));
-    const value = yield* pipe(stored, Exit.match({ onFailure: readFailed, onSuccess: readStored }));
+    const value = yield* pipe(stored, Exit.match({ onFailure: readFailed, onSuccess: adopt }));
     yield* pipe(reply, Deferred.succeed(value));
   });
 
@@ -704,8 +717,8 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
   });
 
   // The defaults are not a safe base for a read, change and write. Refuse
-  // until a later read succeeds, or until the caller replaces the whole value
-  // with `write`.
+  // until a later read or reset succeeds, or until the caller replaces the
+  // whole value with `write`.
   const update = (
     change: (current: A) => A,
     reply: Deferred.Deferred<A, StorageError>,
@@ -760,7 +773,7 @@ export const makeGroup = Effect.fnUntraced(function* <A>(
       Effect.flatMap((outcome) => pipe(reply, Deferred.done(outcome))),
     );
 
-  const acceptRemote = flow(decodeOrDefaults, Effect.flatMap(publish));
+  const acceptRemote = flow(adopt, Effect.asVoid);
 
   // Local intent wins while it is waiting. Another tab did commit, but
   // replacing the value that this user has just chosen would be the greater
