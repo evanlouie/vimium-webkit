@@ -20,6 +20,7 @@ import {
   Option,
   Order,
   pipe,
+  String,
 } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
@@ -138,6 +139,53 @@ const linkText = (anchor: HTMLAnchorElement): string => {
   return `${text} ${label}`.trim();
 };
 
+/** A character that `\b` counts as part of a word, as in upstream Vimium. */
+const WORD_CHARACTER = /^\w$/u;
+
+/** Is the character at `index` a word character? Outside the text there is none. */
+const wordCharacterAt =
+  (index: number) =>
+  (text: string): boolean =>
+    pipe(
+      text,
+      String.charAt(index),
+      Option.exists((char) => WORD_CHARACTER.test(char)),
+    );
+
+/** Every index at which a pattern that is not empty starts in `text`. */
+const occurrences = (text: string, pattern: string): ReadonlyArray<number> =>
+  Array.unfold(text.indexOf(pattern), (index) =>
+    pipe(
+      index,
+      Option.liftPredicate((found) => found !== -1),
+      Option.map((found) => [found, text.indexOf(pattern, found + 1)] as const),
+    ),
+  );
+
+/**
+ * Does the text hold the pattern as a word?
+ *
+ * An end of the pattern that is a word character must not touch another word
+ * character, as `\b` asks in upstream Vimium. "prev" therefore does not name
+ * "Preview", and "back" does not name "Feedback". A pattern of symbols, such
+ * as `»`, still matches anywhere.
+ */
+const holdsWord =
+  (text: string) =>
+  (pattern: string): boolean => {
+    const end = pattern.length;
+    const guardsStart = wordCharacterAt(0)(pattern);
+    const guardsEnd = wordCharacterAt(end - 1)(pattern);
+    return pipe(
+      occurrences(text, pattern),
+      Array.some(
+        (index) =>
+          !(guardsStart && wordCharacterAt(index - 1)(text)) &&
+          !(guardsEnd && wordCharacterAt(index + end)(text)),
+      ),
+    );
+  };
+
 /** The link as a candidate, when one of the patterns names it. A long text names nothing. */
 const candidateOf =
   (patterns: ReadonlyArray<string>) =>
@@ -145,12 +193,7 @@ const candidateOf =
     pipe(
       linkText(anchor),
       Option.liftPredicate((haystack) => haystack.length > 0 && haystack.length <= 60),
-      Option.flatMap((haystack) =>
-        pipe(
-          patterns,
-          Array.findFirstIndex((pattern) => haystack === pattern || haystack.includes(pattern)),
-        ),
-      ),
+      Option.flatMap((haystack) => pipe(patterns, Array.findFirstIndex(holdsWord(haystack)))),
       Option.map((rank) => ({ element: anchor, rank })),
     );
 
