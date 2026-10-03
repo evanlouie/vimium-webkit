@@ -12,17 +12,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import {
-  Array,
-  type Context,
-  Effect,
-  Layer,
-  Option,
-  Ref,
-  SubscriptionRef,
-  Struct,
-  pipe,
-} from "effect";
+import { Array, type Context, Effect, Layer, Option, Ref, Stream, Struct, pipe } from "effect";
 import { attachKeyBridge } from "~/boot/KeyBridge.ts";
 import { CONTINUE_BUBBLING } from "~/core/HandlerStack.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
@@ -97,19 +87,16 @@ const recordingDom = (attached: Ref.Ref<ReadonlyArray<Attached>>): Layer.Layer<D
 
 /** `Keyboard`, reduced to the one method that the bridge calls. */
 const stubKeyboard = (forgotten: Ref.Ref<number>): Layer.Layer<Keyboard> =>
-  pipe(
-    SubscriptionRef.make(Option.none<string>()),
-    Effect.map((pending) =>
-      Keyboard.of({
-        pending,
-        passNextKey: () => Effect.void,
-        forgetSuppressed: pipe(
-          forgotten,
-          Ref.update((count) => count + 1),
-        ),
-      }),
-    ),
-    Layer.effect(Keyboard),
+  Layer.succeed(
+    Keyboard,
+    Keyboard.of({
+      pending: { get: Effect.succeedNone, changes: Stream.empty },
+      passNextKey: () => Effect.void,
+      forgetSuppressed: pipe(
+        forgotten,
+        Ref.update((count) => count + 1),
+      ),
+    }),
   );
 
 /**

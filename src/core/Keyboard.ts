@@ -444,7 +444,11 @@ export class Keyboard extends Context.Service<
   Keyboard,
   {
     /** The half-typed sequence, for the HUD. `None` when there is none. */
-    readonly pending: SubscriptionRef.SubscriptionRef<Option.Option<string>>;
+    readonly pending: {
+      readonly get: Effect.Effect<Option.Option<string>>;
+      /** The sequence now, and then every change of it. */
+      readonly changes: Stream.Stream<Option.Option<string>>;
+    };
 
     /** Give the next `count` keystrokes to the page, without reading them. */
     readonly passNextKey: (count: number) => Effect.Effect<void>;
@@ -708,7 +712,10 @@ export class Keyboard extends Context.Service<
       );
 
       return Keyboard.of({
-        pending,
+        pending: {
+          get: SubscriptionRef.get(pending),
+          changes: SubscriptionRef.changes(pending),
+        },
         passNextKey: (count) => pipe(passNext, Ref.set(Math.max(1, count))),
         forgetSuppressed: pipe(suppressedCodes, Ref.set(HashSet.empty<string>())),
       });

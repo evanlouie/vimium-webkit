@@ -31,6 +31,7 @@ import {
   Record,
   Ref,
   Scope,
+  Stream,
   Struct,
   SubscriptionRef,
   flow,
@@ -321,7 +322,11 @@ export class Modes extends Context.Service<
     ) => Effect.Effect<boolean>;
 
     /** The indicator of the innermost live mode that has one. */
-    readonly indicator: SubscriptionRef.SubscriptionRef<ModeIndicator>;
+    readonly indicator: {
+      readonly get: Effect.Effect<ModeIndicator>;
+      /** The indicator now, and then every change of it. */
+      readonly changes: Stream.Stream<ModeIndicator>;
+    };
 
     /** The live mode names, innermost last. For diagnostics and for tests. */
     readonly activeNames: Effect.Effect<ReadonlyArray<string>>;
@@ -596,7 +601,10 @@ export class Modes extends Context.Service<
         enter,
         exitAll,
         bubble,
-        indicator,
+        indicator: {
+          get: SubscriptionRef.get(indicator),
+          changes: SubscriptionRef.changes(indicator),
+        },
         activeNames: pipe(
           Ref.get(state),
           Effect.map(({ active }) =>

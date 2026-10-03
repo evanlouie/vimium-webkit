@@ -43,7 +43,6 @@ import {
   Ref,
   type Scope,
   Stream,
-  SubscriptionRef,
   pipe,
   Struct,
 } from "effect";
@@ -497,15 +496,13 @@ export class Hud extends Context.Service<
         // ---------------------------------------------------------------
 
         yield* pipe(
-          modes.indicator,
-          SubscriptionRef.changes,
+          modes.indicator.changes,
           Stream.runForEach((indicator) => patch(Struct.assign({ indicator }))),
           Effect.forkScoped,
         );
 
         yield* pipe(
-          keyboard.pending,
-          SubscriptionRef.changes,
+          keyboard.pending.changes,
           Stream.runForEach((pending) => patch(Struct.assign({ pending }))),
           Effect.forkScoped,
         );
