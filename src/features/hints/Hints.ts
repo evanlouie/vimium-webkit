@@ -55,7 +55,7 @@ import {
   Context,
   Data,
   Deferred,
-  Duration,
+  type Duration,
   Effect,
   FiberHandle,
   flow,
@@ -87,14 +87,32 @@ import {
   type MessageOf,
   REQUEST_DEADLINE_MS,
 } from "~/domain/FrameMessage.ts";
+import { type FilterMatch, matchedPrefixLength } from "~/domain/HintFilter.ts";
 import {
-  type FilterCandidate,
-  filterHints,
-  type FilterMatch,
-  type FilterOutcome,
-  matchedPrefixLength,
-} from "~/domain/HintFilter.ts";
-import { hintStrings, matchByPrefix, normaliseHintCharacters } from "~/domain/HintString.ts";
+  blocksRound,
+  cancelsLocalRound,
+  cancelsSession,
+  followsKeysOf,
+  HintRequest,
+  isTopRoundOf,
+  joinsRound,
+  judgeHintRequest,
+  type LocalRound,
+  type RoundSession,
+  type TopRound,
+  withRound,
+} from "~/domain/HintRound.ts";
+import {
+  type AlphabetState,
+  type FilterState,
+  initialState,
+  readKey,
+  replayable,
+  SessionCommand,
+  SessionRole,
+  SessionState,
+  step,
+} from "~/domain/HintSession.ts";
 import { isComposing, type KeyContext, keyNotation } from "~/domain/Key.ts";
 import {
   FrameBus,
@@ -130,33 +148,14 @@ import { hintCss, makeMarkerLayer, MarkerSpec } from "./Markers.ts";
  */
 export const COLLECT_DEADLINE_MS = REQUEST_DEADLINE_MS + 500;
 
-/**
- * How long a round keeps authorising a remote activation.
- *
- * It is the same value in every frame. Filter mode with
- * `waitForEnterForFilteredHints` can keep a session open while the user reads
- * the page, so this bounds a capability, and it is not a limit on an
- * interaction.
- */
-const ROUND_TTL_MS = 120_000;
-
 /** How long a pause in the typing counts as confirmation of one match. */
 export const FILTER_CONFIRM_DELAY_MS = 200;
 
 /** Give the keyboard back after this long, and do not eat the keys of the user. */
 export const KEY_BUFFER_SAFETY_MS = COLLECT_DEADLINE_MS + 500;
 
-/** The alphabet that is used when the setting cannot give a usable one. */
-const DEFAULT_HINT_CHARACTERS = "sadfjklewcmpgh";
-
-/** The digits that are used when the setting cannot give a usable set. */
-const DEFAULT_HINT_NUMBERS = "0123456789";
-
 /** The ceiling on the link text of a descriptor. It is the bound of the wire. */
 const MAX_WIRE_LINK_TEXT = 256;
-
-/** How many ended rounds a frame remembers, so that a late message for one is dropped. */
-const CANCELLED_ROUNDS_KEPT = 32;
 
 /** The events that lift a pointer off an element that it only hovered. */
 const RELEASE_HOVER = ["pointerout", "mouseout"] as const;
@@ -259,6 +258,12 @@ const signal: (deferred: Deferred.Deferred<void>) => Effect.Effect<void> = flow(
   Deferred.succeed<void>(undefined),
   Effect.asVoid,
 );
+
+/** How long a line of a session stays. `None` is the usual time of the HUD. */
+const hudDurationOf: (duration: Option.Option<Duration.Duration>) => HudDuration = Option.match({
+  onNone: () => BRIEFLY,
+  onSome: (duration) => HudDuration.Transient({ duration }),
+});
 
 /** How a key notation reads under the settings of this frame. */
 const keyContextFor = (settings: SettingsData, applePlatform: boolean): KeyContext => ({
@@ -765,394 +770,12 @@ const planActivation = (mode: HintMode, hint: LocalHint): Activation =>
 // The session
 // ---------------------------------------------------------------------------
 
-/** Who drives a session, and who follows it. */
-type SessionRole = Data.TaggedEnum<{
-  /**
-   * This frame drives the session.
-   *
-   * `crossFrame` sends each keystroke to the other frames, so they stay in
-   * step. `buffered` holds the keys that arrived while the round was collected.
-   */
-  Origin: { readonly crossFrame: boolean; readonly buffered: readonly string[] };
-  /** Another frame drives the session, and this frame draws and follows. */
-  Participant: { readonly driver: FrameId };
-}>;
-
-const SessionRole = Data.taggedEnum<SessionRole>();
-
-/** Is the session driven by this frame? */
-const drivenBy = (from: FrameId): ((role: SessionRole) => boolean) =>
-  SessionRole.$match({
-    Origin: () => false,
-    Participant: ({ driver }) => driver === from,
-  });
-
 interface SessionConfig {
   readonly roundId: string;
   readonly mode: HintMode;
   readonly entries: readonly HintEntry[];
   readonly role: SessionRole;
 }
-
-/** What one key does in a hint session. */
-type SessionKey = Data.TaggedEnum<{
-  Escape: NoFields;
-  /** Backspace, or Delete. */
-  Erase: NoFields;
-  Enter: NoFields;
-  /** Tab, or Shift-Tab. */
-  Cycle: { readonly direction: 1 | -1 };
-  /** A printable character. */
-  Type: { readonly char: string };
-  Ignore: NoFields;
-}>;
-
-const SessionKey = Data.taggedEnum<SessionKey>();
-
-/** `"a"` types `"a"`, `"<space>"` types `" "`, and `"<c-a>"` does nothing. */
-const readKey = (notation: string): SessionKey =>
-  pipe(
-    Match.value(notation),
-    Match.withReturnType<SessionKey>(),
-    Match.when("<esc>", () => SessionKey.Escape()),
-    Match.whenOr("<backspace>", "<delete>", () => SessionKey.Erase()),
-    Match.when("<enter>", () => SessionKey.Enter()),
-    Match.when("<tab>", () => SessionKey.Cycle({ direction: 1 })),
-    Match.when("<s-tab>", () => SessionKey.Cycle({ direction: -1 })),
-    Match.when("<space>", () => SessionKey.Type({ char: " " })),
-    // A key notation is one Unicode code point, or a token inside brackets.
-    Match.when(
-      (key) => Array.fromIterable(key).length === 1,
-      (char) => SessionKey.Type({ char }),
-    ),
-    Match.orElse(() => SessionKey.Ignore()),
-  );
-
-/**
- * What filter mode does with the one candidate that the query names without
- * doubt. `waitForEnterForFilteredHints` asks for `Confirm`.
- */
-type SoleMatch = Data.TaggedEnum<{
-  /** Activate it at once. */
-  Activate: NoFields;
-  /** Activate it on Enter, or after a pause in the typing. */
-  Confirm: NoFields;
-}>;
-
-const SoleMatch = Data.taggedEnum<SoleMatch>();
-
-/** Where a session stands, and the rules of its mode. */
-type SessionState = Data.TaggedEnum<{
-  /** Alphabet mode. `typed` is the queue of keystrokes, matched by prefix. */
-  Alphabet: {
-    readonly alphabet: string;
-    readonly hints: readonly string[];
-    readonly typed: string;
-  };
-  /**
-   * Filter mode. `text` is the queue of keystrokes for the link text, and
-   * `digits` is the queue of digit keystrokes. `activeIndex` is the candidate
-   * that Tab moved to.
-   */
-  Filter: {
-    readonly numbers: string;
-    readonly candidates: readonly FilterCandidate[];
-    readonly soleMatch: SoleMatch;
-    readonly text: string;
-    readonly digits: string;
-    readonly activeIndex: number;
-    readonly outcome: FilterOutcome;
-  };
-}>;
-
-const SessionState = Data.taggedEnum<SessionState>();
-
-type AlphabetState = Data.TaggedEnum.Value<SessionState, "Alphabet">;
-type FilterState = Data.TaggedEnum.Value<SessionState, "Filter">;
-
-/** How long "No matching hint" stays on screen. */
-const NO_MATCH_DURATION: HudDuration = HudDuration.Transient({ duration: Duration.millis(800) });
-
-/** What a session asks its runner to do after a key. */
-type SessionCommand = Data.TaggedEnum<{
-  /** Take away the confirmation that waits. */
-  CancelConfirm: NoFields;
-  Render: NoFields;
-  /** A line for the HUD. Only the origin speaks, so the page gets one line. */
-  Say: { readonly text: string; readonly duration: HudDuration };
-  Exit: { readonly reason: ExitReason };
-  /** Act on the entry at `index` now. */
-  Activate: { readonly index: number };
-  /** Act on the entry at `index` after a pause in the typing. */
-  Confirm: { readonly index: number };
-}>;
-
-const SessionCommand = Data.taggedEnum<SessionCommand>();
-
-interface Transition {
-  readonly state: SessionState;
-  readonly commands: readonly SessionCommand[];
-}
-
-const stay = (state: SessionState): Transition => ({ state, commands: [] });
-
-const leave = (state: SessionState): Transition => ({
-  state,
-  commands: [SessionCommand.Exit({ reason: "escape" })],
-});
-
-const alphabetSession = (settings: SettingsData, entries: readonly HintEntry[]): SessionState => {
-  const alphabet = normaliseHintCharacters(settings.linkHintCharacters, DEFAULT_HINT_CHARACTERS);
-  return SessionState.Alphabet({
-    alphabet,
-    hints: hintStrings(entries.length, alphabet),
-    typed: "",
-  });
-};
-
-const filterSession = (settings: SettingsData, entries: readonly HintEntry[]): SessionState => {
-  const numbers = normaliseHintCharacters(settings.linkHintNumbers, DEFAULT_HINT_NUMBERS);
-  const candidates = pipe(
-    entries,
-    Array.map((entry, index) => ({ index, linkText: entry.linkText })),
-  );
-  return SessionState.Filter({
-    numbers,
-    candidates,
-    soleMatch: pipe(
-      settings.waitForEnterForFilteredHints,
-      Boolean.match({ onFalse: () => SoleMatch.Activate(), onTrue: () => SoleMatch.Confirm() }),
-    ),
-    text: "",
-    digits: "",
-    activeIndex: 0,
-    outcome: filterHints(candidates, { text: "", digits: "", numberCharacters: numbers }),
-  });
-};
-
-/** The session that the settings ask for. */
-const initialState = (settings: SettingsData, entries: readonly HintEntry[]): SessionState =>
-  pipe(
-    settings.filterLinkHints,
-    Boolean.match({
-      onFalse: () => alphabetSession(settings, entries),
-      onTrue: () => filterSession(settings, entries),
-    }),
-  );
-
-/**
- * The buffered keys that a new session replays.
- *
- * Filter mode only. In alphabet mode the buffered characters were typed
- * against hint strings that did not exist yet, so a replay would activate a
- * link that is as good as random.
- */
-const replayable = (state: SessionState, keys: readonly string[]): readonly string[] =>
-  pipe(
-    state,
-    SessionState.$match({
-      Alphabet: () => Array.empty<string>(),
-      Filter: () => keys,
-    }),
-  );
-
-/** Is the hint at `index` exactly the keys that were typed? */
-const isTypedHint =
-  (hints: readonly string[], typed: string) =>
-  (index: number): boolean =>
-    pipe(hints, Array.get(index), Option.contains(typed));
-
-/** What alphabet mode does with the keys typed so far. */
-const alphabetFeedback = ({ hints, typed }: AlphabetState): readonly SessionCommand[] =>
-  pipe(
-    matchByPrefix(hints, typed),
-    Array.match({
-      onEmpty: () => [
-        SessionCommand.Say({ text: "No matching hint", duration: NO_MATCH_DURATION }),
-        SessionCommand.Exit({ reason: "explicit" }),
-      ],
-      onNonEmpty: (matches) =>
-        pipe(
-          matches,
-          Option.liftPredicate((matches) => matches.length === 1),
-          Option.map(Array.headNonEmpty),
-          Option.filter(isTypedHint(hints, typed)),
-          Option.match({
-            onNone: () => [SessionCommand.Render()],
-            onSome: (index) => [SessionCommand.Activate({ index })],
-          }),
-        ),
-    }),
-  );
-
-const retype = (state: AlphabetState, typed: string): Transition => {
-  const next = pipe(state, Struct.assign({ typed }));
-  return {
-    state: next,
-    commands: pipe(alphabetFeedback(next), Array.prepend(SessionCommand.CancelConfirm())),
-  };
-};
-
-const alphabetKey = (state: AlphabetState): ((key: SessionKey) => Transition) =>
-  SessionKey.$match({
-    Escape: () => leave(state),
-    Erase: () =>
-      pipe(
-        state.typed,
-        Option.liftPredicate(String.isNonEmpty),
-        Option.match({
-          onNone: () => leave(state),
-          onSome: (typed) => retype(state, typed.slice(0, -1)),
-        }),
-      ),
-    Enter: () => stay(state),
-    Cycle: () => stay(state),
-    Type: ({ char }) =>
-      pipe(
-        char.toLowerCase(),
-        Option.liftPredicate((lower) => state.alphabet.includes(lower)),
-        Option.match({
-          onNone: () => stay(state),
-          onSome: (lower) => retype(state, state.typed + lower),
-        }),
-      ),
-    Ignore: () => stay(state),
-  });
-
-/** The query that the HUD echoes. */
-const filterQuery = ({ text, digits }: FilterState): string => `${text}${digits}`.trim();
-
-/**
- * Activate the one candidate that the query names without doubt.
- *
- * Confirmation: Enter activates at once, and so does a pause in the typing.
- * The pause matters, because filter mode narrows to one match long before the
- * user has finished the word.
- */
-const exactActivation = ({ outcome, soleMatch }: FilterState): Option.Option<SessionCommand> =>
-  pipe(
-    outcome.exact,
-    Option.filter(() => outcome.candidates.length === 1),
-    Option.map(({ index }) =>
-      pipe(
-        soleMatch,
-        SoleMatch.$match({
-          Activate: () => SessionCommand.Activate({ index }),
-          Confirm: () => SessionCommand.Confirm({ index }),
-        }),
-      ),
-    ),
-  );
-
-/** What filter mode says and does after it filtered again. */
-const filterFeedback = (state: FilterState): readonly SessionCommand[] =>
-  pipe(
-    state.outcome.candidates,
-    Array.match({
-      onEmpty: () => [
-        SessionCommand.Say({
-          text: `No matches for "${filterQuery(state)}"`,
-          duration: BRIEFLY,
-        }),
-      ],
-      onNonEmpty: () =>
-        Array.getSomes([
-          pipe(
-            filterQuery(state),
-            Option.liftPredicate(String.isNonEmpty),
-            Option.map((text) => SessionCommand.Say({ text, duration: BRIEFLY })),
-          ),
-          exactActivation(state),
-        ]),
-    }),
-  );
-
-/** Filter again after a queue changed. The first candidate becomes active. */
-const refilter = (state: FilterState): Transition => {
-  const outcome = filterHints(state.candidates, {
-    text: state.text,
-    digits: state.digits,
-    numberCharacters: state.numbers,
-  });
-  const next = pipe(state, Struct.assign({ outcome, activeIndex: 0 }));
-  return {
-    state: next,
-    commands: pipe(
-      [SessionCommand.CancelConfirm(), SessionCommand.Render()],
-      Array.appendAll(filterFeedback(next)),
-    ),
-  };
-};
-
-/** Backspace takes the last digit, then the last character of the text, and then leaves. */
-const eraseFilter = (state: FilterState): Transition =>
-  pipe(
-    Match.value(state),
-    Match.when(
-      ({ digits }) => digits.length > 0,
-      (state) => pipe(state, Struct.assign({ digits: state.digits.slice(0, -1) }), refilter),
-    ),
-    Match.when(
-      ({ text }) => text.length > 0,
-      (state) => pipe(state, Struct.assign({ text: state.text.slice(0, -1) }), refilter),
-    ),
-    Match.orElse(leave),
-  );
-
-/** A digit goes to the digit queue, and every other character to the text. */
-const typeFilter = (state: FilterState, char: string): FilterState =>
-  pipe(
-    state.numbers.includes(char),
-    Boolean.match({
-      onFalse: () => pipe(state, Struct.assign({ text: state.text + char })),
-      onTrue: () => pipe(state, Struct.assign({ digits: state.digits + char })),
-    }),
-  );
-
-/** Tab is an explicit "not that one". It takes away any activation that waits. */
-const cycleFilter = (state: FilterState, direction: 1 | -1): Transition =>
-  pipe(
-    state.outcome.candidates.length,
-    Option.liftPredicate((count) => count > 0),
-    Option.match({
-      onNone: () => stay(state),
-      onSome: (count) => ({
-        state: pipe(
-          state,
-          Struct.assign({ activeIndex: (state.activeIndex + direction + count) % count }),
-        ),
-        commands: [SessionCommand.CancelConfirm(), SessionCommand.Render()],
-      }),
-    }),
-  );
-
-const filterKey = (state: FilterState): ((key: SessionKey) => Transition) =>
-  SessionKey.$match({
-    Escape: () => leave(state),
-    Erase: () => eraseFilter(state),
-    Enter: () => ({
-      state,
-      commands: pipe(
-        state.outcome.candidates,
-        Array.get(state.activeIndex),
-        Option.map(({ index }) => SessionCommand.Activate({ index })),
-        Option.toArray,
-      ),
-    }),
-    Cycle: ({ direction }) => cycleFilter(state, direction),
-    Type: ({ char }) => refilter(typeFilter(state, char)),
-    Ignore: () => stay(state),
-  });
-
-/** The next state of a session after one key, and what the session must do. */
-const step = (state: SessionState, key: SessionKey): Transition =>
-  pipe(
-    state,
-    SessionState.$match({
-      Alphabet: (alphabet) => pipe(key, alphabetKey(alphabet)),
-      Filter: (filter) => pipe(key, filterKey(filter)),
-    }),
-  );
 
 /** One hint of this frame, at its position in the list of the session. */
 interface OwnHint {
@@ -1263,40 +886,18 @@ const markerSpecs = (
   );
 
 /** The live session, as the message handlers of this service see it. */
-interface LiveSession {
+interface LiveSession extends RoundSession {
   readonly id: number;
-  readonly roundId: string;
   readonly mode: HintMode;
-  readonly role: SessionRole;
   readonly key: (notation: string) => Effect.Effect<void>;
 }
-
-/** A keystroke counts inside a participant session only, and only from the frame that drives it. */
-const followsKeysOf =
-  (from: FrameId, roundId: string) =>
-  (session: LiveSession): boolean =>
-    session.roundId === roundId && drivenBy(from)(session.role);
 
 // ---------------------------------------------------------------------------
 // The rounds
 // ---------------------------------------------------------------------------
 
-/** What this frame remembers about the round that it answered. */
-interface LocalRound {
-  readonly roundId: string;
-  readonly coordinator: FrameId;
-  readonly mode: HintMode;
-  readonly openedAt: number;
-  /** The frame that drives the round. It is known from the `COLLECT_HINTS`. */
-  readonly origin: FrameId;
-}
-
-/** What the top frame remembers about the one live round of the page. */
-interface TopRound {
-  readonly roundId: string;
-  readonly origin: FrameId;
-  readonly mode: HintMode;
-  readonly startedAt: number;
+/** The one live round of the page, with the signal that stops its collection. */
+interface LiveTopRound extends TopRound {
   readonly cancelled: Deferred.Deferred<void>;
 }
 
@@ -1304,100 +905,6 @@ interface PendingActivation {
   readonly roundId: string;
   readonly owner: FrameId;
 }
-
-/** Is this the record of the round that `origin` owns? */
-const isTopRoundOf =
-  (roundId: string, origin: FrameId) =>
-  (live: TopRound): boolean =>
-    live.roundId === roundId && live.origin === origin;
-
-/**
- * Does a live round of another frame keep a new round out?
- *
- * One live round for the whole page. An admitted frame could otherwise start
- * detection passes without a limit. The frame that owns the live round may
- * replace it, because a frame that asks again has left the round that it had.
- */
-const blocksRound =
-  (from: FrameId, now: number) =>
-  (live: TopRound): boolean =>
-    now - live.startedAt <= ROUND_TTL_MS && live.origin !== from;
-
-/**
- * Does an `ACTIVATE` name the round that this frame answered?
- *
- * A round exists in this frame only after it answered a `COLLECT_HINTS`.
- * Anything else is not a round that it takes part in. The origin of a round
- * drives its own session, and it never joins as a participant.
- */
-const joinsRound =
-  (payload: MessageOf<"ACTIVATE">, self: FrameId, now: number) =>
-  (round: LocalRound): boolean =>
-    payload.originFrameId !== self &&
-    now - round.openedAt <= ROUND_TTL_MS &&
-    round.roundId === payload.roundId &&
-    round.mode === payload.mode &&
-    round.origin === payload.originFrameId;
-
-/** What a frame does with an `ACTIVATE_HINT`. */
-type HintRequest = Data.TaggedEnum<{
-  /** It is not for the round of this frame, or not from the frame that drives it. */
-  Ignore: NoFields;
-  /** The round is too old. It is forgotten. */
-  Expire: NoFields;
-  Admit: NoFields;
-}>;
-
-const HintRequest = Data.taggedEnum<HintRequest>();
-
-/**
- * Only the frame that owns the live round may drive it. This message ends in a
- * click, a hover, a focus or a clipboard write inside a document of another
- * origin.
- */
-const judgeHintRequest = (
-  round: Option.Option<LocalRound>,
-  payload: MessageOf<"ACTIVATE_HINT">,
-  from: FrameId,
-  now: number,
-): HintRequest =>
-  pipe(
-    round,
-    Option.filter((round) => round.roundId === payload.roundId),
-    Option.match({
-      onNone: () => HintRequest.Ignore(),
-      onSome: (round) =>
-        pipe(
-          Match.value(round),
-          Match.withReturnType<HintRequest>(),
-          Match.when(
-            (round) => now - round.openedAt > ROUND_TTL_MS,
-            () => HintRequest.Expire(),
-          ),
-          Match.when(
-            (round) => round.origin === from && round.mode === payload.mode,
-            () => HintRequest.Admit(),
-          ),
-          Match.orElse(() => HintRequest.Ignore()),
-        ),
-    }),
-  );
-
-/** A `CANCEL_HINTS` from the origin or the coordinator of this round ends it here. */
-const cancelsLocalRound =
-  (roundId: string, from: FrameId) =>
-  (round: LocalRound): boolean =>
-    round.roundId === roundId && (round.origin === from || round.coordinator === from);
-
-/** A `CANCEL_HINTS` ends a session of the round that this frame follows. */
-const cancelsSession =
-  (roundId: string, from: FrameId, localRound: Option.Option<LocalRound>) =>
-  (session: LiveSession): boolean =>
-    session.roundId === roundId &&
-    pipe(
-      localRound,
-      Option.exists((round) => drivenBy(from)(session.role) || round.coordinator === from),
-    );
 
 /** How the collection of a round ended. */
 type Collection = Data.TaggedEnum<{
@@ -1451,10 +958,6 @@ const readHints =
         ),
       ),
     );
-
-/** The ended rounds, with one more. The oldest go when the list is full. */
-const withRound = (roundId: string): ((rounds: readonly string[]) => readonly string[]) =>
-  flow(Array.union([roundId]), Array.takeRight(CANCELLED_ROUNDS_KEPT));
 
 /** A warning for the hints that did not fit the frame message. */
 const omittedNotice = (dropped: number): Option.Option<string> =>
@@ -1554,7 +1057,7 @@ export class Hints extends Context.Service<
        * Only the top frame serves `REQUEST_HINTS`, so only the top frame ever
        * holds a record here.
        */
-      const topRoundRef = yield* Ref.make(Option.none<TopRound>());
+      const topRoundRef = yield* Ref.make(Option.none<LiveTopRound>());
       const sessionRef = yield* Ref.make(Option.none<LiveSession>());
       const sessionSeq = yield* Ref.make(0);
       const roundSeq = yield* Ref.make(0);
@@ -1586,7 +1089,7 @@ export class Hints extends Context.Service<
         );
 
       /** Forget the one live round of the page, and wake the collection that waits on it. */
-      const endTopRound = (live: TopRound): Effect.Effect<void> =>
+      const endTopRound = (live: LiveTopRound): Effect.Effect<void> =>
         pipe(topRoundRef, Ref.set(Option.none()), Effect.andThen(signal(live.cancelled)));
 
       const broadcastCancel = (roundId: string): Effect.Effect<void> =>
@@ -2146,7 +1649,7 @@ export class Hints extends Context.Service<
         const run = SessionCommand.$match({
           CancelConfirm: () => cancelConfirm,
           Render: () => render,
-          Say: ({ text, duration }) => say(text, duration),
+          Say: ({ text, duration }) => say(text, hudDurationOf(duration)),
           Exit: ({ reason }) => exitSession(reason),
           Activate: ({ index }) => activateIndex(index),
           Confirm: ({ index }) =>
