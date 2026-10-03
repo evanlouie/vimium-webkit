@@ -53,7 +53,7 @@ import {
   type CommandGroup,
   DEFAULT_MAPPINGS,
 } from "~/domain/Command.ts";
-import { exclusionProblems, parseExclusionLines } from "~/domain/Exclusion.ts";
+import { exclusionProblems, parseExclusionLines, patternProblem } from "~/domain/Exclusion.ts";
 import { type CompiledMappings, formatDiagnostics, keysByCommand } from "~/domain/Mapping.ts";
 import {
   defaultSettings,
@@ -140,8 +140,8 @@ export type SettingsKey = keyof SettingsData;
  *   value, so `write` keeps the stored one.
  * - `Number` is a numeric input. `write` brings the number into `min` and
  *   `max`, and it drops the decimals.
- * - `Block` is a text area. `problems` names each line that the stored value
- *   drops.
+ * - `Block` is a text area. `problems` names each line that the setting
+ *   ignores, and why.
  */
 export type EntryInput = Data.TaggedEnum<{
   Line: { readonly minLength: number };
@@ -320,12 +320,46 @@ const block = ({
     write,
   });
 
+/** One trimmed line of a text, and the line number that the user sees, counted from one. */
+interface NumberedLine {
+  readonly line: number;
+  readonly entry: string;
+}
+
+/** The lines of a text that hold an entry. An empty line is not an entry. */
+const numberedLines = (text: string): ReadonlyArray<NumberedLine> =>
+  pipe(
+    text.split(/\r?\n/),
+    Array.map((entry, index) => ({ line: index + 1, entry: entry.trim() })),
+    Array.filter(({ entry }) => entry.length > 0),
+  );
+
 /** One entry for each line. An empty line is not an entry. */
 export const parseLines = (text: string): ReadonlyArray<string> =>
   pipe(
-    text.split(/\r?\n/),
-    Array.map((entry) => entry.trim()),
-    Array.filter((entry) => entry.length > 0),
+    numberedLines(text),
+    Array.map(({ entry }) => entry),
+  );
+
+/**
+ * The lines of the history denylist that give no matcher, and why.
+ *
+ * The index compiles each stored pattern, and a pattern that gives no matcher
+ * matches nothing, so the index records the pages that it names. The lines are
+ * read as `parseLines` stores them, and `patternProblem` gives the reason for
+ * the same compile, so the dialog names exactly the patterns that the index
+ * ignores.
+ */
+const denylistProblems = (text: string): ReadonlyArray<string> =>
+  pipe(
+    numberedLines(text),
+    Array.map(({ line, entry }) =>
+      pipe(
+        patternProblem(entry),
+        Option.map((problem) => `line ${line}: ${entry} - ${problem}`),
+      ),
+    ),
+    Array.getSomes,
   );
 
 /**
@@ -590,6 +624,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         label: "URLs that the index never records",
         note: "One URL pattern for each line, for example " + "https://mail.example.com/*",
         minHeight: "80px",
+        problems: denylistProblems,
         read: (settings) => pipe(settings.historyIndexDenylist, Array.join("\n")),
         write: (settings, value) =>
           pipe(settings, Struct.assign({ historyIndexDenylist: [...parseLines(value)] })),
@@ -692,7 +727,7 @@ export interface FormNotes {
   readonly clamped: ReadonlyArray<string>;
   /** The fields whose decimals `write` dropped. */
   readonly truncated: ReadonlyArray<string>;
-  /** The exclusion rules that gave no matcher. */
+  /** The lines whose pattern gave no matcher, each named by its field. */
   readonly dropped: ReadonlyArray<string>;
 }
 
@@ -774,7 +809,12 @@ export const formNotes = (offered: ReadonlyArray<OfferedText>): FormNotes => {
     truncated: labelsWhere((note) => note.truncated),
     dropped: pipe(
       notes,
-      Array.flatMap(({ note }) => note.dropped),
+      Array.flatMap(({ label, note }) =>
+        pipe(
+          note.dropped,
+          Array.map((problem) => `${label}, ${problem}`),
+        ),
+      ),
     ),
   };
 };
@@ -841,9 +881,9 @@ const adjustmentMessage = (
       ),
       sentence(
         notes.dropped,
-        (rules) =>
-          `These exclusion rules were dropped, and they do not exclude a page: ` +
-          `${pipe(rules, Array.join("; "))}.`,
+        (patterns) =>
+          `These patterns were dropped, and they match no page: ` +
+          `${pipe(patterns, Array.join("; "))}.`,
       ),
       sentence(changed, (names) => `Stored with changes to: ${commaList(names)}.`),
     ],

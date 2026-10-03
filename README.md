@@ -264,7 +264,7 @@ configuration and no config file.
 | `passMediaKeys`                | `true`                 | Leave the arrow keys and space to a focused `<video>`/`<audio>` player.                                                                                                    |
 | `enableCssZoom`                | `false`                | Enable `zi`/`zo`. CSS zoom, not browser zoom; breaks `position: fixed` sites. While on, each origin's zoom comes back on load. Off puts pages back at 100%.                |
 | `enableHistoryIndex`           | **`false`**            | Build a local frecency index for the omnibar. See [Privacy](./PRIVACY.md).                                                                                                 |
-| `historyIndexDenylist`         | empty                  | URL patterns never recorded in that index, written as the patterns of `exclusionRules` are. See the note below.                                                            |
+| `historyIndexDenylist`         | empty                  | URL patterns never recorded in that index, written as the patterns of `exclusionRules` are. The settings dialog names each refused pattern. See the note below.            |
 | `historyIndexLimit`            | `5000`                 | Entries kept before LRU eviction. `0` disables recording.                                                                                                                  |
 | `exclusionRules`               | empty                  | URL glob → pass-key set. `*` is the only wildcard. An empty pass-key set disables us on matching pages. A pattern between two `/` is a raw expression. See the note below. |
 | `keyMappings`                  | empty                  | Your `map`/`unmap`/`unmapAll`/`mapkey` lines, applied over the defaults.                                                                                                   |
@@ -373,8 +373,9 @@ The check does not promise a linear match, so a budget holds the limit as well:
 The script drops a rule that the check refuses. It writes a warning to the
 console, it says so in the HUD when you save, and it marks the line in the
 settings dialog. A glob is never refused, and it stays the format that we ask
-for. A `historyIndexDenylist` pattern that the check refuses matches nothing,
-and nothing says so, so write a denylist pattern as a glob where you can.
+for. A `historyIndexDenylist` pattern that the check refuses matches nothing.
+The settings dialog marks its line when you save, but the console and the HUD
+say nothing, so write a denylist pattern as a glob where you can.
 
 ### Omnibar-lite
 

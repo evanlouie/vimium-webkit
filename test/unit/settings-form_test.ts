@@ -144,22 +144,25 @@ describe("the settings form", () => {
     }),
   );
 
-  it.effect("lists an exclusion rule that gives no matcher", () =>
+  it.effect("lists each pattern that gives no matcher", () =>
     Effect.sync(() => {
+      // A denylist pattern that gives no matcher matches nothing, so the
+      // index records the page that it names. It must be marked as an
+      // exclusion rule is.
       const notes = formNotes([
         {
           field: field("exclusionRules"),
           text: "https://good.test/*\n/(a+)+$/",
         },
+        {
+          field: field("historyIndexDenylist"),
+          text: "https://mail.test/*\n\n/(b+)+$/",
+        },
       ]);
-      assert.strictEqual(notes.dropped.length, 1);
-      const dropped = pipe(
-        notes.dropped,
-        Array.head,
-        Option.getOrElse(() => ""),
-      );
-      assert.include(dropped, "line 2");
-      assert.include(dropped, "/(a+)+$/");
+      assert.strictEqual(notes.dropped.length, 2);
+      const dropped = pipe(notes.dropped, Array.join("\n"));
+      assert.include(dropped, "Excluded sites, line 2: /(a+)+$/");
+      assert.include(dropped, "URLs that the index never records, line 3: /(b+)+$/");
       assert.include(dropped, "can hang the page");
     }),
   );
