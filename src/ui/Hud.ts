@@ -769,6 +769,24 @@ export class Hud extends Context.Service<
               settle(Option.none()),
             );
 
+            // A press anywhere else on the layer cancels the prompt, and goes
+            // no further. The layer covers the page, so the default action
+            // would move the focus and then the selection: WebKit puts a caret
+            // into our layer after the selection was given back.
+            yield* dom.listenOn(hudLayer, "mousedown", (event) =>
+              pipe(
+                event.target === parts.input,
+                Boolean.match({
+                  onTrue: () => Effect.void,
+                  onFalse: () =>
+                    pipe(
+                      Effect.sync(() => event.preventDefault()),
+                      Effect.andThen(settle(Option.none())),
+                    ),
+                }),
+              ),
+            );
+
             yield* Effect.sync(() => {
               // `preventScroll` matters. Without it the page scrolls to the
               // overlay, which sits at the bottom of the viewport.
