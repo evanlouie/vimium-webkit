@@ -19,6 +19,7 @@ import {
   Scope,
   Stream,
   Struct,
+  flow,
   pipe,
 } from "effect";
 import { Commands } from "~/core/Commands.ts";
@@ -169,11 +170,22 @@ const describeStorageIssue = (issue: StorageError): string =>
     ),
     Match.when(
       "read",
-      () =>
-        `Stored ${issue.group} could not be read (${issue.reason}); ` +
-        "using defaults. Open Settings to review.",
+      () => `Stored ${issue.group} could not be read (${issue.reason}); using defaults.`,
     ),
     Match.exhaustive,
+  );
+
+/**
+ * The sentences that say what several storage failures mean, for one message.
+ * The advice for a failed read comes once, at the end.
+ */
+const describeStorageIssues = (issues: ReadonlyArray<StorageError>): ReadonlyArray<string> =>
+  pipe(
+    issues,
+    Array.map(describeStorageIssue),
+    Array.appendAll(
+      Array.some(issues, (issue) => issue.direction === "read") ? ["Open Settings to review."] : [],
+    ),
   );
 
 export const BootstrapLayer: Layer.Layer<
@@ -220,17 +232,17 @@ export const BootstrapLayer: Layer.Layer<
       );
 
     /**
-     * Tell the user once about each loss that this manager or browser causes.
+     * The warnings about each loss that this manager or browser causes, which
+     * the user has not seen yet. They count as seen from here on.
      *
      * The session group remembers each warning that the user saw. With no value
      * store it lasts as long as the page, so the warning comes once for each
      * page. The top frame alone speaks, so a page with frames speaks once. A
      * failed write is a storage issue of its own, and the user hears about it.
      */
-    const warnOnce = Effect.gen(function* () {
+    const unseenWarnings = Effect.gen(function* () {
       const { acknowledged } = yield* storage.session.current;
       const fresh = pipe(degradationWarnings(capabilities), Array.difference(acknowledged));
-      yield* pipe(fresh, Effect.forEach(report.error, { discard: true }));
       yield* pipe(
         fresh,
         Array.match({
@@ -242,6 +254,35 @@ export const BootstrapLayer: Layer.Layer<
               ),
               Effect.ignore,
             ),
+        }),
+      );
+      return fresh;
+    });
+
+    /**
+     * Tell the user what the start found, in one message: the storage issues
+     * of the first read, and the warnings of the top frame.
+     *
+     * The HUD shows one message at a time, and each one replaces the one
+     * before. One message for each finding showed only the last of them: a
+     * failure to read the marks hid a failure to read the settings.
+     */
+    const reportStart = Effect.gen(function* () {
+      const warnings = yield* pipe(
+        bus.role,
+        FrameRole.$match({
+          Top: () => unseenWarnings,
+          Child: () => Effect.succeed<ReadonlyArray<string>>([]),
+        }),
+      );
+      // After the warnings, so that a failure to record them as seen is here too.
+      const issues = yield* storage.pendingIssues;
+      yield* pipe(
+        describeStorageIssues(issues),
+        Array.appendAll(warnings),
+        Array.match({
+          onEmpty: () => Effect.void,
+          onNonEmpty: flow(Array.join(" "), report.error),
         }),
       );
     });
@@ -316,20 +357,22 @@ export const BootstrapLayer: Layer.Layer<
       Leave: () => modes.exitAll("navigation"),
     });
 
-    // Every storage failure becomes one line for the user. The queue behind
-    // `Report` keeps the messages that happen before the HUD exists.
-    yield* pipe(
-      storage.issues,
-      Stream.runForEach((issue) => report.error(describeStorageIssue(issue))),
-      Effect.forkScoped,
-    );
-
     // Every group, and never a subset. A group that was never read holds only the
     // defaults, and the first write to it would replace the user's whole stored
     // value with the defaults plus one change.
     yield* storage.hydrateAll;
 
-    yield* inTopFrame(warnOnce);
+    // What the first read found goes out as one message. Every later storage
+    // failure becomes one message of its own. The queue behind `Report` keeps
+    // the messages that happen before the HUD exists.
+    yield* reportStart;
+    yield* pipe(
+      storage.issues,
+      Stream.runForEach((issue) =>
+        pipe(describeStorageIssues([issue]), Array.join(" "), report.error),
+      ),
+      Effect.forkScoped,
+    );
 
     // The top frame matches the rules that it has just read. A child frame asked
     // the top frame when it started.

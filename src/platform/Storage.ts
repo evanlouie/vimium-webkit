@@ -932,6 +932,14 @@ export class Storage extends Context.Service<
      */
     readonly issues: Stream.Stream<StorageError>;
 
+    /**
+     * Take the issues that nobody has taken from `issues` yet, without waiting.
+     *
+     * For the start, which tells the user what the first read found in one
+     * message.
+     */
+    readonly pendingIssues: Effect.Effect<ReadonlyArray<StorageError>>;
+
     /** Read every group. This is the only correct way to start. */
     readonly hydrateAll: Effect.Effect<void>;
 
@@ -979,6 +987,7 @@ export class Storage extends Context.Service<
         history,
         session,
         issues: Stream.fromQueue(issues),
+        pendingIssues: Queue.clear(issues),
         hydrateAll: pipe(
           groups,
           Effect.forEach((group) => group.hydrate, {
