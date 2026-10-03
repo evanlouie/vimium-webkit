@@ -14,18 +14,8 @@
 import { Array, Boolean, Data, Option, Result, Schema, String as Str, flow, pipe } from "effect";
 import { constFalse } from "effect/Function";
 import { describeThrown } from "~/domain/Failure.ts";
-import { exclusionRuleSchema } from "~/domain/Persisted.ts";
 import type { ExclusionRule } from "~/domain/Persisted.ts";
 import { regexSafetyError } from "~/domain/RegexSafety.ts";
-
-/**
- * The rule as it is stored, given again here.
- *
- * `Persisted.ts` owns the schema, because storage owns the shape of the data.
- * A caller of this module then needs only one import.
- */
-export { exclusionRuleSchema };
-export type { ExclusionRule };
 
 /**
  * The verdict of the exclusion rules for one page.
@@ -51,8 +41,6 @@ export const FULLY_ENABLED: EffectiveRule = EffectiveRule.cases.Enabled.make({ p
 
 /** The verdict of a rule with no pass keys: we stay off the page entirely. */
 const FULLY_DISABLED: EffectiveRule = EffectiveRule.cases.Disabled.make({});
-
-const escapeRegExp = (input: string): string => input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * The longest URL that we test a glob against.
@@ -180,16 +168,6 @@ const globMatcher: (shape: GlobShape) => UrlMatcher = GlobShape.$match({
   Wildcard: wildcardMatches,
 });
 
-/** The regular expression source that a glob is equivalent to. */
-const globSource: (glob: string) => string = flow(
-  // A run of `*` means what one `*` means, and `.*.*` is a shape that the
-  // safety check refuses. Collapse the run before the translation.
-  Str.replace(/\*+/g, "*"),
-  Str.split("*"),
-  Array.map(escapeRegExp),
-  Array.join(".*"),
-);
-
 // ---------------------------------------------------------------------------
 // Patterns
 // ---------------------------------------------------------------------------
@@ -200,21 +178,6 @@ export const isRawPattern = (pattern: string): boolean => {
   return trimmed.length > 1 && trimmed.startsWith("/") && trimmed.endsWith("/");
 };
 
-/**
- * A pattern that passed every check: a raw expression between two `/`, or a
- * glob.
- *
- * The raw expression compiled, and the safety check accepted it. A glob cannot
- * backtrack, so it needs no such check. `readPattern` is the one place that
- * makes this value, so no later step checks a pattern again.
- */
-type SafePattern = Data.TaggedEnum<{
-  Expression: { readonly regexp: RegExp };
-  Glob: { readonly glob: string };
-}>;
-
-const SafePattern = Data.taggedEnum<SafePattern>();
-
 const compileExpression = (source: string): Result.Result<RegExp, string> =>
   Result.try({
     try: () => new RegExp(source),
@@ -222,7 +185,7 @@ const compileExpression = (source: string): Result.Result<RegExp, string> =>
   });
 
 /** Compile a raw expression and check it, or say why we drop it. */
-const readExpression = (body: string): Result.Result<SafePattern, string> =>
+const expressionMatcher = (body: string): Result.Result<UrlMatcher, string> =>
   Result.gen(function* () {
     // The group puts every alternative between the anchors. The body must
     // compile alone first, so that a `)` in it cannot close the group.
@@ -238,42 +201,30 @@ const readExpression = (body: string): Result.Result<SafePattern, string> =>
       regexSafetyError(source, ""),
       Option.match({ onNone: () => Result.void, onSome: Result.fail }),
     );
-    return SafePattern.Expression({ regexp });
+    return pipe((url: string) => regexp.test(url), capped(MAX_REGEX_URL_LENGTH));
   });
 
 /**
- * Read a pattern that the user wrote, and check it, or say why it gives no
- * rule.
+ * Compile a pattern that the user wrote, or say why it gives no rule.
  *
  * `*` is the only wildcard. A pattern between two `/` characters is a raw
- * regular expression, which is the escape of upstream. A bad rule costs the
- * user that rule, and no other rule, so every failure comes back as a reason
- * and never as an exception.
+ * regular expression, which is the escape of upstream. A glob cannot
+ * backtrack, so it needs no safety check. Each form reads a capped length of
+ * URL. A bad rule costs the user that rule, and no other rule, so every
+ * failure comes back as a reason and never as an exception.
  */
-const readPattern: (pattern: string) => Result.Result<SafePattern, string> = flow(
+const compile: (pattern: string) => Result.Result<UrlMatcher, string> = flow(
   Str.trim,
   Result.liftPredicate(Str.isNonEmpty, () => "the rule is empty"),
   Result.flatMap((trimmed) =>
     pipe(
       isRawPattern(trimmed),
       Boolean.match({
-        onTrue: () => readExpression(trimmed.slice(1, -1)),
-        onFalse: () => Result.succeed(SafePattern.Glob({ glob: trimmed })),
+        onTrue: () => expressionMatcher(trimmed.slice(1, -1)),
+        onFalse: () => pipe(trimmed, readGlob, globMatcher, capped(MAX_URL_LENGTH), Result.succeed),
       }),
     ),
   ),
-);
-
-/** The matcher of a checked pattern. Each form reads a capped length of URL. */
-const matcherOf: (pattern: SafePattern) => UrlMatcher = SafePattern.$match({
-  Expression: ({ regexp }) => pipe((url: string) => regexp.test(url), capped(MAX_REGEX_URL_LENGTH)),
-  Glob: ({ glob }) => pipe(glob, readGlob, globMatcher, capped(MAX_URL_LENGTH)),
-});
-
-/** Compile a Vimium URL pattern, or say why we drop it. */
-const compile: (pattern: string) => Result.Result<UrlMatcher, string> = flow(
-  readPattern,
-  Result.map(matcherOf),
 );
 
 /**
@@ -354,31 +305,6 @@ export const exclusionProblems: (text: string) => ReadonlyArray<string> = flow(
     ),
   ),
   Array.getSomes,
-);
-
-/** The regular expression of a glob. `globSource` escapes every character but `*`. */
-const globRegExp = Option.liftThrowable((glob: string) => new RegExp(`^${globSource(glob)}$`));
-
-/**
- * The regular expression that a glob is *equivalent* to.
- *
- * Kept for the tests, and for a view that shows the user what a pattern means.
- * It is not used to match. See `UrlMatcher`.
- *
- * It reads the pattern as `compilePattern` does, so the two functions accept
- * the same patterns. A raw expression gives the expression that passed the
- * safety check. A glob cannot backtrack, because the glob matcher reads it
- * greedily, and a run of `*` in a glob becomes one `.*` here.
- */
-export const patternToRegExp: (pattern: string) => Option.Option<RegExp> = flow(
-  readPattern,
-  Result.getSuccess,
-  Option.flatMap(
-    SafePattern.$match({
-      Expression: ({ regexp }) => Option.some(regexp),
-      Glob: ({ glob }) => globRegExp(glob),
-    }),
-  ),
 );
 
 // ---------------------------------------------------------------------------

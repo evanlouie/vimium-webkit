@@ -12,13 +12,12 @@ import {
   compilePattern,
   EffectiveRule,
   exclusionProblems,
-  type ExclusionRule,
   isPassKey,
   makeExclusionSet,
   parseExclusionLines,
   patternProblem,
-  patternToRegExp,
 } from "~/domain/Exclusion.ts";
+import type { ExclusionRule } from "~/domain/Persisted.ts";
 
 /** Test a compiled pattern. `null` means that the pattern did not compile. */
 const matches = (pattern: string, url: string): boolean | null =>
@@ -26,13 +25,6 @@ const matches = (pattern: string, url: string): boolean | null =>
     compilePattern(pattern),
     Option.map((matcher) => matcher(url)),
     Option.getOrNull,
-  );
-
-/** Test the regular expression that describes a pattern. `None` when there is none. */
-const described = (pattern: string, url: string): Option.Option<boolean> =>
-  pipe(
-    patternToRegExp(pattern),
-    Option.map((regexp) => regexp.test(url)),
   );
 
 const rules = (...entries: readonly ExclusionRule[]): readonly ExclusionRule[] => entries;
@@ -130,7 +122,6 @@ describe("Exclusion", () => {
   it.effect.each(BACKTRACKING)("drops a raw expression that can backtrack: %s", (pattern) =>
     Effect.sync(() => {
       assert.isTrue(Option.isNone(compilePattern(pattern)), `${pattern} compiled`);
-      assert.isTrue(Option.isNone(patternToRegExp(pattern)), `${pattern} was still described`);
     }),
   );
 
@@ -269,43 +260,20 @@ describe("Exclusion", () => {
     }),
   );
 
-  it.effect("describes a glob that holds two wildcards side by side", () =>
+  it.effect("matches a glob that holds two wildcards side by side", () =>
     Effect.sync(() => {
-      // `**` becomes `^.*.*$` when it is translated one wildcard at a time,
-      // and the safety check refuses that shape. A glob never backtracks, so
-      // the check belongs to the raw form only, and a run of `*` collapses.
+      // A run of `*` means what one `*` means. A glob never becomes a
+      // regular expression, so the safety check, which refuses `.*.*`, never
+      // reads it.
       pipe(
         ["**", "https://example.com/**", "a**b"],
         Array.forEach((glob) => {
           assert.isTrue(Option.isSome(compilePattern(glob)), `${glob} gave no matcher`);
-          assert.isTrue(Option.isSome(patternToRegExp(glob)), `${glob} was not described`);
         }),
       );
 
-      assert.deepEqual(
-        described("https://example.com/**", "https://example.com/a/b"),
-        Option.some(true),
-      );
-      assert.deepEqual(
-        described("https://example.com/**", "https://evil.test/"),
-        Option.some(false),
-      );
-    }),
-  );
-
-  it.effect("still describes what a glob means", () =>
-    Effect.sync(() => {
-      assert.isTrue(Option.isSome(patternToRegExp("https://example.com/*")));
-      assert.deepEqual(
-        described("https://example.com/*", "https://example.com/a"),
-        Option.some(true),
-      );
-      assert.deepEqual(
-        described("https://example.com/*", "https://evil.example.com.co/"),
-        Option.some(false),
-      );
-      assert.isTrue(Option.isNone(patternToRegExp("/[unclosed/")));
-      assert.isTrue(Option.isNone(patternToRegExp("   ")));
+      assert.strictEqual(matches("https://example.com/**", "https://example.com/a/b"), true);
+      assert.strictEqual(matches("https://example.com/**", "https://evil.test/"), false);
     }),
   );
 

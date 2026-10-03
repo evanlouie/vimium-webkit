@@ -53,10 +53,11 @@ import {
   type CommandGroup,
   DEFAULT_MAPPINGS,
 } from "~/domain/Command.ts";
-import { exclusionProblems, type ExclusionRule, parseExclusionLines } from "~/domain/Exclusion.ts";
+import { exclusionProblems, parseExclusionLines } from "~/domain/Exclusion.ts";
 import { type CompiledMappings, formatDiagnostics, keysByCommand } from "~/domain/Mapping.ts";
 import {
   defaultSettings,
+  type ExclusionRule,
   HISTORY_INDEX_LIMIT_BOUNDS,
   MIN_HINT_CHARACTERS,
   SCROLL_STEP_BOUNDS,

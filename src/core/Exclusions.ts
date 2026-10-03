@@ -26,13 +26,13 @@ import {
 } from "effect";
 import {
   EffectiveRule,
-  type ExclusionRule,
   type ExclusionSet,
   FULLY_ENABLED,
   isRawPattern,
   makeExclusionSet,
   MAX_REGEX_URL_LENGTH,
 } from "~/domain/Exclusion.ts";
+import type { ExclusionRule } from "~/domain/Persisted.ts";
 import { Dom } from "~/platform/Dom.ts";
 import { FrameRole, Realm } from "~/platform/Realm.ts";
 import { Settings } from "./Settings.ts";
