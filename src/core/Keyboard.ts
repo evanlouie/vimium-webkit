@@ -445,6 +445,8 @@ export class Keyboard extends Context.Service<
 
       const pending = yield* SubscriptionRef.make(Option.none<string>());
       const state = yield* Ref.make<KeyState>(Option.none());
+      // The trie that the half-typed sequence was walked on.
+      const walkedOn = yield* Ref.make(mappings.compiledUnsafe());
       const passNext = yield* Ref.make(0);
       // The command bodies that still run. They start at once, on the key task.
       const running = yield* FiberSet.make();
@@ -461,11 +463,20 @@ export class Keyboard extends Context.Service<
         Effect.flatMap(whenSome(() => show(Option.none()))),
       );
 
-      // A new trie must not leave a half-walked sequence behind it.
+      // A new trie must not leave a half-walked sequence behind it. A sequence
+      // that was walked on the trie in force stays, however late the news: the
+      // keys that the guard held play as soon as the settings load, which can
+      // be before the news of their trie arrives here.
       yield* pipe(
         mappings.changes,
-        Stream.drop(1),
-        Stream.runForEach(() => reset),
+        Stream.runForEach(() =>
+          pipe(
+            Ref.get(walkedOn),
+            Effect.flatMap((walked) =>
+              walked === mappings.compiledUnsafe() ? Effect.void : reset,
+            ),
+          ),
+        ),
         Effect.forkScoped,
       );
 
@@ -555,6 +566,7 @@ export class Keyboard extends Context.Service<
               pipe(
                 state,
                 Ref.set(Option.some(next)),
+                Effect.andThen(Ref.set(walkedOn, compiled)),
                 Effect.andThen(showPending(next.pending)),
                 Effect.andThen(suppressed),
               ),

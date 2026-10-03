@@ -7,11 +7,14 @@
  * offset, and `lineOffset` corrects it, so a diagnostic beside the user's own
  * text names the user's own line.
  *
- * The trie is derived state. A fiber rebuilds it whenever the settings change,
- * so nothing has to remember to recompile.
+ * The trie is derived state. It is the trie of the text that the settings hold
+ * when it is read, so it never lags behind them, and nothing has to remember
+ * to recompile. A key that the guard held while the application started plays
+ * right after the settings load, and a trie that a fiber rebuilt a moment
+ * later took the first half of a command typed during the load with it.
  */
 
-import { Context, Effect, Layer, Stream, SubscriptionRef, pipe } from "effect";
+import { Context, Effect, Layer, MutableRef, Stream, pipe } from "effect";
 import { DEFAULT_MAPPINGS } from "~/domain/Command.ts";
 import { type CompiledMappings, compileMappings } from "~/domain/Mapping.ts";
 import type { Settings as SettingsData } from "~/domain/Persisted.ts";
@@ -26,7 +29,10 @@ export class Mappings extends Context.Service<
     /** The trie, read synchronously. For the key path only. */
     readonly compiledUnsafe: () => CompiledMappings;
 
-    /** The current trie, and then every later one. */
+    /**
+     * The current trie, and then each one for a new text. A change to
+     * another setting gives no new trie.
+     */
     readonly changes: Stream.Stream<CompiledMappings>;
 
     /** Compile a source without adopting it. The settings dialog checks with it. */
@@ -47,23 +53,31 @@ export class Mappings extends Context.Service<
           lineOffset: DEFAULT_MAPPING_LINES,
         });
 
-      const compile = (current: SettingsData): CompiledMappings => compileFor(current.keyMappings);
+      // The last text and its trie. The key path reads the trie on every
+      // key, and the text seldom changes.
+      const initial = settings.currentUnsafe().keyMappings;
+      const latest = MutableRef.make({ source: initial, compiled: compileFor(initial) });
 
-      const trie = yield* pipe(
-        settings.current,
-        Effect.map(compile),
-        Effect.flatMap(SubscriptionRef.make),
-      );
+      /** The trie of one text. While the text stays, every reader gets the same trie. */
+      const compiledOf = (source: string): CompiledMappings =>
+        pipe(
+          latest,
+          MutableRef.update((entry) =>
+            entry.source === source ? entry : { source, compiled: compileFor(source) },
+          ),
+          MutableRef.get,
+        ).compiled;
 
-      yield* pipe(
-        settings.changes,
-        Stream.runForEach((current) => pipe(trie, SubscriptionRef.set(compile(current)))),
-        Effect.forkScoped,
-      );
+      const sourceOf = (current: SettingsData): string => current.keyMappings;
 
       return Mappings.of({
-        compiledUnsafe: () => SubscriptionRef.getUnsafe(trie),
-        changes: SubscriptionRef.changes(trie),
+        compiledUnsafe: () => compiledOf(sourceOf(settings.currentUnsafe())),
+        changes: pipe(
+          settings.changes,
+          Stream.map(sourceOf),
+          Stream.changes,
+          Stream.map(compiledOf),
+        ),
         check: (source) => Effect.sync(() => compileFor(source)),
       });
     }),

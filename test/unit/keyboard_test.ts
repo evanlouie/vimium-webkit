@@ -13,7 +13,7 @@
  */
 
 import { assert, describe, it } from "@effect/vitest";
-import { Array, Effect, Layer, Option, Ref, Stream, pipe } from "effect";
+import { Array, Effect, Layer, MutableRef, Option, Queue, Ref, Stream, pipe } from "effect";
 import { Commands } from "~/core/Commands.ts";
 import { Exclusions, Verdict } from "~/core/Exclusions.ts";
 import { Keyboard } from "~/core/Keyboard.ts";
@@ -23,7 +23,7 @@ import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import type { CommandName } from "~/domain/Command.ts";
 import { EffectiveRule, FULLY_ENABLED } from "~/domain/Exclusion.ts";
-import { compileMappings } from "~/domain/Mapping.ts";
+import { type CompiledMappings, compileMappings } from "~/domain/Mapping.ts";
 import { defaultSettings, type Settings as SettingsData } from "~/domain/Persisted.ts";
 import { Capabilities, type CapabilityReport } from "~/platform/Capabilities.ts";
 import { StoreKind } from "~/platform/Gm.ts";
@@ -214,6 +214,8 @@ const capabilitiesOf = (applePlatform: boolean): Layer.Layer<Capabilities> =>
 
 interface Options {
   readonly mappings: string;
+  /** Mappings of a test's own, instead of the ones that `mappings` compiles. */
+  readonly mappingsLayer?: Layer.Layer<Mappings>;
   readonly settings?: SettingsData;
   readonly verdict?: Verdict;
   /** macOS, iOS or iPadOS. It changes the reading of an Option chord. */
@@ -235,7 +237,7 @@ const layerFor = (options: Options): Layer.Layer<Commands | Keyboard | Modes> =>
     Dom.layer,
     settingsOf(options.settings ?? defaultSettings()),
     exclusionsOf(options.verdict ?? Verdict.Known({ rule: FULLY_ENABLED })),
-    mappingsOf(options.mappings),
+    options.mappingsLayer ?? mappingsOf(options.mappings),
   );
   return Layer.provideMerge(Keyboard.layer, support);
 };
@@ -840,6 +842,56 @@ describe("Keyboard", () => {
    * asks whether the user is at the root therefore reads the count as well.
    */
   describe("a count in front of a key", () => {
+    it.effect("stays when the news of its own trie comes late, and goes for another", () =>
+      Effect.gen(function* () {
+        const before = compileMappings("", { rejectReservedShortcuts: false });
+        const compiled = compileMappings("map j scrollDown", { rejectReservedShortcuts: false });
+        const other = compileMappings("map j scrollUp", { rejectReservedShortcuts: false });
+        // The trie of the settings at the start, and then the trie of the
+        // settings that the start read.
+        const current = MutableRef.make(before);
+        const news = yield* Queue.unbounded<CompiledMappings>();
+        yield* Queue.offer(news, before);
+        const mappingsLayer = Layer.succeed(
+          Mappings,
+          Mappings.of({
+            compiledUnsafe: () => MutableRef.get(current),
+            changes: Stream.fromQueue(news),
+            check: () => Effect.succeed(compiled),
+          }),
+        );
+        const tell = (trie: CompiledMappings) =>
+          pipe(
+            Queue.offer(news, trie),
+            Effect.andThen(Effect.yieldNow),
+            Effect.andThen(Effect.yieldNow),
+          );
+
+        yield* pipe(
+          Effect.gen(function* () {
+            const modes = yield* Modes;
+            const calls = yield* recorder(["scrollDown", "scrollUp"]);
+
+            // The guard plays `3` as soon as the settings load. The news of
+            // the trie that the settings made reaches normal mode after it.
+            MutableRef.set(current, compiled);
+            yield* modes.bubble("keydown", new Press("3", { code: "Digit3" }));
+            yield* tell(compiled);
+            yield* modes.bubble("keydown", new Press("j"));
+            assert.deepEqual(yield* Ref.get(calls), ["scrollDown:3"]);
+
+            // A change of the mappings in the middle of a count ends the count.
+            yield* modes.bubble("keydown", new Press("4", { code: "Digit4" }));
+            MutableRef.set(current, other);
+            yield* tell(other);
+            yield* modes.bubble("keydown", new Press("j"));
+            assert.deepEqual(yield* Ref.get(calls), ["scrollDown:3", "scrollUp:1"]);
+          }),
+          Effect.provide(layerFor({ mappings: "", mappingsLayer })),
+        );
+      }),
+    );
+
     it.effect("keeps a stray key away from the page", () =>
       pipe(
         Effect.gen(function* () {
