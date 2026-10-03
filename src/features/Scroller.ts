@@ -51,7 +51,12 @@ import { Report } from "~/core/Report.ts";
 import { Settings } from "~/core/Settings.ts";
 import { whenSome } from "~/domain/Prelude.ts";
 import { Dom } from "~/platform/Dom.ts";
-import { deepActiveElement, isUserEvent } from "~/platform/Elements.ts";
+import {
+  composedTarget,
+  deepActiveElement,
+  isUserEvent,
+  shadowHostOf,
+} from "~/platform/Elements.ts";
 
 export type ScrollAxis = "x" | "y";
 
@@ -248,25 +253,17 @@ const isScrollable = (
   direction: Direction,
 ): boolean => isScrollContainer(view, element, axis) && hasRoom(element, axis, direction);
 
-const isShadowRoot = (node: Node): node is ShadowRoot => node instanceof ShadowRoot;
-
 /**
  * The element above this one.
  *
- * The walk goes through an open shadow root with `getRootNode().host`. A scroll
- * container inside a web component is invisible to a `parentElement` walk.
+ * The walk goes through an open shadow root to its host. A scroll container
+ * inside a web component is invisible to a `parentElement` walk.
  */
 const parentOf = (element: Element): Option.Option<Element> =>
   pipe(
     element.parentElement,
     Option.fromNullOr,
-    Option.orElse(() =>
-      pipe(
-        element.getRootNode(),
-        Option.liftPredicate(isShadowRoot),
-        Option.map((root) => root.host),
-      ),
-    ),
+    Option.orElse(() => shadowHostOf(element)),
   );
 
 /** The start and every element above it, up to the root and without it. */
@@ -380,9 +377,8 @@ const walkStart = (document: Document, pressed: Option.Option<Element>): Option.
 /** The element that a press truly started at, through an open shadow root. */
 const pressedElement = (event: Event): Option.Option<Element> =>
   pipe(
-    event.composedPath(),
-    Array.head,
-    Option.filter((target) => target instanceof Element),
+    composedTarget(event),
+    Option.liftPredicate((target) => target instanceof Element),
   );
 
 /**
