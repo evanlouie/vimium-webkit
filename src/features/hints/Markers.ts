@@ -164,12 +164,56 @@ const MAX_USER_CSS_LENGTH = 8 * 1024;
 /**
  * The constructs that would let user CSS reach outside the overlay.
  *
- * `@import` and `url(` both make a network request, which turns a stylesheet
- * into a channel for exfiltration: an attribute selector plus a background
- * image reports which hints exist to a third-party host. Neither one is needed
- * to style a marker, so to refuse them costs nothing true.
+ * `@import` and a URL make a network request, which turns a stylesheet into a
+ * channel for exfiltration: an attribute selector plus a background image
+ * reports which hints exist to a third-party host. A URL is `url(`, or `src(`,
+ * or a plain string inside `image(` and `image-set(`, which also covers
+ * `-webkit-image-set(`. None of them is needed to style a marker, so to refuse
+ * them costs nothing true.
  */
-const FORBIDDEN_CSS = /@import\b|url\s*\(|@charset\b/iu;
+const FORBIDDEN_CSS = /@import\b|@charset\b|(?:url|src|image(?:-set)?)\s*\(/iu;
+
+/** CSS reads CR LF, a lone CR and FF as one LF, before it reads anything else. */
+const CSS_NEWLINE = /\r\n?|\f/gu;
+
+/** A hex escape with the one white space after it, or any other escaped character. */
+const CSS_ESCAPE = /\\(?:([0-9a-f]{1,6})[ \t\n]?|([\s\S]))/giu;
+
+/** The character of a hex escape. CSS reads zero, a surrogate and a value past Unicode as U+FFFD. */
+const hexCharacter = (hex: string): string =>
+  pipe(
+    Number.parseInt(hex, 16),
+    Option.liftPredicate(
+      (code) => code > 0 && code <= 0x10ffff && (code < 0xd800 || code > 0xdfff),
+    ),
+    Option.match({
+      onNone: () => "\uFFFD",
+      onSome: (code) => globalThis.String.fromCodePoint(code),
+    }),
+  );
+
+/** The character that one escape stands for. */
+const unescapeOne = (
+  _escape: string,
+  hex: string | undefined,
+  character: string | undefined,
+): string =>
+  pipe(
+    Option.fromNullishOr(hex),
+    Option.map(hexCharacter),
+    Option.orElse(() => Option.fromNullishOr(character)),
+    Option.getOrElse(() => ""),
+  );
+
+/**
+ * The text that the tokenizer of CSS reads, with each escape replaced by its
+ * character.
+ *
+ * The tokenizer reads `u\72l(` as `url(`, so a test of the raw text would not
+ * see it.
+ */
+const unescapeCss = (css: string): string =>
+  pipe(css, String.replaceAll(CSS_NEWLINE, "\n"), (text) => text.replace(CSS_ESCAPE, unescapeOne));
 
 /**
  * Is this user CSS that we are willing to install?
@@ -178,7 +222,7 @@ const FORBIDDEN_CSS = /@import\b|url\s*\(|@charset\b/iu;
  * when the user can correct it, and not drop it later in silence.
  */
 export const isSafeUserCss = (css: string): boolean =>
-  css.length <= MAX_USER_CSS_LENGTH && !FORBIDDEN_CSS.test(css);
+  css.length <= MAX_USER_CSS_LENGTH && !FORBIDDEN_CSS.test(unescapeCss(css));
 
 /**
  * The stylesheet of a session, with `userDefinedLinkHintCss` after it.
