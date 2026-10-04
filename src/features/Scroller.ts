@@ -100,6 +100,7 @@ const MAX_FRAME_MS = 100;
 const AXIS_PROPERTIES = {
   y: {
     offset: "scrollTop",
+    side: "top",
     overflow: "overflowY",
     scrollSize: "scrollHeight",
     clientSize: "clientHeight",
@@ -107,6 +108,7 @@ const AXIS_PROPERTIES = {
   },
   x: {
     offset: "scrollLeft",
+    side: "left",
     overflow: "overflowX",
     scrollSize: "scrollWidth",
     clientSize: "clientWidth",
@@ -161,8 +163,18 @@ const durationFor = (amount: number): number =>
 const readOffset = (element: Element, axis: ScrollAxis): number =>
   element[AXIS_PROPERTIES[axis].offset];
 
+/**
+ * Move an element to an offset at once.
+ *
+ * An assignment to `scrollTop` follows the `scroll-behavior` of the page.
+ * Under `scroll-behavior: smooth` the browser animates that write, so the read
+ * that follows in the same task gives the old offset. Every step then looked
+ * refused, the animation ended after its first frame, and a held `j` or `d`
+ * moved by one frame of distance per key repeat, against the easing of the
+ * browser. `behavior: "instant"` overrides the style of the page.
+ */
 const writeOffset = (element: Element, axis: ScrollAxis, value: number): void => {
-  element[AXIS_PROPERTIES[axis].offset] = value;
+  element.scrollTo({ [AXIS_PROPERTIES[axis].side]: value, behavior: "instant" });
 };
 
 /** Apply one offset change, and answer how far the element truly moved. */
